@@ -23,7 +23,7 @@ def analyze():
             img = images[tf]
             content.append({"type":"text","text":f"Gráfico {tf}:"})
             content.append({"type":"image","source":{"type":"base64","media_type":img['mimeType'],"data":img['base64']}})
-        response = client.messages.create(model="claude-sonnet-4-20250514", max_tokens=3000, messages=[{"role":"user","content":content}])
+        response = client.messages.create(model="claude-haiku-4-5", max_tokens=3000, messages=[{"role":"user","content":content}])
         return jsonify({'result': response.content[0].text})
     except Exception as e:
         return jsonify({'error': str(e)}), 500

@@ -193,7 +193,7 @@ async function analyze(){
   }
 }
 
-text = text.replace(/```[\w]*\n?/g, '').replace(/```/g, '');
+function renderResult(text){
   const tl=text.toLowerCase();
   let dir='neutral',dirText='⚠️ AGUARDA',scoreClass='mid';
   const buy=(tl.match(/compra|bullish|buy|long/g)||[]).length;

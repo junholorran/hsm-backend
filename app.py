@@ -20,93 +20,96 @@ def analyze():
             return jsonify({'error': 'Carrega pelo menos 2 graficos'}), 400
 
         prompt = (
-            "Es um mentor ICT/SMC especialista em price action e Smart Money." +
-            " Analisa os graficos de " + pair +
-            " nos timeframes " + ', '.join(tf_list) + " em portugues." +
-            " Segue este fluxo obrigatorio de analise em 12 camadas:" +
-
-            " CAMADA 1 - BIAS E AMD:" +
-            " Identifica o bias direcional dominante (bullish bearish neutro)." +
-            " Analisa a fase AMD actual - Accumulation Manipulation Distribution." +
-            " Identifica o Power of 3 - qual fase estamos agora." +
-
-            " CAMADA 2 - LIQUIDEZ:" +
-            " Mapeia todos os pools de BSL Buy Side Liquidity e SSL Sell Side Liquidity visiveis." +
-            " Identifica EQH Equal Highs e EQL Equal Lows como alvos." +
-            " Define qual o proximo alvo de liquidez mais provavel." +
-
-            " CAMADA 3 - ESTRUTURA DE MERCADO:" +
-            " Analisa CHoCH Change of Character confirmado ou pendente em cada timeframe." +
-            " Identifica BOS Break of Structure e MSS Market Structure Shift." +
-            " Define a tendencia actual em cada timeframe enviado." +
-
-            " CAMADA 4 - FVGs E IFVGs:" +
-            " Identifica todos os Fair Value Gaps abertos e fechados relevantes." +
-            " Mapeia Inverse FVGs como zonas de suporte e resistencia." +
-            " Define qual FVG tem maior confluencia para entrada." +
-            " REGRA DE ENTRADA FVG: so considera FVG formado DEPOIS do sweep de liquidez." +
-
-            " CAMADA 5 - ORDER BLOCKS:" +
-            " Identifica OBs bearish e bullish validos e activos." +
-            " Mapeia Breaker Blocks e Mitigation Blocks." +
-            " Define qual OB tem maior probabilidade de reacao." +
-            " REGRA DE ENTRADA OB: so considera OB formado DEPOIS do sweep de liquidez." +
-
-            " CAMADA 6 - OTE FIBONACCI:" +
-            " Calcula a zona OTE entre 62 e 79 porcento do retracamento do ultimo swing." +
-            " Verifica confluencia do OTE com FVG ou OB identificado." +
-            " Define o nivel exacto de entrada ideal dentro da zona OTE." +
-
-            " CAMADA 7 - KILL ZONES E MACROS:" +
-            " Identifica a sessao actual Asia Londres Nova York." +
-            " Verifica ICT Macros activas 2h20 4h00 e 8h50 9h10 e 9h50 10h10 e 10h50 11h10." +
-            " Define o timing ideal para entrada baseado na sessao." +
-
-            " CAMADA 8 - ANALISE PROBABILISTICA:" +
-            " Calcula probabilidade de movimento bullish vs bearish em percentagem." +
-            " Lista minimo 3 razoes concretas para cada cenario." +
-            " Baseia o calculo nas confluencias identificadas nas camadas anteriores." +
-
-            " CAMADA 9 - WYCKOFF E ELLIOTT:" +
-            " Identifica a fase Wyckoff actual acumulacao distribuicao markup markdown." +
-            " Faz contagem Elliott se visivel nos graficos." +
-            " Verifica confluencia com o bias ICT identificado na camada 1." +
-
-            " CAMADA 10 - SETUP DE ENTRADA:" +
-            " FLUXO OBRIGATORIO: Sweep de liquidez confirmado - CHoCH confirmado - FVG ou OB formado apos o sweep - entrada na zona FVG ou OB." +
-            " CENARIO PRINCIPAL: entrada exacta - SL abaixo do sweep para long ou acima do sweep para short - TP1 minimo 2 para 1 - TP2 minimo 3 para 1 - TP3 minimo 4 para 1." +
-            " CENARIO SECUNDARIO: se existir outro setup valido apresenta com as mesmas regras." +
-            " So apresenta setup se o fluxo completo estiver confirmado." +
-
-            " CAMADA 11 - GESTAO DE RISCO:" +
-            " Recomenda tamanho de posicao entre 1 e 3 porcento da conta." +
-            " Define o nivel exacto de invalidacao do setup." +
-            " Lista alertas de risco especificos para este par e este setup." +
-            " Confirma que o RR e minimo 2 para 1 antes de recomendar entrada." +
-
-            " CAMADA 12 - SCORE E DECISAO FINAL:" +
-            " Apresenta score de 0 a 100 por categoria: Bias - Liquidez - Estrutura - Confluencia - Timing." +
-            " Score geral com decisao obrigatoria: ENTRA AGORA se score acima de 70 e fluxo completo confirmado." +
-            " AGUARDA CONFIRMACAO se score entre 50 e 70 ou fluxo incompleto." +
-            " FICA DE FORA se score abaixo de 50 ou sem sweep confirmado." +
-            " Resumo executivo em 3 linhas com o essencial da analise."
+            "Voce e um mentor ICT/SMC de elite com 15 anos de experiencia em Smart Money Concepts. "
+            "Analisa os graficos do " + pair + " (" + ", ".join(tf_list) + ") em portugues do Brasil com maxima precisao e detalhes.\n\n"
+            "Faz uma analise top-down COMPLETA com TODOS estes topicos:\n\n"
+            "1. BIAS DIRECIONAL\n"
+            "- Tendencia principal: Higher Highs Higher Lows ou Lower Highs Lower Lows\n"
+            "- Fase AMD atual: Accumulation, Manipulation ou Distribution\n"
+            "- Power of 3: qual fase domina agora\n\n"
+            "2. LIQUIDEZ E SMART MONEY\n"
+            "- BSL Buy Side Liquidity: niveis exatos acima do preco\n"
+            "- SSL Sell Side Liquidity: niveis exatos abaixo do preco\n"
+            "- Equal Highs EQH e Equal Lows EQL: onde estao\n"
+            "- Quem esta sendo hunted: compradores ou vendedores\n"
+            "- Market Maker Model: fase atual\n\n"
+            "3. ESTRUTURA DE MERCADO\n"
+            "- CHoCH Change of Character: ultimo nivel e preco exato\n"
+            "- BOS Break of Structure: confirmado ou pendente\n"
+            "- MSS Market Structure Shift: ha inversao em curso\n"
+            "- Fase Wyckoff: Spring, Upthrust ou Ranging\n\n"
+            "4. FAIR VALUE GAPS E ORDER BLOCKS\n"
+            "- FVGs ativos: zonas exatas, bullish ou bearish\n"
+            "- IFVGs Inverse FVGs: zonas de resistencia invertidas\n"
+            "- Order Blocks bullish e bearish com precos exatos\n"
+            "- Breaker Blocks: OBs invertidos\n"
+            "- Mitigation Blocks: onde o preco ja testou\n\n"
+            "5. OTE OPTIMAL TRADE ENTRY\n"
+            "- Fibonacci 62 a 79 porcento do ultimo swing\n"
+            "- Zona OTE exata para long e short\n"
+            "- Confluencia com FVG ou OB nessa zona\n\n"
+            "6. ICT MACROS E KILL ZONES\n"
+            "- London Kill Zone: 02h00 a 05h00 NY\n"
+            "- NY AM Kill Zone: 07h00 a 11h00 NY\n"
+            "- Melhor janela de entrada para hoje\n\n"
+            "7. ANALISE PROBABILISTICA\n"
+            "- Probabilidade LONG: porcentagem\n"
+            "- Probabilidade SHORT: porcentagem\n"
+            "- Nivel de confianca: Baixo, Medio, Alto ou Muito Alto\n\n"
+            "8. WYCKOFF E ELLIOTT\n"
+            "- Fase Wyckoff atual: Accumulation, Markup, Distribution ou Markdown\n"
+            "- Onda Elliott: em que onda estamos\n"
+            "- Implicacao para o proximo movimento\n\n"
+            "9. SETUP RECOMENDADO\n"
+            "FLUXO OBRIGATORIO: Sweep de liquidez confirmado - CHoCH confirmado - FVG ou OB formado apos o sweep - entrada na zona FVG ou OB\n"
+            "Cenario 1 maior probabilidade:\n"
+            "- Direcao: LONG ou SHORT\n"
+            "- Entrada: preco exato ou zona\n"
+            "- Stop Loss: abaixo do sweep para long ou acima do sweep para short\n"
+            "- TP1: minimo 2 para 1 de risco retorno\n"
+            "- TP2: minimo 3 para 1 de risco retorno\n"
+            "- TP3: minimo 4 para 1 de risco retorno\n"
+            "- Trigger: o que confirma a entrada\n\n"
+            "Cenario 2 alternativo: mesma estrutura\n\n"
+            "10. SCORE DE CONFIANCA 0 a 100\n"
+            "Tabela com: Bias, Liquidez, Estrutura, Confluencia, Timing, Score Final\n"
+            "Decisao obrigatoria:\n"
+            "- ENTRA AGORA: score acima de 70 e fluxo completo confirmado\n"
+            "- AGUARDA CONFIRMACAO: score entre 50 e 70 ou fluxo incompleto\n"
+            "- FICA DE FORA: score abaixo de 50 ou sem sweep confirmado\n\n"
+            "11. GESTAO DE RISCO\n"
+            "- Porcentagem maxima do capital a arriscar: entre 1 e 3 porcento\n"
+            "- Invalidacao do setup: preco exato\n\n"
+            "12. OBSERVACOES FINAIS\n"
+            "- 3 razoes principais para entrar\n"
+            "- 3 riscos principais\n"
+            "- Recomendacao final em 1 frase\n\n"
+            "Se extremamente especifico com precos. Cada nivel deve ter valor exato em USD."
         )
 
         content = [{"type": "text", "text": prompt}]
+
         for tf in tf_list:
             img = images[tf]
             content.append({"type": "text", "text": "Grafico " + tf + ":"})
-            content.append({"type": "image", "source": {"type": "base64", "media_type": img['mimeType'], "data": img['base64']}})
+            content.append({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": img.get("mimeType", "image/jpeg"),
+                    "data": img["base64"]
+                }
+            })
 
         response = client.messages.create(
             model="claude-haiku-4-5",
             max_tokens=4000,
             messages=[{"role": "user", "content": content}]
         )
-        return jsonify({'result': response.content[0].text})
+        return jsonify({"result": response.content[0].text})
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return jsonify({"error": str(e)}), 500
 
-if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port)
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)

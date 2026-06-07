@@ -105,10 +105,10 @@
     <div class="pair-btn" onclick="selectPair(this,'USDCAD')">CAD</div>
   </div>
 
-  <div class="section-title">Gráficos</div>
+  <div class="section-title">Graficos</div>
   <div class="upload-grid">
     <div class="upload-slot" id="slot-D1" onclick="document.getElementById('inp-D1').click()">
-      <div class="slot-icon">📅</div><div class="slot-tf">D1</div><div class="slot-label">Diário</div>
+      <div class="slot-icon">📅</div><div class="slot-tf">D1</div><div class="slot-label">Diario</div>
       <input type="file" class="upload-input" id="inp-D1" accept="image/*" onchange="handleFile(this,'D1')">
     </div>
     <div class="upload-slot" id="slot-H4" onclick="document.getElementById('inp-H4').click()">
@@ -124,11 +124,11 @@
       <input type="file" class="upload-input" id="inp-M15" accept="image/*" onchange="handleFile(this,'M15')">
     </div>
     <div class="upload-slot" id="slot-M5" onclick="document.getElementById('inp-M5').click()">
-      <div class="slot-icon">🎯</div><div class="slot-tf">M5</div><div class="slot-label">5 Min · Scalp</div>
+      <div class="slot-icon">🎯</div><div class="slot-tf">M5</div><div class="slot-label">5 Min Scalp</div>
       <input type="file" class="upload-input" id="inp-M5" accept="image/*" onchange="handleFile(this,'M5')">
     </div>
     <div class="upload-slot" id="slot-M1" onclick="document.getElementById('inp-M1').click()">
-      <div class="slot-icon">🔬</div><div class="slot-tf">M1</div><div class="slot-label">1 Min · Opcional</div>
+      <div class="slot-icon">🔬</div><div class="slot-tf">M1</div><div class="slot-label">1 Min Opcional</div>
       <input type="file" class="upload-input" id="inp-M1" accept="image/*" onchange="handleFile(this,'M1')">
     </div>
   </div>
@@ -161,32 +161,36 @@ function handleFile(input,tf){
   const reader=new FileReader();
   reader.onload=(e)=>{
     const base64=e.target.result.split(',')[1];
-    images[tf]={base64,mimeType:file.type};
+    images[tf]={base64:base64,mimeType:'image/jpeg'};
     const slot=document.getElementById('slot-'+tf);
     slot.classList.add('filled');
-    slot.innerHTML=`<img src="${e.target.result}" class="slot-preview"><div class="slot-tf">${tf}</div><input type="file" class="upload-input" id="inp-${tf}" accept="image/*" onchange="handleFile(this,'${tf}')">`;
+    slot.innerHTML='<img src="'+e.target.result+'" class="slot-preview"><div class="slot-tf">'+tf+'</div><input type="file" class="upload-input" id="inp-'+tf+'" accept="image/*" onchange="handleFile(this,\''+tf+'\')">';
   };
   reader.readAsDataURL(file);
 }
 
 async function analyze(){
   const tfList=Object.keys(images);
-  if(tfList.length<2)return showToast('❌ Carrega pelo menos 2 gráficos');
+  if(tfList.length<2)return showToast('Carrega pelo menos 2 graficos');
   document.getElementById('analyzeBtn').disabled=true;
   document.getElementById('loading').classList.add('show');
   document.getElementById('result').classList.remove('show');
   document.getElementById('result').innerHTML='';
   try{
+    const controller=new AbortController();
+    const timeout=setTimeout(()=>controller.abort(),120000);
     const res=await fetch('/analyze',{
       method:'POST',
       headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({pair:selectedPair,images})
+      body:JSON.stringify({pair:selectedPair,images:images}),
+      signal:controller.signal
     });
+    clearTimeout(timeout);
     const data=await res.json();
     if(data.error)throw new Error(data.error);
     renderResult(data.result);
   }catch(e){
-    showToast('❌ Erro: '+e.message);
+    showToast('Erro: '+e.message);
   }finally{
     document.getElementById('analyzeBtn').disabled=false;
     document.getElementById('loading').classList.remove('show');
@@ -195,11 +199,11 @@ async function analyze(){
 
 function renderResult(text){
   const tl=text.toLowerCase();
-  let dir='neutral',dirText='⚠️ AGUARDA',scoreClass='mid';
+  let dir='neutral',dirText='AGUARDA',scoreClass='mid';
   const buy=(tl.match(/compra|bullish|buy|long/g)||[]).length;
-  const sell=(tl.match(/vend[ae]|bearish|sell|short/g)||[]).length;
-  if(buy>sell){dir='bull';dirText='📈 COMPRA';}
-  else if(sell>buy){dir='bear';dirText='📉 VENDA';}
+  const sell=(tl.match(/venda|bearish|sell|short/g)||[]).length;
+  if(buy>sell){dir='bull';dirText='COMPRA';}
+  else if(sell>buy){dir='bear';dirText='VENDA';}
   const sm=text.match(/(\d{1,3})\s*\/\s*100/);
   const score=sm?parseInt(sm[1]):50;
   if(score>=70)scoreClass='high';
@@ -207,29 +211,16 @@ function renderResult(text){
   else scoreClass='low';
   const formatted=text
     .replace(/\*\*(.+?)\*\*/g,'<strong style="color:var(--gold)">$1</strong>')
-    .replace(/#{1,3}\s(.+)/g,'<strong style="color:var(--gold);font-size:13px;display:block;margin:12px 0 6px;font-family:\'Space Mono\',monospace;text-transform:uppercase;letter-spacing:1px">$1</strong>')
     .replace(/BULLISH/g,'<span class="tag tag-bull">BULLISH</span>')
     .replace(/BEARISH/g,'<span class="tag tag-bear">BEARISH</span>')
     .replace(/\bFVG\b/g,'<span class="tag tag-info">FVG</span>')
     .replace(/\bCHoCH\b/g,'<span class="tag tag-warn">CHoCH</span>')
     .replace(/\bBOS\b/g,'<span class="tag tag-info">BOS</span>')
     .replace(/\n{2,}/g,'</p><p>').replace(/\n/g,'<br>').replace(/^/,'<p>').replace(/$/,'</p>');
-  const html=`
-    <div class="score-card ${dir}">
-      <div class="score-header">
-        <div class="score-direction ${dir}">${dirText}</div>
-        <div class="score-badge ${scoreClass}">${score}/100</div>
-      </div>
-      <div class="score-bar-wrap"><div class="score-bar ${dir}" style="width:${score}%"></div></div>
-      <div style="font-size:12px;color:var(--muted);font-family:'Space Mono',monospace">${selectedPair} · Análise ICT/SMC</div>
-    </div>
-    <div class="analysis-card">
-      <h3>📊 Análise Completa</h3>
-      <div class="analysis-text">${formatted}</div>
-    </div>
-    <button class="reset-btn" onclick="resetAnalysis()">🔄 Nova Análise</button>`;
+  const html='<div class="score-card '+dir+'"><div class="score-header"><div class="score-direction '+dir+'">'+dirText+'</div><div class="score-badge '+scoreClass+'">'+score+'/100</div></div><div class="score-bar-wrap"><div class="score-bar '+dir+'" style="width:'+score+'%"></div></div><div style="font-size:12px;color:var(--muted);font-family:Space Mono,monospace">'+selectedPair+' - Analise ICT/SMC</div></div><div class="analysis-card"><h3>Analise Completa</h3><div class="analysis-text">'+formatted+'</div></div><button class="reset-btn" onclick="resetAnalysis()">Nova Analise</button>';
   const el=document.getElementById('result');
-  el.innerHTML=html;el.classList.add('show');
+  el.innerHTML=html;
+  el.classList.add('show');
   el.scrollIntoView({behavior:'smooth',block:'start'});
 }
 
@@ -237,20 +228,22 @@ function resetAnalysis(){
   images={};
   document.getElementById('result').classList.remove('show');
   document.getElementById('result').innerHTML='';
-  ['D1','H4','H1','M15','M5','M1'].forEach(tf=>{
-    const slot=document.getElementById('slot-'+tf);
-    const labels={D1:'📅',H4:'🕐',H1:'⏰',M15:'⚡',M5:'🎯',M1:'🔬'};
-    const names={D1:'Diário',H4:'4 Horas',H1:'1 Hora',M15:'15 Min',M5:'5 Min · Scalp',M1:'1 Min · Opcional'};
+  var tfs=['D1','H4','H1','M15','M5','M1'];
+  var labels={D1:'📅',H4:'🕐',H1:'⏰',M15:'⚡',M5:'🎯',M1:'🔬'};
+  var names={D1:'Diario',H4:'4 Horas',H1:'1 Hora',M15:'15 Min',M5:'5 Min Scalp',M1:'1 Min Opcional'};
+  tfs.forEach(function(tf){
+    var slot=document.getElementById('slot-'+tf);
     slot.classList.remove('filled');
-    slot.innerHTML=`<div class="slot-icon">${labels[tf]}</div><div class="slot-tf">${tf}</div><div class="slot-label">${names[tf]}</div><input type="file" class="upload-input" id="inp-${tf}" accept="image/*" onchange="handleFile(this,'${tf}')">`;
+    slot.innerHTML='<div class="slot-icon">'+labels[tf]+'</div><div class="slot-tf">'+tf+'</div><div class="slot-label">'+names[tf]+'</div><input type="file" class="upload-input" id="inp-'+tf+'" accept="image/*" onchange="handleFile(this,\''+tf+'\')">';
   });
   window.scrollTo({top:0,behavior:'smooth'});
 }
 
 function showToast(msg){
   const t=document.getElementById('toast');
-  t.textContent=msg;t.classList.add('show');
-  setTimeout(()=>t.classList.remove('show'),3000);
+  t.textContent=msg;
+  t.classList.add('show');
+  setTimeout(function(){t.classList.remove('show');},3000);
 }
 </script>
 </body>

@@ -23,7 +23,7 @@
   .subtitle{font-family:'Space Mono',monospace;font-size:10px;color:var(--muted);letter-spacing:2px;text-transform:uppercase}
   .section-title{font-size:13px;font-family:'Space Mono',monospace;color:var(--gold);letter-spacing:1px;text-transform:uppercase;margin-bottom:12px;display:flex;align-items:center;gap:8px}
   .section-title::after{content:'';flex:1;height:1px;background:var(--border)}
-  .pair-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-bottom:20px}
+  .pair-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-bottom:20px}
   .pair-btn{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:8px 4px;text-align:center;cursor:pointer;font-size:10px;font-family:'Space Mono',monospace;color:var(--muted);transition:all .2s}
   .pair-btn:hover,.pair-btn.active{border-color:var(--gold);color:var(--gold);background:rgba(240,180,41,0.08)}
   .upload-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:20px}
@@ -97,12 +97,13 @@
   <div class="pair-grid">
     <div class="pair-btn active" onclick="selectPair(this,'BTCUSD')">BTC</div>
     <div class="pair-btn" onclick="selectPair(this,'ETHUSD')">ETH</div>
+    <div class="pair-btn" onclick="selectPair(this,'SOLUSD')">SOL</div>
+    <div class="pair-btn" onclick="selectPair(this,'XRPUSD')">XRP</div>
     <div class="pair-btn" onclick="selectPair(this,'LINKUSD')">LINK</div>
-    <div class="pair-btn" onclick="selectPair(this,'XLMUSD')">XLM</div>
-    <div class="pair-btn" onclick="selectPair(this,'EURUSD')">EUR</div>
-    <div class="pair-btn" onclick="selectPair(this,'GBPUSD')">GBP</div>
-    <div class="pair-btn" onclick="selectPair(this,'NZDUSD')">NZD</div>
-    <div class="pair-btn" onclick="selectPair(this,'USDCAD')">CAD</div>
+    <div class="pair-btn" onclick="selectPair(this,'ADAUSD')">ADA</div>
+    <div class="pair-btn" onclick="selectPair(this,'AVAXUSD')">AVAX</div>
+    <div class="pair-btn" onclick="selectPair(this,'BNBUSD')">BNB</div>
+    <div class="pair-btn" onclick="selectPair(this,'AAVEUSD')">AAVE</div>
   </div>
 
   <div class="section-title">Gráficos</div>

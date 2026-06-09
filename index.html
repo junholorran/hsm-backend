@@ -98,7 +98,6 @@
     </div>
     <div class="subtitle">Smart Money · Inner Circle Trader</div>
   </div>
-
   <div class="section-title">Par</div>
   <div class="pair-grid">
     <div class="pair-btn active" onclick="selectPair(this,'BTCUSD')">BTC</div>
@@ -111,7 +110,6 @@
     <div class="pair-btn" onclick="selectPair(this,'BNBUSD')">BNB</div>
     <div class="pair-btn" onclick="selectPair(this,'AAVEUSD')">AAVE</div>
   </div>
-
   <div class="section-title">Gráficos</div>
   <div class="upload-grid">
     <div class="upload-slot" id="slot-D1" onclick="document.getElementById('inp-D1').click()">
@@ -139,19 +137,15 @@
       <input type="file" class="upload-input" id="inp-M1" accept="image/*" onchange="handleFile(this,'M1')">
     </div>
   </div>
-
   <button class="analyze-btn" onclick="analyze()" id="analyzeBtn">⚡ Analisar Agora</button>
-
   <div class="loading" id="loading">
     <div class="loading-ring"></div>
     <div class="loading-text">Analisando com ICT/SMC...</div>
   </div>
-
   <div class="result" id="result"></div>
   <div class="footer">HSM Inner Circle Trader · v4.0</div>
 </div>
 <div class="toast" id="toast"></div>
-
 <script>
 let selectedPair='BTCUSD';
 let images={};
@@ -176,6 +170,30 @@ function handleFile(input,tf){
   };
   reader.readAsDataURL(file);
 }
+
+async function getPrice(pair){
+  try{
+    const symbol=pair.replace('USD','USDT');
+    const r=await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${symbol}`);
+    const d=await r.json();
+    return d.price?parseFloat(d.price):null;
+  }catch(e){
+    return null;
+  }
+}
+
+async function updateServerPrices(){
+  try{
+    const price=await getPrice(selectedPair);
+    if(!price)return;
+    await fetch('/update_prices',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({prices:{[selectedPair]:price}})
+    });
+  }catch(e){}
+}
+setInterval(updateServerPrices,30000);
 
 async function analyze(){
   const tfList=Object.keys(images);
@@ -254,14 +272,18 @@ async function createAlert(){
   const price=parseFloat(document.getElementById('alertPrice').value);
   if(!price||price<=0)return showToast('❌ Mete um preço válido');
   const statusEl=document.getElementById('alertStatus');
-  statusEl.textContent='⏳ A criar alerta...';
+  statusEl.textContent='⏳ A buscar preço atual...';
   try{
+    const currentPrice=await getPrice(selectedPair);
+    if(!currentPrice)throw new Error('Nao foi possivel obter preco');
+    statusEl.textContent='⏳ A criar alerta...';
     const res=await fetch('/set_alert',{
       method:'POST',
       headers:{'Content-Type':'application/json'},
       body:JSON.stringify({
         pair:selectedPair,
         target:price,
+        current_price:currentPrice,
         instructions:`Par: ${selectedPair}\nPreço alvo: $${price}\n\n📊 Verifica o gráfico agora!\n✅ Confirma CHoCH\n✅ Aguarda candle de confirmação\n✅ Entra na zona de entrada`
       })
     });
@@ -269,7 +291,7 @@ async function createAlert(){
     if(data.error)throw new Error(data.error);
     const dir=data.direction==='above'?'⬆️ acima':'⬇️ abaixo';
     statusEl.style.color='var(--green)';
-    statusEl.textContent=`✅ Alerta criado! Avisa quando ${selectedPair} chegar $${price} (${dir} de $${data.current_price?.toFixed(2)})`;
+    statusEl.textContent=`✅ Alerta criado! Avisa quando ${selectedPair} chegar $${price} (${dir} de $${currentPrice.toFixed(2)})`;
     showToast('✅ Alerta criado no Telegram!');
   }catch(e){
     statusEl.style.color='var(--red)';

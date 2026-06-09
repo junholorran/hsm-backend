@@ -21,25 +21,13 @@ def send_telegram(message):
     except Exception as e:
         print(f"Telegram erro: {e}")
 
-def get_price(pair):
-    try:
-        symbol = pair.replace("USD", "USDT")
-        url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}"
-        r = requests.get(url, timeout=5)
-        data = r.json()
-        if 'price' in data:
-            return float(data['price'])
-        return None
-    except:
-        return None
-
 def price_monitor():
     while True:
         try:
             with alerts_lock:
                 remaining = []
                 for alert in active_alerts:
-                    price = get_price(alert['pair'])
+                    price = alert.get('current_price')
                     if price is None:
                         remaining.append(alert)
                         continue
@@ -96,20 +84,33 @@ def set_alert():
         data = request.json
         pair = data.get('pair', 'BTCUSD')
         target = float(data.get('target'))
+        current_price = float(data.get('current_price'))
         instructions = data.get('instructions', '')
-        current_price = get_price(pair)
-        if current_price is None:
-            return jsonify({'error': 'Nao foi possivel obter preco'}), 500
         direction = 'above' if target > current_price else 'below'
         with alerts_lock:
             active_alerts.append({
                 'pair': pair,
                 'target': target,
                 'direction': direction,
+                'current_price': current_price,
                 'instructions': instructions
             })
         send_telegram(f"🎯 <b>Alerta criado para {pair}</b>\nPreço alvo: ${target:,.2f}\nDireção: {'Acima ⬆️' if direction == 'above' else 'Abaixo ⬇️'}\nPreço atual: ${current_price:,.2f}")
         return jsonify({'ok': True, 'direction': direction, 'current_price': current_price})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/update_prices', methods=['POST'])
+def update_prices():
+    try:
+        data = request.json
+        prices = data.get('prices', {})
+        with alerts_lock:
+            for alert in active_alerts:
+                pair = alert['pair']
+                if pair in prices:
+                    alert['current_price'] = float(prices[pair])
+        return jsonify({'ok': True})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 

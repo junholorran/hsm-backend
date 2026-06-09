@@ -21,23 +21,13 @@ def send_telegram(message):
     except Exception as e:
         print(f"Telegram erro: {e}")
 
-def get_binance_price(pair):
-    try:
-        symbol = pair.replace('USD', 'USDT')
-        url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}"
-        r = requests.get(url, timeout=5)
-        return float(r.json()['price'])
-    except Exception as e:
-        print(f"Binance erro: {e}")
-        return None
-
 def price_monitor():
     while True:
         try:
             with alerts_lock:
                 remaining = []
                 for alert in active_alerts:
-                    price = get_binance_price(alert['pair'])
+                    price = alert.get('current_price')
                     if price is None:
                         remaining.append(alert)
                         continue
@@ -60,7 +50,7 @@ def price_monitor():
                 active_alerts.extend(remaining)
         except Exception as e:
             print(f"Monitor erro: {e}")
-        time.sleep(30)
+        time.sleep(10)
 
 monitor_thread = threading.Thread(target=price_monitor, daemon=True)
 monitor_thread.start()

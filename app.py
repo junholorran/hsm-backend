@@ -27,7 +27,14 @@ def get_price(pair):
         url = f"https://api.bybit.com/v5/market/tickers?category=spot&symbol={symbol}"
         r = requests.get(url, timeout=5)
         data = r.json()
-        return float(data['result']['list'][0]['lastPrice'])
+        if data.get('result') and data['result'].get('list') and len(data['result']['list']) > 0:
+            return float(data['result']['list'][0]['lastPrice'])
+        url = f"https://api.bybit.com/v5/market/tickers?category=linear&symbol={symbol}"
+        r = requests.get(url, timeout=5)
+        data = r.json()
+        if data.get('result') and data['result'].get('list') and len(data['result']['list']) > 0:
+            return float(data['result']['list'][0]['lastPrice'])
+        return None
     except:
         return None
 

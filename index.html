@@ -76,6 +76,12 @@
   .tag-bear{background:rgba(255,71,87,0.1);color:var(--red)}
   .tag-info{background:rgba(0,212,255,0.1);color:var(--blue)}
   .tag-warn{background:rgba(240,180,41,0.1);color:var(--gold)}
+  .alert-box{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:16px;margin-bottom:12px}
+  .alert-box-title{font-size:12px;font-family:'Space Mono',monospace;color:var(--gold);margin-bottom:10px}
+  .alert-row{display:flex;gap:8px;margin-bottom:8px}
+  .alert-input{flex:1;background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:10px;color:var(--text);font-family:'Space Mono',monospace;font-size:13px}
+  .alert-create-btn{background:linear-gradient(135deg,var(--gold),var(--gold2));color:#000;border:none;border-radius:8px;padding:10px 16px;font-family:'Syne',sans-serif;font-weight:800;font-size:13px;cursor:pointer}
+  .alert-status{font-size:11px;font-family:'Space Mono',monospace;color:var(--muted)}
   .reset-btn{width:100%;background:transparent;border:1px solid var(--border);border-radius:12px;padding:14px;color:var(--muted);font-family:'Syne',sans-serif;font-weight:600;font-size:14px;cursor:pointer;transition:all .2s;margin-top:8px}
   .reset-btn:hover{border-color:var(--gold);color:var(--gold)}
   .footer{text-align:center;padding-top:24px;font-size:10px;font-family:'Space Mono',monospace;color:var(--muted);letter-spacing:1px}
@@ -149,6 +155,7 @@
 <script>
 let selectedPair='BTCUSD';
 let images={};
+let lastAnalysis='';
 
 function selectPair(el,pair){
   document.querySelectorAll('.pair-btn').forEach(b=>b.classList.remove('active'));
@@ -185,6 +192,7 @@ async function analyze(){
     });
     const data=await res.json();
     if(data.error)throw new Error(data.error);
+    lastAnalysis=data.result;
     renderResult(data.result);
   }catch(e){
     showToast('❌ Erro: '+e.message);
@@ -228,14 +236,49 @@ function renderResult(text){
       <h3>📊 Análise Completa</h3>
       <div class="analysis-text">${formatted}</div>
     </div>
+    <div class="alert-box">
+      <div class="alert-box-title">🔔 CRIAR ALERTA DE PREÇO</div>
+      <div class="alert-row">
+        <input id="alertPrice" type="number" placeholder="Ex: 62300" step="any" class="alert-input">
+        <button onclick="createAlert()" class="alert-create-btn">🔔 Criar</button>
+      </div>
+      <div id="alertStatus" class="alert-status"></div>
+    </div>
     <button class="reset-btn" onclick="resetAnalysis()">🔄 Nova Análise</button>`;
   const el=document.getElementById('result');
   el.innerHTML=html;el.classList.add('show');
   el.scrollIntoView({behavior:'smooth',block:'start'});
 }
 
+async function createAlert(){
+  const price=parseFloat(document.getElementById('alertPrice').value);
+  if(!price||price<=0)return showToast('❌ Mete um preço válido');
+  const statusEl=document.getElementById('alertStatus');
+  statusEl.textContent='⏳ A criar alerta...';
+  try{
+    const res=await fetch('/set_alert',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({
+        pair:selectedPair,
+        target:price,
+        instructions:`Par: ${selectedPair}\nPreço alvo: $${price}\n\n📊 Verifica o gráfico agora!\n✅ Confirma CHoCH\n✅ Aguarda candle de confirmação\n✅ Entra na zona de entrada`
+      })
+    });
+    const data=await res.json();
+    if(data.error)throw new Error(data.error);
+    const dir=data.direction==='above'?'⬆️ acima':'⬇️ abaixo';
+    statusEl.style.color='var(--green)';
+    statusEl.textContent=`✅ Alerta criado! Avisa quando ${selectedPair} chegar $${price} (${dir} de $${data.current_price?.toFixed(2)})`;
+    showToast('✅ Alerta criado no Telegram!');
+  }catch(e){
+    statusEl.style.color='var(--red)';
+    statusEl.textContent='❌ Erro: '+e.message;
+  }
+}
+
 function resetAnalysis(){
-  images={};
+  images={};lastAnalysis='';
   document.getElementById('result').classList.remove('show');
   document.getElementById('result').innerHTML='';
   ['D1','H4','H1','M15','M5','M1'].forEach(tf=>{

@@ -14,6 +14,12 @@ TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
 active_alerts = []
 alerts_lock = threading.Lock()
 
+COINGECKO_MAP = {
+    'BTCUSD': 'bitcoin', 'ETHUSD': 'ethereum', 'SOLUSD': 'solana',
+    'XRPUSD': 'ripple', 'LINKUSD': 'chainlink', 'ADAUSD': 'cardano',
+    'AVAXUSD': 'avalanche-2', 'BNBUSD': 'binancecoin', 'AAVEUSD': 'aave'
+}
+
 def send_telegram(message):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -21,16 +27,28 @@ def send_telegram(message):
     except Exception as e:
         print(f"Telegram erro: {e}")
 
+def get_coingecko_price(pair):
+    try:
+        coin = COINGECKO_MAP.get(pair, 'bitcoin')
+        url = f"https://api.coingecko.com/api/v3/simple/price?ids={coin}&vs_currencies=usd"
+        r = requests.get(url, timeout=10)
+        data = r.json()
+        return float(data[coin]['usd'])
+    except Exception as e:
+        print(f"CoinGecko erro: {e}")
+        return None
+
 def price_monitor():
     while True:
         try:
             with alerts_lock:
                 remaining = []
                 for alert in active_alerts:
-                    price = alert.get('current_price')
+                    price = get_coingecko_price(alert['pair'])
                     if price is None:
                         remaining.append(alert)
                         continue
+                    print(f"Monitor: {alert['pair']} @ {price} | alvo: {alert['target']} | dir: {alert['direction']}")
                     triggered = False
                     if alert['direction'] == 'above' and price >= alert['target']:
                         triggered = True
@@ -50,7 +68,7 @@ def price_monitor():
                 active_alerts.extend(remaining)
         except Exception as e:
             print(f"Monitor erro: {e}")
-        time.sleep(10)
+        time.sleep(30)
 
 monitor_thread = threading.Thread(target=price_monitor, daemon=True)
 monitor_thread.start()
@@ -118,3 +136,4 @@ def update_prices():
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
+vo

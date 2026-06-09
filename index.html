@@ -177,9 +177,7 @@ async function getPrice(pair){
     const r=await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${symbol}`);
     const d=await r.json();
     return d.price?parseFloat(d.price):null;
-  }catch(e){
-    return null;
-  }
+  }catch(e){return null;}
 }
 
 async function updateServerPrices(){
@@ -284,7 +282,7 @@ async function createAlert(){
         pair:selectedPair,
         target:price,
         current_price:currentPrice,
-        instructions:`Par: ${selectedPair}\nPreço alvo: $${price}\n\n📊 Verifica o gráfico agora!\n✅ Confirma CHoCH\n✅ Aguarda candle de confirmação\n✅ Entra na zona de entrada`
+        analysis:lastAnalysis
       })
     });
     const data=await res.json();

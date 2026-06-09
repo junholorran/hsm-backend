@@ -1,321 +1,120 @@
-<!DOCTYPE html>
-<html lang="pt">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>HSM ICT Mentor</title>
-<style>
-  @import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Syne:wght@400;600;800&display=swap');
-  :root {
-    --bg:#060810;--surface:#0d1117;--surface2:#161b22;
-    --gold:#f0b429;--gold2:#ffd166;--green:#00ff88;
-    --red:#ff4757;--blue:#00d4ff;--text:#e6edf3;
-    --muted:#7d8590;--border:rgba(240,180,41,0.15);
-  }
-  *{margin:0;padding:0;box-sizing:border-box}
-  body{background:var(--bg);color:var(--text);font-family:'Syne',sans-serif;min-height:100vh}
-  .container{max-width:480px;margin:0 auto;padding:20px 16px 40px}
-  .header{text-align:center;padding:24px 0 20px;border-bottom:1px solid var(--border);margin-bottom:24px}
-  .logo{display:flex;align-items:center;justify-content:center;gap:10px;margin-bottom:6px}
-  .logo-icon{width:36px;height:36px;background:linear-gradient(135deg,var(--gold),var(--gold2));border-radius:8px;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:16px;color:#000}
-  .logo-text{font-size:20px;font-weight:800}
-  .logo-text span{color:var(--gold)}
-  .subtitle{font-family:'Space Mono',monospace;font-size:10px;color:var(--muted);letter-spacing:2px;text-transform:uppercase}
-  .section-title{font-size:13px;font-family:'Space Mono',monospace;color:var(--gold);letter-spacing:1px;text-transform:uppercase;margin-bottom:12px;display:flex;align-items:center;gap:8px}
-  .section-title::after{content:'';flex:1;height:1px;background:var(--border)}
-  .pair-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-bottom:20px}
-  .pair-btn{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:8px 4px;text-align:center;cursor:pointer;font-size:10px;font-family:'Space Mono',monospace;color:var(--muted);transition:all .2s}
-  .pair-btn:hover,.pair-btn.active{border-color:var(--gold);color:var(--gold);background:rgba(240,180,41,0.08)}
-  .upload-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:20px}
-  .upload-slot{background:var(--surface);border:1px dashed rgba(240,180,41,0.3);border-radius:12px;padding:16px 12px;text-align:center;cursor:pointer;transition:all .2s;position:relative;overflow:hidden;min-height:100px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px}
-  .upload-slot:hover{border-color:var(--gold);background:rgba(240,180,41,0.05)}
-  .upload-slot.filled{border-style:solid;border-color:var(--gold)}
-  .upload-slot.filled::after{content:'✓';position:absolute;top:6px;right:8px;color:var(--green);font-size:12px;font-weight:700}
-  .slot-tf{font-size:16px;font-weight:800;color:var(--gold)}
-  .slot-label{font-size:10px;color:var(--muted);font-family:'Space Mono',monospace}
-  .slot-icon{font-size:20px}
-  .slot-preview{width:100%;height:60px;object-fit:cover;border-radius:6px;margin-bottom:4px}
-  .upload-input{display:none}
-  .analyze-btn{width:100%;background:linear-gradient(135deg,var(--gold),var(--gold2));color:#000;border:none;border-radius:12px;padding:16px;font-family:'Syne',sans-serif;font-weight:800;font-size:16px;cursor:pointer;transition:all .2s;display:flex;align-items:center;justify-content:center;gap:8px;margin-bottom:20px}
-  .analyze-btn:hover{transform:translateY(-1px);box-shadow:0 8px 24px rgba(240,180,41,0.3)}
-  .analyze-btn:disabled{opacity:.5;cursor:not-allowed;transform:none}
-  .loading{display:none;text-align:center;padding:32px}
-  .loading.show{display:block}
-  .loading-ring{width:48px;height:48px;border:3px solid var(--border);border-top-color:var(--gold);border-radius:50%;animation:spin .8s linear infinite;margin:0 auto 16px}
-  @keyframes spin{to{transform:rotate(360deg)}}
-  .loading-text{font-family:'Space Mono',monospace;font-size:12px;color:var(--muted);animation:pulse 1.5s ease-in-out infinite}
-  @keyframes pulse{0%,100%{opacity:.5}50%{opacity:1}}
-  .result{display:none;animation:fadeUp .4s ease-out}
-  .result.show{display:block}
-  @keyframes fadeUp{from{opacity:0;transform:translateY(16px)}to{opacity:1;transform:translateY(0)}}
-  .score-card{background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:20px;margin-bottom:16px;position:relative;overflow:hidden}
-  .score-card::before{content:'';position:absolute;top:0;left:0;right:0;height:2px}
-  .score-card.bull::before{background:linear-gradient(90deg,var(--green),transparent)}
-  .score-card.bear::before{background:linear-gradient(90deg,var(--red),transparent)}
-  .score-card.neutral::before{background:linear-gradient(90deg,var(--gold),transparent)}
-  .score-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px}
-  .score-direction{font-size:28px;font-weight:800;letter-spacing:-1px}
-  .score-direction.bull{color:var(--green)}
-  .score-direction.bear{color:var(--red)}
-  .score-direction.neutral{color:var(--gold)}
-  .score-badge{font-family:'Space Mono',monospace;font-size:11px;padding:4px 10px;border-radius:20px;font-weight:700}
-  .score-badge.high{background:rgba(0,255,136,0.15);color:var(--green);border:1px solid rgba(0,255,136,0.3)}
-  .score-badge.mid{background:rgba(240,180,41,0.15);color:var(--gold);border:1px solid rgba(240,180,41,0.3)}
-  .score-badge.low{background:rgba(255,71,87,0.15);color:var(--red);border:1px solid rgba(255,71,87,0.3)}
-  .score-bar-wrap{background:var(--surface2);border-radius:4px;height:6px;margin-bottom:16px;overflow:hidden}
-  .score-bar{height:100%;border-radius:4px;transition:width 1s ease-out}
-  .score-bar.bull{background:linear-gradient(90deg,var(--green),#00ff88aa)}
-  .score-bar.bear{background:linear-gradient(90deg,var(--red),#ff475788)}
-  .score-bar.neutral{background:linear-gradient(90deg,var(--gold),var(--gold2))}
-  .analysis-card{background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:20px;margin-bottom:16px}
-  .analysis-card h3{font-size:12px;font-family:'Space Mono',monospace;color:var(--gold);letter-spacing:1px;text-transform:uppercase;margin-bottom:12px;padding-bottom:8px;border-bottom:1px solid var(--border)}
-  .analysis-text{font-size:13px;line-height:1.7;color:#c9d1d9}
-  .analysis-text p{margin-bottom:8px}
-  .tag{display:inline-block;padding:2px 8px;border-radius:4px;font-size:10px;font-family:'Space Mono',monospace;font-weight:700;margin:2px}
-  .tag-bull{background:rgba(0,255,136,0.1);color:var(--green)}
-  .tag-bear{background:rgba(255,71,87,0.1);color:var(--red)}
-  .tag-info{background:rgba(0,212,255,0.1);color:var(--blue)}
-  .tag-warn{background:rgba(240,180,41,0.1);color:var(--gold)}
-  .alert-box{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:16px;margin-bottom:12px}
-  .alert-box-title{font-size:12px;font-family:'Space Mono',monospace;color:var(--gold);margin-bottom:10px}
-  .alert-row{display:flex;gap:8px;margin-bottom:8px}
-  .alert-input{flex:1;background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:10px;color:var(--text);font-family:'Space Mono',monospace;font-size:13px}
-  .alert-create-btn{background:linear-gradient(135deg,var(--gold),var(--gold2));color:#000;border:none;border-radius:8px;padding:10px 16px;font-family:'Syne',sans-serif;font-weight:800;font-size:13px;cursor:pointer}
-  .alert-status{font-size:11px;font-family:'Space Mono',monospace;color:var(--muted)}
-  .reset-btn{width:100%;background:transparent;border:1px solid var(--border);border-radius:12px;padding:14px;color:var(--muted);font-family:'Syne',sans-serif;font-weight:600;font-size:14px;cursor:pointer;transition:all .2s;margin-top:8px}
-  .reset-btn:hover{border-color:var(--gold);color:var(--gold)}
-  .footer{text-align:center;padding-top:24px;font-size:10px;font-family:'Space Mono',monospace;color:var(--muted);letter-spacing:1px}
-  .toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%) translateY(80px);background:var(--surface2);border:1px solid var(--border);border-radius:20px;padding:10px 20px;font-size:12px;font-family:'Space Mono',monospace;color:var(--text);transition:transform .3s ease;z-index:100;white-space:nowrap}
-  .toast.show{transform:translateX(-50%) translateY(0)}
-</style>
-</head>
-<body>
-<div class="container">
-  <div class="header">
-    <div class="logo">
-      <div class="logo-icon">H</div>
-      <div class="logo-text">HSM <span>ICT</span> Mentor</div>
-    </div>
-    <div class="subtitle">Smart Money · Inner Circle Trader</div>
-  </div>
-  <div class="section-title">Par</div>
-  <div class="pair-grid">
-    <div class="pair-btn active" onclick="selectPair(this,'BTCUSD')">BTC</div>
-    <div class="pair-btn" onclick="selectPair(this,'ETHUSD')">ETH</div>
-    <div class="pair-btn" onclick="selectPair(this,'SOLUSD')">SOL</div>
-    <div class="pair-btn" onclick="selectPair(this,'XRPUSD')">XRP</div>
-    <div class="pair-btn" onclick="selectPair(this,'LINKUSD')">LINK</div>
-    <div class="pair-btn" onclick="selectPair(this,'ADAUSD')">ADA</div>
-    <div class="pair-btn" onclick="selectPair(this,'AVAXUSD')">AVAX</div>
-    <div class="pair-btn" onclick="selectPair(this,'BNBUSD')">BNB</div>
-    <div class="pair-btn" onclick="selectPair(this,'AAVEUSD')">AAVE</div>
-  </div>
-  <div class="section-title">Gráficos</div>
-  <div class="upload-grid">
-    <div class="upload-slot" id="slot-D1" onclick="document.getElementById('inp-D1').click()">
-      <div class="slot-icon">📅</div><div class="slot-tf">D1</div><div class="slot-label">Diário</div>
-      <input type="file" class="upload-input" id="inp-D1" accept="image/*" onchange="handleFile(this,'D1')">
-    </div>
-    <div class="upload-slot" id="slot-H4" onclick="document.getElementById('inp-H4').click()">
-      <div class="slot-icon">🕐</div><div class="slot-tf">H4</div><div class="slot-label">4 Horas</div>
-      <input type="file" class="upload-input" id="inp-H4" accept="image/*" onchange="handleFile(this,'H4')">
-    </div>
-    <div class="upload-slot" id="slot-H1" onclick="document.getElementById('inp-H1').click()">
-      <div class="slot-icon">⏰</div><div class="slot-tf">H1</div><div class="slot-label">1 Hora</div>
-      <input type="file" class="upload-input" id="inp-H1" accept="image/*" onchange="handleFile(this,'H1')">
-    </div>
-    <div class="upload-slot" id="slot-M15" onclick="document.getElementById('inp-M15').click()">
-      <div class="slot-icon">⚡</div><div class="slot-tf">M15</div><div class="slot-label">15 Min</div>
-      <input type="file" class="upload-input" id="inp-M15" accept="image/*" onchange="handleFile(this,'M15')">
-    </div>
-    <div class="upload-slot" id="slot-M5" onclick="document.getElementById('inp-M5').click()">
-      <div class="slot-icon">🎯</div><div class="slot-tf">M5</div><div class="slot-label">5 Min · Scalp</div>
-      <input type="file" class="upload-input" id="inp-M5" accept="image/*" onchange="handleFile(this,'M5')">
-    </div>
-    <div class="upload-slot" id="slot-M1" onclick="document.getElementById('inp-M1').click()">
-      <div class="slot-icon">🔬</div><div class="slot-tf">M1</div><div class="slot-label">1 Min · Opcional</div>
-      <input type="file" class="upload-input" id="inp-M1" accept="image/*" onchange="handleFile(this,'M1')">
-    </div>
-  </div>
-  <button class="analyze-btn" onclick="analyze()" id="analyzeBtn">⚡ Analisar Agora</button>
-  <div class="loading" id="loading">
-    <div class="loading-ring"></div>
-    <div class="loading-text">Analisando com ICT/SMC...</div>
-  </div>
-  <div class="result" id="result"></div>
-  <div class="footer">HSM Inner Circle Trader · v4.0</div>
-</div>
-<div class="toast" id="toast"></div>
-<script>
-let selectedPair='BTCUSD';
-let images={};
-let lastAnalysis='';
+from flask import Flask, request, jsonify, send_from_directory
+import anthropic
+import os
+import threading
+import time
+import requests
 
-function selectPair(el,pair){
-  document.querySelectorAll('.pair-btn').forEach(b=>b.classList.remove('active'));
-  el.classList.add('active');
-  selectedPair=pair;
-}
+app = Flask(__name__)
+client = anthropic.Anthropic(api_key=os.environ.get('ANTHROPIC_API_KEY'))
 
-function handleFile(input,tf){
-  const file=input.files[0];
-  if(!file)return;
-  const reader=new FileReader();
-  reader.onload=(e)=>{
-    const base64=e.target.result.split(',')[1];
-    images[tf]={base64,mimeType:file.type};
-    const slot=document.getElementById('slot-'+tf);
-    slot.classList.add('filled');
-    slot.innerHTML=`<img src="${e.target.result}" class="slot-preview"><div class="slot-tf">${tf}</div><input type="file" class="upload-input" id="inp-${tf}" accept="image/*" onchange="handleFile(this,'${tf}')">`;
-  };
-  reader.readAsDataURL(file);
-}
+TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
+TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
 
-async function getPrice(pair){
-  try{
-    const symbol=pair.replace('USD','USDT');
-    const r=await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${symbol}`);
-    const d=await r.json();
-    return d.price?parseFloat(d.price):null;
-  }catch(e){return null;}
-}
+active_alerts = []
+alerts_lock = threading.Lock()
 
-async function updateServerPrices(){
-  try{
-    const price=await getPrice(selectedPair);
-    if(!price)return;
-    await fetch('/update_prices',{
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({prices:{[selectedPair]:price}})
-    });
-  }catch(e){}
-}
-setInterval(updateServerPrices,30000);
+def send_telegram(message):
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"})
+    except Exception as e:
+        print(f"Telegram erro: {e}")
 
-async function analyze(){
-  const tfList=Object.keys(images);
-  if(tfList.length<2)return showToast('❌ Carrega pelo menos 2 gráficos');
-  document.getElementById('analyzeBtn').disabled=true;
-  document.getElementById('loading').classList.add('show');
-  document.getElementById('result').classList.remove('show');
-  document.getElementById('result').innerHTML='';
-  try{
-    const res=await fetch('/analyze',{
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({pair:selectedPair,images})
-    });
-    const data=await res.json();
-    if(data.error)throw new Error(data.error);
-    lastAnalysis=data.result;
-    renderResult(data.result);
-  }catch(e){
-    showToast('❌ Erro: '+e.message);
-  }finally{
-    document.getElementById('analyzeBtn').disabled=false;
-    document.getElementById('loading').classList.remove('show');
-  }
-}
+def price_monitor():
+    while True:
+        try:
+            with alerts_lock:
+                remaining = []
+                for alert in active_alerts:
+                    price = alert.get('current_price')
+                    if price is None:
+                        remaining.append(alert)
+                        continue
+                    triggered = False
+                    if alert['direction'] == 'above' and price >= alert['target']:
+                        triggered = True
+                    elif alert['direction'] == 'below' and price <= alert['target']:
+                        triggered = True
+                    if triggered:
+                        msg = f"🚨 <b>ALERTA {alert['pair']} ATIVADO!</b>\n"
+                        msg += f"💰 Preço atual: ${price:,.2f}\n"
+                        msg += f"🎯 Preço alvo: ${alert['target']:,.2f}\n\n"
+                        msg += f"📋 <b>ANÁLISE COMPLETA:</b>\n"
+                        msg += alert['analysis']
+                        send_telegram(msg)
+                        print(f"Alerta disparado: {alert['pair']} @ {price}")
+                    else:
+                        remaining.append(alert)
+                active_alerts.clear()
+                active_alerts.extend(remaining)
+        except Exception as e:
+            print(f"Monitor erro: {e}")
+        time.sleep(10)
 
-function renderResult(text){
-  const tl=text.toLowerCase();
-  let dir='neutral',dirText='⚠️ AGUARDA',scoreClass='mid';
-  const buy=(tl.match(/compra|bullish|buy|long/g)||[]).length;
-  const sell=(tl.match(/vend[ae]|bearish|sell|short/g)||[]).length;
-  if(buy>sell){dir='bull';dirText='📈 COMPRA';}
-  else if(sell>buy){dir='bear';dirText='📉 VENDA';}
-  const sm=text.match(/(\d{1,3})\s*\/\s*100/);
-  const score=sm?parseInt(sm[1]):50;
-  if(score>=70)scoreClass='high';
-  else if(score>=50)scoreClass='mid';
-  else scoreClass='low';
-  const formatted=text
-    .replace(/\*\*(.+?)\*\*/g,'<strong style="color:var(--gold)">$1</strong>')
-    .replace(/#{1,3}\s(.+)/g,'<strong style="color:var(--gold);font-size:13px;display:block;margin:12px 0 6px;font-family:\'Space Mono\',monospace;text-transform:uppercase;letter-spacing:1px">$1</strong>')
-    .replace(/BULLISH/g,'<span class="tag tag-bull">BULLISH</span>')
-    .replace(/BEARISH/g,'<span class="tag tag-bear">BEARISH</span>')
-    .replace(/\bFVG\b/g,'<span class="tag tag-info">FVG</span>')
-    .replace(/\bCHoCH\b/g,'<span class="tag tag-warn">CHoCH</span>')
-    .replace(/\bBOS\b/g,'<span class="tag tag-info">BOS</span>')
-    .replace(/\n{2,}/g,'</p><p>').replace(/\n/g,'<br>').replace(/^/,'<p>').replace(/$/,'</p>');
-  const html=`
-    <div class="score-card ${dir}">
-      <div class="score-header">
-        <div class="score-direction ${dir}">${dirText}</div>
-        <div class="score-badge ${scoreClass}">${score}/100</div>
-      </div>
-      <div class="score-bar-wrap"><div class="score-bar ${dir}" style="width:${score}%"></div></div>
-      <div style="font-size:12px;color:var(--muted);font-family:'Space Mono',monospace">${selectedPair} · Análise ICT/SMC</div>
-    </div>
-    <div class="analysis-card">
-      <h3>📊 Análise Completa</h3>
-      <div class="analysis-text">${formatted}</div>
-    </div>
-    <div class="alert-box">
-      <div class="alert-box-title">🔔 CRIAR ALERTA DE PREÇO</div>
-      <div class="alert-row">
-        <input id="alertPrice" type="number" placeholder="Ex: 62300" step="any" class="alert-input">
-        <button onclick="createAlert()" class="alert-create-btn">🔔 Criar</button>
-      </div>
-      <div id="alertStatus" class="alert-status"></div>
-    </div>
-    <button class="reset-btn" onclick="resetAnalysis()">🔄 Nova Análise</button>`;
-  const el=document.getElementById('result');
-  el.innerHTML=html;el.classList.add('show');
-  el.scrollIntoView({behavior:'smooth',block:'start'});
-}
+monitor_thread = threading.Thread(target=price_monitor, daemon=True)
+monitor_thread.start()
 
-async function createAlert(){
-  const price=parseFloat(document.getElementById('alertPrice').value);
-  if(!price||price<=0)return showToast('❌ Mete um preço válido');
-  const statusEl=document.getElementById('alertStatus');
-  statusEl.textContent='⏳ A buscar preço atual...';
-  try{
-    const currentPrice=await getPrice(selectedPair);
-    if(!currentPrice)throw new Error('Nao foi possivel obter preco');
-    statusEl.textContent='⏳ A criar alerta...';
-    const res=await fetch('/set_alert',{
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({
-        pair:selectedPair,
-        target:price,
-        current_price:currentPrice,
-        analysis:lastAnalysis
-      })
-    });
-    const data=await res.json();
-    if(data.error)throw new Error(data.error);
-    const dir=data.direction==='above'?'⬆️ acima':'⬇️ abaixo';
-    statusEl.style.color='var(--green)';
-    statusEl.textContent=`✅ Alerta criado! Avisa quando ${selectedPair} chegar $${price} (${dir} de $${currentPrice.toFixed(2)})`;
-    showToast('✅ Alerta criado no Telegram!');
-  }catch(e){
-    statusEl.style.color='var(--red)';
-    statusEl.textContent='❌ Erro: '+e.message;
-  }
-}
+@app.route('/')
+def index():
+    return send_from_directory('.', 'index.html')
 
-function resetAnalysis(){
-  images={};lastAnalysis='';
-  document.getElementById('result').classList.remove('show');
-  document.getElementById('result').innerHTML='';
-  ['D1','H4','H1','M15','M5','M1'].forEach(tf=>{
-    const slot=document.getElementById('slot-'+tf);
-    const labels={D1:'📅',H4:'🕐',H1:'⏰',M15:'⚡',M5:'🎯',M1:'🔬'};
-    const names={D1:'Diário',H4:'4 Horas',H1:'1 Hora',M15:'15 Min',M5:'5 Min · Scalp',M1:'1 Min · Opcional'};
-    slot.classList.remove('filled');
-    slot.innerHTML=`<div class="slot-icon">${labels[tf]}</div><div class="slot-tf">${tf}</div><div class="slot-label">${names[tf]}</div><input type="file" class="upload-input" id="inp-${tf}" accept="image/*" onchange="handleFile(this,'${tf}')">`;
-  });
-  window.scrollTo({top:0,behavior:'smooth'});
-}
+@app.route('/analyze', methods=['POST'])
+def analyze():
+    try:
+        data = request.json
+        pair = data.get('pair', 'BTCUSD')
+        images = data.get('images', {})
+        tf_list = list(images.keys())
+        if len(tf_list) < 2:
+            return jsonify({'error': 'Carrega pelo menos 2 graficos'}), 400
+        content = [{"type":"text","text":"Es um mentor ICT/SMC. Analisa os graficos do " + pair + " (" + ', '.join(tf_list) + ") em portugues. Da bias, liquidez, FVGs, OBs, CHoCH, setup com entrada/SL/TP e score 0-100."}]
+        for tf in tf_list:
+            img = images[tf]
+            content.append({"type":"text","text":"Grafico " + tf + ":"})
+            content.append({"type":"image","source":{"type":"base64","media_type":img['mimeType'],"data":img['base64']}})
+        response = client.messages.create(model="claude-haiku-4-5", max_tokens=3000, messages=[{"role":"user","content":content}])
+        result_text = response.content[0].text
+        return jsonify({'result': result_text})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
-function showToast(msg){
-  const t=document.getElementById('toast');
-  t.textContent=msg;t.classList.add('show');
-  setTimeout(()=>t.classList.remove('show'),3000);
-}
-</script>
-</body>
-</html>
+@app.route('/set_alert', methods=['POST'])
+def set_alert():
+    try:
+        data = request.json
+        pair = data.get('pair', 'BTCUSD')
+        target = float(data.get('target'))
+        current_price = float(data.get('current_price'))
+        analysis = data.get('analysis', '')
+        direction = 'above' if target > current_price else 'below'
+        with alerts_lock:
+            active_alerts.append({
+                'pair': pair,
+                'target': target,
+                'direction': direction,
+                'current_price': current_price,
+                'analysis': analysis
+            })
+        send_telegram(f"🎯 <b>Alerta criado para {pair}</b>\nPreço alvo: ${target:,.2f}\nDireção: {'Acima ⬆️' if direction == 'above' else 'Abaixo ⬇️'}\nPreço atual: ${current_price:,.2f}")
+        return jsonify({'ok': True, 'direction': direction, 'current_price': current_price})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/update_prices', methods=['POST'])
+def update_prices():
+    try:
+        data = request.json
+        prices = data.get('prices', {})
+        with alerts_lock:
+            for alert in active_alerts:
+                pair = alert['pair']
+                if pair in prices:
+                    alert['current_price'] = float(prices[pair])
+        return jsonify({'ok': True})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port)

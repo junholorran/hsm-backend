@@ -24,16 +24,11 @@ def send_telegram(message):
 def get_price(pair):
     try:
         symbol = pair.replace("USD", "USDT")
-        url = f"https://api.bybit.com/v5/market/tickers?category=spot&symbol={symbol}"
+        url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}"
         r = requests.get(url, timeout=5)
         data = r.json()
-        if data.get('result') and data['result'].get('list') and len(data['result']['list']) > 0:
-            return float(data['result']['list'][0]['lastPrice'])
-        url = f"https://api.bybit.com/v5/market/tickers?category=linear&symbol={symbol}"
-        r = requests.get(url, timeout=5)
-        data = r.json()
-        if data.get('result') and data['result'].get('list') and len(data['result']['list']) > 0:
-            return float(data['result']['list'][0]['lastPrice'])
+        if 'price' in data:
+            return float(data['price'])
         return None
     except:
         return None

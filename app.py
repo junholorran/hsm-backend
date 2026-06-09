@@ -37,10 +37,11 @@ def price_monitor():
                     elif alert['direction'] == 'below' and price <= alert['target']:
                         triggered = True
                     if triggered:
-                        msg = f"🚨 <b>ALERTA {alert['pair']} ATIVADO</b>\n"
-                        msg += f"💰 Preço atual: ${price:,.2f}\n\n"
-                        msg += f"📋 <b>O QUE FAZER AGORA:</b>\n"
-                        msg += alert['instructions']
+                        msg = f"🚨 <b>ALERTA {alert['pair']} ATIVADO!</b>\n"
+                        msg += f"💰 Preço atual: ${price:,.2f}\n"
+                        msg += f"🎯 Preço alvo: ${alert['target']:,.2f}\n\n"
+                        msg += f"📋 <b>ANÁLISE COMPLETA:</b>\n"
+                        msg += alert['analysis']
                         send_telegram(msg)
                         print(f"Alerta disparado: {alert['pair']} @ {price}")
                     else:
@@ -85,7 +86,7 @@ def set_alert():
         pair = data.get('pair', 'BTCUSD')
         target = float(data.get('target'))
         current_price = float(data.get('current_price'))
-        instructions = data.get('instructions', '')
+        analysis = data.get('analysis', '')
         direction = 'above' if target > current_price else 'below'
         with alerts_lock:
             active_alerts.append({
@@ -93,7 +94,7 @@ def set_alert():
                 'target': target,
                 'direction': direction,
                 'current_price': current_price,
-                'instructions': instructions
+                'analysis': analysis
             })
         send_telegram(f"🎯 <b>Alerta criado para {pair}</b>\nPreço alvo: ${target:,.2f}\nDireção: {'Acima ⬆️' if direction == 'above' else 'Abaixo ⬇️'}\nPreço atual: ${current_price:,.2f}")
         return jsonify({'ok': True, 'direction': direction, 'current_price': current_price})

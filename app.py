@@ -14,12 +14,6 @@ TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
 active_alerts = []
 alerts_lock = threading.Lock()
 
-COINGECKO_MAP = {
-    'BTCUSD': 'bitcoin', 'ETHUSD': 'ethereum', 'SOLUSD': 'solana',
-    'XRPUSD': 'ripple', 'LINKUSD': 'chainlink', 'ADAUSD': 'cardano',
-    'AVAXUSD': 'avalanche-2', 'BNBUSD': 'binancecoin', 'AAVEUSD': 'aave'
-}
-
 def send_telegram(message):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -27,25 +21,15 @@ def send_telegram(message):
     except Exception as e:
         print(f"Telegram erro: {e}")
 
-def get_coingecko_price(pair):
-    try:
-        coin = COINGECKO_MAP.get(pair, 'bitcoin')
-        url = f"https://api.coingecko.com/api/v3/simple/price?ids={coin}&vs_currencies=usd"
-        r = requests.get(url, timeout=10)
-        data = r.json()
-        return float(data[coin]['usd'])
-    except Exception as e:
-        print(f"CoinGecko erro: {e}")
-        return None
-
 def price_monitor():
     while True:
         try:
             with alerts_lock:
                 remaining = []
                 for alert in active_alerts:
-                    price = get_coingecko_price(alert['pair'])
+                    price = alert.get('current_price')
                     if price is None:
+                        print(f"Aguardando preco do browser para {alert['pair']}...")
                         remaining.append(alert)
                         continue
                     print(f"Monitor: {alert['pair']} @ {price} | alvo: {alert['target']} | dir: {alert['direction']}")
@@ -56,9 +40,9 @@ def price_monitor():
                         triggered = True
                     if triggered:
                         msg = f"🚨 <b>ALERTA {alert['pair']} ATIVADO!</b>\n"
-                        msg += f"💰 Preço atual: ${price:,.2f}\n"
-                        msg += f"🎯 Preço alvo: ${alert['target']:,.2f}\n\n"
-                        msg += f"📋 <b>ANÁLISE COMPLETA:</b>\n"
+                        msg += f"💰 Preco atual: ${price:,.2f}\n"
+                        msg += f"🎯 Preco alvo: ${alert['target']:,.2f}\n\n"
+                        msg += f"📋 <b>ANALISE COMPLETA:</b>\n"
                         msg += alert['analysis']
                         send_telegram(msg)
                         print(f"Alerta disparado: {alert['pair']} @ {price}")
@@ -68,7 +52,7 @@ def price_monitor():
                 active_alerts.extend(remaining)
         except Exception as e:
             print(f"Monitor erro: {e}")
-        time.sleep(30)
+        time.sleep(10)
 
 monitor_thread = threading.Thread(target=price_monitor, daemon=True)
 monitor_thread.start()
@@ -114,7 +98,7 @@ def set_alert():
                 'current_price': current_price,
                 'analysis': analysis
             })
-        send_telegram(f"🎯 <b>Alerta criado para {pair}</b>\nPreço alvo: ${target:,.2f}\nDireção: {'Acima ⬆️' if direction == 'above' else 'Abaixo ⬇️'}\nPreço atual: ${current_price:,.2f}")
+        send_telegram(f"🎯 <b>Alerta criado para {pair}</b>\nPreco alvo: ${target:,.2f}\nDirecao: {'Acima' if direction == 'above' else 'Abaixo'}\nPreco atual: ${current_price:,.2f}")
         return jsonify({'ok': True, 'direction': direction, 'current_price': current_price})
     except Exception as e:
         return jsonify({'error': str(e)}), 500

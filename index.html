@@ -171,6 +171,7 @@ function handleFile(input,tf){
   reader.readAsDataURL(file);
 }
 
+// CORRIGIDO: Agora consome a API da BYBIT em vez da Binance
 async function getPrice(pair){
   try{
     const symbolMap={
@@ -179,9 +180,13 @@ async function getPrice(pair){
       'AVAXUSD':'AVAXUSDT','BNBUSD':'BNBUSDT','AAVEUSD':'AAVEUSDT'
     };
     const symbol=symbolMap[pair]||'BTCUSDT';
-    const r=await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${symbol}`);
+    // Chamada à API pública e gratuita da Bybit
+    const r=await fetch(`https://api.bybit.com/v5/market/tickers?category=linear&symbol=${symbol}`);
     const d=await r.json();
-    return d.price?parseFloat(d.price):null;
+    if(d.result && d.result.list && d.result.list[0]){
+      return parseFloat(d.result.list[0].lastPrice);
+    }
+    return null;
   }catch(e){return null;}
 }
 

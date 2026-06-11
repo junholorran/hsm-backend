@@ -13,29 +13,7 @@ TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
 
 active_alerts = []
 alerts_lock = threading.Lock()
-
-SYMBOL_MAP = {
-    'BTCUSD': 'BTCUSDT',
-    'ETHUSD': 'ETHUSDT',
-    'SOLUSD': 'SOLUSDT',
-    'XRPUSD': 'XRPUSDT',
-    'LINKUSD': 'LINKUSDT',
-    'ADAUSD': 'ADAUSDT',
-    'AVAXUSD': 'AVAXUSDT',
-    'BNBUSD': 'BNBUSDT',
-    'AAVEUSD': 'AAVEUSDT',
-}
-
-def get_binance_price(pair):
-    try:
-        symbol = SYMBOL_MAP.get(pair, pair.replace('USD', 'USDT'))
-        url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}"
-        resp = requests.get(url, timeout=5)
-        data = resp.json()
-        return float(data['price'])
-    except Exception as e:
-        print(f"Binance erro para {pair}: {e}")
-        return None
+latest_prices = {}
 
 def send_telegram(message):
     try:
@@ -50,9 +28,9 @@ def price_monitor():
             with alerts_lock:
                 remaining = []
                 for alert in active_alerts:
-                    price = get_binance_price(alert['pair'])
+                    price = latest_prices.get(alert['pair'])
                     if price is None:
-                        print(f"Sem preco para {alert['pair']}, mantendo alerta...")
+                        print(f"Aguardando preco do browser para {alert['pair']}...")
                         remaining.append(alert)
                         continue
                     print(f"Monitor: {alert['pair']} @ {price} | alvo: {alert['target']} | dir: {alert['direction']}")
@@ -75,7 +53,7 @@ def price_monitor():
                 active_alerts.extend(remaining)
         except Exception as e:
             print(f"Monitor erro: {e}")
-        time.sleep(30)
+        time.sleep(10)
 
 monitor_thread = threading.Thread(target=price_monitor, daemon=True)
 monitor_thread.start()
@@ -127,7 +105,13 @@ def set_alert():
 
 @app.route('/update_prices', methods=['POST'])
 def update_prices():
-    return jsonify({'ok': True})
+    try:
+        data = request.json
+        prices = data.get('prices', {})
+        latest_prices.update(prices)
+        return jsonify({'ok': True})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))

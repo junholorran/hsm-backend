@@ -32,12 +32,24 @@ def get_bybit_price(pair):
     try:
         symbol = SYMBOL_MAP.get(pair, pair.replace('USD', 'USDT'))
         url = f"https://api.bybit.com/v5/market/tickers?category=linear&symbol={symbol}"
-        resp = requests.get(url, timeout=5)
-        data = resp.json()
-        if data.get('result') and data['result'].get('list') and len(data['result']['list']) > 0:
-            price = float(data['result']['list'][0]['lastPrice'])
-            latest_prices[pair] = price
-            return price
+        
+        # BLINDAGEM: Simula um navegador real para evitar bloqueios IP da Bybit (Cloudflare/Rate Limit)
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        
+        resp = requests.get(url, headers=headers, timeout=5)
+        
+        # Só tenta ler o JSON se o servidor da Bybit responder com status 200 (Sucesso)
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get('result') and data['result'].get('list') and len(data['result']['list']) > 0:
+                price = float(data['result']['list'][0]['lastPrice'])
+                latest_prices[pair] = price
+                return price
+        else:
+            print(f"Bybit recusou ligação com status {resp.status_code} para {pair} (Evitou crash de JSON)")
+            
         return None
     except Exception as e:
         print(f"Bybit erro para {pair}: {e}")
@@ -51,21 +63,21 @@ def send_telegram(message):
         print(f"Telegram erro: {e}")
 
 def price_monitor():
-    # Mantém a memória de notificações fora do loop para persistência estável
+    # Mantém a memória de notificações fora do loop para não spamar mensagens seguidas
     already_notified = {}
     
     while True:
         triggered_alerts = []
         try:
-            # 1. Filtra os pares com alertas ativos para otimizar requisições HTTP
+            # 1. Agrupar os pares com alertas ativos para poupar requisições à API
             with alerts_lock:
                 unique_pairs = list(set(alert['pair'] for alert in active_alerts))
             
             for pair in unique_pairs:
                 get_bybit_price(pair)
-                time.sleep(0.05)
+                time.sleep(0.1) # Delay de estabilidade para evitar abusar da API
                 
-            # 2. Avalia os cruzamentos milimétricos com precisão de 1 segundo
+            # 2. Avaliar cruzamentos precisos
             with alerts_lock:
                 for alert in active_alerts:
                     price = latest_prices.get(alert['pair'])
@@ -75,7 +87,6 @@ def price_monitor():
                     alert_id = alert['id']
                     is_above_now = price >= alert['target']
                     
-                    # Se não foi mapeado (segurança de fallback), regista e salta
                     if alert_id not in last_known_position:
                         last_known_position[alert_id] = is_above_now
                         continue
@@ -83,7 +94,7 @@ def price_monitor():
                     was_above = last_known_position[alert_id]
                     triggered = False
                     
-                    # Deteta a transição exata (o cruzamento de linha)
+                    # Deteta o corte milimétrico da linha de preço
                     if alert['direction'] == 'above' and not was_above and is_above_now:
                         triggered = True
                     elif alert['direction'] == 'below' and was_above and not is_above_now:
@@ -92,19 +103,18 @@ def price_monitor():
                     last_known_position[alert_id] = is_above_now
                     
                     if triggered:
-                        # Só valida se houver mudança de estado real para evitar spam
                         if already_notified.get(alert_id) != is_above_now:
                             alert_copy = alert.copy()
                             alert_copy['triggered_price'] = price
                             triggered_alerts.append(alert_copy)
                             already_notified[alert_id] = is_above_now
-                            print(f"Cruzamento detetado! {alert['pair']} @ {price}")
+                            print(f"Cruzamento capturado! {alert['pair']} @ {price}")
             
-            # 3. Dispara as mensagens formatadas para o Telegram
+            # 3. Dispara as mensagens diretas para o Telegram (Fora do Lock)
             for alert_triggered in triggered_alerts:
                 analysis_clean = alert_triggered['analysis']
                 
-                # Conversor de Markdown para Tags de HTML suportadas pelo Telegram
+                # Fallback de limpeza caso o prompt falhe alguma tag
                 analysis_clean = analysis_clean.replace('**', '<b>', 1)
                 while '**' in analysis_clean:
                     analysis_clean = analysis_clean.replace('**', '<b>', 1).replace('**', '</b>', 1)
@@ -120,14 +130,11 @@ def price_monitor():
                 
         except Exception as e:
             print(f"Monitor erro: {e}")
-            try:
-                send_telegram(f"⚠️ <b>BOT AVISO:</b> Erro no monitor: <code>{str(e)}</code>")
-            except:
-                pass
-                
-        time.sleep(1) # Executa de 1 em 1 segundo (High Frequency)
+            
+        # Equilíbrio ideal de frequência (2 segundos impede bloqueios de IP na hospedagem e apanha tudo)
+        time.sleep(2) 
 
-# Inicializa e força o arranque automático da thread em segundo plano
+# Inicialização e arranque automático do monitor em segundo plano
 monitor_thread = threading.Thread(target=price_monitor, daemon=True)
 monitor_thread.start()
 
@@ -145,7 +152,19 @@ def analyze():
         if len(tf_list) < 2:
             return jsonify({'error': 'Carrega pelo menos 2 gráficos'}), 400
             
-        content = [{"type": "text", "text": "És um mentor ICT/SMC. Analisa os gráficos do " + pair + " (" + ', '.join(tf_list) + ") em português. Dá bias, liquidez, FVGs, OBs, CHoCH, setup com entrada/SL/TP e score 0-100."}]
+        # CONFIGURAÇÃO DE PROMPT: Entrega HTML nativo e elimina de vez o Markdown cru do Telegram
+        prompt_telegram = (
+            f"És um mentor ICT/SMC. Analisa os gráficos do {pair} ({', '.join(tf_list)}) em português. "
+            "Dá bias, liquidez, FVGs, OBs, CHoCH, setup com entrada/SL/TP e score 0-100.\n\n"
+            "REGRAS ESTRITAS DE FORMATAÇÃO PARA O TELEGRAM:\n"
+            "1. Formata a resposta EXCLUSIVAMENTE com tags HTML válidas (<b>, <i>, <u>, <code>).\n"
+            "2. NUNCA uses cabeçalhos Markdown (#, ##, ###) nem asteriscos (**).\n"
+            "3. Para destacar títulos ou nomes de secções, usa apenas texto em negrito (ex: <b>📌 RESUMO EXECUTIVO</b>).\n"
+            "4. Para listas de pontos, usa obrigatoriamente o caractere unicode da bola (•) em vez de traços (-) ou asteriscos.\n"
+            "5. Certifica-se de fechar todas as tags abertas na mesma linha correspondente."
+        )
+            
+        content = [{"type": "text", "text": prompt_telegram}]
         for tf in tf_list:
             img = images[tf]
             content.append({"type": "text", "text": "Gráfico " + tf + ":"})
@@ -164,7 +183,6 @@ def set_alert():
         pair = data.get('pair', 'BTCUSD')
         target = float(data.get('target'))
         
-        # Garante a leitura fresca do preço no momento do clique
         current_price = get_bybit_price(pair)
         if not current_price:
             current_price = float(data.get('current_price'))
@@ -173,8 +191,8 @@ def set_alert():
         direction = 'above' if target > current_price else 'below'
         alert_unique_id = f"{pair}_{target}_{direction}_{int(time.time() * 1000)}"
         
-        # FIX CRÍTICO: Regista o estado de partida no exato milissegundo em que o alerta nasce.
-        # Isto impede que o monitor descarte o primeiro cruzamento por falta de histórico.
+        # SINCRO-FIX: Regista o estado inicial no exato milissegundo em que o alerta nasce.
+        # Evita falhas ou atrasos se o preço cruzar a linha no mesmo segundo da criação.
         is_above_initial = current_price >= target
         last_known_position[alert_unique_id] = is_above_initial
         

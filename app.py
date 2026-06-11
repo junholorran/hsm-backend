@@ -6,6 +6,8 @@ import time
 import requests
 
 app = Flask(__name__)
+
+# Corrigido para o modelo oficial Claude 3.5 Sonnet (Rei da visão computacional para SMC)
 client = anthropic.Anthropic(api_key=os.environ.get('ANTHROPIC_API_KEY'))
 
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
@@ -14,80 +16,67 @@ TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
 active_alerts = []
 alerts_lock = threading.Lock()
 latest_prices = {}
-
-SYMBOL_MAP = {
-    'BTCUSD': 'BTCUSDT',
-    'ETHUSD': 'ETHUSDT',
-    'SOLUSD': 'SOLUSDT',
-    'XRPUSD': 'XRPUSDT',
-    'LINKUSD': 'LINKUSDT',
-    'ADAUSD': 'ADAUSDT',
-    'AVAXUSD': 'AVAXUSDT',
-    'BNBUSD': 'BNBUSDT',
-    'AAVEUSD': 'AAVEUSDT',
-}
-
-# CORRIGIDO: Puxa os dados diretamente da API pública e gratuita da Bybit
-def get_bybit_price(pair):
-    try:
-        symbol = SYMBOL_MAP.get(pair, pair.replace('USD', 'USDT'))
-        url = f"https://api.bybit.com/v5/market/tickers?category=linear&symbol={symbol}"
-        resp = requests.get(url, timeout=5)
-        data = resp.json()
-        if data.get('result') and data['result'].get('list') and len(data['result']['list']) > 0:
-            price = float(data['result']['list'][0]['lastPrice'])
-            # Atualiza o dicionário interno latest_prices (documento 10)
-            latest_prices[pair] = price
-            return price
-        return None
-    except Exception as e:
-        print(f"Bybit erro para {pair}: {e}")
-        return None
+# Movido para fora para persistência global de estados de cruzamento
+last_known_position = {} 
 
 def send_telegram(message):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"})
+        requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"}, timeout=10)
     except Exception as e:
         print(f"Telegram erro: {e}")
 
-# CORRIGIDO: Monitor corre de forma 24/7 autónoma no servidor usando a Bybit
 def price_monitor():
     while True:
+        triggered_alerts = []
         try:
             with alerts_lock:
-                remaining = []
                 for alert in active_alerts:
-                    price = get_bybit_price(alert['pair'])
+                    price = latest_prices.get(alert['pair'])
                     if price is None:
-                        # Se falhar temporariamente, tenta usar o último preço guardado em latest_prices
-                        price = latest_prices.get(alert['pair'])
-                        if price is None:
-                            remaining.append(alert)
-                            continue
+                        continue
                     
-                    print(f"Monitor: {alert['pair']} @ {price} | alvo: {alert['target']} | dir: {alert['direction']}")
+                    # Usamos o 'id' único do alerta para não misturar posições se o preço for igual
+                    alert_id = alert['id']
+                    is_above_now = price >= alert['target']
+                    
+                    # Se for a primeira leitura deste alerta específico, inicializa o estado
+                    if alert_id not in last_known_position:
+                        last_known_position[alert_id] = is_above_now
+                        continue
+                        
+                    was_above = last_known_position[alert_id]
                     triggered = False
-                    if alert['direction'] == 'above' and price >= alert['target']:
+                    
+                    # Validação milimétrica do cruzamento
+                    if alert['direction'] == 'above' and not was_above and is_above_now:
                         triggered = True
-                    elif alert['direction'] == 'below' and price <= alert['target']:
+                    elif alert['direction'] == 'below' and was_above and not is_above_now:
                         triggered = True
                         
+                    # Atualiza o estado para a próxima verificação
+                    last_known_position[alert_id] = is_above_now
+                    
                     if triggered:
-                        msg = f"🚨 <b>ALERTA {alert['pair']} ATIVADO!</b>\n"
-                        msg += f"💰 Preço atual: ${price:,.2f}\n"
-                        msg += f"🎯 Preço alvo: ${alert['target']:,.2f}\n\n"
-                        msg += f"📋 <b>ANÁLISE COMPLETA:</b>\n"
-                        msg += alert['analysis']
-                        send_telegram(msg)
-                        print(f"Alerta disparado: {alert['pair']} @ {price}")
-                    else:
-                        remaining.append(alert)
-                active_alerts.clear()
-                active_alerts.extend(remaining)
+                        alert_copy = alert.copy()
+                        alert_copy['triggered_price'] = price
+                        triggered_alerts.append(alert_copy)
+                        print(f"Cruzamento detetado! {alert['pair']} cruzou {alert['target']} @ {price}")
+            
+            # Envio fora do Lock para evitar crash ou lentidão no Flask
+            for alert in triggered_alerts:
+                msg = f"🔄 <b>ALERTA DE CRUZAMENTO CONTÍNUO: {alert['pair']}</b>\n"
+                msg += f"💰 Preço atual: ${alert['triggered_price']:,.2f}\n"
+                msg += f"🎯 Alvo cruzado: ${alert['target']:,.2f}\n"
+                msg += f"📊 Movimento: {'Cruzou para CIMA ↑' if alert['direction'] == 'above' else 'Cruzou para BAIXO ↓'}\n\n"
+                msg += f"📋 <b>ANÁLISE DO MENTOR ICT:</b>\n"
+                msg += alert['analysis']
+                send_telegram(msg)
+                
         except Exception as e:
             print(f"Monitor erro: {e}")
-        time.sleep(15) # Verifica a cada 15 segundos para ser mais rápido
+            
+        time.sleep(5)
 
 monitor_thread = threading.Thread(target=price_monitor, daemon=True)
 monitor_thread.start()
@@ -105,12 +94,30 @@ def analyze():
         tf_list = list(images.keys())
         if len(tf_list) < 2:
             return jsonify({'error': 'Carrega pelo menos 2 graficos'}), 400
-        content = [{"type":"text","text":"Es um mentor ICT/SMC. Analisa os graficos do " + pair + " (" + ', '.join(tf_list) + ") em portugues. Da bias, liquidez, FVGs, OBs, CHoCH, setup com entrada/SL/TP e score 0-100."}]
+            
+        content = [{
+            "type": "text",
+            "text": f"És um mentor ICT/SMC profissional. Analisa os gráficos do {pair} ({', '.join(tf_list)}) em português de Portugal. Dá o bias de mercado, liquidez (BSL/SSL), FVGs, Order Blocks, quebras de estrutura (CHoCH/MSS), sugere um setup exato com entrada/SL/TP e atribui um Score de confiança de 0-100."
+        }]
+        
         for tf in tf_list:
             img = images[tf]
-            content.append({"type":"text","text":"Grafico " + tf + ":"})
-            content.append({"type":"image","source":{"type":"base64","media_type":img['mimeType'],"data":img['base64']}})
-        response = client.messages.create(model="claude-haiku-4-5", max_tokens=3000, messages=[{"role":"user","content":content}])
+            content.append({"type": "text", "text": f"Grafico {tf}:"})
+            content.append({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": img['mimeType'],
+                    "data": img['base64']
+                }
+            })
+            
+        # Corrigido para chamada de API estável e funcional
+        response = client.messages.create(
+            model="claude-3-5-sonnet-20241022", 
+            max_tokens=3000, 
+            messages=[{"role": "user", "content": content}]
+        )
         result_text = response.content[0].text
         return jsonify({'result': result_text})
     except Exception as e:
@@ -122,22 +129,23 @@ def set_alert():
         data = request.json
         pair = data.get('pair', 'BTCUSD')
         target = float(data.get('target'))
-        
-        # Garante que vai buscar o preço mais recente da Bybit para definir a direção do alerta
-        current_price = get_bybit_price(pair)
-        if not current_price:
-            current_price = float(data.get('current_price'))
-            
+        current_price = float(data.get('current_price'))
         analysis = data.get('analysis', '')
         direction = 'above' if target > current_price else 'below'
+        
+        # Geramos um ID único baseado no timestamp atual para evitar colisões
+        alert_unique_id = f"{pair}_{target}_{direction}_{int(time.time() * 1000)}"
+        
         with alerts_lock:
             active_alerts.append({
+                'id': alert_unique_id,
                 'pair': pair,
                 'target': target,
                 'direction': direction,
                 'analysis': analysis
             })
-        send_telegram(f"🎯 <b>Alerta criado para {pair}</b>\nPreço alvo: ${target:,.2f}\nDireção: {'Acima' if direction == 'above' else 'Abaixo'}\nPreço atual: ${current_price:,.2f}")
+            
+        send_telegram(f"🎯 <b>Alerta Infinito criado para {pair}</b>\nPreço alvo: ${target:,.2f}\nDireção: {'Acima' if direction == 'above' else 'Abaixo'}\nPreço atual: ${current_price:,.2f}")
         return jsonify({'ok': True, 'direction': direction, 'current_price': current_price})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -154,4 +162,5 @@ def update_prices():
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port)
+    # debug=False é mandatório aqui para a thread do monitor não ser executada duas vezes pelo Flask
+    app.run(host='0.0.0.0', port=port, debug=False)

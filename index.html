@@ -173,15 +173,15 @@ function handleFile(input,tf){
 
 async function getPrice(pair){
   try{
-    const coinMap={
-      'BTCUSD':'bitcoin','ETHUSD':'ethereum','SOLUSD':'solana',
-      'XRPUSD':'ripple','LINKUSD':'chainlink','ADAUSD':'cardano',
-      'AVAXUSD':'avalanche-2','BNBUSD':'binancecoin','AAVEUSD':'aave'
+    const symbolMap={
+      'BTCUSD':'BTCUSDT','ETHUSD':'ETHUSDT','SOLUSD':'SOLUSDT',
+      'XRPUSD':'XRPUSDT','LINKUSD':'LINKUSDT','ADAUSD':'ADAUSDT',
+      'AVAXUSD':'AVAXUSDT','BNBUSD':'BNBUSDT','AAVEUSD':'AAVEUSDT'
     };
-    const coin=coinMap[pair]||'bitcoin';
-    const r=await fetch(`https://api.coingecko.com/api/v3/simple/price?ids=${coin}&vs_currencies=usd`);
+    const symbol=symbolMap[pair]||'BTCUSDT';
+    const r=await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${symbol}`);
     const d=await r.json();
-    return d[coin]?d[coin].usd:null;
+    return d.price?parseFloat(d.price):null;
   }catch(e){return null;}
 }
 
@@ -196,7 +196,7 @@ async function updateServerPrices(){
     });
   }catch(e){}
 }
-setInterval(updateServerPrices,30000);
+setInterval(updateServerPrices,10000);
 
 async function analyze(){
   const tfList=Object.keys(images);

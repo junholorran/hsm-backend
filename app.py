@@ -27,15 +27,21 @@ SYMBOL_MAP = {
     'AAVEUSD': 'AAVEUSDT',
 }
 
-def get_binance_price(pair):
+# CORRIGIDO: Puxa os dados diretamente da API pública e gratuita da Bybit
+def get_bybit_price(pair):
     try:
         symbol = SYMBOL_MAP.get(pair, pair.replace('USD', 'USDT'))
-        url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}"
+        url = f"https://api.bybit.com/v5/market/tickers?category=linear&symbol={symbol}"
         resp = requests.get(url, timeout=5)
         data = resp.json()
-        return float(data['price'])
+        if data.get('result') and data['result'].get('list') and len(data['result']['list']) > 0:
+            price = float(data['result']['list'][0]['lastPrice'])
+            # Atualiza o dicionário interno latest_prices (documento 10)
+            latest_prices[pair] = price
+            return price
+        return None
     except Exception as e:
-        print(f"Binance erro para {pair}: {e}")
+        print(f"Bybit erro para {pair}: {e}")
         return None
 
 def send_telegram(message):
@@ -45,27 +51,33 @@ def send_telegram(message):
     except Exception as e:
         print(f"Telegram erro: {e}")
 
+# CORRIGIDO: Monitor corre de forma 24/7 autónoma no servidor usando a Bybit
 def price_monitor():
     while True:
         try:
             with alerts_lock:
                 remaining = []
                 for alert in active_alerts:
-                    price = get_binance_price(alert['pair'])
+                    price = get_bybit_price(alert['pair'])
                     if price is None:
-                        remaining.append(alert)
-                        continue
+                        # Se falhar temporariamente, tenta usar o último preço guardado em latest_prices
+                        price = latest_prices.get(alert['pair'])
+                        if price is None:
+                            remaining.append(alert)
+                            continue
+                    
                     print(f"Monitor: {alert['pair']} @ {price} | alvo: {alert['target']} | dir: {alert['direction']}")
                     triggered = False
                     if alert['direction'] == 'above' and price >= alert['target']:
                         triggered = True
                     elif alert['direction'] == 'below' and price <= alert['target']:
                         triggered = True
+                        
                     if triggered:
                         msg = f"🚨 <b>ALERTA {alert['pair']} ATIVADO!</b>\n"
-                        msg += f"💰 Preco atual: ${price:,.2f}\n"
-                        msg += f"🎯 Preco alvo: ${alert['target']:,.2f}\n\n"
-                        msg += f"📋 <b>ANALISE COMPLETA:</b>\n"
+                        msg += f"💰 Preço atual: ${price:,.2f}\n"
+                        msg += f"🎯 Preço alvo: ${alert['target']:,.2f}\n\n"
+                        msg += f"📋 <b>ANÁLISE COMPLETA:</b>\n"
                         msg += alert['analysis']
                         send_telegram(msg)
                         print(f"Alerta disparado: {alert['pair']} @ {price}")
@@ -75,7 +87,7 @@ def price_monitor():
                 active_alerts.extend(remaining)
         except Exception as e:
             print(f"Monitor erro: {e}")
-        time.sleep(30)
+        time.sleep(15) # Verifica a cada 15 segundos para ser mais rápido
 
 monitor_thread = threading.Thread(target=price_monitor, daemon=True)
 monitor_thread.start()
@@ -110,7 +122,12 @@ def set_alert():
         data = request.json
         pair = data.get('pair', 'BTCUSD')
         target = float(data.get('target'))
-        current_price = float(data.get('current_price'))
+        
+        # Garante que vai buscar o preço mais recente da Bybit para definir a direção do alerta
+        current_price = get_bybit_price(pair)
+        if not current_price:
+            current_price = float(data.get('current_price'))
+            
         analysis = data.get('analysis', '')
         direction = 'above' if target > current_price else 'below'
         with alerts_lock:
@@ -120,7 +137,7 @@ def set_alert():
                 'direction': direction,
                 'analysis': analysis
             })
-        send_telegram(f"🎯 <b>Alerta criado para {pair}</b>\nPreco alvo: ${target:,.2f}\nDirecao: {'Acima' if direction == 'above' else 'Abaixo'}\nPreco atual: ${current_price:,.2f}")
+        send_telegram(f"🎯 <b>Alerta criado para {pair}</b>\nPreço alvo: ${target:,.2f}\nDireção: {'Acima' if direction == 'above' else 'Abaixo'}\nPreço atual: ${current_price:,.2f}")
         return jsonify({'ok': True, 'direction': direction, 'current_price': current_price})
     except Exception as e:
         return jsonify({'error': str(e)}), 500

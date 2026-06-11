@@ -35,35 +35,23 @@ def price_monitor():
                     price = latest_prices.get(alert['pair'])
                     if price is None:
                         continue
-                    
-                    # Usamos o 'id' único do alerta para não misturar posições se o preço for igual
                     alert_id = alert['id']
                     is_above_now = price >= alert['target']
-                    
-                    # Se for a primeira leitura deste alerta específico, inicializa o estado
                     if alert_id not in last_known_position:
                         last_known_position[alert_id] = is_above_now
                         continue
-                        
                     was_above = last_known_position[alert_id]
                     triggered = False
-                    
-                    # Validação milimétrica do cruzamento
                     if alert['direction'] == 'above' and not was_above and is_above_now:
                         triggered = True
                     elif alert['direction'] == 'below' and was_above and not is_above_now:
                         triggered = True
-                        
-                    # Atualiza o estado para a próxima verificação
                     last_known_position[alert_id] = is_above_now
-                    
                     if triggered:
                         alert_copy = alert.copy()
                         alert_copy['triggered_price'] = price
                         triggered_alerts.append(alert_copy)
                         print(f"Cruzamento detetado! {alert['pair']} cruzou {alert['target']} @ {price}")
-            
-            # Envio fora do Lock para evitar crash ou lentidão no Flask
             for alert in triggered_alerts:
                 msg = f"🔄 <b>ALERTA DE CRUZAMENTO CONTÍNUO: {alert['pair']}</b>\n"
                 msg += f"💰 Preço atual: ${alert['triggered_price']:,.2f}\n"
@@ -72,10 +60,8 @@ def price_monitor():
                 msg += f"📋 <b>ANÁLISE DO MENTOR ICT:</b>\n"
                 msg += alert['analysis']
                 send_telegram(msg)
-                
         except Exception as e:
             print(f"Monitor erro: {e}")
-            
         time.sleep(5)
 
 monitor_thread = threading.Thread(target=price_monitor, daemon=True)
@@ -112,9 +98,8 @@ def analyze():
                 }
             })
             
-        # Corrigido para chamada de API estável e funcional
         response = client.messages.create(
-            model="claude-3-5-sonnet-20241022", 
+            model="claude-haiku-4-5",
             max_tokens=3000, 
             messages=[{"role": "user", "content": content}]
         )
@@ -132,10 +117,7 @@ def set_alert():
         current_price = float(data.get('current_price'))
         analysis = data.get('analysis', '')
         direction = 'above' if target > current_price else 'below'
-        
-        # Geramos um ID único baseado no timestamp atual para evitar colisões
         alert_unique_id = f"{pair}_{target}_{direction}_{int(time.time() * 1000)}"
-        
         with alerts_lock:
             active_alerts.append({
                 'id': alert_unique_id,
@@ -144,7 +126,6 @@ def set_alert():
                 'direction': direction,
                 'analysis': analysis
             })
-            
         send_telegram(f"🎯 <b>Alerta Infinito criado para {pair}</b>\nPreço alvo: ${target:,.2f}\nDireção: {'Acima' if direction == 'above' else 'Abaixo'}\nPreço atual: ${current_price:,.2f}")
         return jsonify({'ok': True, 'direction': direction, 'current_price': current_price})
     except Exception as e:
@@ -162,5 +143,4 @@ def update_prices():
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
-    # debug=False é mandatório aqui para a thread do monitor não ser executada duas vezes pelo Flask
     app.run(host='0.0.0.0', port=port, debug=False)

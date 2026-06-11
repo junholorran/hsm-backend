@@ -15,6 +15,29 @@ active_alerts = []
 alerts_lock = threading.Lock()
 latest_prices = {}
 
+SYMBOL_MAP = {
+    'BTCUSD': 'BTCUSDT',
+    'ETHUSD': 'ETHUSDT',
+    'SOLUSD': 'SOLUSDT',
+    'XRPUSD': 'XRPUSDT',
+    'LINKUSD': 'LINKUSDT',
+    'ADAUSD': 'ADAUSDT',
+    'AVAXUSD': 'AVAXUSDT',
+    'BNBUSD': 'BNBUSDT',
+    'AAVEUSD': 'AAVEUSDT',
+}
+
+def get_binance_price(pair):
+    try:
+        symbol = SYMBOL_MAP.get(pair, pair.replace('USD', 'USDT'))
+        url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}"
+        resp = requests.get(url, timeout=5)
+        data = resp.json()
+        return float(data['price'])
+    except Exception as e:
+        print(f"Binance erro para {pair}: {e}")
+        return None
+
 def send_telegram(message):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -28,9 +51,8 @@ def price_monitor():
             with alerts_lock:
                 remaining = []
                 for alert in active_alerts:
-                    price = latest_prices.get(alert['pair'])
+                    price = get_binance_price(alert['pair'])
                     if price is None:
-                        print(f"Aguardando preco do browser para {alert['pair']}...")
                         remaining.append(alert)
                         continue
                     print(f"Monitor: {alert['pair']} @ {price} | alvo: {alert['target']} | dir: {alert['direction']}")
@@ -53,7 +75,7 @@ def price_monitor():
                 active_alerts.extend(remaining)
         except Exception as e:
             print(f"Monitor erro: {e}")
-        time.sleep(10)
+        time.sleep(30)
 
 monitor_thread = threading.Thread(target=price_monitor, daemon=True)
 monitor_thread.start()

@@ -62,18 +62,33 @@ def extract_trade_info(analysis, timeframes_str):
        score = int(sm.group(1))
 
    sl = ""
-   sl_match = re.search(r'(?:Stop Loss|SL)[:\s]+\$?([\d]{4,}(?:[.,]\d+)?)', analysis, re.IGNORECASE)
+   sl_match = re.search(
+       r'(?:Stop Loss|SL)\s*[:]\s*\$?([\d]{4,}(?:[.,]\d+)?)',
+       analysis, re.IGNORECASE
+   )
+   if not sl_match:
+       sl_match = re.search(
+           r'(?:Stop Loss|SL)\s*\$?([\d]{4,}(?:[.,]\d+)?)',
+           analysis, re.IGNORECASE
+       )
    if sl_match:
-       sl = sl_match.group(1).replace(',', '')
+       sl = sl_match.group(1).replace(',', '.')
 
    tps = []
-   tp_matches = re.findall(r'(?:Take Profit\s*\d|TP\s*\d)[:\s]+\$?([\d]{4,}(?:[.,]\d+)?)', analysis, re.IGNORECASE)
+   tp_matches = re.findall(
+       r'(?:Take Profit\s*\d|TP\s*\d)\s*[:]\s*\$?([\d]{4,}(?:[.,]\d+)?)',
+       analysis, re.IGNORECASE
+   )
+   if not tp_matches:
+       tp_matches = re.findall(
+           r'(?:Take Profit\s*\d|TP\s*\d)\s*\$?([\d]{4,}(?:[.,]\d+)?)',
+           analysis, re.IGNORECASE
+       )
    for tp in tp_matches[:3]:
-       tps.append(tp.replace(',', ''))
+       tps.append(tp.replace(',', '.'))
 
    tfs = timeframes_str.upper() if timeframes_str else ""
 
-   # Extrai tipo diretamente da analise
    tf_label = ""
    if re.search(r'scalp', analysis, re.IGNORECASE):
        tf_label = "SCALP"
@@ -82,7 +97,6 @@ def extract_trade_info(analysis, timeframes_str):
    elif re.search(r'intraday', analysis, re.IGNORECASE):
        tf_label = "INTRADAY"
 
-   # Adiciona o TF principal
    if "D1" in tfs:
        tf_label += " D1"
    elif "H4" in tfs:
@@ -237,9 +251,10 @@ def analyze():
            "<b>SETUPS IDENTIFICADOS</b>\n\n"
            "<b>SETUP #1 - [LONG/SHORT] [SCALP/INTRADAY/SWING] ([TFs])</b>\n"
            "- Entrada: [valor] ([contexto ICT])\n"
-           "- Stop Loss: [valor] ([referencia ICT: acima/abaixo do OB/FVG/liquidez])\n"
-           "- Take Profit 1: [valor] ([referencia: liquidez/OB/FVG])\n"
+           "- Stop Loss: [valor] ([referencia ICT])\n"
+           "- Take Profit 1: [valor] ([referencia])\n"
            "- Take Profit 2: [valor] ([referencia])\n"
+           "- Take Profit 3: [valor] ([referencia])\n"
            "- Razao R/R: [ex: 1:2.5]\n"
            "- Tipo: [Scalp/Intraday/Swing + descricao]\n\n"
            "<b>SETUP #2 - [LONG/SHORT] [SCALP/INTRADAY/SWING] ([TFs])</b>\n"
@@ -247,6 +262,7 @@ def analyze():
            "- Stop Loss: [valor] ([referencia ICT])\n"
            "- Take Profit 1: [valor]\n"
            "- Take Profit 2: [valor]\n"
+           "- Take Profit 3: [valor]\n"
            "- Razao R/R: [valor]\n"
            "- Tipo: [descricao]\n\n"
            "<b>SCORE OPERACIONAL: [X]/100</b>\n"

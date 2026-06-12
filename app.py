@@ -5,6 +5,7 @@ import threading
 import time
 import requests
 import sqlite3
+import socket
 
 app = Flask(__name__)
 client = anthropic.Anthropic(api_key=os.environ.get('ANTHROPIC_API_KEY'))
@@ -13,17 +14,8 @@ TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
 DB_FILE = 'alerts.db'
 
-SYMBOL_MAP = {
-    'BTCUSD': 'BTCUSDT',
-    'ETHUSD': 'ETHUSDT',
-    'SOLUSD': 'SOLUSDT',
-    'XRPUSD': 'XRPUSDT',
-    'LINKUSD': 'LINKUSDT',
-    'ADAUSD': 'ADAUSDT',
-    'AVAXUSD': 'AVAXUSDT',
-    'BNBUSD': 'BNBUSDT',
-    'AAVEUSD': 'AAVEUSDT',
-}
+# ARQUITETURA ANTI-451: Browser envia precos, servidor compara
+PRECOS_TICKER = {}
 
 def init_db():
     try:
@@ -43,19 +35,6 @@ def init_db():
     except Exception as e:
         print(f"Erro ao inicializar Base de Dados: {e}")
 
-def get_binance_price(pair):
-    try:
-        symbol = SYMBOL_MAP.get(pair, pair.replace('USD', 'USDT'))
-        url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}"
-        resp = requests.get(url, timeout=5)
-        if resp.status_code == 200:
-            return float(resp.json()['price'])
-        else:
-            print(f"Binance status {resp.status_code} para {pair}")
-    except Exception as e:
-        print(f"Binance erro para {pair}: {e}")
-    return None
-
 def send_telegram(message):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -64,7 +43,7 @@ def send_telegram(message):
         print(f"Telegram erro: {e}")
 
 def price_monitor():
-    print("Monitor de Precos Ativo!")
+    print("Monitor de Precos Ativo! A ler dados enviados pelo Browser.")
     while True:
         try:
             conn = sqlite3.connect(DB_FILE)
@@ -74,19 +53,11 @@ def price_monitor():
             conn.close()
 
             if not db_alerts:
-                time.sleep(3.0)
+                time.sleep(2.0)
                 continue
 
-            unique_pairs = list(set(row[1] for row in db_alerts))
-            latest_prices = {}
-            for pair in unique_pairs:
-                price = get_binance_price(pair)
-                if price is not None:
-                    latest_prices[pair] = price
-                time.sleep(0.1)
-
             for alert_id, pair, target, analysis in db_alerts:
-                current_price = latest_prices.get(pair)
+                current_price = PRECOS_TICKER.get(pair)
                 if current_price is None:
                     continue
 
@@ -103,77 +74,101 @@ def price_monitor():
 
                     if linhas_afetadas > 0:
                         print(f"TOQUE DETETADO! {pair} a ${current_price} (Alvo: {target})")
-                        msg = f"🎯 <b>ALERTA DISPARADO: {pair} ATINGIDO!</b>\n"
-                        msg += f"💰 Preco no toque: ${current_price:,.2f}\n"
-                        msg += f"📍 Teu alvo era: ${target:,.2f}\n\n"
-                        msg += f"📋 <b>ANALISE DO MENTOR ICT:</b>\n"
+                        msg = f"<b>ALERTA DISPARADO: {pair} ATINGIDO!</b>\n"
+                        msg += f"Preco no toque: ${current_price:,.2f}\n"
+                        msg += f"Teu alvo era: ${target:,.2f}\n\n"
+                        msg += f"<b>ANALISE DO MENTOR ICT:</b>\n"
                         msg += analysis
                         send_telegram(msg)
 
         except Exception as e:
             print(f"Monitor erro: {e}")
 
-        time.sleep(2.5)
+        time.sleep(1.5)
 
-# Execucao autonoma para Gunicorn em producao no Railway
 init_db()
-monitor_thread = threading.Thread(target=price_monitor, daemon=True)
-monitor_thread.start()
+
+_lock_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+try:
+    _lock_socket.bind(('127.0.0.1', 48484))
+    monitor_thread = threading.Thread(target=price_monitor, daemon=True)
+    monitor_thread.start()
+    print("Worker principal assumiu o monitor de precos.")
+except socket.error:
+    print("Worker secundario detetado. Monitor ignorado neste processo.")
 
 @app.route('/')
 def index():
     return send_from_directory('.', 'index.html')
 
+@app.route('/update_prices', methods=['POST'])
+def update_prices():
+    try:
+        dados = request.json or {}
+        for pair, price in dados.items():
+            if price is not None:
+                PRECOS_TICKER[pair] = float(price)
+        return jsonify({'ok': True, 'prices_stored': len(PRECOS_TICKER)})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 400
+
 @app.route('/analyze', methods=['POST'])
 def analyze():
     try:
-        data = request.json
+        data = request.json or {}
         pair = data.get('pair', 'BTCUSD')
         images = data.get('images', {})
-        tf_list = list(images.keys())
-        if len(tf_list) < 2:
-            return jsonify({'error': 'Carrega pelo menos 2 graficos'}), 400
 
-        prompt_telegram = (
+        valid_tfs = [tf for tf, img in images.items() if img and isinstance(img, dict) and img.get('base64')]
+
+        if len(valid_tfs) < 2:
+            return jsonify({'error': 'Carrega pelo menos 2 graficos validos!'}), 400
+
+        prompt = (
             f"Es um mentor institucional especializado na metodologia ICT (Inner Circle Trader) e SMC.\n"
-            f"Analisa rigorosamente os graficos de {pair} fornecidos nos timeframes ({', '.join(tf_list)}).\n\n"
+            f"Analisa rigorosamente os graficos de {pair} fornecidos nos timeframes ({', '.join(valid_tfs)}).\n\n"
             "A tua analise deve obrigatoriamente integrar e cruzar as seguintes 12 CAMADAS ICT:\n"
             "1. HTF Narrative & Daily Bias (Tendencia macro e direcao do dia atual)\n"
-            "2. Liquidez Pendente (Identificar Buy-side Liquidity [BSL] e Sell-side Liquidity [SSL] remanescentes)\n"
-            "3. Premium vs Discount Zone (Preco acima ou abaixo do 50% de Fibonacci do range atual)\n"
-            "4. Institutional Order Blocks (Zonas cruciais de abertura de ordens institucionais)\n"
-            "5. Fair Value Gaps (FVG) / Imbalances / Ineficiencias de Preco a mitigar\n"
-            "6. Market Structure Shift (MSS) / CHoCH nos timeframes menores (M15 a M1)\n"
-            "7. Liquidity Sweeps / Stop Raids (Manipulacao previa antes da distribuicao)\n"
-            "8. Mitigation & Breaker Blocks (Antigos OBs rompidos que atuam como suporte/resistencia)\n"
-            "9. Killzones & Session Patterns (Asia Accumulation, London Manipulation, NY Distribution)\n"
-            "10. Midnight Open (Referencia essencial de preco aberto de Nova Iorque para BTC/Alts)\n"
-            "11. Optimal Trade Entry (OTE - Niveis 61.8%, 70.5%, 79% de recuo)\n"
-            "12. ICT Score Geral (Score de vies de 0 a 100 com base na confluencia destas camadas)\n\n"
-            "REGRAS ESTRITAS DE FORMATACAO NATIVA DO TELEGRAM:\n"
+            "2. Liquidez Pendente (BSL e SSL remanescentes)\n"
+            "3. Premium vs Discount Zone (50% de Fibonacci do range atual)\n"
+            "4. Institutional Order Blocks (Zonas de ordens institucionais)\n"
+            "5. Fair Value Gaps (FVG) / Imbalances / Ineficiencias de Preco\n"
+            "6. Market Structure Shift (MSS) / CHoCH nos timeframes menores\n"
+            "7. Liquidity Sweeps / Stop Raids (Manipulacao previa)\n"
+            "8. Mitigation & Breaker Blocks (Antigos OBs rompidos)\n"
+            "9. Killzones & Session Patterns (Asia, London, NY)\n"
+            "10. Midnight Open (Referencia de preco NY para BTC/Alts)\n"
+            "11. Optimal Trade Entry (OTE - 61.8%, 70.5%, 79% de recuo)\n"
+            "12. ICT Score Geral (0 a 100 com base na confluencia)\n\n"
+            "REGRAS DE FORMATACAO PARA TELEGRAM:\n"
             "- Usa EXCLUSIVAMENTE tags HTML validas (<b>, <i>, <u>, <code>).\n"
-            "- NUNCA uses markdown (*, **, #, ##, ###, -, [ ]).\n"
-            "- Para titulos, usa texto em maiusculas com negrito (ex: <b>1. DIARIO BIAS & NARRATIVA</b>).\n"
-            "- Para listas, usa estritamente o caractere da bola unicode (•).\n"
+            "- NUNCA uses markdown (*, **, #, -, [ ]).\n"
+            "- Para listas usa o caractere bullet unicode (-).\n"
             "- Finaliza com: <b>ENTRADA:</b>, <b>STOP LOSS:</b>, <b>TAKE PROFIT:</b>.\n"
-            "- Garante o fecho de cada tag HTML na mesma linha."
+            "- Fecha todas as tags HTML."
         )
 
-        content = [{"type": "text", "text": prompt_telegram}]
-        for tf in tf_list:
+        content = [{"type": "text", "text": prompt}]
+        for tf in valid_tfs:
             img = images[tf]
+            b64_data = img['base64']
+            if "," in b64_data:
+                b64_data = b64_data.split(",")[-1]
+            mime = img.get('mimeType', 'image/jpeg') or 'image/jpeg'
             content.append({"type": "text", "text": f"Grafico {tf}:"})
-            content.append({"type": "image", "source": {"type": "base64", "media_type": img['mimeType'], "data": img['base64']}})
+            content.append({
+                "type": "image",
+                "source": {"type": "base64", "media_type": mime, "data": b64_data}
+            })
 
         response = client.messages.create(
-            model="claude-haiku-4-5",
+            model="claude-3-5-sonnet-latest",
             max_tokens=3000,
             messages=[{"role": "user", "content": content}]
         )
-        result_text = response.content[0].text
-        return jsonify({'result': result_text})
+        return jsonify({'result': response.content[0].text})
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': f"Erro na API Anthropic: {str(e)}"}), 500
 
 @app.route('/set_alert', methods=['POST'])
 def set_alert():
@@ -183,7 +178,7 @@ def set_alert():
         target = float(data.get('target'))
         analysis = data.get('analysis', '')
 
-        current_price = get_binance_price(pair)
+        current_price = PRECOS_TICKER.get(pair)
         if not current_price:
             current_price = float(data.get('current_price', 0))
 
@@ -198,14 +193,10 @@ def set_alert():
         conn.commit()
         conn.close()
 
-        send_telegram(f"💾 <b>Alerta Gravado para {pair}</b>\nAlvo: ${target:,.2f}\nPreco atual: ${current_price:,.2f}")
+        send_telegram(f"<b>Alerta Gravado para {pair}</b>\nAlvo: ${target:,.2f}\nPreco atual: ${current_price:,.2f}")
         return jsonify({'ok': True, 'current_price': current_price})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
-
-@app.route('/update_prices', methods=['POST'])
-def update_prices():
-    return jsonify({'ok': True})
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))

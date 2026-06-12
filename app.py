@@ -6,6 +6,7 @@ import time
 import requests
 import sqlite3
 import socket
+import re
 
 app = Flask(__name__)
 client = anthropic.Anthropic(api_key=os.environ.get('ANTHROPIC_API_KEY'))
@@ -14,7 +15,6 @@ TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
 DB_FILE = 'alerts.db'
 
-# ARQUITETURA ANTI-451: Browser envia precos, servidor compara
 PRECOS_TICKER = {}
 
 def init_db():
@@ -26,9 +26,14 @@ def init_db():
                 id TEXT PRIMARY KEY,
                 pair TEXT,
                 target REAL,
-                analysis TEXT
+                analysis TEXT,
+                timeframes TEXT
             )
         ''')
+        try:
+            cursor.execute("ALTER TABLE alerts ADD COLUMN timeframes TEXT")
+        except:
+            pass
         conn.commit()
         conn.close()
         print("Base de dados SQLite inicializada!")
@@ -38,9 +43,60 @@ def init_db():
 def send_telegram(message):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"}, timeout=10)
+        resp = requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"}, timeout=10)
+        print(f"Telegram enviado: {resp.status_code}")
     except Exception as e:
         print(f"Telegram erro: {e}")
+
+def extract_trade_info(analysis, timeframes_str):
+    direction = "LONG"
+    tl = analysis.lower()
+    sell_count = len(re.findall(r'short|bearish|sell|vend[ae]', tl))
+    buy_count = len(re.findall(r'long|bullish|buy|compra', tl))
+    if sell_count > buy_count:
+        direction = "SHORT"
+
+    score = 50
+    sm = re.search(r'(\d{1,3})\s*/\s*100', analysis)
+    if sm:
+        score = int(sm.group(1))
+
+    sl = ""
+    sl_match = re.search(r'(?:stop\s*loss|sl)[:\s]+\$?([\d.,]+)', analysis, re.IGNORECASE)
+    if sl_match:
+        sl = sl_match.group(1).replace(',', '')
+
+    tps = []
+    tp_matches = re.findall(r'(?:take\s*profit|tp\s*\d?)[:\s]+\$?([\d.,]+)', analysis, re.IGNORECASE)
+    for tp in tp_matches[:3]:
+        tps.append(tp.replace(',', ''))
+
+    tfs = timeframes_str.upper() if timeframes_str else ""
+    tf_type = "INTRADAY"
+    tf_label = ""
+    if any(x in tfs for x in ["M1", "M5"]):
+        tf_type = "SCALP"
+        tf_label = "SCALP"
+        if "M5" in tfs:
+            tf_label = "SCALP M5"
+        if "M1" in tfs:
+            tf_label = "SCALP M1"
+    elif any(x in tfs for x in ["H4", "D1"]):
+        tf_type = "SWING"
+        tf_label = "SWING"
+        if "H4" in tfs:
+            tf_label = "SWING H4"
+        if "D1" in tfs:
+            tf_label = "SWING D1"
+    elif any(x in tfs for x in ["M15", "H1"]):
+        tf_type = "INTRADAY"
+        tf_label = "INTRADAY"
+        if "H1" in tfs:
+            tf_label = "INTRADAY H1"
+        if "M15" in tfs:
+            tf_label = "INTRADAY M15"
+
+    return direction, score, sl, tps, tf_label
 
 def price_monitor():
     print("Monitor de Precos Ativo! A ler dados enviados pelo Browser.")
@@ -48,7 +104,7 @@ def price_monitor():
         try:
             conn = sqlite3.connect(DB_FILE)
             cursor = conn.cursor()
-            cursor.execute("SELECT id, pair, target, analysis FROM alerts")
+            cursor.execute("SELECT id, pair, target, analysis, timeframes FROM alerts")
             db_alerts = cursor.fetchall()
             conn.close()
 
@@ -56,13 +112,19 @@ def price_monitor():
                 time.sleep(2.0)
                 continue
 
-            for alert_id, pair, target, analysis in db_alerts:
+            for row in db_alerts:
+                alert_id = row[0]
+                pair = row[1]
+                target = row[2]
+                analysis = row[3]
+                timeframes_str = row[4] if len(row) > 4 else ""
+
                 current_price = PRECOS_TICKER.get(pair)
                 if current_price is None:
                     continue
 
                 distancia = abs(current_price - target)
-                margem_tolerancia = target * 0.0005
+                margem_tolerancia = target * 0.0015
 
                 if distancia <= margem_tolerancia:
                     conn = sqlite3.connect(DB_FILE)
@@ -74,11 +136,22 @@ def price_monitor():
 
                     if linhas_afetadas > 0:
                         print(f"TOQUE DETETADO! {pair} a ${current_price} (Alvo: {target})")
-                        msg = f"<b>ALERTA DISPARADO: {pair} ATINGIDO!</b>\n"
-                        msg += f"Preco no toque: ${current_price:,.2f}\n"
-                        msg += f"Teu alvo era: ${target:,.2f}\n\n"
-                        msg += f"<b>ANALISE DO MENTOR ICT:</b>\n"
-                        msg += analysis
+
+                        direction, score, sl, tps, tf_label = extract_trade_info(analysis, timeframes_str)
+
+                        emoji_dir = "Long" if direction == "LONG" else "Short"
+                        arrow = "📈" if direction == "LONG" else "📉"
+
+                        msg = f"🎯 <b>{pair} ATINGIDO!</b>\n"
+                        msg += f"{arrow} <b>{direction}</b> | {tf_label}\n"
+                        msg += f"💰 Preco: ${current_price:,.2f}\n"
+                        msg += f"🎯 Alvo era: ${target:,.2f}\n"
+                        if sl:
+                            msg += f"🛑 SL: ${sl}\n"
+                        for i, tp in enumerate(tps, 1):
+                            msg += f"✅ TP{i}: ${tp}\n"
+                        msg += f"⭐ Score: {score}/100"
+
                         send_telegram(msg)
 
         except Exception as e:
@@ -143,31 +216,41 @@ def analyze():
             "REGRAS DE FORMATACAO PARA TELEGRAM:\n"
             "- Usa EXCLUSIVAMENTE tags HTML validas (<b>, <i>, <u>, <code>).\n"
             "- NUNCA uses markdown (*, **, #, -, [ ]).\n"
-            "- Para listas usa o caractere bullet unicode (-).\n"
-            "- Finaliza com: <b>ENTRADA:</b>, <b>STOP LOSS:</b>, <b>TAKE PROFIT:</b>.\n"
+            "- Para listas usa o caractere bullet (-).\n"
+            "- Finaliza SEMPRE com estas linhas exatas:\n"
+            "  <b>ENTRADA:</b> [valor]\n"
+            "  <b>STOP LOSS:</b> [valor]\n"
+            "  <b>TAKE PROFIT 1:</b> [valor]\n"
+            "  <b>TAKE PROFIT 2:</b> [valor]\n"
+            "  <b>TAKE PROFIT 3:</b> [valor]\n"
+            "  <b>SCORE:</b> [numero]/100\n"
             "- Fecha todas as tags HTML."
         )
 
-        content = [{"type": "text", "text": prompt}]
+        content = []
         for tf in valid_tfs:
             img = images[tf]
             b64_data = img['base64']
             if "," in b64_data:
                 b64_data = b64_data.split(",")[-1]
+            b64_data = b64_data.strip().replace("\n", "").replace("\r", "")
             mime = img.get('mimeType', 'image/jpeg') or 'image/jpeg'
             content.append({"type": "text", "text": f"Grafico {tf}:"})
             content.append({
                 "type": "image",
                 "source": {"type": "base64", "media_type": mime, "data": b64_data}
             })
+        content.append({"type": "text", "text": prompt})
 
         response = client.messages.create(
-            model="claude-sonnet-4-6",
+            model="claude-3-5-sonnet-20241022",
             max_tokens=3000,
             messages=[{"role": "user", "content": content}]
         )
-        return jsonify({'result': response.content[0].text})
+        result_text = response.content[0].text
+        return jsonify({'result': result_text, 'timeframes': ','.join(valid_tfs)})
     except Exception as e:
+        print(f"Erro na API: {str(e)}")
         return jsonify({'error': f"Erro na API Anthropic: {str(e)}"}), 500
 
 @app.route('/set_alert', methods=['POST'])
@@ -177,6 +260,7 @@ def set_alert():
         pair = data.get('pair', 'BTCUSD')
         target = float(data.get('target'))
         analysis = data.get('analysis', '')
+        timeframes = data.get('timeframes', '')
 
         current_price = PRECOS_TICKER.get(pair)
         if not current_price:
@@ -187,8 +271,8 @@ def set_alert():
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
         cursor.execute(
-            "INSERT INTO alerts (id, pair, target, analysis) VALUES (?, ?, ?, ?)",
-            (alert_unique_id, pair, target, analysis)
+            "INSERT INTO alerts (id, pair, target, analysis, timeframes) VALUES (?, ?, ?, ?, ?)",
+            (alert_unique_id, pair, target, analysis, timeframes)
         )
         conn.commit()
         conn.close()

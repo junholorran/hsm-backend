@@ -4,16 +4,14 @@ import os
 import threading
 import time
 import requests
+import sqlite3
 
 app = Flask(__name__)
 client = anthropic.Anthropic(api_key=os.environ.get('ANTHROPIC_API_KEY'))
 
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
-
-active_alerts = []
-alerts_lock = threading.Lock()
-latest_prices = {}
+DB_FILE = 'alerts.db'
 
 SYMBOL_MAP = {
     'BTCUSD': 'BTCUSDT',
@@ -27,30 +25,36 @@ SYMBOL_MAP = {
     'AAVEUSD': 'AAVEUSDT',
 }
 
-def get_bybit_price(pair):
+def init_db():
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS alerts (
+                id TEXT PRIMARY KEY,
+                pair TEXT,
+                target REAL,
+                analysis TEXT
+            )
+        ''')
+        conn.commit()
+        conn.close()
+        print("Base de dados SQLite inicializada!")
+    except Exception as e:
+        print(f"Erro ao inicializar Base de Dados: {e}")
+
+def get_binance_price(pair):
     try:
         symbol = SYMBOL_MAP.get(pair, pair.replace('USD', 'USDT'))
-        url = f"https://api.bybit.com/v5/market/tickers?category=linear&symbol={symbol}"
-        
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        }
-        
-        resp = requests.get(url, headers=headers, timeout=5)
-        
+        url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}"
+        resp = requests.get(url, timeout=5)
         if resp.status_code == 200:
-            data = resp.json()
-            if data.get('result') and data['result'].get('list') and len(data['result']['list']) > 0:
-                price = float(data['result']['list'][0]['lastPrice'])
-                latest_prices[pair] = price
-                return price
+            return float(resp.json()['price'])
         else:
-            print(f"Bybit recusou ligação com status {resp.status_code} para {pair}")
-            
-        return None
+            print(f"Binance status {resp.status_code} para {pair}")
     except Exception as e:
-        print(f"Bybit erro para {pair}: {e}")
-        return None
+        print(f"Binance erro para {pair}: {e}")
+    return None
 
 def send_telegram(message):
     try:
@@ -60,63 +64,59 @@ def send_telegram(message):
         print(f"Telegram erro: {e}")
 
 def price_monitor():
+    print("Monitor de Precos Ativo!")
     while True:
-        triggered_alerts = []
         try:
-            # 1. Agrupar os pares com alertas ativos para atualizar preços
-            with alerts_lock:
-                unique_pairs = list(set(alert['pair'] for alert in active_alerts))
-            
+            conn = sqlite3.connect(DB_FILE)
+            cursor = conn.cursor()
+            cursor.execute("SELECT id, pair, target, analysis FROM alerts")
+            db_alerts = cursor.fetchall()
+            conn.close()
+
+            if not db_alerts:
+                time.sleep(3.0)
+                continue
+
+            unique_pairs = list(set(row[1] for row in db_alerts))
+            latest_prices = {}
             for pair in unique_pairs:
-                get_bybit_price(pair)
+                price = get_binance_price(pair)
+                if price is not None:
+                    latest_prices[pair] = price
                 time.sleep(0.1)
-                
-            # 2. Lógica de Toque Puro (Indiferente se vem de cima ou de baixo)
-            with alerts_lock:
-                alerts_to_keep = []
-                for alert in active_alerts:
-                    price = latest_prices.get(alert['pair'])
-                    if price is None:
-                        alerts_to_keep.append(alert)
-                        continue
-                        
-                    # Calcula a distância absoluta entre o preço atual e o alvo
-                    distancia = abs(price - alert['target'])
-                    
-                    # Se estiver a menos de $10 dólares do alvo, dispara e limpa da memória
-                    if distancia <= 10.0:
-                        alert_copy = alert.copy()
-                        alert_copy['triggered_price'] = price
-                        triggered_alerts.append(alert_copy)
-                        print(f"🎯 TOQUE DETETADO! {alert['pair']} está a ${price} (Alvo: {alert['target']})")
-                    else:
-                        alerts_to_keep.append(alert)
-                
-                # Atualiza a lista removendo o alerta que disparou (evita spam)
-                active_alerts[:] = alerts_to_keep
-            
-            # 3. Dispara as mensagens limpas para o Telegram
-            for alert_triggered in triggered_alerts:
-                analysis_clean = alert_triggered['analysis']
-                
-                analysis_clean = analysis_clean.replace('**', '<b>', 1)
-                while '**' in analysis_clean:
-                    analysis_clean = analysis_clean.replace('**', '<b>', 1).replace('**', '</b>', 1)
-                analysis_clean = analysis_clean.replace('### ', '• <b>').replace('## ', '<b>')
-                
-                msg = f"🎯 <b>ALERTA DISPARADO: {alert_triggered['pair']} ATINGIDO!</b>\n"
-                msg += f"💰 Preço no toque: ${alert_triggered['triggered_price']:,.2f}\n"
-                msg += f"📍 Teu alvo era: ${alert_triggered['target']:,.2f}\n\n"
-                msg += f"📋 <b>ANÁLISE DO MENTOR ICT:</b>\n"
-                msg += analysis_clean
-                send_telegram(msg)
-                
+
+            for alert_id, pair, target, analysis in db_alerts:
+                current_price = latest_prices.get(pair)
+                if current_price is None:
+                    continue
+
+                distancia = abs(current_price - target)
+                margem_tolerancia = target * 0.0005
+
+                if distancia <= margem_tolerancia:
+                    conn = sqlite3.connect(DB_FILE)
+                    cursor = conn.cursor()
+                    cursor.execute("DELETE FROM alerts WHERE id = ?", (alert_id,))
+                    linhas_afetadas = cursor.rowcount
+                    conn.commit()
+                    conn.close()
+
+                    if linhas_afetadas > 0:
+                        print(f"TOQUE DETETADO! {pair} a ${current_price} (Alvo: {target})")
+                        msg = f"🎯 <b>ALERTA DISPARADO: {pair} ATINGIDO!</b>\n"
+                        msg += f"💰 Preco no toque: ${current_price:,.2f}\n"
+                        msg += f"📍 Teu alvo era: ${target:,.2f}\n\n"
+                        msg += f"📋 <b>ANALISE DO MENTOR ICT:</b>\n"
+                        msg += analysis
+                        send_telegram(msg)
+
         except Exception as e:
             print(f"Monitor erro: {e}")
-            
-        time.sleep(1.5)
 
-# Inicialização automática da thread
+        time.sleep(2.5)
+
+# Execucao autonoma para Gunicorn em producao no Railway
+init_db()
 monitor_thread = threading.Thread(target=price_monitor, daemon=True)
 monitor_thread.start()
 
@@ -132,26 +132,44 @@ def analyze():
         images = data.get('images', {})
         tf_list = list(images.keys())
         if len(tf_list) < 2:
-            return jsonify({'error': 'Carrega pelo menos 2 gráficos'}), 400
-            
+            return jsonify({'error': 'Carrega pelo menos 2 graficos'}), 400
+
         prompt_telegram = (
-            f"És um mentor ICT/SMC. Analisa os gráficos do {pair} ({', '.join(tf_list)}) em português. "
-            "Dá bias, liquidez, FVGs, OBs, CHoCH, setup com entrada/SL/TP e score 0-100.\n\n"
-            "REGRAS ESTRITAS DE FORMATAÇÃO PARA O TELEGRAM:\n"
-            "1. Formata a resposta EXCLUSIVAMENTE com tags HTML válidas (<b>, <i>, <u>, <code>).\n"
-            "2. NUNCA uses cabeçalhos Markdown (#, ##, ###) nem asteriscos (**).\n"
-            "3. Para destacar títulos, usa apenas texto em negrito (ex: <b>📌 BIAS DE MERCADO</b>).\n"
-            "4. Para listas de pontos, usa o caractere unicode da bola (•).\n"
-            "5. Certifica-se de fechar todas as tags abertas na mesma linha correspondente."
+            f"Es um mentor institucional especializado na metodologia ICT (Inner Circle Trader) e SMC.\n"
+            f"Analisa rigorosamente os graficos de {pair} fornecidos nos timeframes ({', '.join(tf_list)}).\n\n"
+            "A tua analise deve obrigatoriamente integrar e cruzar as seguintes 12 CAMADAS ICT:\n"
+            "1. HTF Narrative & Daily Bias (Tendencia macro e direcao do dia atual)\n"
+            "2. Liquidez Pendente (Identificar Buy-side Liquidity [BSL] e Sell-side Liquidity [SSL] remanescentes)\n"
+            "3. Premium vs Discount Zone (Preco acima ou abaixo do 50% de Fibonacci do range atual)\n"
+            "4. Institutional Order Blocks (Zonas cruciais de abertura de ordens institucionais)\n"
+            "5. Fair Value Gaps (FVG) / Imbalances / Ineficiencias de Preco a mitigar\n"
+            "6. Market Structure Shift (MSS) / CHoCH nos timeframes menores (M15 a M1)\n"
+            "7. Liquidity Sweeps / Stop Raids (Manipulacao previa antes da distribuicao)\n"
+            "8. Mitigation & Breaker Blocks (Antigos OBs rompidos que atuam como suporte/resistencia)\n"
+            "9. Killzones & Session Patterns (Asia Accumulation, London Manipulation, NY Distribution)\n"
+            "10. Midnight Open (Referencia essencial de preco aberto de Nova Iorque para BTC/Alts)\n"
+            "11. Optimal Trade Entry (OTE - Niveis 61.8%, 70.5%, 79% de recuo)\n"
+            "12. ICT Score Geral (Score de vies de 0 a 100 com base na confluencia destas camadas)\n\n"
+            "REGRAS ESTRITAS DE FORMATACAO NATIVA DO TELEGRAM:\n"
+            "- Usa EXCLUSIVAMENTE tags HTML validas (<b>, <i>, <u>, <code>).\n"
+            "- NUNCA uses markdown (*, **, #, ##, ###, -, [ ]).\n"
+            "- Para titulos, usa texto em maiusculas com negrito (ex: <b>1. DIARIO BIAS & NARRATIVA</b>).\n"
+            "- Para listas, usa estritamente o caractere da bola unicode (•).\n"
+            "- Finaliza com: <b>ENTRADA:</b>, <b>STOP LOSS:</b>, <b>TAKE PROFIT:</b>.\n"
+            "- Garante o fecho de cada tag HTML na mesma linha."
         )
-            
+
         content = [{"type": "text", "text": prompt_telegram}]
         for tf in tf_list:
             img = images[tf]
-            content.append({"type": "text", "text": "Gráfico " + tf + ":"})
+            content.append({"type": "text", "text": f"Grafico {tf}:"})
             content.append({"type": "image", "source": {"type": "base64", "media_type": img['mimeType'], "data": img['base64']}})
-            
-        response = client.messages.create(model="claude-haiku-4-5", max_tokens=3000, messages=[{"role": "user", "content": content}])
+
+        response = client.messages.create(
+            model="claude-haiku-4-5",
+            max_tokens=3000,
+            messages=[{"role": "user", "content": content}]
+        )
         result_text = response.content[0].text
         return jsonify({'result': result_text})
     except Exception as e:
@@ -164,35 +182,30 @@ def set_alert():
         pair = data.get('pair', 'BTCUSD')
         target = float(data.get('target'))
         analysis = data.get('analysis', '')
-        
-        current_price = get_bybit_price(pair)
+
+        current_price = get_binance_price(pair)
         if not current_price:
-            current_price = float(data.get('current_price'))
-            
+            current_price = float(data.get('current_price', 0))
+
         alert_unique_id = f"{pair}_{target}_{int(time.time() * 1000)}"
-        
-        with alerts_lock:
-            active_alerts.append({
-                'id': alert_unique_id,
-                'pair': pair,
-                'target': target,
-                'analysis': analysis
-            })
-            
-        send_telegram(f"🎯 <b>Alerta de Toque Ativado para {pair}</b>\nAlvo configurado: ${target:,.2f}\nPreço atual: ${current_price:,.2f}")
+
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO alerts (id, pair, target, analysis) VALUES (?, ?, ?, ?)",
+            (alert_unique_id, pair, target, analysis)
+        )
+        conn.commit()
+        conn.close()
+
+        send_telegram(f"💾 <b>Alerta Gravado para {pair}</b>\nAlvo: ${target:,.2f}\nPreco atual: ${current_price:,.2f}")
         return jsonify({'ok': True, 'current_price': current_price})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
 @app.route('/update_prices', methods=['POST'])
 def update_prices():
-    try:
-        data = request.json
-        prices = data.get('prices', {})
-        latest_prices.update(prices)
-        return jsonify({'ok': True})
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+    return jsonify({'ok': True})
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))

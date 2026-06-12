@@ -150,6 +150,7 @@
 let selectedPair='BTCUSD';
 let images={};
 let lastAnalysis='';
+let lastTimeframes='';
 
 function selectPair(el,pair){
   document.querySelectorAll('.pair-btn').forEach(b=>b.classList.remove('active'));
@@ -224,6 +225,7 @@ async function analyze(){
     const data=await res.json();
     if(data.error)throw new Error(data.error);
     lastAnalysis=data.result;
+    lastTimeframes=Object.keys(images).join(',');
     renderResult(data.result);
   }catch(e){
     showToast('Erro: '+e.message);
@@ -276,7 +278,8 @@ async function createAlert(){
         pair:selectedPair,
         target:price,
         current_price:currentPrice,
-        analysis:lastAnalysis
+        analysis:lastAnalysis,
+        timeframes:lastTimeframes
       })
     });
     const data=await res.json();

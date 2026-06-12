@@ -63,27 +63,17 @@ def extract_trade_info(analysis, timeframes_str):
 
    sl = ""
    sl_match = re.search(
-       r'(?:Stop Loss|SL)\s*[:]\s*\$?([\d]{4,}(?:[.,]\d+)?)',
+       r'Stop Loss:\s*\$?([\d]+[.,][\d]+)',
        analysis, re.IGNORECASE
    )
-   if not sl_match:
-       sl_match = re.search(
-           r'(?:Stop Loss|SL)\s*\$?([\d]{4,}(?:[.,]\d+)?)',
-           analysis, re.IGNORECASE
-       )
    if sl_match:
        sl = sl_match.group(1).replace(',', '.')
 
    tps = []
    tp_matches = re.findall(
-       r'(?:Take Profit\s*\d|TP\s*\d)\s*[:]\s*\$?([\d]{4,}(?:[.,]\d+)?)',
+       r'Take Profit\s*\d:\s*\$?([\d]+[.,][\d]+)',
        analysis, re.IGNORECASE
    )
-   if not tp_matches:
-       tp_matches = re.findall(
-           r'(?:Take Profit\s*\d|TP\s*\d)\s*\$?([\d]{4,}(?:[.,]\d+)?)',
-           analysis, re.IGNORECASE
-       )
    for tp in tp_matches[:3]:
        tps.append(tp.replace(',', '.'))
 

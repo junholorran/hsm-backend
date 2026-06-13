@@ -203,7 +203,7 @@ def analyze():
        prompt = (
            "Es um mentor institucional ICT (Inner Circle Trader) e SMC de elite.\n"
            f"Analisa os graficos de {pair} nos timeframes ({', '.join(valid_tfs)}) com maxima precisao.\n\n"
-           "ANALISE OBRIGATORIA - 12 CAMADAS ICT:\n"
+           "ANALISE OBRIGATORIA - 13 CAMADAS ICT:\n"
            "1. HTF Narrative & Daily Bias (D1/W1 - tendencia macro)\n"
            "2. Liquidez Pendente (BSL e SSL identificados com valores exatos)\n"
            "3. Premium vs Discount Zone (Fibonacci 50% do range - onde esta o preco agora)\n"
@@ -215,7 +215,8 @@ def analyze():
            "9. Killzones & Session Patterns (Asia/London/NY - qual esta ativa)\n"
            "10. Midnight Open (valor exato e posicao do preco em relacao a ele)\n"
            "11. OTE - Optimal Trade Entry (calcular 61.8%, 70.5%, 79% do swing relevante)\n"
-           "12. Score ICT (0-100 baseado em confluencias)\n\n"
+           "12. Score ICT (0-100 baseado em confluencias)\n"
+           "13. Wyckoff Phase (identificar fase atual: Acumulacao/Markup/Distribuicao/Markdown + Spring/UTAD se visivel)\n\n"
            "FORMATO OBRIGATORIO DA RESPOSTA:\n\n"
            "<b>ANALISE MULTI-TIMEFRAME " + pair + "</b>\n\n"
            "<b>BIAS DE MERCADO</b>\n"
@@ -229,6 +230,10 @@ def analyze():
            "- OB Relevante: [zona]\n"
            "- FVG Aberto: [zona]\n"
            "- CHoCH: [status e nivel]\n\n"
+           "<b>WYCKOFF PHASE</b>\n"
+           "- Fase Atual: [Acumulacao/Markup/Distribuicao/Markdown]\n"
+           "- Evento Wyckoff: [Spring/UTAD/LPS/SOW se identificavel]\n"
+           "- Confluencia ICT: [como alinha com o bias e liquidez atual]\n\n"
            "<b>KILLZONES & MIDNIGHT OPEN</b>\n"
            "- Sessao Ativa: [Asia/London/NY]\n"
            "- Midnight Open: [valor]\n"
@@ -293,7 +298,7 @@ def analyze():
 
        response = client.messages.create(
            model="claude-sonnet-4-6",
-           max_tokens=3000,
+           max_tokens=4000,
            messages=[{"role": "user", "content": content}]
        )
        result_text = response.content[0].text

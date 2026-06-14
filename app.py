@@ -18,324 +18,394 @@ DB_FILE = 'alerts.db'
 PRECOS_TICKER = {}
 
 def init_db():
-   try:
-       conn = sqlite3.connect(DB_FILE)
-       cursor = conn.cursor()
-       cursor.execute('''
-           CREATE TABLE IF NOT EXISTS alerts (
-               id TEXT PRIMARY KEY,
-               pair TEXT,
-               target REAL,
-               analysis TEXT,
-               timeframes TEXT
-           )
-       ''')
-       try:
-           cursor.execute("ALTER TABLE alerts ADD COLUMN timeframes TEXT")
-       except:
-           pass
-       conn.commit()
-       conn.close()
-       print("Base de dados SQLite inicializada!")
-   except Exception as e:
-       print(f"Erro ao inicializar Base de Dados: {e}")
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS alerts (
+                id TEXT PRIMARY KEY,
+                pair TEXT,
+                target REAL,
+                analysis TEXT,
+                timeframes TEXT
+            )
+        ''')
+        try:
+            cursor.execute("ALTER TABLE alerts ADD COLUMN timeframes TEXT")
+        except:
+            pass
+        conn.commit()
+        conn.close()
+        print("Base de dados SQLite inicializada!")
+    except Exception as e:
+        print(f"Erro ao inicializar Base de Dados: {e}")
 
 def send_telegram(message):
-   try:
-       url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-       resp = requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"}, timeout=10)
-       print(f"Telegram enviado: {resp.status_code}")
-   except Exception as e:
-       print(f"Telegram erro: {e}")
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        resp = requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"}, timeout=10)
+        print(f"Telegram enviado: {resp.status_code}")
+    except Exception as e:
+        print(f"Telegram erro: {e}")
 
 def extract_trade_info(analysis, timeframes_str):
-   direction = "LONG"
-   tl = analysis.lower()
-   sell_count = len(re.findall(r'short|bearish|sell|vend[ae]', tl))
-   buy_count = len(re.findall(r'long|bullish|buy|compra', tl))
-   if sell_count > buy_count:
-       direction = "SHORT"
+    direction = "LONG"
+    tl = analysis.lower()
+    sell_count = len(re.findall(r'short|bearish|sell|vend[ae]', tl))
+    buy_count = len(re.findall(r'long|bullish|buy|compra', tl))
+    if sell_count > buy_count:
+        direction = "SHORT"
 
-   score = 50
-   sm = re.search(r'(\d{1,3})\s*/\s*100', analysis)
-   if sm:
-       score = int(sm.group(1))
+    score = 50
+    sm = re.search(r'(\d{1,3})\s*/\s*100', analysis)
+    if sm:
+        score = int(sm.group(1))
 
-   sl = ""
-   sl_match = re.search(
-       r'Stop Loss:\s*\$?([\d]+[.,][\d]+)',
-       analysis, re.IGNORECASE
-   )
-   if sl_match:
-       sl = sl_match.group(1).replace(',', '.')
+    sl = ""
+    sl_match = re.search(
+        r'Stop Loss:\s*\$?([\d]+[.,][\d]+)',
+        analysis, re.IGNORECASE
+    )
+    if sl_match:
+        sl = sl_match.group(1).replace(',', '.')
 
-   tps = []
-   tp_matches = re.findall(
-       r'Take Profit\s*\d:\s*\$?([\d]+[.,][\d]+)',
-       analysis, re.IGNORECASE
-   )
-   for tp in tp_matches[:3]:
-       tps.append(tp.replace(',', '.'))
+    tps = []
+    tp_matches = re.findall(
+        r'Take Profit\s*\d:\s*\$?([\d]+[.,][\d]+)',
+        analysis, re.IGNORECASE
+    )
+    for tp in tp_matches[:3]:
+        tps.append(tp.replace(',', '.'))
 
-   tfs = timeframes_str.upper() if timeframes_str else ""
+    tfs = timeframes_str.upper() if timeframes_str else ""
 
-   tf_label = ""
-   if re.search(r'scalp', analysis, re.IGNORECASE):
-       tf_label = "SCALP"
-   elif re.search(r'swing', analysis, re.IGNORECASE):
-       tf_label = "SWING"
-   elif re.search(r'intraday', analysis, re.IGNORECASE):
-       tf_label = "INTRADAY"
+    tf_label = ""
+    if re.search(r'scalp', analysis, re.IGNORECASE):
+        tf_label = "SCALP"
+    elif re.search(r'swing', analysis, re.IGNORECASE):
+        tf_label = "SWING"
+    elif re.search(r'intraday', analysis, re.IGNORECASE):
+        tf_label = "INTRADAY"
 
-   if "D1" in tfs:
-       tf_label += " D1"
-   elif "H4" in tfs:
-       tf_label += " H4"
-   elif "H1" in tfs:
-       tf_label += " H1"
-   elif "M15" in tfs:
-       tf_label += " M15"
-   elif "M5" in tfs:
-       tf_label += " M5"
-   elif "M1" in tfs:
-       tf_label += " M1"
+    if "D1" in tfs:
+        tf_label += " D1"
+    elif "H4" in tfs:
+        tf_label += " H4"
+    elif "H1" in tfs:
+        tf_label += " H1"
+    elif "M15" in tfs:
+        tf_label += " M15"
+    elif "M5" in tfs:
+        tf_label += " M5"
+    elif "M1" in tfs:
+        tf_label += " M1"
 
-   return direction, score, sl, tps, tf_label
+    return direction, score, sl, tps, tf_label
 
 def price_monitor():
-   print("Monitor de Precos Ativo! A ler dados enviados pelo Browser.")
-   while True:
-       try:
-           conn = sqlite3.connect(DB_FILE)
-           cursor = conn.cursor()
-           cursor.execute("SELECT id, pair, target, analysis, timeframes FROM alerts")
-           db_alerts = cursor.fetchall()
-           conn.close()
+    print("Monitor de Precos Ativo! A ler dados enviados pelo Browser.")
+    while True:
+        try:
+            conn = sqlite3.connect(DB_FILE)
+            cursor = conn.cursor()
+            cursor.execute("SELECT id, pair, target, analysis, timeframes FROM alerts")
+            db_alerts = cursor.fetchall()
+            conn.close()
 
-           if not db_alerts:
-               time.sleep(2.0)
-               continue
+            if not db_alerts:
+                time.sleep(2.0)
+                continue
 
-           for row in db_alerts:
-               alert_id = row[0]
-               pair = row[1]
-               target = row[2]
-               analysis = row[3]
-               timeframes_str = row[4] if len(row) > 4 else ""
+            for row in db_alerts:
+                alert_id = row[0]
+                pair = row[1]
+                target = row[2]
+                analysis = row[3]
+                timeframes_str = row[4] if len(row) > 4 else ""
 
-               current_price = PRECOS_TICKER.get(pair)
-               if current_price is None:
-                   continue
+                current_price = PRECOS_TICKER.get(pair)
+                if current_price is None:
+                    continue
 
-               distancia = abs(current_price - target)
-               margem_tolerancia = target * 0.0015
+                distancia = abs(current_price - target)
+                margem_tolerancia = target * 0.0015
 
-               if distancia <= margem_tolerancia:
-                   conn = sqlite3.connect(DB_FILE)
-                   cursor = conn.cursor()
-                   cursor.execute("DELETE FROM alerts WHERE id = ?", (alert_id,))
-                   linhas_afetadas = cursor.rowcount
-                   conn.commit()
-                   conn.close()
+                if distancia <= margem_tolerancia:
+                    conn = sqlite3.connect(DB_FILE)
+                    cursor = conn.cursor()
+                    cursor.execute("DELETE FROM alerts WHERE id = ?", (alert_id,))
+                    linhas_afetadas = cursor.rowcount
+                    conn.commit()
+                    conn.close()
 
-                   if linhas_afetadas > 0:
-                       print(f"TOQUE DETETADO! {pair} a ${current_price} (Alvo: {target})")
+                    if linhas_afetadas > 0:
+                        print(f"TOQUE DETETADO! {pair} a ${current_price} (Alvo: {target})")
 
-                       direction, score, sl, tps, tf_label = extract_trade_info(analysis, timeframes_str)
+                        direction, score, sl, tps, tf_label = extract_trade_info(analysis, timeframes_str)
 
-                       arrow = "📈" if direction == "LONG" else "📉"
+                        arrow = "📈" if direction == "LONG" else "📉"
 
-                       msg = f"🎯 <b>{pair} ATINGIDO!</b>\n"
-                       msg += f"{arrow} <b>{direction}</b> | {tf_label}\n"
-                       msg += f"💰 Preco: ${current_price:,.2f}\n"
-                       msg += f"🎯 Alvo era: ${target:,.2f}\n"
-                       if sl:
-                           msg += f"🛑 SL: ${sl}\n"
-                       for i, tp in enumerate(tps, 1):
-                           msg += f"✅ TP{i}: ${tp}\n"
-                       msg += f"⭐ Score: {score}/100"
+                        msg = f"🎯 <b>{pair} ATINGIDO!</b>\n"
+                        msg += f"{arrow} <b>{direction}</b> | {tf_label}\n"
+                        msg += f"💰 Preco: ${current_price:,.2f}\n"
+                        msg += f"🎯 Alvo era: ${target:,.2f}\n"
+                        if sl:
+                            msg += f"🛑 SL: ${sl}\n"
+                        for i, tp in enumerate(tps, 1):
+                            msg += f"✅ TP{i}: ${tp}\n"
+                        msg += f"⭐ Score: {score}/100"
 
-                       send_telegram(msg)
+                        send_telegram(msg)
 
-       except Exception as e:
-           print(f"Monitor erro: {e}")
+        except Exception as e:
+            print(f"Monitor erro: {e}")
 
-       time.sleep(1.5)
+        time.sleep(1.5)
 
 init_db()
 
 _lock_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 try:
-   _lock_socket.bind(('127.0.0.1', 48484))
-   monitor_thread = threading.Thread(target=price_monitor, daemon=True)
-   monitor_thread.start()
-   print("Worker principal assumiu o monitor de precos.")
+    _lock_socket.bind(('127.0.0.1', 48484))
+    monitor_thread = threading.Thread(target=price_monitor, daemon=True)
+    monitor_thread.start()
+    print("Worker principal assumiu o monitor de precos.")
 except socket.error:
-   print("Worker secundario detetado. Monitor ignorado neste processo.")
+    print("Worker secundario detetado. Monitor ignorado neste processo.")
 
 @app.route('/')
 def index():
-   return send_from_directory('.', 'index.html')
+    return send_from_directory('.', 'index.html')
 
 @app.route('/update_prices', methods=['POST'])
 def update_prices():
-   try:
-       dados = request.json or {}
-       for pair, price in dados.items():
-           if price is not None:
-               PRECOS_TICKER[pair] = float(price)
-       return jsonify({'ok': True, 'prices_stored': len(PRECOS_TICKER)})
-   except Exception as e:
-       return jsonify({'error': str(e)}), 400
+    try:
+        dados = request.json or {}
+        for pair, price in dados.items():
+            if price is not None:
+                PRECOS_TICKER[pair] = float(price)
+        return jsonify({'ok': True, 'prices_stored': len(PRECOS_TICKER)})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 400
 
 @app.route('/analyze', methods=['POST'])
 def analyze():
-   try:
-       data = request.json or {}
-       pair = data.get('pair', 'BTCUSD')
-       images = data.get('images', {})
+    try:
+        data = request.json or {}
+        pair = data.get('pair', 'BTCUSD')
+        images = data.get('images', {})
 
-       valid_tfs = [tf for tf, img in images.items() if img and isinstance(img, dict) and img.get('base64')]
+        valid_tfs = [tf for tf, img in images.items() if img and isinstance(img, dict) and img.get('base64')]
 
-       if len(valid_tfs) < 2:
-           return jsonify({'error': 'Carrega pelo menos 2 graficos validos!'}), 400
+        if len(valid_tfs) < 2:
+            return jsonify({'error': 'Carrega pelo menos 2 graficos validos!'}), 400
 
-       prompt = (
-           "Es um mentor institucional ICT (Inner Circle Trader) e SMC de elite.\n"
-           f"Analisa os graficos de {pair} nos timeframes ({', '.join(valid_tfs)}) com maxima precisao.\n\n"
-           "ANALISE OBRIGATORIA - 13 CAMADAS ICT:\n"
-           "1. HTF Narrative & Daily Bias (D1/W1 - tendencia macro)\n"
-           "2. Liquidez Pendente (BSL e SSL identificados com valores exatos)\n"
-           "3. Premium vs Discount Zone (Fibonacci 50% do range - onde esta o preco agora)\n"
-           "4. Order Blocks (OB bullish e bearish com zonas exatas por TF)\n"
-           "5. Fair Value Gaps (FVG com zonas exatas e status: preenchido/aberto)\n"
-           "6. CHoCH / MSS (confirmado ou potencial, com nivel exato)\n"
-           "7. Liquidity Sweeps (varreduras recentes com valores)\n"
-           "8. Mitigation & Breaker Blocks\n"
-           "9. Killzones & Session Patterns (Asia/London/NY - qual esta ativa)\n"
-           "10. Midnight Open (valor exato e posicao do preco em relacao a ele)\n"
-           "11. OTE - Optimal Trade Entry (calcular 61.8%, 70.5%, 79% do swing relevante)\n"
-           "12. Score ICT (0-100 baseado em confluencias)\n"
-           "13. Wyckoff Phase (identificar fase atual: Acumulacao/Markup/Distribuicao/Markdown + Spring/UTAD se visivel)\n\n"
-           "FORMATO OBRIGATORIO DA RESPOSTA:\n\n"
-           "<b>ANALISE MULTI-TIMEFRAME " + pair + "</b>\n\n"
-           "<b>BIAS DE MERCADO</b>\n"
-           "- D1: [BULLISH/BEARISH] - [justificativa]\n"
-           "- H4: [BULLISH/BEARISH] - [justificativa]\n"
-           "- H1: [bias] - [justificativa]\n"
-           "- M15/M5: [bias] - [justificativa]\n\n"
-           "<b>LIQUIDEZ & ESTRUTURA</b>\n"
-           "- Zona de Liquidez Alta: [valor] - [contexto]\n"
-           "- Suportes Criticos: [valores]\n"
-           "- OB Relevante: [zona]\n"
-           "- FVG Aberto: [zona]\n"
-           "- CHoCH: [status e nivel]\n\n"
-           "<b>WYCKOFF PHASE</b>\n"
-           "- Fase Atual: [Acumulacao/Markup/Distribuicao/Markdown]\n"
-           "- Evento Wyckoff: [Spring/UTAD/LPS/SOW se identificavel]\n"
-           "- Confluencia ICT: [como alinha com o bias e liquidez atual]\n\n"
-           "<b>KILLZONES & MIDNIGHT OPEN</b>\n"
-           "- Sessao Ativa: [Asia/London/NY]\n"
-           "- Midnight Open: [valor]\n"
-           "- Posicao do Preco: [premium/discount/no nivel]\n\n"
-           "<b>OTE - OPTIMAL TRADE ENTRY</b>\n"
-           "- Swing relevante: de [low] para [high]\n"
-           "- OTE 61.8%: [valor]\n"
-           "- OTE 70.5%: [valor]\n"
-           "- Zona de entrada ideal: [range]\n\n"
-           "<b>SETUPS IDENTIFICADOS</b>\n\n"
-           "<b>SETUP #1 - [LONG/SHORT] [SCALP/INTRADAY/SWING] ([TFs])</b>\n"
-           "- Entrada: [valor] ([contexto ICT])\n"
-           "- Stop Loss: [valor] ([referencia ICT])\n"
-           "- Take Profit 1: [valor] ([referencia])\n"
-           "- Take Profit 2: [valor] ([referencia])\n"
-           "- Take Profit 3: [valor] ([referencia])\n"
-           "- Razao R/R: [ex: 1:2.5]\n"
-           "- Tipo: [Scalp/Intraday/Swing + descricao]\n\n"
-           "<b>SETUP #2 - [LONG/SHORT] [SCALP/INTRADAY/SWING] ([TFs])</b>\n"
-           "- Entrada: [valor]\n"
-           "- Stop Loss: [valor] ([referencia ICT])\n"
-           "- Take Profit 1: [valor]\n"
-           "- Take Profit 2: [valor]\n"
-           "- Take Profit 3: [valor]\n"
-           "- Razao R/R: [valor]\n"
-           "- Tipo: [descricao]\n\n"
-           "<b>SCORE OPERACIONAL: [X]/100</b>\n"
-           "- Confluencia Multi-TF: [X]/100\n"
-           "- Suporte Estrutural: [X]/100\n"
-           "- Momentum: [X]/100\n"
-           "- Risk/Reward: [X]/100\n"
-           "- Liquidez: [X]/100\n"
-           "- Timing (Killzone): [X]/100\n\n"
-           "<b>AVISOS CRITICOS</b>\n"
-           "- [aviso 1]\n"
-           "- [aviso 2]\n\n"
-           "<b>RECOMENDACAO FINAL</b>\n"
-           "[descricao do melhor setup e condicoes de entrada]\n\n"
-           "REGRAS CRITICAS:\n"
-           "- Stop Loss SEMPRE com referencia ICT explicada\n"
-           "- NUNCA uses markdown (* # [ ])\n"
-           "- Usa APENAS tags HTML: <b> <i> <u>\n"
-           "- D1 bearish = aviso critico obrigatorio em qualquer setup long\n"
-           "- Minimo 2:1 RR para recomendar entrada\n"
-           "- Fecha todas as tags HTML abertas\n"
-       )
+        prompt = (
+            "Es um mentor institucional ICT (Inner Circle Trader) e SMC de elite.\n"
+            f"Analisa os graficos de {pair} nos timeframes ({', '.join(valid_tfs)}) com maxima precisao.\n\n"
+            "ANALISE OBRIGATORIA - 13 CAMADAS ICT:\n"
+            "1. HTF Narrative & Daily Bias (D1/W1 - tendencia macro)\n"
+            "2. Liquidez Pendente (BSL e SSL identificados com valores exatos)\n"
+            "3. Premium vs Discount Zone (Fibonacci 50% do range - onde esta o preco agora)\n"
+            "4. Order Blocks (OB bullish e bearish com zonas exatas por TF)\n"
+            "5. Fair Value Gaps (FVG com zonas exatas e status: preenchido/aberto)\n"
+            "6. CHoCH / MSS (confirmado ou potencial, com nivel exato)\n"
+            "7. Liquidity Sweeps (varreduras recentes com valores exatos e qual liquidez foi varrida)\n"
+            "8. Mitigation & Breaker Blocks\n"
+            "9. Killzones & Session Patterns (Asia/London/NY - qual esta ativa)\n"
+            "10. Midnight Open (valor exato e posicao do preco em relacao a ele)\n"
+            "11. OTE - Optimal Trade Entry (calcular 61.8%, 70.5%, 79% do swing criado pelo sweep mais recente)\n"
+            "12. Score ICT (0-100 baseado em confluencias)\n"
+            "13. Wyckoff Phase (identificar fase atual: Acumulacao/Markup/Distribuicao/Markdown + Spring/UTAD se visivel)\n\n"
+            "NARRATIVA ICT COMPLETA OBRIGATORIA:\n"
+            "Cada setup deve seguir esta sequencia logica:\n"
+            "1. SWEEP: qual liquidez foi varrida, onde e quando\n"
+            "2. CHoCH: confirmacao de reversao com nivel exato\n"
+            "3. OTE: tracar fibonacci do swing criado pelo sweep (low para high ou high para low)\n"
+            "4. ENTRADA: no retrace para 61.8%, 70.5% ou 79% com trigger exato\n"
+            "5. GESTAO POS-ENTRADA: o que esperar depois da entrada\n"
+            "6. PROXIMOS ALVOS: onde o mercado vai buscar liquidez apos cada TP\n"
+            "7. CENARIOS ALTERNATIVOS: re-sweep, invalidacao, continuacao\n\n"
+            "ANALISE DE ENTRADA AVANCADA:\n"
+            "- Entrada Agressiva: limit order no nivel OTE (61.8% ou 70.5% do swing)\n"
+            "- Entrada Conservadora: apenas apos fechamento de vela M15 confirmando rejeicao no OTE\n"
+            "- Trigger Exato: identificar padrao de vela obrigatorio (Engolfo Bearish/Bullish, Pin Bar, Inside Bar)\n"
+            "- Nivel OTE: identificar se entrada coincide com 61.8%, 70.5% ou 79% do swing relevante\n"
+            "- Volume: vela de confirmacao deve ter volume acima da MA20\n"
+            "- Invalidacao em Tempo Real: nivel exato que invalida o setup ANTES da entrada\n"
+            "- Confluencias Ativas: contar quantas confluencias ICT batem (minimo 3 para entrada)\n"
+            "- Probabilidade: 3 confluencias=60%, 4=70%, 5=80%, 6+=90%\n\n"
+            "FORMATO OBRIGATORIO DA RESPOSTA:\n\n"
+            "<b>ANALISE MULTI-TIMEFRAME " + pair + "</b>\n"
+            "Data/Hora: [data e hora UTC]\n\n"
+            "---\n\n"
+            "<b>BIAS DE MERCADO</b>\n"
+            "- <b>D1:</b> [BULLISH/BEARISH] - [justificativa detalhada com MAs, RSI, MACD]\n"
+            "- <b>H4:</b> [BULLISH/BEARISH] - [justificativa]\n"
+            "- <b>H1:</b> [bias] - [justificativa]\n"
+            "- <b>M15/M5:</b> [bias] - [justificativa]\n\n"
+            "---\n\n"
+            "<b>LIQUIDEZ & ESTRUTURA</b>\n"
+            "- <b>Zona de Liquidez Alta (BSL):</b> [valor] - [contexto]\n"
+            "- <b>Zona de Liquidez Baixa (SSL):</b> [valor] - [contexto]\n"
+            "- <b>Suportes Criticos:</b> [valores]\n"
+            "- <b>OB Bearish Relevante:</b> [zona]\n"
+            "- <b>OB Bullish:</b> [zona]\n"
+            "- <b>FVG Aberto:</b> [zona e status]\n"
+            "- <b>CHoCH:</b> [status e nivel exato]\n\n"
+            "---\n\n"
+            "<b>NARRATIVA ICT DO MERCADO</b>\n"
+            "- <b>Sweep Identificado:</b> [qual liquidez foi varrida, valor exato e TF]\n"
+            "- <b>Swing Criado:</b> de [low] para [high] (ou high para low)\n"
+            "- <b>CHoCH Confirmado:</b> [nivel exato e TF]\n"
+            "- <b>OTE do Swing:</b> 61.8%=[valor] | 70.5%=[valor] | 79%=[valor]\n"
+            "- <b>Narrativa Atual:</b> [descricao do que o mercado esta a fazer e porque]\n\n"
+            "---\n\n"
+            "<b>WYCKOFF PHASE</b>\n"
+            "- <b>Fase Atual:</b> [Acumulacao/Markup/Distribuicao/Markdown]\n"
+            "- <b>Evento Wyckoff:</b> [Spring/UTAD/LPS/SOW se identificavel]\n"
+            "- <b>Confluencia ICT:</b> [como alinha com sweep, CHoCH e OTE]\n\n"
+            "---\n\n"
+            "<b>KILLZONES & MIDNIGHT OPEN</b>\n"
+            "- <b>Sessao Ativa:</b> [Asia/London/NY]\n"
+            "- <b>Midnight Open:</b> [valor exato]\n"
+            "- <b>Posicao do Preco:</b> [PREMIUM/DISCOUNT/NO NIVEL]\n\n"
+            "---\n\n"
+            "<b>OTE - OPTIMAL TRADE ENTRY</b>\n"
+            "- <b>Swing relevante:</b> de [low] para [high]\n"
+            "- <b>Origem do Swing:</b> [sweep que originou este swing]\n"
+            "- <b>50% (Equilibrio):</b> [valor]\n"
+            "- <b>OTE 61.8%:</b> [valor]\n"
+            "- <b>OTE 70.5%:</b> [valor]\n"
+            "- <b>OTE 79%:</b> [valor]\n"
+            "- <b>Zona de entrada ideal SHORT:</b> [range]\n"
+            "- <b>Zona de entrada ideal LONG:</b> [range]\n\n"
+            "---\n\n"
+            "<b>SETUPS IDENTIFICADOS</b>\n\n"
+            "---\n\n"
+            "<b>SETUP #1 - [LONG/SHORT] [SCALP/INTRADAY/SWING] ([TFs])</b>\n"
+            "- <b>Narrativa:</b> [sweep em X criou swing Y-Z, OTE em W, entrada no retrace]\n"
+            "- <b>Nivel OTE:</b> [61.8% / 70.5% / 79%] = [valor exato do fibonacci]\n"
+            "- <b>Entrada Agressiva:</b> [valor exato] - limit order no OTE\n"
+            "- <b>Entrada Conservadora:</b> [valor exato] - apos fechamento M15 confirmado no OTE\n"
+            "- <b>Trigger Obrigatorio:</b> [Engolfo/Pin Bar/Inside Bar] no [TF] com fechamento [acima/abaixo] de [nivel]\n"
+            "- <b>Volume:</b> vela de confirmacao deve ter volume acima de [valor MA20]\n"
+            "- <b>Stop Loss:</b> [valor] ([referencia ICT exata])\n"
+            "- <b>Invalidacao Pre-Entrada:</b> fechar acima/abaixo de [valor] cancela o setup\n"
+            "- <b>Take Profit 1:</b> [valor] ([referencia])\n"
+            "- <b>Take Profit 2:</b> [valor] ([referencia])\n"
+            "- <b>Take Profit 3:</b> [valor] ([referencia])\n"
+            "- <b>Razao R/R:</b> [ex: 1:2.5]\n"
+            "- <b>Confluencias Ativas:</b> [listar: Sweep + CHoCH + OTE + OB + FVG + Killzone etc]\n"
+            "- <b>Probabilidade:</b> [X]% ([N] confluencias identificadas)\n"
+            "- <b>Gestao Pos-Entrada:</b> [o que esperar depois de entrar - proximos niveis, re-sweeps possiveis]\n"
+            "- <b>Proximos Alvos de Liquidez:</b> [onde o mercado vai apos TP1, TP2, TP3]\n"
+            "- <b>Cenario Alternativo:</b> [o que acontece se invalidar - re-sweep, continuacao, novo setup]\n"
+            "- <b>Tipo:</b> [Scalp/Intraday/Swing + descricao]\n\n"
+            "<b>SETUP #2 - [LONG/SHORT] [SCALP/INTRADAY/SWING] ([TFs])</b>\n"
+            "- <b>Narrativa:</b> [sweep e swing que origina este setup]\n"
+            "- <b>Nivel OTE:</b> [61.8% / 70.5% / 79%] = [valor]\n"
+            "- <b>Entrada Agressiva:</b> [valor]\n"
+            "- <b>Entrada Conservadora:</b> [valor]\n"
+            "- <b>Trigger Obrigatorio:</b> [padrao de vela]\n"
+            "- <b>Volume:</b> [referencia]\n"
+            "- <b>Stop Loss:</b> [valor] ([referencia ICT])\n"
+            "- <b>Invalidacao Pre-Entrada:</b> [nivel]\n"
+            "- <b>Take Profit 1:</b> [valor]\n"
+            "- <b>Take Profit 2:</b> [valor]\n"
+            "- <b>Take Profit 3:</b> [valor]\n"
+            "- <b>Razao R/R:</b> [valor]\n"
+            "- <b>Confluencias Ativas:</b> [listar]\n"
+            "- <b>Probabilidade:</b> [X]%\n"
+            "- <b>Gestao Pos-Entrada:</b> [proximos niveis e re-sweeps]\n"
+            "- <b>Proximos Alvos de Liquidez:</b> [onde vai apos cada TP]\n"
+            "- <b>Cenario Alternativo:</b> [se invalidar]\n"
+            "- <b>Tipo:</b> [descricao]\n\n"
+            "---\n\n"
+            "<b>SCORE OPERACIONAL: [X]/100</b>\n"
+            "- Confluencia Multi-TF: [X]/100\n"
+            "- Suporte Estrutural: [X]/100\n"
+            "- Momentum: [X]/100\n"
+            "- Risk/Reward: [X]/100\n"
+            "- Liquidez: [X]/100\n"
+            "- Timing (Killzone): [X]/100\n\n"
+            "---\n\n"
+            "<b>AVISOS CRITICOS</b>\n"
+            "- [aviso 1]\n"
+            "- [aviso 2]\n\n"
+            "---\n\n"
+            "<b>RECOMENDACAO FINAL</b>\n"
+            "[narrativa completa: sweep identificado, CHoCH confirmado, OTE calculado, "
+            "entrada exata, gestao da posicao e o que esperar depois]\n\n"
+            "REGRAS CRITICAS:\n"
+            "- Stop Loss SEMPRE com referencia ICT explicada\n"
+            "- NUNCA uses markdown (* # [ ])\n"
+            "- Usa APENAS tags HTML: <b> <i> <u>\n"
+            "- D1 bearish = aviso critico obrigatorio em qualquer setup long\n"
+            "- Minimo 3 confluencias para recomendar entrada\n"
+            "- Minimo 2:1 RR para recomendar entrada\n"
+            "- Entrada conservadora E SEMPRE a preferida\n"
+            "- Entrada DEVE referenciar nivel OTE correspondente (61.8%, 70.5% ou 79%)\n"
+            "- Se entrada nao coincide com OTE explicar porque e qual alternativa OTE existe\n"
+            "- Narrativa ICT obrigatoria: Sweep -> CHoCH -> OTE -> Entrada -> Gestao\n"
+            "- Fecha todas as tags HTML abertas\n"
+        )
 
-       content = []
-       for tf in valid_tfs:
-           img = images[tf]
-           b64_data = img['base64']
-           if "," in b64_data:
-               b64_data = b64_data.split(",")[-1]
-           b64_data = b64_data.strip().replace("\n", "").replace("\r", "")
-           mime = img.get('mimeType', 'image/jpeg') or 'image/jpeg'
-           content.append({"type": "text", "text": f"Grafico {tf}:"})
-           content.append({
-               "type": "image",
-               "source": {"type": "base64", "media_type": mime, "data": b64_data}
-           })
-       content.append({"type": "text", "text": prompt})
+        content = []
+        for tf in valid_tfs:
+            img = images[tf]
+            b64_data = img['base64']
+            if "," in b64_data:
+                b64_data = b64_data.split(",")[-1]
+            b64_data = b64_data.strip().replace("\n", "").replace("\r", "")
+            mime = img.get('mimeType', 'image/jpeg') or 'image/jpeg'
+            content.append({"type": "text", "text": f"Grafico {tf}:"})
+            content.append({
+                "type": "image",
+                "source": {"type": "base64", "media_type": mime, "data": b64_data}
+            })
+        content.append({"type": "text", "text": prompt})
 
-       response = client.messages.create(
-           model="claude-sonnet-4-6",
-           max_tokens=4000,
-           messages=[{"role": "user", "content": content}]
-       )
-       result_text = response.content[0].text
-       return jsonify({'result': result_text, 'timeframes': ','.join(valid_tfs)})
-   except Exception as e:
-       print(f"Erro na API: {str(e)}")
-       return jsonify({'error': f"Erro na API Anthropic: {str(e)}"}), 500
+        response = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=4000,
+            messages=[{"role": "user", "content": content}]
+        )
+        result_text = response.content[0].text
+        return jsonify({'result': result_text, 'timeframes': ','.join(valid_tfs)})
+    except Exception as e:
+        print(f"Erro na API: {str(e)}")
+        return jsonify({'error': f"Erro na API Anthropic: {str(e)}"}), 500
 
 @app.route('/set_alert', methods=['POST'])
 def set_alert():
-   try:
-       data = request.json
-       pair = data.get('pair', 'BTCUSD')
-       target = float(data.get('target'))
-       analysis = data.get('analysis', '')
-       timeframes = data.get('timeframes', '')
+    try:
+        data = request.json
+        pair = data.get('pair', 'BTCUSD')
+        target = float(data.get('target'))
+        analysis = data.get('analysis', '')
+        timeframes = data.get('timeframes', '')
 
-       current_price = PRECOS_TICKER.get(pair)
-       if not current_price:
-           current_price = float(data.get('current_price', 0))
+        current_price = PRECOS_TICKER.get(pair)
+        if not current_price:
+            current_price = float(data.get('current_price', 0))
 
-       alert_unique_id = f"{pair}_{target}_{int(time.time() * 1000)}"
+        alert_unique_id = f"{pair}_{target}_{int(time.time() * 1000)}"
 
-       conn = sqlite3.connect(DB_FILE)
-       cursor = conn.cursor()
-       cursor.execute(
-           "INSERT INTO alerts (id, pair, target, analysis, timeframes) VALUES (?, ?, ?, ?, ?)",
-           (alert_unique_id, pair, target, analysis, timeframes)
-       )
-       conn.commit()
-       conn.close()
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO alerts (id, pair, target, analysis, timeframes) VALUES (?, ?, ?, ?, ?)",
+            (alert_unique_id, pair, target, analysis, timeframes)
+        )
+        conn.commit()
+        conn.close()
 
-       send_telegram(f"<b>Alerta Gravado para {pair}</b>\nAlvo: ${target:,.2f}\nPreco atual: ${current_price:,.2f}")
-       return jsonify({'ok': True, 'current_price': current_price})
-   except Exception as e:
-       return jsonify({'error': str(e)}), 500
+        send_telegram(f"<b>Alerta Gravado para {pair}</b>\nAlvo: ${target:,.2f}\nPreco atual: ${current_price:,.2f}")
+        return jsonify({'ok': True, 'current_price': current_price})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
-   port = int(os.environ.get('PORT', 5000))
-   app.run(host='0.0.0.0', port=port, debug=False)
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=False)

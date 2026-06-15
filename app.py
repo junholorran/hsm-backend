@@ -17,15 +17,17 @@ DB_FILE = 'alerts.db'
 
 PRECOS_TICKER = {}
 
-RE_SCORE = re.compile(r'(\d{1,3})\s*/\s*100')
-RE_SL = re.compile(r'Stop\s*(?:<\/b>)?\s*Loss:\s*(?:<\/b>)?\s*\$?([\d]+[.,]?[\d]*)', re.IGNORECASE)
-RE_TP = re.compile(r'Take\s*(?:<\/b>)?\s*Profit\s*(?:<\/b>)?\s*\d:\s*(?:<\/b>)?\s*\$?([\d]+[.,]?[\d]*)', re.IGNORECASE)
+# --- REGEX BLINDADAS CONTRA HTML E ESPAÇOS ---
+RE_SCORE = re.compile(r'SCORE\s*OPERACIONAL\s*:[^\d]*(\d{1,3})\s*/\s*100', re.IGNORECASE)
+RE_SL = re.compile(r'Stop\s*Loss\s*[^:]*:[^\d]*\$?\s*([\d,.]+)', re.IGNORECASE)
+RE_TP = re.compile(r'Take\s*Profit\s*\d\s*[^:]*:[^\d]*\$?\s*([\d,.]+)', re.IGNORECASE)
+RE_ENTRY = re.compile(r'Entrada\s*Conservadora\s*[^:]*:[^\d]*\$?\s*([\d,.]+)', re.IGNORECASE)
 RE_STYLE = re.compile(r'(scalp|swing|intraday)', re.IGNORECASE)
 TIMEFRAMES_MAP = ["D1", "H4", "H1", "M15", "M5", "M1"]
 
 def extract_trade_info(analysis, timeframes_str):
    if not analysis:
-       return "LONG", 50, "", [], ""
+       return "LONG", 50, "", [], "", ""
 
    tl = analysis.lower()
 
@@ -33,19 +35,29 @@ def extract_trade_info(analysis, timeframes_str):
    buy_count = sum(tl.count(w) for w in ['long', 'bullish', 'buy', 'compra'])
    direction = "SHORT" if sell_count > buy_count else "LONG"
 
+   # Score procura no texto global
    sm = RE_SCORE.search(analysis)
    score = int(sm.group(1)) if sm else 50
+   if score > 100: score = 100
 
-   sl_match = RE_SL.search(analysis)
+   # Isolar Setup #1 para não misturar com Setup #2
+   setup1_block = analysis
+   if "SETUP #2" in analysis:
+       setup1_block = analysis.split("SETUP #2")[0]
+
+   sl_match = RE_SL.search(setup1_block)
    sl = sl_match.group(1).replace(',', '.') if sl_match else ""
 
-   tp_matches = RE_TP.findall(analysis)
+   tp_matches = RE_TP.findall(setup1_block)
    tps = [tp.replace(',', '.') for tp in tp_matches[:3]]
+
+   entry_match = RE_ENTRY.search(setup1_block)
+   entry = entry_match.group(1).replace(',', '.') if entry_match else ""
 
    tfs = timeframes_str.upper() if timeframes_str else ""
    tf_components = []
 
-   style_match = RE_STYLE.search(analysis)
+   style_match = RE_STYLE.search(setup1_block)
    if style_match:
        tf_components.append(style_match.group(1).upper())
 
@@ -53,7 +65,7 @@ def extract_trade_info(analysis, timeframes_str):
    tf_components.extend(found_tfs)
    tf_label = " ".join(tf_components)
 
-   return direction, score, sl, tps, tf_label
+   return direction, score, sl, tps, tf_label, entry
 
 
 def init_db():
@@ -121,18 +133,27 @@ def price_monitor():
                    if linhas_afetadas > 0:
                        print(f"TOQUE DETETADO! {pair} a ${current_price} (Alvo: {target})")
 
-                       direction, score, sl, tps, tf_label = extract_trade_info(analysis, timeframes_str)
+                       direction, score, sl, tps, tf_label, entry = extract_trade_info(analysis, timeframes_str)
                        arrow = "📈" if direction == "LONG" else "📉"
+                       emoji_score = "🟢" if score >= 75 else "🟡" if score >= 50 else "🔴"
 
-                       msg = f"🎯 <b>{pair} ATINGIDO!</b>\n"
+                       msg = f"🎯 <b>{pair} ATINGIDO!</b>\n\n"
                        msg += f"{arrow} <b>{direction}</b> | {tf_label}\n"
-                       msg += f"💰 Preco: ${current_price:,.2f}\n"
-                       msg += f"🎯 Alvo era: ${target:,.2f}\n"
+                       msg += f"💰 <b>Preço Atual:</b> ${current_price:,.2f}\n"
+                       msg += f"🎯 <b>Alvo atingido:</b> ${target:,.2f}\n"
+                       msg += f"-------------------------------------\n"
+                       if entry:
+                           msg += f"📍 <b>Entrada Conservadora:</b> ${entry}\n"
                        if sl:
-                           msg += f"🛑 SL: ${sl}\n"
-                       for i, tp in enumerate(tps, 1):
-                           msg += f"✅ TP{i}: ${tp}\n"
-                       msg += f"⭐ Score: {score}/100"
+                           msg += f"🛑 <b>Stop Loss (SL):</b> ${sl}\n"
+                       if tps:
+                           for i, tp in enumerate(tps, 1):
+                               msg += f"✅ <b>Take Profit {i} (TP{i}):</b> ${tp}\n"
+                       else:
+                           msg += f"✅ <b>Take Profit (TP):</b> N/A\n"
+                       msg += f"-------------------------------------\n"
+                       msg += f"{emoji_score} <b>Score Operacional:</b> {score}/100\n\n"
+                       msg += f"💡 <i>Aguardar mitigação de FVG ou Order Block se aplicável.</i>"
 
                        send_telegram(msg)
 
@@ -192,7 +213,7 @@ def analyze():
            "6. CHoCH / MSS (confirmado ou potencial, com nivel exato)\n"
            "7. Liquidity Sweeps (varreduras recentes com valores exatos e qual liquidez foi varrida)\n"
            "8. Mitigation & Breaker Blocks\n"
-           "9. Killzones & Session Patterns (Asia/London/NY - qual esta ativa)\n"
+           "9. Killzones & Session Patterns (Asia/London/NY - qual esta activa)\n"
            "10. Midnight Open (valor exato e posicao do preco em relacao a ele)\n"
            "11. OTE - Optimal Trade Entry (calcular 61.8%, 70.5%, 79% do swing criado pelo sweep mais recente)\n"
            "12. Score ICT (0-100 baseado em confluencias)\n"
@@ -369,7 +390,6 @@ def analyze():
        response = client.messages.create(
            model="claude-sonnet-4-6",
            max_tokens=8000,
-
            messages=[{"role": "user", "content": content}]
        )
        result_text = response.content[0].text

@@ -179,11 +179,13 @@ def index():
 @app.route('/btc_data', methods=['GET'])
 def btc_data():
    try:
-       url = 'https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT'
-       r = requests.get(url, timeout=10)
-       d = r.json()
+       # Usar endpoint simples de preco da Binance
+       r_price = requests.get('https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT', timeout=10)
+       r_24h = requests.get('https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT', timeout=10)
+       dp = r_price.json()
+       d = r_24h.json()
        data = {
-           'price': float(d['lastPrice']),
+           'price': float(dp['price']),
            'change': float(d['priceChangePercent']),
            'high': float(d['highPrice']),
            'low': float(d['lowPrice'])

@@ -28,43 +28,31 @@ TIMEFRAMES_MAP = ["D1", "H4", "H1", "M15", "M5", "M1"]
 def extract_trade_info(analysis, timeframes_str):
    if not analysis:
        return "LONG", 50, "", [], "", ""
-
    tl = analysis.lower()
-
    sell_count = sum(tl.count(w) for w in ['short', 'bearish', 'sell', 'venda', 'vende'])
    buy_count = sum(tl.count(w) for w in ['long', 'bullish', 'buy', 'compra'])
    direction = "SHORT" if sell_count > buy_count else "LONG"
-
    sm = RE_SCORE.search(analysis)
    score = int(sm.group(1)) if sm else 50
    if score > 100: score = 100
-
    setup1_block = analysis
    if "SETUP #2" in analysis:
        setup1_block = analysis.split("SETUP #2")[0]
-
    sl_match = RE_SL.search(setup1_block)
    sl = sl_match.group(1).replace(',', '.') if sl_match else ""
-
    tp_matches = RE_TP.findall(setup1_block)
    tps = [tp.replace(',', '.') for tp in tp_matches[:3]]
-
    entry_match = RE_ENTRY.search(setup1_block)
    entry = entry_match.group(1).replace(',', '.') if entry_match else ""
-
    tfs = timeframes_str.upper() if timeframes_str else ""
    tf_components = []
-
    style_match = RE_STYLE.search(setup1_block)
    if style_match:
        tf_components.append(style_match.group(1).upper())
-
    found_tfs = [tf for tf in TIMEFRAMES_MAP if tf in tfs]
    tf_components.extend(found_tfs)
    tf_label = " ".join(tf_components)
-
    return direction, score, sl, tps, tf_label, entry
-
 
 def init_db():
    try:
@@ -79,10 +67,6 @@ def init_db():
                    timeframes TEXT
                )
            ''')
-           try:
-               cursor.execute("ALTER TABLE alerts ADD COLUMN timeframes TEXT")
-           except sqlite3.OperationalError:
-               pass
            conn.commit()
        print("Base de dados SQLite inicializada com sucesso!")
    except Exception as e:
@@ -91,112 +75,65 @@ def init_db():
 def send_telegram(message):
    try:
        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-       resp = requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"}, timeout=10)
-       print(f"Telegram enviado: {resp.status_code}")
+       requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"}, timeout=10)
    except Exception as e:
        print(f"Telegram erro: {e}")
 
 def price_monitor():
-   print("Monitor de Precos Ativo! A ler dados enviados pelo Browser.")
+   print("Monitor de Precos Ativo!")
    while True:
        try:
            with sqlite3.connect(DB_FILE) as conn:
                cursor = conn.cursor()
                cursor.execute("SELECT id, pair, target, analysis, timeframes FROM alerts")
                db_alerts = cursor.fetchall()
-
            if not db_alerts:
-               time.sleep(2.0)
+               time.sleep(5.0)
                continue
-
            for row in db_alerts:
                alert_id, pair, target, analysis, timeframes_str = row[0], row[1], row[2], row[3], row[4]
-               if timeframes_str is None:
-                   timeframes_str = ""
-
+               if timeframes_str is None: timeframes_str = ""
                current_price = PRECOS_TICKER.get(pair)
-               if current_price is None:
-                   continue
-
+               if current_price is None: continue
                distancia = abs(current_price - target)
                margem_tolerancia = target * 0.0015
-
                if distancia <= margem_tolerancia:
                    with sqlite3.connect(DB_FILE) as conn_del:
                        cursor_del = conn_del.cursor()
                        cursor_del.execute("DELETE FROM alerts WHERE id = ?", (alert_id,))
                        linhas_afetadas = cursor_del.rowcount
                        conn_del.commit()
-
                    if linhas_afetadas > 0:
-                       print(f"TOQUE DETETADO! {pair} a ${current_price} (Alvo: {target})")
-
                        direction, score, sl, tps, tf_label, entry = extract_trade_info(analysis, timeframes_str)
                        arrow = "📈" if direction == "LONG" else "📉"
                        emoji_score = "🟢" if score >= 75 else "🟡" if score >= 50 else "🔴"
-
                        msg = f"🎯 <b>{pair} ATINGIDO!</b>\n\n"
                        msg += f"{arrow} <b>{direction}</b> | {tf_label}\n"
                        msg += f"💰 <b>Preço Atual:</b> ${current_price:,.2f}\n"
                        msg += f"🎯 <b>Alvo atingido:</b> ${target:,.2f}\n"
                        msg += f"-------------------------------------\n"
-                       if entry:
-                           msg += f"📍 <b>Entrada Conservadora:</b> ${entry}\n"
-                       if sl:
-                           msg += f"🛑 <b>Stop Loss (SL):</b> ${sl}\n"
+                       if entry: msg += f"📍 <b>Entrada Conservadora:</b> ${entry}\n"
+                       if sl: msg += f"🛑 <b>Stop Loss (SL):</b> ${sl}\n"
                        if tps:
-                           for i, tp in enumerate(tps, 1):
-                               msg += f"✅ <b>Take Profit {i} (TP{i}):</b> ${tp}\n"
-                       else:
-                           msg += f"✅ <b>Take Profit (TP):</b> N/A\n"
+                           for i, tp in enumerate(tps, 1): msg += f"✅ <b>Take Profit {i} (TP{i}):</b> ${tp}\n"
+                       else: msg += f"✅ <b>Take Profit (TP):</b> N/A\n"
                        msg += f"-------------------------------------\n"
                        msg += f"{emoji_score} <b>Score Operacional:</b> {score}/100\n\n"
                        msg += f"💡 <i>Aguardar mitigação de FVG ou Order Block se aplicável.</i>"
-
                        send_telegram(msg)
-
        except Exception as e:
-           print(f"Monitor erro: {e}")
-
-       time.sleep(1.5)
+           pass
+       time.sleep(2.0)
 
 init_db()
 
-_lock_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-_lock_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-try:
-   _lock_socket.bind(('127.0.0.1', 48484))
-   monitor_thread = threading.Thread(target=price_monitor, daemon=True)
-   monitor_thread.start()
-   print("Worker principal assumiu o monitor de precos.")
-except socket.error:
-   print("Worker secundario detetado. Monitor ignorado neste processo.")
+# Inicialização segura da Thread sem travar portas de rede locais
+monitor_thread = threading.Thread(target=price_monitor, daemon=True)
+monitor_thread.start()
 
 @app.route('/')
 def index():
    return send_from_directory('.', 'index.html')
-
-@app.route('/btc_data', methods=['GET'])
-def btc_data():
-   try:
-       r = requests.get(
-           'https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd&include_24hr_change=true&include_24hr_vol=true',
-           timeout=10,
-           headers={'User-Agent': 'Mozilla/5.0'}
-       )
-       d = r.json()
-       btc = d['bitcoin']
-       price = float(btc['usd'])
-       change = float(btc.get('usd_24h_change', 0))
-       # high/low estimados a partir da variação
-       high = price * (1 + max(change, 0) / 100) if change > 0 else price * 1.01
-       low = price * (1 + min(change, 0) / 100) if change < 0 else price * 0.99
-       data = {'price': price, 'change': change, 'high': high, 'low': low}
-       print(f"BTC Data CoinGecko: {data}")
-       return jsonify(data)
-   except Exception as e:
-       print(f"btc_data erro: {str(e)}")
-       return jsonify({'error': str(e)}), 500
 
 @app.route('/update_prices', methods=['POST'])
 def update_prices():
@@ -215,9 +152,7 @@ def analyze():
        data = request.json or {}
        pair = data.get('pair', 'BTCUSD')
        images = data.get('images', {})
-
        valid_tfs = [tf for tf, img in images.items() if img and isinstance(img, dict) and img.get('base64')]
-
        if len(valid_tfs) < 2:
            return jsonify({'error': 'Carrega pelo menos 2 graficos validos!'}), 400
 
@@ -253,7 +188,7 @@ def analyze():
            "- Entrada SEMPRE em OB ou FVG identificado — NUNCA fora dessas zonas\n"
            "- Stop Loss SEMPRE acima do OB/FVG seguinte ou swing high/low relevante — NUNCA em zona obvia de liquidez\n"
            "- Identificar BSL/SSL proximos que podem varrer o stop antes da movimentacao\n"
-           "- Entrada Conservadora: apenas apos fechamento de vela M15 confirmando rejeicao no OTE\n"
+           "- Entrada Conservadora: apenas apos fechamento de vela M15 confirming rejeicao no OTE\n"
            "- Trigger Exato: identificar padrao de vela obrigatorio (Engolfo Bearish/Bullish, Pin Bar, Inside Bar)\n"
            "- Nivel OTE: identificar se entrada coincide com 61.8%, 70.5% ou 79% do swing relevante\n"
            "- IFVG: verificar se entrada coincide com zona de IFVG para confluencia maxima\n"
@@ -320,14 +255,13 @@ def analyze():
        content.append({"type": "text", "text": prompt})
 
        response = client.messages.create(
-           model="claude-sonnet-4-6",
-           max_tokens=16000,
+           model="claude-3-5-sonnet-20241022",
+           max_tokens=4000,
            messages=[{"role": "user", "content": content}]
        )
        result_text = response.content[0].text
        return jsonify({'result': result_text, 'timeframes': ','.join(valid_tfs)})
    except Exception as e:
-       print(f"Erro na API: {str(e)}")
        return jsonify({'error': f"Erro na API Anthropic: {str(e)}"}), 500
 
 @app.route('/set_alert', methods=['POST'])
@@ -338,7 +272,6 @@ def set_alert():
        target = float(data.get('target'))
        analysis = data.get('analysis', '')
        timeframes = data.get('timeframes', '')
-
        current_price = PRECOS_TICKER.get(pair)
        if not current_price:
            current_price = float(data.get('current_price', 0))

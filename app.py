@@ -180,16 +180,20 @@ def index():
 def btc_data():
    try:
        url = 'https://api.bybit.com/v5/market/tickers?category=linear&symbol=BTCUSDT'
-       r = requests.get(url, timeout=5)
+       headers = {'User-Agent': 'Mozilla/5.0'}
+       r = requests.get(url, timeout=10, headers=headers)
        d = r.json()
        t = d['result']['list'][0]
-       return jsonify({
+       data = {
            'price': float(t['lastPrice']),
            'change': float(t['price24hPcnt']) * 100,
            'high': float(t['highPrice24h']),
            'low': float(t['lowPrice24h'])
-       })
+       }
+       print(f"BTC Data: {data}")
+       return jsonify(data)
    except Exception as e:
+       print(f"btc_data erro: {str(e)}")
        return jsonify({'error': str(e)}), 500
 
 @app.route('/update_prices', methods=['POST'])

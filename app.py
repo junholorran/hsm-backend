@@ -253,7 +253,7 @@ def analyze():
        content.append({"type": "text", "text": prompt})
 
        response = client.messages.create(
-           model="claude-3-5-sonnet-20241022",
+           model="claude-sonnet-4-6",
            max_tokens=4000,
            messages=[{"role": "user", "content": content}]
        )

@@ -183,12 +183,25 @@ def btc_data():
        headers = {'User-Agent': 'Mozilla/5.0'}
        r = requests.get(url, timeout=10, headers=headers)
        d = r.json()
+       
+       if 'result' not in d or 'list' not in d['result'] or not d['result']['list']:
+           return jsonify({'error': 'Resposta invalida da Bybit'}), 500
+           
        t = d['result']['list'][0]
+       
+       def safe_float(val, default=0.0):
+           try:
+               return float(val) if val is not None else default
+           except (ValueError, TypeError):
+               return default
+
+       change_raw = safe_float(t.get('price24hPcnt', '0'))
+       
        data = {
-           'price': float(t['lastPrice']),
-           'change': float(t['price24hPcnt']) * 100,
-           'high': float(t['highPrice24h']),
-           'low': float(t['lowPrice24h'])
+           'price': safe_float(t.get('lastPrice')),
+           'change': change_raw * 100,
+           'high': safe_float(t.get('highPrice24h')),
+           'low': safe_float(t.get('lowPrice24h'))
        }
        print(f"BTC Data: {data}")
        return jsonify(data)

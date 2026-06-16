@@ -179,16 +179,14 @@ def index():
 @app.route('/btc_data', methods=['GET'])
 def btc_data():
    try:
-       url = 'https://api.bybit.com/v5/market/tickers?category=linear&symbol=BTCUSDT'
-       headers = {'User-Agent': 'Mozilla/5.0'}
-       r = requests.get(url, timeout=10, headers=headers)
+       url = 'https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT'
+       r = requests.get(url, timeout=10)
        d = r.json()
-       t = d['result']['list'][0]
        data = {
-           'price': float(t['lastPrice']),
-           'change': float(t['price24hPcnt']) * 100,
-           'high': float(t['highPrice24h']),
-           'low': float(t['lowPrice24h'])
+           'price': float(d['lastPrice']),
+           'change': float(d['priceChangePercent']),
+           'high': float(d['highPrice']),
+           'low': float(d['lowPrice'])
        }
        print(f"BTC Data: {data}")
        return jsonify(data)

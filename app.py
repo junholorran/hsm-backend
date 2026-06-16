@@ -1,11 +1,9 @@
 from flask import Flask, request, jsonify, send_from_directory
 import anthropic
 import os
-import threading
 import time
 import requests
 import sqlite3
-import socket
 import re
 
 app = Flask(__name__)
@@ -79,57 +77,56 @@ def send_telegram(message):
    except Exception as e:
        print(f"Telegram erro: {e}")
 
-def price_monitor():
-   print("Monitor de Precos Ativo!")
-   while True:
-       try:
-           with sqlite3.connect(DB_FILE) as conn:
-               cursor = conn.cursor()
-               cursor.execute("SELECT id, pair, target, analysis, timeframes FROM alerts")
-               db_alerts = cursor.fetchall()
-           if not db_alerts:
-               time.sleep(5.0)
-               continue
-           for row in db_alerts:
-               alert_id, pair, target, analysis, timeframes_str = row[0], row[1], row[2], row[3], row[4]
-               if timeframes_str is None: timeframes_str = ""
-               current_price = PRECOS_TICKER.get(pair)
-               if current_price is None: continue
-               distancia = abs(current_price - target)
-               margem_tolerancia = target * 0.0015
-               if distancia <= margem_tolerancia:
-                   with sqlite3.connect(DB_FILE) as conn_del:
-                       cursor_del = conn_del.cursor()
-                       cursor_del.execute("DELETE FROM alerts WHERE id = ?", (alert_id,))
-                       linhas_afetadas = cursor_del.rowcount
-                       conn_del.commit()
-                   if linhas_afetadas > 0:
-                       direction, score, sl, tps, tf_label, entry = extract_trade_info(analysis, timeframes_str)
-                       arrow = "📈" if direction == "LONG" else "📉"
-                       emoji_score = "🟢" if score >= 75 else "🟡" if score >= 50 else "🔴"
-                       msg = f"🎯 <b>{pair} ATINGIDO!</b>\n\n"
-                       msg += f"{arrow} <b>{direction}</b> | {tf_label}\n"
-                       msg += f"💰 <b>Preço Atual:</b> ${current_price:,.2f}\n"
-                       msg += f"🎯 <b>Alvo atingido:</b> ${target:,.2f}\n"
-                       msg += f"-------------------------------------\n"
-                       if entry: msg += f"📍 <b>Entrada Conservadora:</b> ${entry}\n"
-                       if sl: msg += f"🛑 <b>Stop Loss (SL):</b> ${sl}\n"
-                       if tps:
-                           for i, tp in enumerate(tps, 1): msg += f"✅ <b>Take Profit {i} (TP{i}):</b> ${tp}\n"
-                       else: msg += f"✅ <b>Take Profit (TP):</b> N/A\n"
-                       msg += f"-------------------------------------\n"
-                       msg += f"{emoji_score} <b>Score Operacional:</b> {score}/100\n\n"
-                       msg += f"💡 <i>Aguardar mitigação de FVG ou Order Block se aplicável.</i>"
-                       send_telegram(msg)
-       except Exception as e:
-           pass
-       time.sleep(2.0)
+def check_alerts_inline():
+   try:
+       with sqlite3.connect(DB_FILE) as conn:
+           cursor = conn.cursor()
+           cursor.execute("SELECT id, pair, target, analysis, timeframes FROM alerts")
+           db_alerts = cursor.fetchall()
+       
+       if not db_alerts:
+           return
 
+       for row in db_alerts:
+           alert_id, pair, target, analysis, timeframes_str = row[0], row[1], row[2], row[3], row[4]
+           if timeframes_str is None: timeframes_str = ""
+           
+           current_price = PRECOS_TICKER.get(pair)
+           if current_price is None: continue
+           
+           distancia = abs(current_price - target)
+           margem_tolerancia = target * 0.0015
+           
+           if distancia <= margem_tolerancia:
+               with sqlite3.connect(DB_FILE) as conn_del:
+                   cursor_del = conn_del.cursor()
+                   cursor_del.execute("DELETE FROM alerts WHERE id = ?", (alert_id,))
+                   linhas_afetadas = cursor_del.rowcount
+                   conn_del.commit()
+               
+               if linhas_afetadas > 0:
+                   direction, score, sl, tps, tf_label, entry = extract_trade_info(analysis, timeframes_str)
+                   arrow = "📈" if direction == "LONG" else "📉"
+                   emoji_score = "🟢" if score >= 75 else "🟡" if score >= 50 else "🔴"
+                   msg = f"🎯 <b>{pair} ATINGIDO!</b>\n\n"
+                   msg += f"{arrow} <b>{direction}</b> | {tf_label}\n"
+                   msg += f"💰 <b>Preço Atual:</b> ${current_price:,.2f}\n"
+                   msg += f"🎯 <b>Alvo atingido:</b> ${target:,.2f}\n"
+                   msg += f"-------------------------------------\n"
+                   if entry: msg += f"📍 <b>Entrada Conservadora:</b> ${entry}\n"
+                   if sl: msg += f"🛑 <b>Stop Loss (SL):</b> ${sl}\n"
+                   if tps:
+                       for i, tp in enumerate(tps, 1): msg += f"✅ <b>Take Profit {i} (TP{i}):</b> ${tp}\n"
+                   else: msg += f"✅ <b>Take Profit (TP):</b> N/A\n"
+                   msg += f"-------------------------------------\n"
+                   msg += f"{emoji_score} <b>Score Operacional:</b> {score}/100\n\n"
+                   msg += f"💡 <i>Aguardar mitigação de FVG ou Order Block se aplicável.</i>"
+                   send_telegram(msg)
+   except Exception as e:
+       print(f"Erro ao processar alertas inline: {e}")
+
+# Executa as inicializações antes de expor a app ao Gunicorn
 init_db()
-
-# Inicialização segura da Thread sem travar portas de rede locais
-monitor_thread = threading.Thread(target=price_monitor, daemon=True)
-monitor_thread.start()
 
 @app.route('/')
 def index():
@@ -142,6 +139,8 @@ def update_prices():
        for pair, price in dados.items():
            if price is not None:
                PRECOS_TICKER[pair] = float(price)
+       
+       check_alerts_inline()
        return jsonify({'ok': True, 'prices_stored': len(PRECOS_TICKER)})
    except Exception as e:
        return jsonify({'error': str(e)}), 400
@@ -251,7 +250,7 @@ def analyze():
            content.append({
                "type": "image",
                "source": {"type": "base64", "media_type": mime, "data": b64_data}
-           })
+            })
        content.append({"type": "text", "text": prompt})
 
        response = client.messages.create(
@@ -290,7 +289,3 @@ def set_alert():
        return jsonify({'ok': True, 'current_price': current_price})
    except Exception as e:
        return jsonify({'error': str(e)}), 500
-
-if __name__ == '__main__':
-   port = int(os.environ.get('PORT', 5000))
-   app.run(host='0.0.0.0', port=port, debug=False)

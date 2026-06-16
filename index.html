@@ -1,387 +1,73 @@
-<!DOCTYPE html>
-<html lang="pt">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>HSM ICT Mentor</title>
-<style>
-  @import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Syne:wght@400;600;800&display=swap');
-  :root {
-    --bg:#060810;--surface:#0d1117;--surface2:#161b22;
-    --gold:#f0b429;--gold2:#ffd166;--green:#00ff88;
-    --red:#ff4757;--blue:#00d4ff;--text:#e6edf3;
-    --muted:#7d8590;--border:rgba(240,180,41,0.15);
-  }
-  *{margin:0;padding:0;box-sizing:border-box}
-  body{background:var(--bg);color:var(--text);font-family:'Syne',sans-serif;min-height:100vh}
-  .container{max-width:480px;margin:0 auto;padding:20px 16px 40px}
-  .header{text-align:center;padding:24px 0 20px;border-bottom:1px solid var(--border);margin-bottom:24px}
-  .logo{display:flex;align-items:center;justify-content:center;gap:10px;margin-bottom:6px}
-  .logo-icon{width:36px;height:36px;background:linear-gradient(135deg,var(--gold),var(--gold2));border-radius:8px;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:16px;color:#000}
-  .logo-text{font-size:20px;font-weight:800}
-  .logo-text span{color:var(--gold)}
-  .subtitle{font-family:'Space Mono',monospace;font-size:10px;color:var(--muted);letter-spacing:2px;text-transform:uppercase}
-
-  /* ── MARKET BIAS WIDGET ── */
-  .bias-widget{
-    border-radius:20px;
-    padding:16px;
-    margin-bottom:20px;
-    position:relative;
-    overflow:hidden;
-    transition:all 0.4s ease;
-    border:1px solid rgba(255,255,255,0.06);
-    background:var(--surface);
-  }
-  .bias-widget.bearish{ border-color:rgba(255,71,87,0.25); background:linear-gradient(145deg,#150808,var(--surface)); }
-  .bias-widget.bullish{ border-color:rgba(0,255,136,0.25); background:linear-gradient(145deg,#08150d,var(--surface)); }
-  .bias-widget.neutral{ border-color:rgba(240,180,41,0.25); background:linear-gradient(145deg,#15120a,var(--surface)); }
-  .bias-widget.loading-state{ border-color:var(--border); }
-
-  .bias-card{border-radius:20px;padding:18px;margin-bottom:20px;position:relative;overflow:hidden;transition:all 0.4s}
-  .bias-card.bearish{background:linear-gradient(145deg,#1a0808,#0d0d15);border:1px solid rgba(248,81,73,0.25)}
-  .bias-card.bullish{background:linear-gradient(145deg,#081a0d,#0d0d15);border:1px solid rgba(63,185,80,0.25)}
-  .bias-card.neutral{background:linear-gradient(145deg,#1a1508,#0d0d15);border:1px solid rgba(227,179,65,0.25)}
-  .bias-card.loading-state{background:var(--surface);border:1px solid var(--border)}
-  .stats-row{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;position:relative;z-index:1}
-  .stat{background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.07);border-radius:12px;padding:10px 8px;text-align:center}
-  .stat-icon{font-size:15px;margin-bottom:3px}
-  .stat-num{font-size:15px;font-weight:700;margin-bottom:2px}
-  .stat-lbl{font-size:8px;color:rgba(255,255,255,0.25);letter-spacing:1.5px;text-transform:uppercase}
-  .bias-glow{
-    position:absolute;top:-50px;right:-50px;
-    width:150px;height:150px;border-radius:50%;
-    pointer-events:none;transition:background 0.4s;
-  }
-  .bearish .bias-glow{background:radial-gradient(circle,rgba(255,71,87,0.1) 0%,transparent 70%)}
-  .bullish .bias-glow{background:radial-gradient(circle,rgba(0,255,136,0.1) 0%,transparent 70%)}
-  .neutral  .bias-card{border-radius:20px;padding:18px;margin-bottom:20px;position:relative;overflow:hidden;transition:all 0.4s}
-  .bias-card.bearish{background:linear-gradient(145deg,#1a0808,#0d0d15);border:1px solid rgba(248,81,73,0.25)}
-  .bias-card.bullish{background:linear-gradient(145deg,#081a0d,#0d0d15);border:1px solid rgba(63,185,80,0.25)}
-  .bias-card.neutral{background:linear-gradient(145deg,#1a1508,#0d0d15);border:1px solid rgba(227,179,65,0.25)}
-  .bias-card.loading-state{background:var(--surface);border:1px solid var(--border)}
-  .stats-row{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;position:relative;z-index:1}
-  .stat{background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.07);border-radius:12px;padding:10px 8px;text-align:center}
-  .stat-icon{font-size:15px;margin-bottom:3px}
-  .stat-num{font-size:15px;font-weight:700;margin-bottom:2px}
-  .stat-lbl{font-size:8px;color:rgba(255,255,255,0.25);letter-spacing:1.5px;text-transform:uppercase}
-  .bias-glow{background:radial-gradient(circle,rgba(240,180,41,0.1) 0%,transparent 70%)}
-
-  .bias-top{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:12px;position:relative;z-index:1}
-
-  .bias-left{}
-  .bias-eyebrow{font-size:8px;letter-spacing:2px;color:var(--muted);text-transform:uppercase;font-family:'Space Mono',monospace;margin-bottom:6px}
-  .bias-signal{display:flex;align-items:center;gap:8px}
-  .bias-icon{font-size:22px;line-height:1}
-  .bias-text{font-size:22px;font-weight:800;letter-spacing:-0.5px;transition:color 0.4s}
-  .bearish .bias-text{color:var(--red)}
-  .bullish .bias-text{color:var(--green)}
-  .neutral  .bias-text{color:var(--gold)}
-  .bias-sub{font-size:10px;color:var(--muted);margin-top:3px;font-family:'Space Mono',monospace}
-
-  .btc-badge{text-align:right}
-  .btc-price{font-size:17px;font-weight:700;color:var(--text);font-variant-numeric:tabular-nums;letter-spacing:-0.5px}
-  .btc-change{font-size:11px;font-weight:700;margin-top:2px}
-  .btc-change.down{color:var(--red)}
-  .btc-change.up{color:var(--green)}
-  .btc-change.flat{color:var(--muted)}
-  .btc-lbl{font-size:8px;color:var(--muted);letter-spacing:1px;text-transform:uppercase;font-family:'Space Mono',monospace;margin-top:2px}
-
-  /* sparkline */
-  .spark-wrap{position:relative;z-index:1;margin-bottom:12px;height:36px}
-  .spark-svg{width:100%;height:36px}
-
-  /* stats */
-  .bias-stats{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;position:relative;z-index:1;margin-bottom:12px}
-  .bstat{background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.06);border-radius:10px;padding:8px 6px;text-align:center}
-  .bstat-icon{font-size:13px;margin-bottom:2px}
-  .bstat-val{font-size:13px;font-weight:700;margin-bottom:1px}
-  .bstat-lbl{font-size:8px;color:var(--muted);letter-spacing:1px;text-transform:uppercase;font-family:'Space Mono',monospace}
-  .c-red{color:var(--red)}
-  .c-green{color:var(--green)}
-  .c-gold{color:var(--gold)}
-  .c-orange{color:#f7931a}
-  .c-white{color:var(--text)}
-
-  /* sentiment bar */
-  .sent-wrap{position:relative;z-index:1}
-  .sent-row{display:flex;justify-content:space-between;margin-bottom:4px}
-  .sent-lbl{font-size:8px;color:rgba(255,255,255,0.2);letter-spacing:1px;text-transform:uppercase;font-family:'Space Mono',monospace}
-  .sent-bar{height:3px;border-radius:3px;background:linear-gradient(to right,var(--red) 0%,var(--gold) 50%,var(--green) 100%);position:relative}
-  .sent-needle{position:absolute;top:-4px;width:11px;height:11px;background:#fff;border-radius:50%;transform:translateX(-50%);box-shadow:0 0 6px rgba(255,255,255,0.5);transition:left 1s ease-out}
-
-  /* loading skeleton */
-  .bias-skeleton{display:flex;flex-direction:column;gap:8px}
-  .skel{background:linear-gradient(90deg,var(--surface2) 25%,rgba(255,255,255,0.04) 50%,var(--surface2) 75%);background-size:200% 100%;animation:shimmer 1.5s infinite;border-radius:6px}
-  @keyframes shimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}
-
-  /* refresh btn */
-  .bias-refresh{position:absolute;top:12px;right:12px;z-index:2;background:none;border:none;color:var(--muted);font-size:14px;cursor:pointer;opacity:0.5;transition:opacity 0.2s;font-family:inherit}
-  .bias-refresh:hover{opacity:1}
-
-  /* ── resto do CSS original ── */
-  .section-title{font-size:13px;font-family:'Space Mono',monospace;color:var(--gold);letter-spacing:1px;text-transform:uppercase;margin-bottom:12px;display:flex;align-items:center;gap:8px}
-  .section-title::after{content:'';flex:1;height:1px;background:var(--border)}
-  .pair-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-bottom:20px}
-  .pair-btn{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:8px 4px;text-align:center;cursor:pointer;font-size:10px;font-family:'Space Mono',monospace;color:var(--muted);transition:all .2s}
-  .pair-btn:hover,.pair-btn.active{border-color:var(--gold);color:var(--gold);background:rgba(240,180,41,0.08)}
-  .upload-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:20px}
-  .upload-slot{background:var(--surface);border:1px dashed rgba(240,180,41,0.3);border-radius:12px;padding:16px 12px;text-align:center;cursor:pointer;transition:all .2s;position:relative;overflow:hidden;min-height:100px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px}
-  .upload-slot:hover{border-color:var(--gold);background:rgba(240,180,41,0.05)}
-  .upload-slot.filled{border-style:solid;border-color:var(--gold)}
-  .upload-slot.filled::after{content:'✓';position:absolute;top:6px;right:8px;color:var(--green);font-size:12px;font-weight:700}
-  .slot-tf{font-size:16px;font-weight:800;color:var(--gold)}
-  .slot-label{font-size:10px;color:var(--muted);font-family:'Space Mono',monospace}
-  .slot-icon{font-size:20px}
-  .slot-preview{width:100%;height:60px;object-fit:cover;border-radius:6px;margin-bottom:4px}
-  .upload-input{display:none}
-  .analyze-btn{width:100%;background:linear-gradient(135deg,var(--gold),var(--gold2));color:#000;border:none;border-radius:12px;padding:16px;font-family:'Syne',sans-serif;font-weight:800;font-size:16px;cursor:pointer;transition:all .2s;display:flex;align-items:center;justify-content:center;gap:8px;margin-bottom:20px}
-  .analyze-btn:hover{transform:translateY(-1px);box-shadow:0 8px 24px rgba(240,180,41,0.3)}
-  .analyze-btn:disabled{opacity:.5;cursor:not-allowed;transform:none}
-  .loading{display:none;text-align:center;padding:32px}
-  .loading.show{display:block}
-  .loading-ring{width:48px;height:48px;border:3px solid var(--border);border-top-color:var(--gold);border-radius:50%;animation:spin .8s linear infinite;margin:0 auto 16px}
-  @keyframes spin{to{transform:rotate(360deg)}}
-  .loading-text{font-family:'Space Mono',monospace;font-size:12px;color:var(--muted);animation:pulse 1.5s ease-in-out infinite}
-  @keyframes pulse{0%,100%{opacity:.5}50%{opacity:1}}
-  .result{display:none;animation:fadeUp .4s ease-out}
-  .result.show{display:block}
-  @keyframes fadeUp{from{opacity:0;transform:translateY(16px)}to{opacity:1;transform:translateY(0)}}
-  .score-card{background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:20px;margin-bottom:16px;position:relative;overflow:hidden}
-  .score-card::before{content:'';position:absolute;top:0;left:0;right:0;height:2px}
-  .score-card.bull::before{background:linear-gradient(90deg,var(--green),transparent)}
-  .score-card.bear::before{background:linear-gradient(90deg,var(--red),transparent)}
-  .score-card.neutral::before{background:linear-gradient(90deg,var(--gold),transparent)}
-  .score-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px}
-  .score-direction{font-size:28px;font-weight:800;letter-spacing:-1px}
-  .score-direction.bull{color:var(--green)}
-  .score-direction.bear{color:var(--red)}
-  .score-direction.neutral{color:var(--gold)}
-  .score-badge{font-family:'Space Mono',monospace;font-size:11px;padding:4px 10px;border-radius:20px;font-weight:700}
-  .score-badge.high{background:rgba(0,255,136,0.15);color:var(--green);border:1px solid rgba(0,255,136,0.3)}
-  .score-badge.mid{background:rgba(240,180,41,0.15);color:var(--gold);border:1px solid rgba(240,180,41,0.3)}
-  .score-badge.low{background:rgba(255,71,87,0.15);color:var(--red);border:1px solid rgba(255,71,87,0.3)}
-  .score-bar-wrap{background:var(--surface2);border-radius:4px;height:6px;margin-bottom:16px;overflow:hidden}
-  .score-bar{height:100%;border-radius:4px;transition:width 1s ease-out}
-  .score-bar.bull{background:linear-gradient(90deg,var(--green),#00ff88aa)}
-  .score-bar.bear{background:linear-gradient(90deg,var(--red),#ff475788)}
-  .score-bar.neutral{background:linear-gradient(90deg,var(--gold),var(--gold2))}
-  .analysis-card{background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:20px;margin-bottom:16px}
-  .analysis-card h3{font-size:12px;font-family:'Space Mono',monospace;color:var(--gold);letter-spacing:1px;text-transform:uppercase;margin-bottom:12px;padding-bottom:8px;border-bottom:1px solid var(--border)}
-  .analysis-text{font-size:13px;line-height:1.7;color:#c9d1d9}
-  .analysis-text p{margin-bottom:8px}
-  .tag{display:inline-block;padding:2px 8px;border-radius:4px;font-size:10px;font-family:'Space Mono',monospace;font-weight:700;margin:2px}
-  .tag-bull{background:rgba(0,255,136,0.1);color:var(--green)}
-  .tag-bear{background:rgba(255,71,87,0.1);color:var(--red)}
-  .tag-info{background:rgba(0,212,255,0.1);color:var(--blue)}
-  .tag-warn{background:rgba(240,180,41,0.1);color:var(--gold)}
-  .alert-box{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:16px;margin-bottom:12px}
-  .alert-box-title{font-size:12px;font-family:'Space Mono',monospace;color:var(--gold);margin-bottom:10px}
-  .alert-row{display:flex;gap:8px;margin-bottom:8px}
-  .alert-input{flex:1;background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:10px;color:var(--text);font-family:'Space Mono',monospace;font-size:13px}
-  .alert-create-btn{background:linear-gradient(135deg,var(--gold),var(--gold2));color:#000;border:none;border-radius:8px;padding:10px 16px;font-family:'Syne',sans-serif;font-weight:800;font-size:13px;cursor:pointer}
-  .alert-status{font-size:11px;font-family:'Space Mono',monospace;color:var(--muted)}
-  .reset-btn{width:100%;background:transparent;border:1px solid var(--border);border-radius:12px;padding:14px;color:var(--muted);font-family:'Syne',sans-serif;font-weight:600;font-size:14px;cursor:pointer;transition:all .2s;margin-top:8px}
-  .reset-btn:hover{border-color:var(--gold);color:var(--gold)}
-  .footer{text-align:center;padding-top:24px;font-size:10px;font-family:'Space Mono',monospace;color:var(--muted);letter-spacing:1px}
-  .toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%) translateY(80px);background:var(--surface2);border:1px solid var(--border);border-radius:20px;padding:10px 20px;font-size:12px;font-family:'Space Mono',monospace;color:var(--text);transition:transform .3s ease;z-index:100;white-space:nowrap}
-  .toast.show{transform:translateX(-50%) translateY(0)}
-</style>
-</head>
-<body>
-<div class="container">
-  <div class="header">
-    <div class="logo">
-      <div class="logo-icon">H</div>
-      <div class="logo-text">HSM <span>ICT</span> Mentor</div>
-    </div>
-    <div class="subtitle">Smart Money · Inner Circle Trader</div>
-  </div>
-
-  <!-- ══ MARKET BIAS WIDGET ══ -->
-  <div id="biasWidget" class="bias-card neutral" style="margin-bottom:20px">
-    <div class="bias-glow"></div>
-    <button onclick="loadMarketBias()" style="position:absolute;top:12px;right:12px;z-index:2;background:none;border:none;color:rgba(255,255,255,0.3);font-size:14px;cursor:pointer">↻</button>
-    <div class="bias-top">
-      <div>
-        <div class="bias-eyebrow">Market Bias · Agora</div>
-        <div class="bias-signal">
-          <div class="bias-icon" id="biasIcon">⏳</div>
-          <div class="bias-text" id="biasText">A carregar</div>
-        </div>
-        <div class="bias-sub" id="biasSub">Aguarda dados...</div>
-      </div>
-      <div style="text-align:right">
-        <div style="font-size:18px;font-weight:700;color:#fff" id="btcPriceEl">---</div>
-        <div style="font-size:12px;font-weight:600;margin-top:2px" id="btcChangeEl">---</div>
-        <div style="font-size:9px;color:rgba(255,255,255,0.25);letter-spacing:1px;text-transform:uppercase;margin-top:2px">BTC · 24h</div>
-      </div>
-    </div>
-    <div style="margin-bottom:14px">
-      <svg id="biasSpark" style="width:100%;height:44px" viewBox="0 0 300 44" preserveAspectRatio="none">
-        <defs><linearGradient id="sparkG" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stop-color="#e3b341" stop-opacity="0.2"/>
-          <stop offset="100%" stop-color="#e3b341" stop-opacity="0"/>
-        </linearGradient></defs>
-        <path id="sparkLine" d="M0,22 L150,22 L300,22" fill="none" stroke="#e3b341" stroke-width="1.5" stroke-linecap="round"/>
-        <path id="sparkArea" d="M0,22 L150,22 L300,22 L300,44 L0,44Z" fill="url(#sparkG)"/>
-      </svg>
-    </div>
-    <div class="stats-row">
-      <div class="stat"><div class="stat-icon">📊</div><div class="stat-num" id="rangeEl" style="color:#e3b341">--</div><div class="stat-lbl">Range 24h</div></div>
-      <div class="stat"><div class="stat-icon">📈</div><div class="stat-num" id="highEl" style="color:#3fb950">---</div><div class="stat-lbl">High 24h</div></div>
-      <div class="stat"><div class="stat-icon" id="momIcon">⚠️</div><div class="stat-num" id="momVal" style="color:#e3b341">WAIT</div><div class="stat-lbl">Momentum</div></div>
-    </div>
-    <div class="sent-wrap" style="margin-top:14px">
-      <div class="sent-label-row">
-        <span class="sent-label" id="lowEl">Low ---</span>
-        <span class="sent-label" id="highEl2">High ---</span>
-      </div>
-      <div class="sent-bar"><div class="sent-needle" id="sentNeedle" style="left:50%"></div></div>
-    </div>
-  </div>
-
-  <div class="section-title">Par</div>
-  <div class="pair-grid">
-    <div class="pair-btn active" onclick="selectPair(this,'BTCUSD')">BTC</div>
-    <div class="pair-btn" onclick="selectPair(this,'ETHUSD')">ETH</div>
-    <div class="pair-btn" onclick="selectPair(this,'SOLUSD')">SOL</div>
-    <div class="pair-btn" onclick="selectPair(this,'XRPUSD')">XRP</div>
-    <div class="pair-btn" onclick="selectPair(this,'LINKUSD')">LINK</div>
-    <div class="pair-btn" onclick="selectPair(this,'ADAUSD')">ADA</div>
-    <div class="pair-btn" onclick="selectPair(this,'AVAXUSD')">AVAX</div>
-    <div class="pair-btn" onclick="selectPair(this,'BNBUSD')">BNB</div>
-    <div class="pair-btn" onclick="selectPair(this,'AAVEUSD')">AAVE</div>
-  </div>
-  <div class="section-title">Graficos</div>
-  <div class="upload-grid">
-    <div class="upload-slot" id="slot-D1" onclick="document.getElementById('inp-D1').click()">
-      <div class="slot-icon">📅</div><div class="slot-tf">D1</div><div class="slot-label">Diario</div>
-      <input type="file" class="upload-input" id="inp-D1" accept="image/*" onchange="handleFile(this,'D1')">
-    </div>
-    <div class="upload-slot" id="slot-H4" onclick="document.getElementById('inp-H4').click()">
-      <div class="slot-icon">🕐</div><div class="slot-tf">H4</div><div class="slot-label">4 Horas</div>
-      <input type="file" class="upload-input" id="inp-H4" accept="image/*" onchange="handleFile(this,'H4')">
-    </div>
-    <div class="upload-slot" id="slot-H1" onclick="document.getElementById('inp-H1').click()">
-      <div class="slot-icon">⏰</div><div class="slot-tf">H1</div><div class="slot-label">1 Hora</div>
-      <input type="file" class="upload-input" id="inp-H1" accept="image/*" onchange="handleFile(this,'H1')">
-    </div>
-    <div class="upload-slot" id="slot-M15" onclick="document.getElementById('inp-M15').click()">
-      <div class="slot-icon">⚡</div><div class="slot-tf">M15</div><div class="slot-label">15 Min</div>
-      <input type="file" class="upload-input" id="inp-M15" accept="image/*" onchange="handleFile(this,'M15')">
-    </div>
-    <div class="upload-slot" id="slot-M5" onclick="document.getElementById('inp-M5').click()">
-      <div class="slot-icon">🎯</div><div class="slot-tf">M5</div><div class="slot-label">5 Min Scalp</div>
-      <input type="file" class="upload-input" id="inp-M5" accept="image/*" onchange="handleFile(this,'M5')">
-    </div>
-    <div class="upload-slot" id="slot-M1" onclick="document.getElementById('inp-M1').click()">
-      <div class="slot-icon">🔬</div><div class="slot-tf">M1</div><div class="slot-label">1 Min Opcional</div>
-      <input type="file" class="upload-input" id="inp-M1" accept="image/*" onchange="handleFile(this,'M1')">
-    </div>
-  </div>
-  <button class="analyze-btn" onclick="analyze()" id="analyzeBtn">⚡ Analisar Agora</button>
-  <div class="loading" id="loading">
-    <div class="loading-ring"></div>
-    <div class="loading-text">Analisando com ICT/SMC...</div>
-  </div>
-  <div class="result" id="result"></div>
-  <div class="footer">HSM Inner Circle Trader · v4.1</div>
-</div>
-<div class="toast" id="toast"></div>
-
 <script>
 let selectedPair='BTCUSD';
 let images={};
 let lastAnalysis='';
 let lastTimeframes='';
 
-// ══ MARKET BIAS ══
 async function loadMarketBias(){
-  const widget=document.getElementById('biasWidget');
-  const content=document.getElementById('biasContent');
+  const widget = document.getElementById('biasWidget');
   try{
-    // Chama o servidor Render que faz o fetch ao Bybit
-    const r=await fetch('/btc_data');
-    const d=await r.json();
-    if(d.error) throw new Error(d.error);
+    const symbol = 'BTCUSDT';
+    const r = await fetch('https://api.bybit.com/v5/market/tickers?category=linear&symbol='+symbol);
+    const resData = await r.json();
+    if(!resData.result || !resData.result.list || !resData.result.list[0]) throw new Error("Erro API");
+    
+    const t = resData.result.list[0];
+    const btcPrice = parseFloat(t.lastPrice);
+    const btcChange = parseFloat(t.price24hPcnt) * 100;
+    const high24h = parseFloat(t.highPrice24h);
+    const low24h = parseFloat(t.lowPrice24h);
+    
+    window._btcData = { price: btcPrice, change: btcChange, high: high24h, low: low24h };
+    const rangePos = low24h < high24h ? ((btcPrice - low24h) / (high24h - low24h)) * 100 : 50;
 
-    const btcPrice=d.price;
-    const btcChange=d.change;
-    const high24h=d.high;
-    const low24h=d.low;
-    const rangePos=low24h<high24h?((btcPrice-low24h)/(high24h-low24h))*100:50;
-
-    let bias,biasClass,biasIcon,biasSub,momentumIcon,momentumVal,momentumColor;
-    if(btcChange>1.5||(btcChange>0.5&&rangePos>60)){
-      bias='BULLISH';biasClass='bullish';biasIcon='🟢';biasSub='Favorece posições LONG';
-      momentumIcon='📈';momentumVal='BULL';momentumColor='#3fb950';
-    }else if(btcChange<-1.5||(btcChange<-0.5&&rangePos<40)){
-      bias='BEARISH';biasClass='bearish';biasIcon='🔴';biasSub='Favorece posições SHORT';
-      momentumIcon='📉';momentumVal='BEAR';momentumColor='#f85149';
-    }else{
-      bias='NEUTRO';biasClass='neutral';biasIcon='🟡';biasSub='Aguarda confirmação';
-      momentumIcon='⚠️';momentumVal='WAIT';momentumColor='#e3b341';
+    let bias='NEUTRO', biasClass='neutral', biasIcon='🟡', biasSub='Aguarda confirmação';
+    let momentumIcon='⚠️', momentumVal='WAIT', momentumColor='#e3b341';
+    
+    if(btcChange > 1.5 || (btcChange > 0.5 && rangePos > 60)){
+      bias='BULLISH'; biasClass='bullish'; biasIcon='🟢'; biasSub='Favorece posições LONG';
+      momentumIcon='📈'; momentumVal='BULL'; momentumColor='#3fb950';
+    }else if(btcChange < -1.5 || (btcChange < -0.5 && rangePos < 40)){
+      bias='BEARISH'; biasClass='bearish'; biasIcon='🔴'; biasSub='Favorece posições SHORT';
+      momentumIcon='📉'; momentumVal='BEAR'; momentumColor='#f85149';
     }
-    const changeClass=btcChange>0?'up':btcChange<0?'down':'flat';
-    const changeStr=(btcChange>0?'▲ +':'▼ ')+Math.abs(btcChange).toFixed(2)+'%';
-    const rangePosR=Math.round(rangePos);
-    const needlePos=Math.min(Math.max(rangePosR,5),95);
-    const sparkColor=btcChange>=0?'#3fb950':'#f85149';
-    const sp=generateSparkline(btcChange);
-    widget.className='bias-card '+biasClass;
-    content.innerHTML=`
-      <div class="bias-glow"></div>
-      <button onclick="loadMarketBias()" style="position:absolute;top:12px;right:12px;z-index:2;background:none;border:none;color:rgba(255,255,255,0.3);font-size:14px;cursor:pointer">↻</button>
-      <div class="bias-top">
-        <div class="bias-left">
-          <div class="bias-eyebrow">Market Bias · Agora</div>
-          <div class="bias-signal">
-            <div class="bias-icon">${biasIcon}</div>
-            <div class="bias-text">${bias}</div>
-          </div>
-          <div class="bias-sub">${biasSub}</div>
-        </div>
-        <div style="text-align:right">
-          <div style="font-size:18px;font-weight:700;color:#fff">$${btcPrice.toLocaleString('en-US',{maximumFractionDigits:0})}</div>
-          <div style="font-size:12px;font-weight:600;margin-top:2px;color:${btcChange>=0?'#3fb950':'#f85149'}">${changeStr}</div>
-          <div style="font-size:9px;color:rgba(255,255,255,0.25);letter-spacing:1px;text-transform:uppercase;font-family:Space Mono,monospace;margin-top:2px">BTC · 24h</div>
-        </div>
-      </div>
-      <div class="spark-wrap">
-        <svg class="spark-svg" viewBox="0 0 300 44" preserveAspectRatio="none">
-          <defs><linearGradient id="sparkG" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stop-color="${sparkColor}" stop-opacity="0.25"/>
-            <stop offset="100%" stop-color="${sparkColor}" stop-opacity="0"/>
-          </linearGradient></defs>
-          <path d="${sp.line}" fill="none" stroke="${sparkColor}" stroke-width="1.5" stroke-linecap="round"/>
-          <path d="${sp.area}" fill="url(#sparkG)"/>
-        </svg>
-      </div>
-      <div class="stats-row">
-        <div class="stat"><div class="stat-icon">😰</div><div class="stat-num" style="color:#e3b341">${rangePosR}%</div><div class="stat-lbl">Range 24h</div></div>
-        <div class="stat"><div class="stat-icon">📈</div><div class="stat-num" style="color:#3fb950">$${Math.round(high24h).toLocaleString('en-US')}</div><div class="stat-lbl">High 24h</div></div>
-        <div class="stat"><div class="stat-icon">${momentumIcon}</div><div class="stat-num" style="color:${momentumColor}">${momentumVal}</div><div class="stat-lbl">Momentum</div></div>
-      </div>
-      <div class="sent-wrap" style="margin-top:14px">
-        <div class="sent-row">
-          <span class="sent-label">Low $${Math.round(low24h).toLocaleString('en-US')}</span>
-          <span class="sent-label">High $${Math.round(high24h).toLocaleString('en-US')}</span>
-        </div>
-        <div class="sent-bar"><div class="sent-needle" style="left:${needlePos}%"></div></div>
-      </div>
-    `;
+
+    const changeStr = (btcChange >= 0 ? '▲ +' : '▼ ') + Math.abs(btcChange).toFixed(2) + '%';
+    const rangePosR = Math.round(rangePos);
+    const needlePos = Math.min(Math.max(rangePosR, 5), 95);
+    const sparkColor = btcChange >= 0 ? '#3fb950' : '#f85149';
+    const sp = generateSparkline(btcChange);
+
+    widget.className = 'bias-card ' + biasClass;
+    
+    document.getElementById('biasText').textContent = bias;
+    document.getElementById('biasIcon').textContent = biasIcon;
+    document.getElementById('biasSub').textContent = biasSub;
+    document.getElementById('btcPriceEl').textContent = '$' + btcPrice.toLocaleString('en-US', {maximumFractionDigits:0});
+    document.getElementById('btcChangeEl').textContent = changeStr;
+    document.getElementById('btcChangeEl').style.color = btcChange >= 0 ? '#3fb950' : '#f85149';
+    document.getElementById('rangeEl').textContent = rangePosR + '%';
+    document.getElementById('highEl').textContent = '$' + Math.round(high24h).toLocaleString('en-US');
+    document.getElementById('momIcon').textContent = momentumIcon;
+    document.getElementById('momVal').textContent = momentumVal;
+    document.getElementById('momVal').style.color = momentumColor;
+    document.getElementById('lowEl').textContent = 'Low $' + Math.round(low24h).toLocaleString('en-US');
+    document.getElementById('highEl2').textContent = 'High $' + Math.round(high24h).toLocaleString('en-US');
+    document.getElementById('sentNeedle').style.left = needlePos + '%';
+    
+    const sLine = document.getElementById('sparkLine');
+    const sArea = document.getElementById('sparkArea');
+    if(sLine) sLine.setAttribute('d', sp.line);
+    if(sLine) sLine.setAttribute('stroke', sparkColor);
+    if(sArea) sArea.setAttribute('d', sp.area);
   }catch(e){
-    widget.className='bias-card neutral';
-    content.innerHTML='<div style="font-size:11px;color:var(--muted);font-family:Space Mono,monospace;text-align:center;padding:20px">⚠️ Sem dados — tenta novamente</div>';
+    widget.className = 'bias-card neutral';
+    document.getElementById('biasSub').textContent = '⚠️ Erro API Bybit — Tenta novamente';
   }
 }
 
-
 function generateSparkline(change) {
-  // Gera sparkline simples baseada na direção da variação
-  const pts = [];
-  const n = 10;
+  const pts = []; const n = 10;
   let y = change >= 0 ? 28 : 8;
   for(let i = 0; i < n; i++) {
     const x = (i / (n-1)) * 300;
@@ -395,8 +81,6 @@ function generateSparkline(change) {
   return {line, area};
 }
 
-// Carrega ao abrir + atualiza a cada 5 minutos
-// ══ RESTO DO APP ══
 function selectPair(el,pair){
   document.querySelectorAll('.pair-btn').forEach(b=>b.classList.remove('active'));
   el.classList.add('active');
@@ -419,17 +103,12 @@ function handleFile(input,tf){
 
 async function getPrice(pair){
   try{
-    const symbolMap={
-      'BTCUSD':'BTCUSDT','ETHUSD':'ETHUSDT','SOLUSD':'SOLUSDT',
-      'XRPUSD':'XRPUSDT','LINKUSD':'LINKUSDT','ADAUSD':'ADAUSDT',
-      'AVAXUSD':'AVAXUSDT','BNBUSD':'BNBUSDT','AAVEUSD':'AAVEUSDT'
-    };
+    const symbolMap={'BTCUSD':'BTCUSDT','ETHUSD':'ETHUSDT','SOLUSD':'SOLUSDT','XRPUSD':'XRPUSDT','LINKUSD':'LINKUSDT','ADAUSD':'ADAUSDT','AVAXUSD':'AVAXUSDT','BNBUSD':'BNBUSDT','AAVEUSD':'AAVEUSDT'};
     const symbol=symbolMap[pair]||'BTCUSDT';
     const r=await fetch('https://api.bybit.com/v5/market/tickers?category=linear&symbol='+symbol);
     const d=await r.json();
     if(d.result&&d.result.list&&d.result.list[0]){
       const t=d.result.list[0];
-      // Guardar dados completos do BTC para o widget
       if(pair==='BTCUSD'){
         window._btcData={
           price:parseFloat(t.lastPrice),
@@ -446,11 +125,9 @@ async function getPrice(pair){
 
 async function updateServerPrices(){
   try{
-    // BTC primeiro — widget atualiza logo
     const btcPrice=await getPrice('BTCUSD');
-    if(window._btcData) loadMarketBias();
+    loadMarketBias();
 
-    // Resto dos pares em paralelo
     const pairs=['ETHUSD','SOLUSD','XRPUSD','LINKUSD','ADAUSD','AVAXUSD','BNBUSD','AAVEUSD'];
     const priceObj={};
     if(btcPrice) priceObj['BTCUSD']=btcPrice;
@@ -467,8 +144,9 @@ async function updateServerPrices(){
     }
   }catch(e){}
 }
-updateServerPrices();
-setInterval(updateServerPrices,10000);
+
+setTimeout(updateServerPrices, 500);
+setInterval(updateServerPrices, 15000);
 
 async function analyze(){
   const tfList=Object.keys(images);
@@ -574,5 +252,3 @@ function showToast(msg){
   setTimeout(()=>t.classList.remove('show'),3000);
 }
 </script>
-</body>
-</html>

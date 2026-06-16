@@ -35,12 +35,10 @@ def extract_trade_info(analysis, timeframes_str):
    buy_count = sum(tl.count(w) for w in ['long', 'bullish', 'buy', 'compra'])
    direction = "SHORT" if sell_count > buy_count else "LONG"
 
-   # Score procura no texto global
    sm = RE_SCORE.search(analysis)
    score = int(sm.group(1)) if sm else 50
    if score > 100: score = 100
 
-   # Isolar Setup #1 para não misturar com Setup #2
    setup1_block = analysis
    if "SETUP #2" in analysis:
        setup1_block = analysis.split("SETUP #2")[0]
@@ -178,6 +176,22 @@ except socket.error:
 def index():
    return send_from_directory('.', 'index.html')
 
+@app.route('/btc_data', methods=['GET'])
+def btc_data():
+   try:
+       url = 'https://api.bybit.com/v5/market/tickers?category=linear&symbol=BTCUSDT'
+       r = requests.get(url, timeout=5)
+       d = r.json()
+       t = d['result']['list'][0]
+       return jsonify({
+           'price': float(t['lastPrice']),
+           'change': float(t['price24hPcnt']) * 100,
+           'high': float(t['highPrice24h']),
+           'low': float(t['lowPrice24h'])
+       })
+   except Exception as e:
+       return jsonify({'error': str(e)}), 500
+
 @app.route('/update_prices', methods=['POST'])
 def update_prices():
    try:
@@ -259,116 +273,13 @@ def analyze():
            "- <b>IFVG:</b> [zona, direcao invertida e status: ativo/mitigado]\n"
            "- <b>CHoCH:</b> [status e nivel exato]\n\n"
            "---\n\n"
-           "<b>NARRATIVA ICT DO MERCADO</b>\n"
-           "- <b>Sweep Identificado:</b> [qual liquidez foi varrida, valor exato e TF]\n"
-           "- <b>Swing Criado:</b> de [low] para [high] (ou high para low)\n"
-           "- <b>CHoCH Confirmado:</b> [nivel exato e TF]\n"
-           "- <b>OTE do Swing:</b> 61.8%=[valor] | 70.5%=[valor] | 79%=[valor]\n"
-           "- <b>IFVG Relevante:</b> [zona de FVG invertido que coincide com entrada]\n"
-           "- <b>Narrativa Atual:</b> [descricao do que o mercado esta a fazer e porque]\n\n"
-           "---\n\n"
-           "<b>POWER OF THREE - AMD</b>\n"
-           "- <b>Fase Atual:</b> [Accumulation / Manipulation / Distribution]\n"
-           "- <b>Accumulation:</b> [onde e quando o mercado consolidou - sessao Asia]\n"
-           "- <b>Manipulation:</b> [spike identificado - direcao, valor exato, sessao London/NY]\n"
-           "- <b>Distribution:</b> [direcao real esperada apos manipulacao - alvo]\n"
-           "- <b>Midnight Open:</b> [valor] - preco [acima/abaixo] = manipulacao [bullish/bearish]\n"
-           "- <b>Aviso PO3:</b> [se spike de manipulacao ainda em curso - AGUARDAR antes de entrar]\n\n"
-           "---\n\n"
-           "<b>WYCKOFF PHASE</b>\n"
-           "- <b>Fase Atual:</b> [Acumulacao/Markup/Distribuicao/Markdown]\n"
-           "- <b>Evento Wyckoff:</b> [Spring/UTAD/LPS/SOW se identificavel]\n"
-           "- <b>Confluencia ICT:</b> [como alinha com sweep, CHoCH e OTE]\n\n"
-           "---\n\n"
-           "<b>KILLZONES & MIDNIGHT OPEN</b>\n"
-           "- <b>Sessao Ativa:</b> [Asia/London/NY]\n"
-           "- <b>Midnight Open:</b> [valor exato]\n"
-           "- <b>Posicao do Preco:</b> [PREMIUM/DISCOUNT/NO NIVEL]\n\n"
-           "---\n\n"
-           "<b>OTE - OPTIMAL TRADE ENTRY</b>\n"
-           "- <b>Swing relevante:</b> de [low] para [high]\n"
-           "- <b>Origem do Swing:</b> [sweep que originou este swing]\n"
-           "- <b>50% (Equilibrio):</b> [valor]\n"
-           "- <b>OTE 61.8%:</b> [valor]\n"
-           "- <b>OTE 70.5%:</b> [valor]\n"
-           "- <b>OTE 79%:</b> [valor]\n"
-           "- <b>IFVG na zona OTE:</b> [sim/nao - zona exata se existir]\n"
-           "- <b>Zona de entrada ideal SHORT:</b> [range]\n"
-           "- <b>Zona de entrada ideal LONG:</b> [range]\n\n"
-           "---\n\n"
-           "<b>SETUPS IDENTIFICADOS</b>\n\n"
-           "---\n\n"
-           "<b>SETUP #1 - [LONG/SHORT] [SCALP/INTRADAY/SWING] ([TFs])</b>\n"
-           "- <b>Narrativa:</b> [sweep em X criou swing Y-Z, OTE em W, entrada no retrace]\n"
-           "- <b>Fase PO3:</b> [em que fase AMD estamos e se e seguro entrar agora]\n"
-           "- <b>Nivel OTE:</b> [61.8% / 70.5% / 79%] = [valor exato do fibonacci]\n"
-           "- <b>IFVG Confluente:</b> [zona de IFVG que coincide com entrada - se existir]\n"
-           "- <b>Entrada Agressiva:</b> [valor exato] - limit order no OTE\n"
-           "- <b>Entrada Conservadora:</b> [valor exato] - apos fechamento M15 confirmado no OTE\n"
-           "- <b>Trigger Obrigatorio:</b> [Engolfo/Pin Bar/Inside Bar] no [TF] com fechamento [acima/abaixo] de [nivel]\n"
-           "- <b>Volume:</b> vela de confirmacao deve ter volume acima de [valor MA20]\n"
-           "- <b>Stop Loss:</b> [valor] ([referencia ICT exata])\n"
-           "- <b>Invalidacao Pre-Entrada:</b> fechar acima/abaixo de [valor] cancela o setup\n"
-           "- <b>Take Profit 1:</b> [valor] ([referencia])\n"
-           "- <b>Take Profit 2:</b> [valor] ([referencia])\n"
-           "- <b>Take Profit 3:</b> [valor] ([referencia])\n"
-           "- <b>Razao R/R:</b> [ex: 1:2.5]\n"
-           "- <b>Confluencias Ativas:</b> [listar: Sweep + CHoCH + OTE + OB + FVG + IFVG + PO3 + Killzone etc]\n"
-           "- <b>Probabilidade:</b> [X]% ([N] confluencias identificadas)\n"
-           "- <b>Gestao Pos-Entrada:</b> [o que esperar depois de entrar - proximos niveis, re-sweeps possiveis]\n"
-           "- <b>Proximos Alvos de Liquidez:</b> [onde o mercado vai apos TP1, TP2, TP3]\n"
-           "- <b>Cenario Alternativo:</b> [o que acontece se invalidar - re-sweep, continuacao, novo setup]\n"
-           "- <b>Tipo:</b> [Scalp/Intraday/Swing + descricao]\n\n"
-           "<b>SETUP #2 - [LONG/SHORT] [SCALP/INTRADAY/SWING] ([TFs])</b>\n"
-           "- <b>Narrativa:</b> [sweep e swing que origina este setup]\n"
-           "- <b>Fase PO3:</b> [fase AMD e seguranca de entrada]\n"
-           "- <b>Nivel OTE:</b> [61.8% / 70.5% / 79%] = [valor]\n"
-           "- <b>IFVG Confluente:</b> [zona se existir]\n"
-           "- <b>Entrada Agressiva:</b> [valor]\n"
-           "- <b>Entrada Conservadora:</b> [valor]\n"
-           "- <b>Trigger Obrigatorio:</b> [padrao de vela]\n"
-           "- <b>Volume:</b> [referencia]\n"
-           "- <b>Stop Loss:</b> [valor] ([referencia ICT])\n"
-           "- <b>Invalidacao Pre-Entrada:</b> [nivel]\n"
-           "- <b>Take Profit 1:</b> [valor]\n"
-           "- <b>Take Profit 2:</b> [valor]\n"
-           "- <b>Take Profit 3:</b> [valor]\n"
-           "- <b>Razao R/R:</b> [valor]\n"
-           "- <b>Confluencias Ativas:</b> [listar]\n"
-           "- <b>Probabilidade:</b> [X]%\n"
-           "- <b>Gestao Pos-Entrada:</b> [proximos niveis e re-sweeps]\n"
-           "- <b>Proximos Alvos de Liquidez:</b> [onde vai apos cada TP]\n"
-           "- <b>Cenario Alternativo:</b> [se invalidar]\n"
-           "- <b>Tipo:</b> [descricao]\n\n"
-           "---\n\n"
-           "<b>SCORE OPERACIONAL: [X]/100</b>\n"
-           "- Confluencia Multi-TF: [X]/100\n"
-           "- Suporte Estrutural: [X]/100\n"
-           "- Momentum: [X]/100\n"
-           "- Risk/Reward: [X]/100\n"
-           "- Liquidez: [X]/100\n"
-           "- Timing (Killzone): [X]/100\n\n"
-           "---\n\n"
-           "<b>AVISOS CRITICOS</b>\n"
-           "- [aviso 1]\n"
-           "- [aviso 2]\n\n"
+           "<b>SCORE OPERACIONAL: [X]/100</b>\n\n"
            "---\n\n"
            "<b>RECOMENDACAO FINAL</b>\n"
-           "[narrativa completa: sweep identificado, fase PO3 atual, CHoCH confirmado, "
-           "OTE calculado, IFVG confluente se existir, entrada exata, gestao da posicao e o que esperar depois]\n\n"
+           "[narrativa completa]\n\n"
            "REGRAS CRITICAS:\n"
-           "- Stop Loss SEMPRE com referencia ICT explicada\n"
            "- NUNCA uses markdown (* # [ ])\n"
            "- Usa APENAS tags HTML: <b> <i> <u>\n"
-           "- D1 bearish = aviso critico obrigatorio em qualquer setup long\n"
-           "- Minimo 3 confluencias para recomendar entrada\n"
-           "- Minimo 2:1 RR para recomendar entrada\n"
-           "- Entrada conservadora E SEMPRE a preferida\n"
-           "- Entrada DEVE referenciar nivel OTE correspondente (61.8%, 70.5% ou 79%)\n"
-           "- Se entrada nao coincide com OTE explicar porque e qual alternativa OTE existe\n"
-           "- Narrativa ICT obrigatoria: Sweep -> CHoCH -> OTE -> IFVG -> PO3 -> Entrada -> Gestao\n"
-           "- Se PO3 Manipulation ainda em curso = AVISO CRITICO para NAO entrar ainda\n"
-           "- IFVG confluente com OTE = confluencia maxima = prioridade de entrada\n"
            "- Fecha todas as tags HTML abertas\n"
        )
 

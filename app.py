@@ -125,7 +125,6 @@ def check_alerts_inline():
    except Exception as e:
        print(f"Erro ao processar alertas inline: {e}")
 
-# Executa as inicializações antes de expor a app ao Gunicorn
 init_db()
 
 @app.route('/')
@@ -205,7 +204,7 @@ def analyze():
            "- <b>H1:</b> [bias] - [justificativa]\n"
            "- <b>M15/M5:</b> [bias] - [justificativa]\n\n"
            "---\n\n"
-           "<b>LIQUIDEZ & ESTRUTURA</b>\n"
+           "<b>LIquidez & ESTRUTURA</b>\n"
            "- <b>BSL (Buy Side Liquidity):</b> [valor] - [contexto - stops dos shorts aqui]\n"
            "- <b>SSL (Sell Side Liquidity):</b> [valor] - [contexto - stops dos longs aqui]\n"
            "- <b>AVISO DE LIQUIDEZ:</b> [BSL/SSL que pode varrer o stop antes da movimentacao]\n"

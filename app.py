@@ -179,15 +179,20 @@ def index():
 @app.route('/btc_data', methods=['GET'])
 def btc_data():
    try:
-       r = requests.get('https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT', timeout=10)
+       r = requests.get(
+           'https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd&include_24hr_change=true&include_24hr_vol=true',
+           timeout=10,
+           headers={'User-Agent': 'Mozilla/5.0'}
+       )
        d = r.json()
-       data = {
-           'price': float(d['lastPrice']),
-           'change': float(d['priceChangePercent']),
-           'high': float(d['highPrice']),
-           'low': float(d['lowPrice'])
-       }
-       print(f"BTC Data: {data}")
+       btc = d['bitcoin']
+       price = float(btc['usd'])
+       change = float(btc.get('usd_24h_change', 0))
+       # high/low estimados a partir da variação
+       high = price * (1 + max(change, 0) / 100) if change > 0 else price * 1.01
+       low = price * (1 + min(change, 0) / 100) if change < 0 else price * 0.99
+       data = {'price': price, 'change': change, 'high': high, 'low': low}
+       print(f"BTC Data CoinGecko: {data}")
        return jsonify(data)
    except Exception as e:
        print(f"btc_data erro: {str(e)}")

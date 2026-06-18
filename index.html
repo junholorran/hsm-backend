@@ -776,7 +776,7 @@ function resetAnalysis(){
 // ── JOURNAL ────────────────────────────────────────────────────────────────
 async function loadJournal(){
   try{
-    const res = await fetch('/journal');
+    const res = await fetch(window.location.origin+"/journal");
     const data = await res.json();
     if(data.error) throw new Error(data.error);
     allTrades = data.trades || [];
@@ -823,7 +823,7 @@ function renderJournal(trades){
   }
   container.innerHTML = trades.map(t => {
     const date = new Date(t.created_at * 1000);
-    const dateStr = date.toLocaleDateString('pt-PT') + ' · ' + date.toHours();
+    const dateStr = date.toLocaleDateString('pt-PT') + ' · ' + date.toLocaleTimeString('pt-PT',{hour:'2-digit',minute:'2-digit'});
     const isPending = t.status === 'pending';
     const resultHtml = isPending
       ? '<div class="trade-result pending">⏳ Aberto</div>'
@@ -883,7 +883,7 @@ async function updateTrade(id, status){
   const pnl = pnlInput ? Math.abs(parseFloat(pnlInput.value)||0) : 0;
   const finalPnl = status === 'loss' ? -pnl : (status === 'win' ? pnl : 0);
   try{
-    await fetch('/journal/update', {
+    await fetch(window.location.origin+'/journal/update', {
       method:'POST',
       headers:{'Content-Type':'application/json'},
       body: JSON.stringify({id, status, pnl: finalPnl})
@@ -898,7 +898,7 @@ async function updateTrade(id, status){
 // ── STATS ──────────────────────────────────────────────────────────────────
 async function loadStats(){
   try{
-    const res = await fetch('/journal/stats');
+    const res = await fetch(window.location.origin+"/journal/stats");
     const d = await res.json();
     if(d.error) throw new Error(d.error);
 

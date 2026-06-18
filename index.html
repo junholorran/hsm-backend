@@ -20,9 +20,10 @@
   --muted:#6e7681;
   --text:#e6edf3;
   --text2:#b1bac4;
+  --pending:#ff9800;
 }
 *{box-sizing:border-box;margin:0;padding:0;}
-body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-height:100vh;padding-bottom:40px;}
+body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-height:100vh;padding-bottom:80px;}
 
 /* HEADER */
 .header{background:linear-gradient(135deg,#0d0d18 0%,#111128 100%);border-bottom:1px solid var(--border);padding:16px 20px;display:flex;align-items:center;gap:12px;position:sticky;top:0;z-index:100;}
@@ -48,7 +49,6 @@ body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-h
 /* SPARKLINE */
 .spark-wrap{margin:8px 0;height:38px;}
 .spark-wrap svg{width:100%;height:38px;}
-.spark-area{fill-opacity:.15;}
 
 /* SENTIMENT BAR */
 .sent-bar-wrap{margin-top:10px;}
@@ -141,11 +141,119 @@ body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-h
 .reset-btn{display:block;width:calc(100% - 32px);margin:0 16px 16px;padding:14px;background:var(--surface2);color:var(--muted);border:1px solid var(--border);border-radius:12px;font-size:13px;font-family:'Space Mono',monospace;cursor:pointer;}
 
 /* TOAST */
-.toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%) translateY(100px);background:#1f2937;color:var(--text);padding:12px 20px;border-radius:10px;font-size:13px;z-index:999;transition:transform .3s;white-space:nowrap;border:1px solid var(--border);}
+.toast{position:fixed;bottom:90px;left:50%;transform:translateX(-50%) translateY(100px);background:#1f2937;color:var(--text);padding:12px 20px;border-radius:10px;font-size:13px;z-index:999;transition:transform .3s;white-space:nowrap;border:1px solid var(--border);}
 .toast.show{transform:translateX(-50%) translateY(0);}
 
 /* DIVIDER */
 .divider{height:1px;background:var(--border);margin:0 16px 16px;}
+
+/* ── BOTTOM NAV ── */
+.bottom-nav{
+  position:fixed;bottom:0;left:0;right:0;
+  background:rgba(17,17,24,0.97);
+  backdrop-filter:blur(20px);
+  border-top:1px solid var(--border);
+  display:flex;z-index:200;
+  padding-bottom:env(safe-area-inset-bottom,4px);
+}
+.nav-item{
+  flex:1;display:flex;flex-direction:column;align-items:center;
+  padding:10px 0 6px;cursor:pointer;gap:3px;
+  border:none;background:transparent;color:var(--muted);
+  font-size:9px;font-weight:600;letter-spacing:0.5px;
+  font-family:'Space Mono',monospace;
+  -webkit-tap-highlight-color:transparent;
+  transition:color .2s;
+}
+.nav-item.active{color:var(--gold);}
+.nav-icon{font-size:20px;}
+.nav-dot{width:4px;height:4px;border-radius:50%;background:var(--gold);opacity:0;transition:opacity .2s;}
+.nav-item.active .nav-dot{opacity:1;}
+
+/* ── SCREENS ── */
+.screen{display:none;}
+.screen.active{display:block;}
+
+/* ── JOURNAL SCREEN ── */
+.pnl-hero{
+  margin:16px;border-radius:16px;padding:20px;
+  background:linear-gradient(135deg,#0d1a0d,#0a1a10);
+  border:1px solid #1a3a1a;text-align:center;
+}
+.pnl-label{font-size:10px;color:var(--muted);letter-spacing:2px;font-family:'Space Mono',monospace;margin-bottom:8px;}
+.pnl-value{font-size:40px;font-weight:700;font-family:'Space Mono',monospace;line-height:1;}
+.pnl-value.positive{color:var(--green);}
+.pnl-value.negative{color:var(--red);}
+.pnl-sub{font-size:11px;color:var(--muted);margin-top:6px;}
+.pnl-stats{display:flex;gap:8px;margin-top:14px;}
+.pnl-stat{flex:1;background:rgba(255,255,255,.04);border-radius:10px;padding:10px 6px;text-align:center;}
+.pnl-stat-val{font-size:17px;font-weight:700;font-family:'Space Mono',monospace;}
+.pnl-stat-label{font-size:9px;color:var(--muted);letter-spacing:1px;margin-top:3px;}
+
+.filter-row{display:flex;gap:8px;margin:0 16px 14px;overflow-x:auto;padding-bottom:4px;}
+.filter-row::-webkit-scrollbar{display:none;}
+.filter-chip{padding:6px 14px;border-radius:20px;border:1px solid var(--border);background:transparent;color:var(--muted);font-size:11px;font-weight:600;white-space:nowrap;cursor:pointer;flex-shrink:0;font-family:'Space Mono',monospace;-webkit-tap-highlight-color:transparent;}
+.filter-chip.active{border-color:var(--gold);color:var(--gold);background:rgba(240,192,64,.08);}
+
+.trade-card{
+  margin:0 16px 10px;background:var(--surface);
+  border:1px solid var(--border);border-radius:14px;padding:14px;
+  cursor:pointer;transition:border-color .2s;
+}
+.trade-card:active{border-color:var(--gold);}
+.trade-header{display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:10px;}
+.trade-pair{font-size:15px;font-weight:700;font-family:'Space Mono',monospace;}
+.trade-date{font-size:10px;color:var(--muted);margin-top:2px;}
+.trade-result{font-size:17px;font-weight:700;font-family:'Space Mono',monospace;}
+.trade-result.win{color:var(--green);}
+.trade-result.loss{color:var(--red);}
+.trade-result.pending{color:var(--pending);}
+.trade-details{display:flex;gap:14px;margin-bottom:10px;}
+.td-label{font-size:9px;color:var(--muted);letter-spacing:1px;}
+.td-val{font-size:12px;font-weight:700;font-family:'Space Mono',monospace;color:var(--text);margin-top:2px;}
+.trade-badges{display:flex;gap:6px;flex-wrap:wrap;}
+.badge{padding:3px 8px;border-radius:6px;font-size:10px;font-weight:700;letter-spacing:0.5px;font-family:'Space Mono',monospace;}
+.badge-score{background:rgba(240,192,64,.15);color:var(--gold);}
+.badge-win{background:rgba(63,185,80,.12);color:var(--green);}
+.badge-loss{background:rgba(248,81,73,.12);color:var(--red);}
+.badge-pending{background:rgba(255,152,0,.12);color:var(--pending);}
+.badge-short{background:rgba(248,81,73,.12);color:var(--red);}
+.badge-long{background:rgba(63,185,80,.12);color:var(--green);}
+
+.action-btns{display:flex;gap:8px;margin-top:12px;}
+.action-btn{flex:1;padding:9px;border-radius:8px;border:1.5px solid;font-size:11px;font-weight:700;cursor:pointer;background:transparent;letter-spacing:0.5px;font-family:'Space Mono',monospace;-webkit-tap-highlight-color:transparent;}
+.action-btn.tp{border-color:var(--green);color:var(--green);}
+.action-btn.sl{border-color:var(--red);color:var(--red);}
+.action-btn.cancel{border-color:var(--muted);color:var(--muted);}
+
+.pnl-input-row{display:flex;gap:8px;margin-top:10px;}
+.pnl-input{flex:1;background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:9px 12px;border-radius:8px;font-size:13px;font-family:'Space Mono',monospace;outline:none;}
+.pnl-input:focus{border-color:var(--gold);}
+.pnl-confirm-btn{background:linear-gradient(135deg,var(--gold),var(--gold2));color:#000;border:none;padding:9px 16px;border-radius:8px;font-size:12px;font-weight:700;font-family:'Space Mono',monospace;cursor:pointer;}
+
+.empty-state{text-align:center;padding:40px 20px;color:var(--muted);}
+.empty-state .empty-icon{font-size:40px;margin-bottom:12px;}
+.empty-state p{font-size:13px;line-height:1.6;}
+
+/* ── STATS SCREEN ── */
+.stats-card{margin:0 16px 14px;background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:16px;}
+.stats-card-title{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:2px;font-family:'Space Mono',monospace;margin-bottom:12px;}
+.winrate-big{font-size:48px;font-weight:700;font-family:'Space Mono',monospace;color:var(--gold);line-height:1;}
+.winrate-label{font-size:11px;color:var(--muted);margin-top:4px;}
+
+.score-row{display:flex;align-items:center;gap:10px;margin-bottom:8px;}
+.score-range{font-size:11px;color:var(--muted);font-family:'Space Mono',monospace;width:56px;flex-shrink:0;}
+.score-bar-bg{flex:1;height:8px;background:var(--surface2);border-radius:4px;overflow:hidden;}
+.score-bar-fill{height:100%;border-radius:4px;}
+.score-pct{font-size:12px;font-weight:700;font-family:'Space Mono',monospace;width:36px;text-align:right;flex-shrink:0;}
+
+.pair-row{display:flex;align-items:center;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--border);}
+.pair-row:last-child{border-bottom:none;}
+.pair-name{font-size:14px;font-weight:700;font-family:'Space Mono',monospace;}
+.pair-wl{font-size:11px;color:var(--muted);margin-top:2px;}
+.pair-pnl{font-size:15px;font-weight:700;font-family:'Space Mono',monospace;}
+
+.no-stats{text-align:center;padding:30px;color:var(--muted);font-size:13px;}
 </style>
 </head>
 <body>
@@ -157,6 +265,9 @@ body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-h
     <div class="header-sub">Smart Money Concepts</div>
   </div>
 </div>
+
+<!-- ══════════════════ HOME SCREEN ══════════════════ -->
+<div id="screenHome" class="screen active">
 
 <!-- BIAS WIDGET -->
 <div class="bias-card neutral" id="biasWidget">
@@ -284,15 +395,94 @@ body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-h
 <!-- RESULTADO -->
 <div class="result" id="result"></div>
 
+</div><!-- end screenHome -->
+
+<!-- ══════════════════ JOURNAL SCREEN ══════════════════ -->
+<div id="screenJournal" class="screen">
+  <div class="pnl-hero">
+    <div class="pnl-label">P&L TOTAL</div>
+    <div class="pnl-value positive" id="journalPnl">$0.00</div>
+    <div class="pnl-sub" id="journalSince">Sem trades ainda</div>
+    <div class="pnl-stats">
+      <div class="pnl-stat">
+        <div class="pnl-stat-val" id="journalWinRate" style="color:var(--gold)">--%</div>
+        <div class="pnl-stat-label">WIN RATE</div>
+      </div>
+      <div class="pnl-stat">
+        <div class="pnl-stat-val" id="journalTotal">0</div>
+        <div class="pnl-stat-label">TRADES</div>
+      </div>
+      <div class="pnl-stat">
+        <div class="pnl-stat-val" id="journalLosses" style="color:var(--red)">$0</div>
+        <div class="pnl-stat-label">PERDAS</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="filter-row" id="journalFilters">
+    <button class="filter-chip active" onclick="filterJournal('ALL',this)">TODOS</button>
+    <button class="filter-chip" onclick="filterJournal('BTCUSD',this)">BTC</button>
+    <button class="filter-chip" onclick="filterJournal('AAVEUSD',this)">AAVE</button>
+    <button class="filter-chip" onclick="filterJournal('ETHUSD',this)">ETH</button>
+    <button class="filter-chip" onclick="filterJournal('SOLUSD',this)">SOL</button>
+    <button class="filter-chip" onclick="filterJournal('win',this)">WIN ✅</button>
+    <button class="filter-chip" onclick="filterJournal('loss',this)">LOSS ❌</button>
+    <button class="filter-chip" onclick="filterJournal('pending',this)">ABERTOS ⏳</button>
+  </div>
+
+  <div id="journalList"></div>
+</div><!-- end screenJournal -->
+
+<!-- ══════════════════ STATS SCREEN ══════════════════ -->
+<div id="screenStats" class="screen">
+  <div style="margin-top:16px" id="statsContent">
+    <div class="no-stats">A carregar stats...</div>
+  </div>
+</div><!-- end screenStats -->
+
+<!-- BOTTOM NAV -->
+<nav class="bottom-nav">
+  <button class="nav-item active" id="navHome" onclick="switchTab('Home')">
+    <span class="nav-icon">🏠</span>
+    <span>HOME</span>
+    <div class="nav-dot"></div>
+  </button>
+  <button class="nav-item" id="navJournal" onclick="switchTab('Journal')">
+    <span class="nav-icon">📊</span>
+    <span>JOURNAL</span>
+    <div class="nav-dot"></div>
+  </button>
+  <button class="nav-item" id="navStats" onclick="switchTab('Stats')">
+    <span class="nav-icon">📈</span>
+    <span>STATS</span>
+    <div class="nav-dot"></div>
+  </button>
+</nav>
+
 <!-- TOAST -->
 <div class="toast" id="toast"></div>
 
 <script>
-let selectedPair='BTCUSD';
-let images={};
-let lastAnalysis='';
-let lastTimeframes='';
+// ── STATE ──────────────────────────────────────────────────────────────────
+let selectedPair = 'BTCUSD';
+let images = {};
+let lastAnalysis = '';
+let lastTimeframes = '';
+let lastJournalId = '';
+let allTrades = [];
+let currentFilter = 'ALL';
 
+// ── TAB NAVIGATION ─────────────────────────────────────────────────────────
+function switchTab(tab) {
+  ['Home','Journal','Stats'].forEach(t => {
+    document.getElementById('screen'+t).classList.toggle('active', t===tab);
+    document.getElementById('nav'+t).classList.toggle('active', t===tab);
+  });
+  if(tab === 'Journal') loadJournal();
+  if(tab === 'Stats') loadStats();
+}
+
+// ── MARKET BIAS ────────────────────────────────────────────────────────────
 async function loadMarketBias(){
   const widget = document.getElementById('biasWidget');
   try{
@@ -309,6 +499,29 @@ async function loadMarketBias(){
     
     window._btcData = { price: btcPrice, change: btcChange, high: high24h, low: low24h };
     const rangePos = low24h < high24h ? ((btcPrice - low24h) / (high24h - low24h)) * 100 : 50;
+
+    // RANGE POS: posição no range do dia com label contextual ICT
+    let rangePosLabel = '--';
+    let rangePosColor = 'var(--text)';
+    if(rangePos <= 20){
+      rangePosLabel = 'DEEP LOW';
+      rangePosColor = '#3fb950';
+    } else if(rangePos <= 35){
+      rangePosLabel = 'LOW';
+      rangePosColor = '#3fb950';
+    } else if(rangePos <= 50){
+      rangePosLabel = 'DISCOUNT';
+      rangePosColor = '#58a6ff';
+    } else if(rangePos <= 65){
+      rangePosLabel = 'PREMIUM';
+      rangePosColor = '#e3b341';
+    } else if(rangePos <= 80){
+      rangePosLabel = 'HIGH';
+      rangePosColor = 'var(--red)';
+    } else {
+      rangePosLabel = 'DEEP HIGH';
+      rangePosColor = 'var(--red)';
+    }
 
     let bias='NEUTRO', biasClass='neutral', biasIcon='🟡', biasSub='Aguarda confirmação';
     let momentumIcon='⚠️', momentumVal='WAIT', momentumColor='#e3b341';
@@ -328,7 +541,6 @@ async function loadMarketBias(){
     const sp = generateSparkline(btcChange);
 
     widget.className = 'bias-card ' + biasClass;
-    
     document.getElementById('biasText').textContent = bias;
     document.getElementById('biasIcon').textContent = biasIcon;
     document.getElementById('biasSub').textContent = biasSub;
@@ -343,7 +555,12 @@ async function loadMarketBias(){
     document.getElementById('lowEl').textContent = 'Low $' + Math.round(low24h).toLocaleString('en-US');
     document.getElementById('highEl2').textContent = 'High $' + Math.round(high24h).toLocaleString('en-US');
     document.getElementById('sentNeedle').style.left = needlePos + '%';
-    
+
+    // RANGE POS atualizado
+    const rangePosEl = document.getElementById('rangePos');
+    rangePosEl.textContent = rangePosLabel;
+    rangePosEl.style.color = rangePosColor;
+
     const sLine = document.getElementById('sparkLine');
     const sArea = document.getElementById('sparkArea');
     if(sLine) sLine.setAttribute('d', sp.line);
@@ -370,6 +587,7 @@ function generateSparkline(change) {
   return {line, area};
 }
 
+// ── PAIR & FILE HANDLERS ───────────────────────────────────────────────────
 function selectPair(el,pair){
   document.querySelectorAll('.pair-btn').forEach(b=>b.classList.remove('active'));
   el.classList.add('active');
@@ -390,6 +608,7 @@ function handleFile(input,tf){
   reader.readAsDataURL(file);
 }
 
+// ── PRICE FETCHER ──────────────────────────────────────────────────────────
 async function getPrice(pair){
   try{
     const symbolMap={'BTCUSD':'BTCUSDT','ETHUSD':'ETHUSDT','SOLUSD':'SOLUSDT','XRPUSD':'XRPUSDT','LINKUSD':'LINKUSDT','ADAUSD':'ADAUSDT','AVAXUSD':'AVAXUSDT','BNBUSD':'BNBUSDT','AAVEUSD':'AAVEUSDT'};
@@ -416,7 +635,6 @@ async function updateServerPrices(){
   try{
     const btcPrice=await getPrice('BTCUSD');
     loadMarketBias();
-
     const pairs=['ETHUSD','SOLUSD','XRPUSD','LINKUSD','ADAUSD','AVAXUSD','BNBUSD','AAVEUSD'];
     const priceObj={};
     if(btcPrice) priceObj['BTCUSD']=btcPrice;
@@ -437,6 +655,7 @@ async function updateServerPrices(){
 setTimeout(updateServerPrices, 500);
 setInterval(updateServerPrices, 15000);
 
+// ── ANALYZE ────────────────────────────────────────────────────────────────
 async function analyze(){
   const tfList=Object.keys(images);
   if(tfList.length<2)return showToast('Carrega pelo menos 2 graficos');
@@ -453,7 +672,8 @@ async function analyze(){
     const data=await res.json();
     if(data.error)throw new Error(data.error);
     lastAnalysis=data.result;
-    lastTimeframes=Object.keys(images).join(',');
+    lastTimeframes=data.timeframes||Object.keys(images).join(',');
+    lastJournalId=data.journal_id||'';
     renderResult(data.result);
   }catch(e){
     showToast('Erro: '+e.message);
@@ -484,7 +704,25 @@ function renderResult(text){
     .replace(/\bCHoCH\b/g,'<span class="tag tag-warn">CHoCH</span>')
     .replace(/\bBOS\b/g,'<span class="tag tag-info">BOS</span>')
     .replace(/\n{2,}/g,'</p><p>').replace(/\n/g,'<br>').replace(/^/,'<p>').replace(/$/,'</p>');
-  const html='<div class="score-card '+dir+'"><div class="score-header"><div class="score-direction '+dir+'">'+dirText+'</div><div class="score-badge '+scoreClass+'">'+score+'/100</div></div><div class="score-bar-wrap"><div class="score-bar '+dir+'" style="width:'+score+'%"></div></div><div style="font-size:12px;color:var(--muted);font-family:Space Mono,monospace">'+selectedPair+' ICT/SMC</div></div><div class="analysis-card"><h3>Analise Completa</h3><div class="analysis-text">'+formatted+'</div></div><div class="alert-box"><div class="alert-box-title">CRIAR ALERTA DE PRECO</div><div class="alert-row"><input id="alertPrice" type="number" placeholder="Ex: 62300" step="any" class="alert-input"><button onclick="createAlert()" class="alert-create-btn">Criar</button></div><div id="alertStatus" class="alert-status"></div></div><button class="reset-btn" onclick="resetAnalysis()">Nova Analise</button>';
+  const html=
+    '<div class="score-card '+dir+'">'+
+      '<div class="score-header">'+
+        '<div class="score-direction '+dir+'">'+dirText+'</div>'+
+        '<div class="score-badge '+scoreClass+'">'+score+'/100</div>'+
+      '</div>'+
+      '<div class="score-bar-wrap"><div class="score-bar '+dir+'" style="width:'+score+'%"></div></div>'+
+      '<div style="font-size:12px;color:var(--muted);font-family:Space Mono,monospace">'+selectedPair+' ICT/SMC</div>'+
+    '</div>'+
+    '<div class="analysis-card"><h3>Analise Completa</h3><div class="analysis-text">'+formatted+'</div></div>'+
+    '<div class="alert-box">'+
+      '<div class="alert-box-title">CRIAR ALERTA DE PRECO</div>'+
+      '<div class="alert-row">'+
+        '<input id="alertPrice" type="number" placeholder="Ex: 62300" step="any" class="alert-input">'+
+        '<button onclick="createAlert()" class="alert-create-btn">Criar</button>'+
+      '</div>'+
+      '<div id="alertStatus" class="alert-status"></div>'+
+    '</div>'+
+    '<button class="reset-btn" onclick="resetAnalysis()">Nova Analise</button>';
   const el=document.getElementById('result');
   el.innerHTML=html;el.classList.add('show');
   el.scrollIntoView({behavior:'smooth',block:'start'});
@@ -513,7 +751,7 @@ async function createAlert(){
     const data=await res.json();
     if(data.error)throw new Error(data.error);
     statusEl.style.color='var(--green)';
-    statusEl.textContent='Alerta criado! Avisa quando '+selectedPair+' chegar $'+price+' (preco atual $'+currentPrice.toFixed(2)+')';
+    statusEl.textContent='Alerta criado! Avisa quando '+selectedPair+' chegar $'+price+' (atual $'+currentPrice.toFixed(2)+')';
     showToast('Alerta criado no Telegram!');
   }catch(e){
     statusEl.style.color='var(--red)';
@@ -522,7 +760,7 @@ async function createAlert(){
 }
 
 function resetAnalysis(){
-  images={};lastAnalysis='';
+  images={};lastAnalysis='';lastJournalId='';
   document.getElementById('result').classList.remove('show');
   document.getElementById('result').innerHTML='';
   ['D1','H4','H1','M15','M5','M1'].forEach(tf=>{
@@ -535,6 +773,187 @@ function resetAnalysis(){
   window.scrollTo({top:0,behavior:'smooth'});
 }
 
+// ── JOURNAL ────────────────────────────────────────────────────────────────
+async function loadJournal(){
+  try{
+    const res = await fetch('/journal');
+    const data = await res.json();
+    if(data.error) throw new Error(data.error);
+    allTrades = data.trades || [];
+    renderJournal(allTrades);
+    updateJournalHeader(allTrades);
+  }catch(e){
+    document.getElementById('journalList').innerHTML = '<div class="empty-state"><div class="empty-icon">⚠️</div><p>Erro ao carregar journal</p></div>';
+  }
+}
+
+function updateJournalHeader(trades){
+  const closed = trades.filter(t => t.status === 'win' || t.status === 'loss');
+  const wins = closed.filter(t => t.status === 'win').length;
+  const totalPnl = closed.reduce((s,t) => s + (t.pnl||0), 0);
+  const losses = closed.filter(t => t.status === 'loss').reduce((s,t) => s + Math.abs(t.pnl||0), 0);
+  const winRate = closed.length > 0 ? Math.round(wins/closed.length*100) : null;
+
+  const pnlEl = document.getElementById('journalPnl');
+  pnlEl.textContent = (totalPnl >= 0 ? '+' : '') + '$' + totalPnl.toFixed(2);
+  pnlEl.className = 'pnl-value ' + (totalPnl >= 0 ? 'positive' : 'negative');
+  document.getElementById('journalWinRate').textContent = winRate !== null ? winRate+'%' : '--%';
+  document.getElementById('journalTotal').textContent = trades.length;
+  document.getElementById('journalLosses').textContent = '-$' + losses.toFixed(2);
+  document.getElementById('journalSince').textContent = trades.length > 0 ? trades.length + ' análises guardadas' : 'Sem trades ainda';
+}
+
+function filterJournal(filter, el){
+  currentFilter = filter;
+  document.querySelectorAll('.filter-chip').forEach(c => c.classList.remove('active'));
+  el.classList.add('active');
+  let filtered = allTrades;
+  if(filter === 'win') filtered = allTrades.filter(t => t.status === 'win');
+  else if(filter === 'loss') filtered = allTrades.filter(t => t.status === 'loss');
+  else if(filter === 'pending') filtered = allTrades.filter(t => t.status === 'pending');
+  else if(filter !== 'ALL') filtered = allTrades.filter(t => t.pair === filter);
+  renderJournal(filtered);
+}
+
+function renderJournal(trades){
+  const container = document.getElementById('journalList');
+  if(!trades || trades.length === 0){
+    container.innerHTML = '<div class="empty-state"><div class="empty-icon">📊</div><p>Sem trades aqui ainda.<br>Faz uma análise para começar!</p></div>';
+    return;
+  }
+  container.innerHTML = trades.map(t => {
+    const date = new Date(t.created_at * 1000);
+    const dateStr = date.toLocaleDateString('pt-PT') + ' · ' + date.toHours();
+    const isPending = t.status === 'pending';
+    const resultHtml = isPending
+      ? '<div class="trade-result pending">⏳ Aberto</div>'
+      : t.status === 'win'
+        ? '<div class="trade-result win">+$'+Math.abs(t.pnl||0).toFixed(2)+'</div>'
+        : t.status === 'cancelled'
+          ? '<div class="trade-result" style="color:var(--muted)">Cancelado</div>'
+          : '<div class="trade-result loss">-$'+Math.abs(t.pnl||0).toFixed(2)+'</div>';
+
+    const actionBtns = isPending ? `
+      <div class="pnl-input-row">
+        <input type="number" class="pnl-input" id="pnl_${t.id}" placeholder="Lucro/Perda em $" step="0.01">
+      </div>
+      <div class="action-btns">
+        <button class="action-btn tp" onclick="updateTrade('${t.id}','win')">🎯 TP HIT</button>
+        <button class="action-btn sl" onclick="updateTrade('${t.id}','loss')">🛑 STOP HIT</button>
+        <button class="action-btn cancel" onclick="updateTrade('${t.id}','cancelled')">❌ Cancelei</button>
+      </div>` : '';
+
+    const statusBadge = isPending
+      ? '<span class="badge badge-pending">EM ABERTO</span>'
+      : t.status === 'win'
+        ? '<span class="badge badge-win">TP HIT ✅</span>'
+        : t.status === 'cancelled'
+          ? '<span class="badge" style="background:rgba(110,118,129,.15);color:var(--muted)">CANCELADO</span>'
+          : '<span class="badge badge-loss">STOP HIT ❌</span>';
+
+    const dirBadge = t.direction === 'SHORT'
+      ? '<span class="badge badge-short">SHORT 📉</span>'
+      : '<span class="badge badge-long">LONG 📈</span>';
+
+    return `<div class="trade-card">
+      <div class="trade-header">
+        <div>
+          <div class="trade-pair">${t.pair.replace('USD','')}/USDT</div>
+          <div class="trade-date">${new Date(t.created_at*1000).toLocaleDateString('pt-PT')} · ${new Date(t.created_at*1000).toLocaleTimeString('pt-PT',{hour:'2-digit',minute:'2-digit'})}</div>
+        </div>
+        ${resultHtml}
+      </div>
+      <div class="trade-details">
+        ${t.entry ? '<div><div class="td-label">ENTRY</div><div class="td-val">$'+t.entry+'</div></div>' : ''}
+        ${t.tp1 ? '<div><div class="td-label">TP1</div><div class="td-val" style="color:var(--green)">$'+t.tp1+'</div></div>' : ''}
+        ${t.sl ? '<div><div class="td-label">SL</div><div class="td-val" style="color:var(--red)">$'+t.sl+'</div></div>' : ''}
+      </div>
+      <div class="trade-badges">
+        <span class="badge badge-score">SCORE ${t.score}</span>
+        ${dirBadge}
+        ${statusBadge}
+      </div>
+      ${actionBtns}
+    </div>`;
+  }).join('');
+}
+
+async function updateTrade(id, status){
+  const pnlInput = document.getElementById('pnl_'+id);
+  const pnl = pnlInput ? Math.abs(parseFloat(pnlInput.value)||0) : 0;
+  const finalPnl = status === 'loss' ? -pnl : (status === 'win' ? pnl : 0);
+  try{
+    await fetch('/journal/update', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({id, status, pnl: finalPnl})
+    });
+    showToast(status === 'win' ? '🎯 TP registado!' : status === 'loss' ? '🛑 Stop registado!' : '❌ Cancelado');
+    loadJournal();
+  }catch(e){
+    showToast('Erro ao atualizar');
+  }
+}
+
+// ── STATS ──────────────────────────────────────────────────────────────────
+async function loadStats(){
+  try{
+    const res = await fetch('/journal/stats');
+    const d = await res.json();
+    if(d.error) throw new Error(d.error);
+
+    if(d.total_trades === 0){
+      document.getElementById('statsContent').innerHTML = '<div class="no-stats">📊<br><br>Sem trades fechados ainda.<br>Marca os resultados no Journal!</div>';
+      return;
+    }
+
+    const scoreBrackets = d.score_brackets || {};
+    const pairStats = d.pair_stats || {};
+
+    const scoreRows = Object.entries(scoreBrackets).map(([range, v]) => {
+      const total = v.w + v.l;
+      const wr = total > 0 ? Math.round(v.w/total*100) : 0;
+      const color = wr >= 60 ? 'var(--green)' : wr >= 40 ? '#e3b341' : 'var(--red)';
+      return `<div class="score-row">
+        <div class="score-range">${range}</div>
+        <div class="score-bar-bg"><div class="score-bar-fill" style="width:${wr}%;background:${color}"></div></div>
+        <div class="score-pct" style="color:${color}">${wr}%</div>
+      </div>`;
+    }).join('');
+
+    const pairRows = Object.entries(pairStats).sort((a,b) => b[1].pnl - a[1].pnl).map(([pair, v]) => {
+      const pnlColor = v.pnl >= 0 ? 'var(--green)' : 'var(--red)';
+      return `<div class="pair-row">
+        <div>
+          <div class="pair-name">${pair.replace('USD','')}</div>
+          <div class="pair-wl">${v.w}W / ${v.l}L</div>
+        </div>
+        <div class="pair-pnl" style="color:${pnlColor}">${v.pnl >= 0 ? '+' : ''}$${v.pnl.toFixed(2)}</div>
+      </div>`;
+    }).join('');
+
+    const pnlColor = d.total_pnl >= 0 ? 'var(--green)' : 'var(--red)';
+
+    document.getElementById('statsContent').innerHTML = `
+      <div class="stats-card">
+        <div class="stats-card-title">PERFORMANCE GERAL</div>
+        <div class="winrate-big">${d.win_rate}%</div>
+        <div class="winrate-label">win rate · ${d.wins}W / ${d.losses}L · <span style="color:${pnlColor}">${d.total_pnl >= 0 ? '+' : ''}$${d.total_pnl}</span> net</div>
+      </div>
+      <div class="stats-card">
+        <div class="stats-card-title">WIN RATE POR SCORE</div>
+        ${scoreRows || '<div class="no-stats">Sem dados</div>'}
+      </div>
+      <div class="stats-card">
+        <div class="stats-card-title">P&L POR PAR</div>
+        ${pairRows || '<div class="no-stats">Sem dados</div>'}
+      </div>`;
+  }catch(e){
+    document.getElementById('statsContent').innerHTML = '<div class="no-stats">Erro ao carregar stats</div>';
+  }
+}
+
+// ── UTILS ──────────────────────────────────────────────────────────────────
 function showToast(msg){
   const t=document.getElementById('toast');
   t.textContent=msg;t.classList.add('show');

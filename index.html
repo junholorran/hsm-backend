@@ -417,6 +417,21 @@ body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-h
         <div class="pnl-stat-label">PERDAS</div>
       </div>
     </div>
+    <!-- NOVO: resumo por periodo -->
+    <div class="pnl-stats" id="periodStats" style="margin-top:8px">
+      <div class="pnl-stat">
+        <div class="pnl-stat-val" id="periodToday">$0</div>
+        <div class="pnl-stat-label">HOJE</div>
+      </div>
+      <div class="pnl-stat">
+        <div class="pnl-stat-val" id="periodWeek">$0</div>
+        <div class="pnl-stat-label">SEMANA</div>
+      </div>
+      <div class="pnl-stat">
+        <div class="pnl-stat-val" id="periodMonth">$0</div>
+        <div class="pnl-stat-label">MÊS</div>
+      </div>
+    </div>
   </div>
 
   <div class="filter-row" id="journalFilters">
@@ -801,6 +816,25 @@ function updateJournalHeader(trades){
   document.getElementById('journalTotal').textContent = trades.length;
   document.getElementById('journalLosses').textContent = '-$' + losses.toFixed(2);
   document.getElementById('journalSince').textContent = trades.length > 0 ? trades.length + ' análises guardadas' : 'Sem trades ainda';
+
+  // NOVO: resumo por periodo (hoje / semana / mes), baseado nos trades ja carregados
+  const now = new Date();
+  const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()/1000;
+  const dow = now.getDay();
+  const diffToMonday = dow === 0 ? 6 : dow - 1;
+  const startOfWeek = new Date(now.getFullYear(), now.getMonth(), now.getDate()-diffToMonday).getTime()/1000;
+  const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1).getTime()/1000;
+
+  const sumPnl = (arr) => arr.reduce((s,t) => s + (t.pnl||0), 0);
+  const pToday = sumPnl(closed.filter(t => t.created_at >= startOfDay));
+  const pWeek = sumPnl(closed.filter(t => t.created_at >= startOfWeek));
+  const pMonth = sumPnl(closed.filter(t => t.created_at >= startOfMonth));
+
+  [['periodToday',pToday],['periodWeek',pWeek],['periodMonth',pMonth]].forEach(([id,val])=>{
+    const el = document.getElementById(id);
+    el.textContent = (val>=0?'+':'')+'$'+val.toFixed(2);
+    el.style.color = val>=0 ? 'var(--green)' : 'var(--red)';
+  });
 }
 
 function filterJournal(filter, el){
@@ -833,6 +867,7 @@ function renderJournal(trades){
           ? '<div class="trade-result" style="color:var(--muted)">Cancelado</div>'
           : '<div class="trade-result loss">-$'+Math.abs(t.pnl||0).toFixed(2)+'</div>';
 
+    // NOVO: pendente continua igual; trades fechados (win/loss) ganham botao de editar valor
     const actionBtns = isPending ? `
       <div class="pnl-input-row">
         <input type="number" class="pnl-input" id="pnl_${t.id}" placeholder="Lucro/Perda em $" step="0.01">
@@ -841,6 +876,13 @@ function renderJournal(trades){
         <button class="action-btn tp" onclick="updateTrade('${t.id}','win')">🎯 TP HIT</button>
         <button class="action-btn sl" onclick="updateTrade('${t.id}','loss')">🛑 STOP HIT</button>
         <button class="action-btn cancel" onclick="updateTrade('${t.id}','cancelled')">❌ Cancelei</button>
+      </div>` : (t.status === 'win' || t.status === 'loss') ? `
+      <div class="pnl-input-row" id="editRow_${t.id}" style="display:none">
+        <input type="number" class="pnl-input" id="editPnl_${t.id}" placeholder="Valor em $" step="0.01" value="${Math.abs(t.pnl||0)}">
+        <button class="pnl-confirm-btn" onclick="confirmEditPnl('${t.id}','${t.status}')">Salvar</button>
+      </div>
+      <div class="action-btns">
+        <button class="action-btn cancel" onclick="toggleEditPnl('${t.id}')">✏️ Editar Valor</button>
       </div>` : '';
 
     const statusBadge = isPending
@@ -854,6 +896,15 @@ function renderJournal(trades){
     const dirBadge = t.direction === 'SHORT'
       ? '<span class="badge badge-short">SHORT 📉</span>'
       : '<span class="badge badge-long">LONG 📈</span>';
+
+    // NOVO: badge de R:R calculado a partir de entry/sl/tp1
+    const rr = (() => {
+      const e=parseFloat(t.entry), s=parseFloat(t.sl), tp=parseFloat(t.tp1);
+      if(!e||!s||!tp) return null;
+      const risk=Math.abs(e-s), reward=Math.abs(tp-e);
+      return risk>0 ? (reward/risk).toFixed(1) : null;
+    })();
+    const rrBadge = rr ? `<span class="badge" style="background:rgba(88,166,255,.15);color:var(--blue)">R:R 1:${rr}</span>` : '';
 
     return `<div class="trade-card">
       <div class="trade-header">
@@ -871,6 +922,7 @@ function renderJournal(trades){
       <div class="trade-badges">
         <span class="badge badge-score">SCORE ${t.score}</span>
         ${dirBadge}
+        ${rrBadge}
         ${statusBadge}
       </div>
       ${actionBtns}
@@ -878,9 +930,39 @@ function renderJournal(trades){
   }).join('');
 }
 
+// NOVO: liga/desliga o campo de edicao de valor num trade ja fechado
+function toggleEditPnl(id){
+  const row = document.getElementById('editRow_'+id);
+  if(row) row.style.display = row.style.display === 'none' ? 'flex' : 'none';
+}
+
+// NOVO: salva o valor editado de um trade ja fechado, sem mudar o status
+async function confirmEditPnl(id, status){
+  const input = document.getElementById('editPnl_'+id);
+  const val = Math.abs(parseFloat(input.value) || 0);
+  const finalPnl = status === 'loss' ? -val : val;
+  try{
+    await fetch(window.location.origin+'/journal/update', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({id, status, pnl: finalPnl})
+    });
+    showToast('💾 Valor atualizado!');
+    loadJournal();
+  }catch(e){
+    showToast('Erro ao atualizar valor');
+  }
+}
+
 async function updateTrade(id, status){
   const pnlInput = document.getElementById('pnl_'+id);
-  const pnl = pnlInput ? Math.abs(parseFloat(pnlInput.value)||0) : 0;
+  const rawVal = pnlInput ? pnlInput.value : '';
+  // NOVO: avisa antes de fechar um trade com valor $0 ou vazio
+  if((status === 'win' || status === 'loss') && (!rawVal || parseFloat(rawVal) === 0)){
+    const ok = confirm('Tens a certeza que o resultado foi $0?');
+    if(!ok) return;
+  }
+  const pnl = pnlInput ? Math.abs(parseFloat(rawVal)||0) : 0;
   const finalPnl = status === 'loss' ? -pnl : (status === 'win' ? pnl : 0);
   try{
     await fetch(window.location.origin+'/journal/update', {

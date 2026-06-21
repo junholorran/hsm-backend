@@ -19,7 +19,7 @@ PRECOS_TICKER = {}
 RE_SCORE = re.compile(r'SCORE\s*OPERACIONAL\s*:[^\d]*(\d{1,3})\s*/\s*100', re.IGNORECASE)
 RE_SL = re.compile(r'Stop\s*Loss\s*[^:]*:[^\d]*\$?\s*([\d,.]+)', re.IGNORECASE)
 RE_TP = re.compile(r'Take\s*Profit\s*\d?\s*[^:]*:[^\d]*\$?\s*([\d,.]+)', re.IGNORECASE)
-RE_ENTRY = re.compile(r'Entrada\s*Conservadora\s*[^:]*:[^\d]*\$?\s*([\d,.]+)', re.IGNORECASE)
+RE_ENTRY = re.compile(r'Entrada\s*Conservadora\s*[^:\n]{0,30}:[^\d]*\$?\s*([\d,.]+)', re.IGNORECASE)
 RE_STYLE = re.compile(r'(scalp|swing|intraday)', re.IGNORECASE)
 TIMEFRAMES_MAP = ["D1", "H4", "H1", "M15", "M5", "M1"]
 

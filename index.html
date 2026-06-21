@@ -348,7 +348,7 @@ body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-h
 <!-- FUNDING + OI WIDGET (novo, isolado, so visual) -->
 <div class="funding-card neutral" id="fundingWidget">
   <div class="funding-top">
-    <div class="funding-eyebrow">Funding + OI · M15</div>
+    <div class="funding-eyebrow" id="fundingPairLabel">Funding + OI · M15</div>
     <div class="funding-eyebrow" id="fundingRateNow">--</div>
   </div>
   <div class="funding-signal" id="fundingSignalText">A carregar...</div>
@@ -748,7 +748,13 @@ function paintTfBox(prefix, deltaPct, fundingRate){
 }
 
 async function loadFundingOI(){
-  const symbol = 'BTCUSDT';
+  // segue o par selecionado pelo usuario (mesmo mapeamento de simbolo usado em getPrice)
+  const pairToSymbol = {'BTCUSD':'BTCUSDT','ETHUSD':'ETHUSDT','SOLUSD':'SOLUSDT','XRPUSD':'XRPUSDT','LINKUSD':'LINKUSDT','ADAUSD':'ADAUSDT','AVAXUSD':'AVAXUSDT','BNBUSD':'BNBUSDT','AAVEUSD':'AAVEUSDT'};
+  const symbol = pairToSymbol[selectedPair] || 'BTCUSDT';
+  const pairLabel = symbol.replace('USDT','');
+  const labelEl = document.getElementById('fundingPairLabel');
+  if(labelEl) labelEl.textContent = pairLabel + ' · Funding + OI · M15';
+
   try{
     const tickerRes = await fetch('https://api.bybit.com/v5/market/tickers?category=linear&symbol='+symbol);
     const tickerData = await tickerRes.json();
@@ -804,6 +810,7 @@ function selectPair(el,pair){
   document.querySelectorAll('.pair-btn').forEach(b=>b.classList.remove('active'));
   el.classList.add('active');
   selectedPair=pair;
+  if(typeof loadFundingOI === 'function') loadFundingOI();
 }
 
 function handleFile(input,tf){

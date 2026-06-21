@@ -147,6 +147,31 @@ body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-h
 /* DIVIDER */
 .divider{height:1px;background:var(--border);margin:0 16px 16px;}
 
+/* ── FUNDING + OI WIDGET (novo, isolado, so visual) ── */
+.funding-card{margin:16px;border-radius:16px;padding:16px;border:1px solid var(--border);background:var(--surface);transition:all .3s;}
+.funding-card.bullish{border-color:#3fb95044;background:linear-gradient(135deg,#0d1f12,#111a14);}
+.funding-card.bearish{border-color:#f8514944;background:linear-gradient(135deg,#1f0d0d,#1a1111);}
+.funding-card.neutral{border-color:#e3b34144;background:linear-gradient(135deg,#1a1a0d,#18180d);}
+.funding-top{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;}
+.funding-eyebrow{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:2px;font-family:'Space Mono',monospace;}
+.funding-signal{font-size:16px;font-weight:700;font-family:'Space Mono',monospace;color:var(--gold);margin-bottom:4px;}
+.funding-signal.bull{color:var(--green);}
+.funding-signal.bear{color:var(--red);}
+.funding-detail{font-size:11px;color:var(--text2);line-height:1.5;margin-bottom:12px;}
+
+.funding-gauge-labels{display:flex;justify-content:space-between;font-size:9px;color:var(--muted);margin-bottom:4px;font-family:'Space Mono',monospace;}
+.funding-gauge-track{position:relative;height:6px;border-radius:3px;background:linear-gradient(90deg,var(--red),#3a3a42 50%,var(--green));margin-bottom:14px;}
+.funding-gauge-handle{position:absolute;top:50%;width:14px;height:14px;border-radius:50%;background:#fff;border:3px solid var(--surface);transform:translate(-50%,-50%);transition:left .4s;}
+
+.tf-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;}
+.tf-box{background:var(--surface);border:1px dashed var(--border);border-radius:12px;padding:12px 8px;text-align:center;}
+.tf-box-name{font-size:12px;font-weight:700;font-family:'Space Mono',monospace;color:var(--gold);margin-bottom:4px;}
+.tf-box-delta{font-size:12px;font-weight:700;font-family:'Space Mono',monospace;color:var(--text);margin-bottom:6px;}
+.tf-box-tag{font-size:9px;font-weight:700;letter-spacing:0.5px;padding:3px 8px;border-radius:6px;font-family:'Space Mono',monospace;display:inline-block;}
+.tf-tag-bull{background:rgba(63,185,80,.15);color:var(--green);}
+.tf-tag-bear{background:rgba(248,81,73,.15);color:var(--red);}
+.tf-tag-wait{background:rgba(227,179,65,.15);color:#e3b341;}
+
 /* ── BOTTOM NAV ── */
 .bottom-nav{
   position:fixed;bottom:0;left:0;right:0;
@@ -316,6 +341,62 @@ body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-h
     <div class="stat-box">
       <div class="stat-label">Range Pos</div>
       <div class="stat-val" id="rangePos">--</div>
+    </div>
+  </div>
+</div>
+
+<!-- FUNDING + OI WIDGET (novo, isolado, so visual) -->
+<div class="funding-card neutral" id="fundingWidget">
+  <div class="funding-top">
+    <div class="funding-eyebrow">Funding + OI · M15</div>
+    <div class="funding-eyebrow" id="fundingRateNow">--</div>
+  </div>
+  <div class="funding-signal" id="fundingSignalText">A carregar...</div>
+  <div class="funding-detail" id="fundingSignalDetail">A buscar dados na Bybit...</div>
+
+  <div class="funding-gauge-labels">
+    <span>Shorts lotados</span><span>Longs lotados</span>
+  </div>
+  <div class="funding-gauge-track"><div class="funding-gauge-handle" id="fundingGaugeHandle" style="left:50%"></div></div>
+
+  <div class="stats-row">
+    <div class="stat-box">
+      <div class="stat-label">Próx. Pgto</div>
+      <div class="stat-val" id="fundingNextPay">--</div>
+    </div>
+    <div class="stat-box">
+      <div class="stat-label">Média 24h</div>
+      <div class="stat-val" id="fundingAvg24h">--</div>
+    </div>
+    <div class="stat-box">
+      <div class="stat-label">OI M15</div>
+      <div class="stat-val" id="oiM15Val">--</div>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <div class="section-title">Variação de OI por Timeframe</div>
+  <div class="tf-grid">
+    <div class="tf-box" id="tfBoxD1">
+      <div class="tf-box-name">D1</div>
+      <div class="tf-box-delta" id="tfDeltaD1">--</div>
+      <div class="tf-box-tag tf-tag-wait" id="tfTagD1">--</div>
+    </div>
+    <div class="tf-box" id="tfBoxH4">
+      <div class="tf-box-name">H4</div>
+      <div class="tf-box-delta" id="tfDeltaH4">--</div>
+      <div class="tf-box-tag tf-tag-wait" id="tfTagH4">--</div>
+    </div>
+    <div class="tf-box" id="tfBoxH1">
+      <div class="tf-box-name">H1</div>
+      <div class="tf-box-delta" id="tfDeltaH1">--</div>
+      <div class="tf-box-tag tf-tag-wait" id="tfTagH1">--</div>
+    </div>
+    <div class="tf-box" id="tfBoxM15">
+      <div class="tf-box-name">M15</div>
+      <div class="tf-box-delta" id="tfDeltaM15">--</div>
+      <div class="tf-box-tag tf-tag-wait" id="tfTagM15">--</div>
     </div>
   </div>
 </div>
@@ -602,6 +683,116 @@ function generateSparkline(change) {
   return {line, area};
 }
 
+// ── FUNDING + OI WIDGET (novo, isolado, so visual — nao mexe na analise/score) ──
+function pctDelta(now, before){
+  if(!before) return null;
+  return ((now - before) / before) * 100;
+}
+
+function fundingOiSignal(fundingRate, oiDeltaPct){
+  const fPos = fundingRate > 0.005;
+  const fNeg = fundingRate < -0.005;
+  const oiUp = oiDeltaPct !== null && oiDeltaPct > 0.05;
+  const oiDown = oiDeltaPct !== null && oiDeltaPct < -0.05;
+
+  if(fPos && oiDown) return {cls:'bull', label:'🟢 LONGS SENDO LIMPOS', tag:'LIMPANDO', detail:'Funding positivo (longs lotados) + OI caindo = alavancagem comprada sendo varrida. Reforça tese de sweep/reversão.'};
+  if(fPos && oiUp) return {cls:'wait', label:'🟡 LONGS LOTANDO MAIS', tag:'LOTANDO', detail:'Funding positivo + OI subindo = mais gente entrando comprada. Risco de sweep pra baixo aumenta.'};
+  if(fNeg && oiDown) return {cls:'wait', label:'🟡 SHORTS COBRINDO', tag:'COBRINDO', detail:'Funding negativo + OI caindo = shorts fechando posição, não é compra nova. Cuidado pra não confiar demais na alta.'};
+  if(fNeg && oiUp) return {cls:'bear', label:'🔴 SHORTS NOVOS ENTRANDO', tag:'PRESSÃO', detail:'Funding negativo + OI subindo = pressão vendedora real e nova. Continuação bearish ganha força.'};
+  return {cls:'wait', label:'⚪ NEUTRO', tag:'AGUARDA', detail:'Sem crowding relevante de funding ou variação clara de OI agora.'};
+}
+
+async function fetchOiDelta(symbol, intervalTime){
+  try{
+    const r = await fetch('https://api.bybit.com/v5/market/open-interest?category=linear&symbol='+symbol+'&intervalTime='+intervalTime+'&limit=2');
+    const d = await r.json();
+    const list = d.result && d.result.list;
+    if(!list || list.length < 2) return null;
+    const sorted = [...list].sort((a,b) => parseInt(a.timestamp) - parseInt(b.timestamp));
+    const older = parseFloat(sorted[0].openInterest);
+    const newer = parseFloat(sorted[sorted.length-1].openInterest);
+    return pctDelta(newer, older);
+  }catch(e){ return null; }
+}
+
+async function fetchFundingHistory(symbol){
+  try{
+    const r = await fetch('https://api.bybit.com/v5/market/funding/history?category=linear&symbol='+symbol+'&limit=4');
+    const d = await r.json();
+    const list = d.result && d.result.list;
+    if(!list || list.length === 0) return null;
+    const avg = list.reduce((s,f) => s + parseFloat(f.fundingRate), 0) / list.length;
+    return avg * 100;
+  }catch(e){ return null; }
+}
+
+function paintTfBox(prefix, deltaPct, fundingRate){
+  const deltaEl = document.getElementById('tfDelta'+prefix);
+  const tagEl = document.getElementById('tfTag'+prefix);
+  if(!deltaEl || !tagEl) return null;
+  if(deltaPct === null){
+    deltaEl.textContent = 'sem dado';
+    return null;
+  }
+  const sign = deltaPct >= 0 ? '+' : '';
+  deltaEl.textContent = 'OI '+sign+deltaPct.toFixed(2)+'%';
+  const sig = fundingOiSignal(fundingRate, deltaPct);
+  tagEl.className = 'tf-box-tag tf-tag-'+sig.cls;
+  tagEl.textContent = sig.tag;
+  return sig;
+}
+
+async function loadFundingOI(){
+  const symbol = 'BTCUSDT';
+  try{
+    const tickerRes = await fetch('https://api.bybit.com/v5/market/tickers?category=linear&symbol='+symbol);
+    const tickerData = await tickerRes.json();
+    const t = tickerData.result && tickerData.result.list && tickerData.result.list[0];
+    if(!t) throw new Error('sem ticker');
+
+    const currentFunding = parseFloat(t.fundingRate) * 100;
+    const nextFundingTime = parseInt(t.nextFundingTime);
+
+    const [avg24h, d1, h4, h1, m15] = await Promise.all([
+      fetchFundingHistory(symbol),
+      fetchOiDelta(symbol,'1d'),
+      fetchOiDelta(symbol,'4h'),
+      fetchOiDelta(symbol,'1h'),
+      fetchOiDelta(symbol,'15min')
+    ]);
+
+    document.getElementById('fundingRateNow').textContent = (currentFunding>=0?'+':'')+currentFunding.toFixed(4)+'%';
+    document.getElementById('fundingNextPay').textContent = new Date(nextFundingTime).toLocaleTimeString('pt-PT',{hour:'2-digit',minute:'2-digit'});
+    if(avg24h !== null){
+      document.getElementById('fundingAvg24h').textContent = (avg24h>=0?'+':'')+avg24h.toFixed(4)+'%';
+    }
+    if(m15 !== null){
+      document.getElementById('oiM15Val').textContent = (m15>=0?'+':'')+m15.toFixed(2)+'%';
+    }
+
+    const clamped = Math.max(-0.05, Math.min(0.05, currentFunding));
+    const handlePos = ((clamped + 0.05) / 0.10) * 100;
+    document.getElementById('fundingGaugeHandle').style.left = handlePos+'%';
+
+    paintTfBox('D1', d1, avg24h !== null ? avg24h : currentFunding);
+    paintTfBox('H4', h4, currentFunding);
+    paintTfBox('H1', h1, currentFunding);
+    const m15sig = paintTfBox('M15', m15, currentFunding);
+
+    if(m15sig){
+      const card = document.getElementById('fundingWidget');
+      card.className = 'funding-card ' + (m15sig.cls === 'bull' ? 'bullish' : m15sig.cls === 'bear' ? 'bearish' : 'neutral');
+      const signalEl = document.getElementById('fundingSignalText');
+      signalEl.className = 'funding-signal ' + m15sig.cls;
+      signalEl.textContent = m15sig.label;
+      document.getElementById('fundingSignalDetail').textContent = m15sig.detail;
+    }
+  }catch(e){
+    const detailEl = document.getElementById('fundingSignalDetail');
+    if(detailEl) detailEl.textContent = '⚠️ Erro ao buscar dado da Bybit — tenta novamente';
+  }
+}
+
 // ── PAIR & FILE HANDLERS ───────────────────────────────────────────────────
 function selectPair(el,pair){
   document.querySelectorAll('.pair-btn').forEach(b=>b.classList.remove('active'));
@@ -669,6 +860,9 @@ async function updateServerPrices(){
 
 setTimeout(updateServerPrices, 500);
 setInterval(updateServerPrices, 15000);
+
+setTimeout(loadFundingOI, 1200);
+setInterval(loadFundingOI, 60000);
 
 // ── ANALYZE ────────────────────────────────────────────────────────────────
 async function analyze(){

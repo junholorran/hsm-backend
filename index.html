@@ -702,17 +702,22 @@ function fundingOiSignal(fundingRate, oiDeltaPct){
   return {cls:'wait', label:'⚪ NEUTRO', tag:'AGUARDA', detail:'Sem crowding relevante de funding ou variação clara de OI agora.'};
 }
 
-async function fetchOiDelta(symbol, intervalTime){
+async function fetchOiSeries(symbol){
   try{
-    const r = await fetch('https://api.bybit.com/v5/market/open-interest?category=linear&symbol='+symbol+'&intervalTime='+intervalTime+'&limit=2');
+    const r = await fetch('https://api.bybit.com/v5/market/open-interest?category=linear&symbol='+symbol+'&intervalTime=15min&limit=100');
     const d = await r.json();
     const list = d.result && d.result.list;
     if(!list || list.length < 2) return null;
-    const sorted = [...list].sort((a,b) => parseInt(a.timestamp) - parseInt(b.timestamp));
-    const older = parseFloat(sorted[0].openInterest);
-    const newer = parseFloat(sorted[sorted.length-1].openInterest);
-    return pctDelta(newer, older);
+    return [...list].sort((a,b) => parseInt(a.timestamp) - parseInt(b.timestamp));
   }catch(e){ return null; }
+}
+
+function deltaFromSeries(series, stepsBack){
+  if(!series || series.length < 2) return null;
+  const newer = parseFloat(series[series.length-1].openInterest);
+  const olderIdx = Math.max(0, series.length-1-stepsBack);
+  const older = parseFloat(series[olderIdx].openInterest);
+  return pctDelta(newer, older);
 }
 
 async function fetchFundingHistory(symbol){
@@ -753,13 +758,14 @@ async function loadFundingOI(){
     const currentFunding = parseFloat(t.fundingRate) * 100;
     const nextFundingTime = parseInt(t.nextFundingTime);
 
-    const [avg24h, d1, h4, h1, m15] = await Promise.all([
+    const [avg24h, oiSeries] = await Promise.all([
       fetchFundingHistory(symbol),
-      fetchOiDelta(symbol,'1d'),
-      fetchOiDelta(symbol,'4h'),
-      fetchOiDelta(symbol,'1h'),
-      fetchOiDelta(symbol,'15min')
+      fetchOiSeries(symbol)
     ]);
+    const m15 = deltaFromSeries(oiSeries, 1);
+    const h1 = deltaFromSeries(oiSeries, 4);
+    const h4 = deltaFromSeries(oiSeries, 16);
+    const d1 = deltaFromSeries(oiSeries, 96);
 
     document.getElementById('fundingRateNow').textContent = (currentFunding>=0?'+':'')+currentFunding.toFixed(4)+'%';
     document.getElementById('fundingNextPay').textContent = new Date(nextFundingTime).toLocaleTimeString('pt-PT',{hour:'2-digit',minute:'2-digit'});

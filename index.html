@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
-<title>HSM ICT Mentor</title>
+<title>Kairos Mentor</title>
 <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <style>
 :root{
@@ -284,9 +284,9 @@ body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-h
 <body>
 
 <div class="header">
-  <div class="header-logo">H</div>
+  <div class="header-logo">K</div>
   <div>
-    <div class="header-title">HSM ICT MENTOR</div>
+    <div class="header-title">KAIROS MENTOR</div>
     <div class="header-sub">Smart Money Concepts</div>
   </div>
 </div>
@@ -498,7 +498,6 @@ body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-h
         <div class="pnl-stat-label">PERDAS</div>
       </div>
     </div>
-    <!-- NOVO: resumo por periodo -->
     <div class="pnl-stats" id="periodStats" style="margin-top:8px">
       <div class="pnl-stat">
         <div class="pnl-stat-val" id="periodToday">$0</div>
@@ -596,7 +595,6 @@ async function loadMarketBias(){
     window._btcData = { price: btcPrice, change: btcChange, high: high24h, low: low24h };
     const rangePos = low24h < high24h ? ((btcPrice - low24h) / (high24h - low24h)) * 100 : 50;
 
-    // RANGE POS: posição no range do dia com label contextual ICT
     let rangePosLabel = '--';
     let rangePosColor = 'var(--text)';
     if(rangePos <= 20){
@@ -652,7 +650,6 @@ async function loadMarketBias(){
     document.getElementById('highEl2').textContent = 'High $' + Math.round(high24h).toLocaleString('en-US');
     document.getElementById('sentNeedle').style.left = needlePos + '%';
 
-    // RANGE POS atualizado
     const rangePosEl = document.getElementById('rangePos');
     rangePosEl.textContent = rangePosLabel;
     rangePosEl.style.color = rangePosColor;
@@ -683,7 +680,7 @@ function generateSparkline(change) {
   return {line, area};
 }
 
-// ── FUNDING + OI WIDGET (novo, isolado, so visual — nao mexe na analise/score) ──
+// ── FUNDING + OI WIDGET ──
 function pctDelta(now, before){
   if(!before) return null;
   return ((now - before) / before) * 100;
@@ -748,7 +745,6 @@ function paintTfBox(prefix, deltaPct, fundingRate){
 }
 
 async function loadFundingOI(){
-  // segue o par selecionado pelo usuario (mesmo mapeamento de simbolo usado em getPrice)
   const pairToSymbol = {'BTCUSD':'BTCUSDT','ETHUSD':'ETHUSDT','SOLUSD':'SOLUSDT','XRPUSD':'XRPUSDT','LINKUSD':'LINKUSDT','ADAUSD':'ADAUSDT','AVAXUSD':'AVAXUSDT','BNBUSD':'BNBUSDT','AAVEUSD':'AAVEUSDT'};
   const symbol = pairToSymbol[selectedPair] || 'BTCUSDT';
   const pairLabel = symbol.replace('USDT','');
@@ -1024,7 +1020,6 @@ function updateJournalHeader(trades){
   document.getElementById('journalLosses').textContent = '-$' + losses.toFixed(2);
   document.getElementById('journalSince').textContent = trades.length > 0 ? trades.length + ' análises guardadas' : 'Sem trades ainda';
 
-  // NOVO: resumo por periodo (hoje / semana / mes), baseado nos trades ja carregados
   const now = new Date();
   const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()/1000;
   const dow = now.getDay();
@@ -1074,7 +1069,6 @@ function renderJournal(trades){
           ? '<div class="trade-result" style="color:var(--muted)">Cancelado</div>'
           : '<div class="trade-result loss">-$'+Math.abs(t.pnl||0).toFixed(2)+'</div>';
 
-    // NOVO: pendente continua igual; trades fechados (win/loss) ganham botao de editar valor
     const actionBtns = isPending ? `
       <div class="pnl-input-row">
         <input type="number" class="pnl-input" id="pnl_${t.id}" placeholder="Lucro/Perda em $" step="0.01">
@@ -1104,7 +1098,6 @@ function renderJournal(trades){
       ? '<span class="badge badge-short">SHORT 📉</span>'
       : '<span class="badge badge-long">LONG 📈</span>';
 
-    // NOVO: badge de R:R calculado a partir de entry/sl/tp1
     const rr = (() => {
       const e=parseFloat(t.entry), s=parseFloat(t.sl), tp=parseFloat(t.tp1);
       if(!e||!s||!tp) return null;
@@ -1137,13 +1130,11 @@ function renderJournal(trades){
   }).join('');
 }
 
-// NOVO: liga/desliga o campo de edicao de valor num trade ja fechado
 function toggleEditPnl(id){
   const row = document.getElementById('editRow_'+id);
   if(row) row.style.display = row.style.display === 'none' ? 'flex' : 'none';
 }
 
-// NOVO: salva o valor editado de um trade ja fechado, sem mudar o status
 async function confirmEditPnl(id, status){
   const input = document.getElementById('editPnl_'+id);
   const val = Math.abs(parseFloat(input.value) || 0);
@@ -1164,7 +1155,6 @@ async function confirmEditPnl(id, status){
 async function updateTrade(id, status){
   const pnlInput = document.getElementById('pnl_'+id);
   const rawVal = pnlInput ? pnlInput.value : '';
-  // NOVO: avisa antes de fechar um trade com valor $0 ou vazio
   if((status === 'win' || status === 'loss') && (!rawVal || parseFloat(rawVal) === 0)){
     const ok = confirm('Tens a certeza que o resultado foi $0?');
     if(!ok) return;

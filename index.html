@@ -25,13 +25,11 @@
 *{box-sizing:border-box;margin:0;padding:0;}
 body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-height:100vh;padding-bottom:80px;}
 
-/* HEADER */
 .header{background:linear-gradient(135deg,#0d0d18 0%,#111128 100%);border-bottom:1px solid var(--border);padding:16px 20px;display:flex;align-items:center;gap:12px;position:sticky;top:0;z-index:100;}
 .header-logo{width:36px;height:36px;background:linear-gradient(135deg,var(--gold),var(--gold2));border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:18px;font-weight:700;color:#000;font-family:'Space Mono',monospace;}
 .header-title{font-size:16px;font-weight:700;color:var(--gold);font-family:'Space Mono',monospace;letter-spacing:1px;}
 .header-sub{font-size:10px;color:var(--muted);letter-spacing:2px;text-transform:uppercase;}
 
-/* BIAS CARD */
 .bias-card{margin:16px;border-radius:16px;padding:16px;border:1px solid var(--border);background:var(--surface);transition:all .3s;}
 .bias-card.bullish{border-color:#3fb95044;background:linear-gradient(135deg,#0d1f12,#111a14);}
 .bias-card.bearish{border-color:#f8514944;background:linear-gradient(135deg,#1f0d0d,#1a1111);}
@@ -56,161 +54,10 @@ body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-h
 .stat-label{font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:1px;}
 .stat-val{font-size:13px;font-weight:700;font-family:'Space Mono',monospace;color:var(--text);margin-top:2px;}
 
-/* SECTION */
 .section{margin:0 16px 16px;}
 .section-title{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:2px;margin-bottom:10px;font-family:'Space Mono',monospace;}
 
-/* ── MULTI UPLOAD ── */
-.upload-zone{
-  border:2px dashed var(--border);border-radius:14px;
-  padding:28px 20px;text-align:center;
-  background:var(--surface);cursor:pointer;
-  transition:border-color .2s;position:relative;
-}
-.upload-zone:hover{border-color:var(--gold);}
-.upload-zone input[type=file]{position:absolute;inset:0;opacity:0;cursor:pointer;width:100%;height:100%;}
-.upload-zone-icon{font-size:32px;margin-bottom:8px;}
-.upload-zone-title{font-size:14px;font-weight:700;color:var(--gold);letter-spacing:1px;margin-bottom:4px;font-family:'Space Mono',monospace;}
-.upload-zone-sub{font-size:11px;color:var(--muted);line-height:1.6;}
-
-/* IMAGE LIST */
-.img-list{display:flex;flex-direction:column;gap:8px;margin-bottom:12px;}
-.img-row{
-  background:var(--surface);border:1px solid var(--border);
-  border-radius:12px;padding:10px 12px;
-  display:flex;align-items:center;gap:10px;
-}
-.img-thumb{
-  width:46px;height:36px;border-radius:6px;
-  background:var(--surface2);border:1px solid var(--border);
-  overflow:hidden;flex-shrink:0;
-  display:flex;align-items:center;justify-content:center;font-size:16px;
-}
-.img-thumb img{width:100%;height:100%;object-fit:cover;}
-.img-meta{flex:1;min-width:0;}
-.img-name{font-size:10px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-bottom:5px;}
-.img-selects{display:flex;gap:6px;}
-.img-selects select{
-  flex:1;background:var(--surface2);border:1px solid var(--border);
-  color:var(--text);border-radius:7px;padding:5px 6px;
-  font-size:11px;font-family:'Space Mono',monospace;
-  appearance:none;cursor:pointer;outline:none;
-}
-.img-selects select:focus{border-color:var(--gold);}
-.img-remove{
-  width:26px;height:26px;background:#1a0a0a;border:1px solid #3a1a1a;
-  border-radius:6px;color:var(--red);font-size:13px;
-  display:flex;align-items:center;justify-content:center;
-  cursor:pointer;flex-shrink:0;
-}
-
-/* GROUP PREVIEW */
-.group-list{display:flex;flex-direction:column;gap:8px;margin-bottom:12px;}
-.group-row{
-  background:var(--surface);border:1px solid var(--border);
-  border-radius:10px;padding:10px 14px;
-  display:flex;align-items:center;justify-content:space-between;
-}
-.group-pair{font-size:13px;font-weight:700;font-family:'Space Mono',monospace;color:var(--gold);}
-.group-tfs{display:flex;gap:4px;flex-wrap:wrap;}
-.tf-badge{
-  background:var(--surface2);border:1px solid var(--border);
-  border-radius:4px;padding:2px 7px;font-size:9px;
-  color:var(--muted);letter-spacing:1px;font-family:'Space Mono',monospace;
-}
-.group-count{font-size:10px;color:var(--muted);}
-
-/* ANALYZE BTN */
-.analyze-btn{width:100%;padding:16px;background:linear-gradient(135deg,var(--gold),var(--gold2));color:#000;border:none;border-radius:14px;font-size:15px;font-weight:700;font-family:'Space Mono',monospace;cursor:pointer;letter-spacing:1px;transition:all .2s;-webkit-tap-highlight-color:transparent;display:flex;align-items:center;justify-content:center;gap:8px;}
-.analyze-btn:disabled{opacity:.5;cursor:not-allowed;}
-.analyze-btn:active:not(:disabled){transform:scale(.98);}
-.analyze-btn .btn-count{background:#0008;color:var(--gold);border-radius:4px;padding:2px 8px;font-size:11px;}
-
-/* LOADING */
-.loading{display:none;padding:20px 16px;}
-.loading.show{display:block;}
-.loading-pair-card{
-  background:var(--surface);border:1px solid var(--border);
-  border-radius:12px;padding:14px 16px;
-  display:flex;align-items:center;gap:14px;margin-bottom:8px;
-}
-.loading-spinner{width:22px;height:22px;border:2px solid var(--border);border-top-color:var(--gold);border-radius:50%;animation:spin .8s linear infinite;flex-shrink:0;}
-.loading-spinner.done{border:2px solid var(--green);animation:none;}
-.loading-spinner.done::after{content:'✓';display:flex;align-items:center;justify-content:center;font-size:12px;color:var(--green);width:100%;height:100%;}
-.loading-pair-name{font-size:13px;font-weight:700;font-family:'Space Mono',monospace;color:var(--gold);}
-.loading-pair-sub{font-size:10px;color:var(--muted);margin-top:2px;}
-@keyframes spin{to{transform:rotate(360deg)}}
-
-/* RESULT CARDS */
-.result{display:none;}
-.result.show{display:block;padding:0 16px;}
-
-.result-summary-card{
-  background:var(--surface);border:1px solid var(--border);
-  border-radius:14px;margin-bottom:10px;overflow:hidden;
-  transition:border-color .2s;
-}
-.result-summary-card:active{border-color:var(--gold);}
-.rsc-header{
-  padding:14px 16px;display:flex;
-  align-items:center;justify-content:space-between;
-  border-bottom:1px solid var(--border);
-}
-.rsc-pair{font-size:15px;font-weight:700;font-family:'Space Mono',monospace;}
-.rsc-tfs{font-size:9px;color:var(--muted);letter-spacing:1px;margin-top:2px;}
-.rsc-right{display:flex;gap:6px;align-items:center;}
-.rsc-dir{font-size:11px;font-weight:700;padding:3px 10px;border-radius:5px;letter-spacing:1px;font-family:'Space Mono',monospace;}
-.rsc-dir.bear{background:#1a050522;color:var(--red);border:1px solid #3a0a0a;}
-.rsc-dir.bull{background:#05201022;color:var(--green);border:1px solid #0a3a1a;}
-.rsc-dir.neutral{background:#1a1a0522;color:#e3b341;border:1px solid #3a3a0a;}
-.rsc-score{font-size:13px;font-weight:700;padding:4px 10px;border-radius:6px;font-family:'Space Mono',monospace;}
-.score-high{background:#3fb95022;color:var(--green);border:1px solid #3fb95044;}
-.score-mid{background:#e3b34122;color:#e3b341;border:1px solid #e3b34144;}
-.score-low{background:#f8514922;color:var(--red);border:1px solid #f8514944;}
-
-.rsc-body{padding:12px 16px;}
-.rsc-levels{display:flex;gap:12px;margin-bottom:10px;}
-.rsc-level{flex:1;}
-.rsc-level-label{font-size:9px;color:var(--muted);letter-spacing:1px;}
-.rsc-level-val{font-size:12px;font-weight:700;font-family:'Space Mono',monospace;margin-top:2px;}
-.rsc-level-val.green{color:var(--green);}
-.rsc-level-val.red{color:var(--red);}
-
-.rsc-expand-btn{
-  width:100%;background:var(--surface2);border:1px solid var(--border);
-  color:var(--muted);border-radius:8px;padding:9px;
-  font-size:10px;font-weight:700;letter-spacing:1px;
-  font-family:'Space Mono',monospace;cursor:pointer;
-  -webkit-tap-highlight-color:transparent;
-}
-.rsc-expand-btn:active{border-color:var(--gold);color:var(--gold);}
-
-.rsc-full{display:none;margin-top:12px;border-top:1px solid var(--border);padding-top:12px;}
-.rsc-full.open{display:block;}
-.analysis-text{font-size:12px;line-height:1.7;color:var(--text2);}
-.analysis-text p{margin-bottom:8px;}
-.tag{display:inline-block;padding:1px 6px;border-radius:4px;font-size:11px;font-weight:600;margin:0 1px;}
-.tag-bull{background:#3fb95022;color:var(--green);border:1px solid #3fb95033;}
-.tag-bear{background:#f8514922;color:var(--red);border:1px solid #f8514933;}
-.tag-info{background:#58a6ff22;color:var(--blue);border:1px solid #58a6ff33;}
-.tag-warn{background:#e3b34122;color:#e3b341;border:1px solid #e3b34133;}
-
-/* ALERT BOX */
-.alert-box{margin-top:12px;border-top:1px solid var(--border);padding-top:12px;}
-.alert-box-title{font-size:9px;color:var(--muted);letter-spacing:2px;font-family:'Space Mono',monospace;margin-bottom:8px;}
-.alert-row{display:flex;gap:8px;}
-.alert-input{flex:1;background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:9px 12px;border-radius:8px;font-size:13px;font-family:'Space Mono',monospace;outline:none;}
-.alert-input:focus{border-color:var(--gold);}
-.alert-create-btn{background:linear-gradient(135deg,var(--gold),var(--gold2));color:#000;border:none;padding:9px 14px;border-radius:8px;font-size:12px;font-weight:700;font-family:'Space Mono',monospace;cursor:pointer;}
-.alert-status{margin-top:6px;font-size:11px;color:var(--muted);min-height:14px;}
-
-/* RESET BTN */
-.reset-btn{display:block;width:100%;margin:12px 0 0;padding:14px;background:var(--surface2);color:var(--muted);border:1px solid var(--border);border-radius:12px;font-size:13px;font-family:'Space Mono',monospace;cursor:pointer;}
-
-/* DIVIDER */
-.divider{height:1px;background:var(--border);margin:0 16px 16px;}
-
-/* FUNDING CARD */
+/* FUNDING */
 .funding-card{margin:16px;border-radius:16px;padding:16px;border:1px solid var(--border);background:var(--surface);transition:all .3s;}
 .funding-card.bullish{border-color:#3fb95044;background:linear-gradient(135deg,#0d1f12,#111a14);}
 .funding-card.bearish{border-color:#f8514944;background:linear-gradient(135deg,#1f0d0d,#1a1111);}
@@ -233,11 +80,119 @@ body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-h
 .tf-tag-bear{background:rgba(248,81,73,.15);color:var(--red);}
 .tf-tag-wait{background:rgba(227,179,65,.15);color:#e3b341;}
 
-/* TOAST */
+.divider{height:1px;background:var(--border);margin:0 16px 16px;}
+
+/* ── MULTI PAR UPLOAD (novo fluxo por lotes) ── */
+.pair-selector-card{
+  background:var(--surface);border:1px solid var(--border);
+  border-radius:16px;padding:16px;margin:0 16px 12px;
+}
+.pair-selector-label{font-size:10px;color:var(--muted);letter-spacing:2px;font-family:'Space Mono',monospace;margin-bottom:10px;}
+.pairs-wrap{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:14px;}
+.pair-btn{background:var(--surface2);border:1px solid var(--border);color:var(--text2);padding:7px 12px;border-radius:8px;font-size:12px;font-family:'Space Mono',monospace;cursor:pointer;transition:all .2s;-webkit-tap-highlight-color:transparent;}
+.pair-btn.active{background:linear-gradient(135deg,var(--gold),var(--gold2));color:#000;border-color:transparent;font-weight:700;}
+
+.upload-zone-mini{
+  border:2px dashed var(--border);border-radius:12px;
+  padding:18px;text-align:center;cursor:pointer;
+  transition:border-color .2s;position:relative;
+}
+.upload-zone-mini:hover{border-color:var(--gold);}
+.upload-zone-mini.has-files{border-color:var(--gold);border-style:solid;}
+.upload-zone-mini-icon{font-size:24px;margin-bottom:6px;}
+.upload-zone-mini-title{font-size:13px;font-weight:700;color:var(--gold);font-family:'Space Mono',monospace;margin-bottom:3px;letter-spacing:1px;}
+.upload-zone-mini-sub{font-size:11px;color:var(--muted);}
+
+.tf-preview{display:flex;gap:6px;justify-content:center;flex-wrap:wrap;margin-top:10px;}
+.tf-pill{padding:3px 10px;border-radius:20px;font-size:10px;font-weight:700;font-family:'Space Mono',monospace;background:rgba(240,192,64,.12);color:var(--gold);border:1px solid rgba(240,192,64,.25);}
+
+.add-pair-btn{
+  width:100%;padding:12px;margin-top:12px;
+  background:transparent;border:1px solid var(--gold);
+  color:var(--gold);border-radius:10px;
+  font-size:13px;font-weight:700;font-family:'Space Mono',monospace;
+  cursor:pointer;letter-spacing:1px;
+  -webkit-tap-highlight-color:transparent;
+}
+.add-pair-btn:active{background:rgba(240,192,64,.08);}
+
+/* FILA DE PARES */
+.queue-list{display:flex;flex-direction:column;gap:8px;margin:0 16px 12px;}
+.queue-card{
+  background:var(--surface);border:1px solid #3fb95044;
+  border-radius:12px;padding:12px 14px;
+  display:flex;align-items:center;justify-content:space-between;
+}
+.queue-pair-name{font-size:14px;font-weight:700;font-family:'Space Mono',monospace;color:var(--gold);}
+.queue-tfs{display:flex;gap:4px;flex-wrap:wrap;margin-top:5px;}
+.queue-tf-badge{background:var(--surface2);border:1px solid #3fb95033;border-radius:4px;padding:2px 7px;font-size:9px;color:var(--green);font-family:'Space Mono',monospace;}
+.queue-count{font-size:10px;color:var(--muted);margin-bottom:3px;text-align:right;}
+.queue-remove{font-size:11px;color:var(--red);cursor:pointer;text-align:right;margin-top:2px;-webkit-tap-highlight-color:transparent;}
+
+/* ANALYZE BTN */
+.analyze-btn{width:100%;padding:16px;background:linear-gradient(135deg,var(--gold),var(--gold2));color:#000;border:none;border-radius:14px;font-size:15px;font-weight:700;font-family:'Space Mono',monospace;cursor:pointer;letter-spacing:1px;transition:all .2s;-webkit-tap-highlight-color:transparent;display:flex;align-items:center;justify-content:center;gap:8px;}
+.analyze-btn:disabled{opacity:.5;cursor:not-allowed;}
+.analyze-btn:active:not(:disabled){transform:scale(.98);}
+.analyze-btn .btn-count{background:#0008;color:var(--gold);border-radius:4px;padding:2px 8px;font-size:11px;}
+
+/* LOADING */
+.loading{display:none;padding:20px 16px;}
+.loading.show{display:block;}
+.loading-pair-card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:14px 16px;display:flex;align-items:center;gap:14px;margin-bottom:8px;}
+.loading-spinner{width:22px;height:22px;border:2px solid var(--border);border-top-color:var(--gold);border-radius:50%;animation:spin .8s linear infinite;flex-shrink:0;}
+.loading-spinner.done{border:2px solid var(--green);animation:none;display:flex;align-items:center;justify-content:center;font-size:13px;color:var(--green);}
+.loading-pair-name{font-size:13px;font-weight:700;font-family:'Space Mono',monospace;color:var(--gold);}
+.loading-pair-sub{font-size:10px;color:var(--muted);margin-top:2px;}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* RESULTADOS */
+.result{display:none;}
+.result.show{display:block;padding:0 16px;}
+.result-summary-card{background:var(--surface);border:1px solid var(--border);border-radius:14px;margin-bottom:10px;overflow:hidden;transition:border-color .2s;}
+.rsc-header{padding:14px 16px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--border);}
+.rsc-pair{font-size:15px;font-weight:700;font-family:'Space Mono',monospace;}
+.rsc-tfs{font-size:9px;color:var(--muted);letter-spacing:1px;margin-top:2px;}
+.rsc-right{display:flex;gap:6px;align-items:center;}
+.rsc-dir{font-size:11px;font-weight:700;padding:3px 10px;border-radius:5px;letter-spacing:1px;font-family:'Space Mono',monospace;}
+.rsc-dir.bear{background:#1a050522;color:var(--red);border:1px solid #3a0a0a;}
+.rsc-dir.bull{background:#05201022;color:var(--green);border:1px solid #0a3a1a;}
+.rsc-dir.neutral{background:#1a1a0522;color:#e3b341;border:1px solid #3a3a0a;}
+.rsc-score{font-size:13px;font-weight:700;padding:4px 10px;border-radius:6px;font-family:'Space Mono',monospace;}
+.score-high{background:#3fb95022;color:var(--green);border:1px solid #3fb95044;}
+.score-mid{background:#e3b34122;color:#e3b341;border:1px solid #e3b34144;}
+.score-low{background:#f8514922;color:var(--red);border:1px solid #f8514944;}
+.rsc-body{padding:12px 16px;}
+.rsc-levels{display:flex;gap:12px;margin-bottom:10px;}
+.rsc-level{flex:1;}
+.rsc-level-label{font-size:9px;color:var(--muted);letter-spacing:1px;}
+.rsc-level-val{font-size:12px;font-weight:700;font-family:'Space Mono',monospace;margin-top:2px;}
+.rsc-level-val.green{color:var(--green);}
+.rsc-level-val.red{color:var(--red);}
+.rsc-expand-btn{width:100%;background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:8px;padding:9px;font-size:10px;font-weight:700;letter-spacing:1px;font-family:'Space Mono',monospace;cursor:pointer;-webkit-tap-highlight-color:transparent;}
+.rsc-expand-btn:active{border-color:var(--gold);color:var(--gold);}
+.rsc-full{display:none;margin-top:12px;border-top:1px solid var(--border);padding-top:12px;}
+.rsc-full.open{display:block;}
+.analysis-text{font-size:12px;line-height:1.7;color:var(--text2);}
+.analysis-text p{margin-bottom:8px;}
+.tag{display:inline-block;padding:1px 6px;border-radius:4px;font-size:11px;font-weight:600;margin:0 1px;}
+.tag-bull{background:#3fb95022;color:var(--green);border:1px solid #3fb95033;}
+.tag-bear{background:#f8514922;color:var(--red);border:1px solid #f8514933;}
+.tag-info{background:#58a6ff22;color:var(--blue);border:1px solid #58a6ff33;}
+.tag-warn{background:#e3b34122;color:#e3b341;border:1px solid #e3b34133;}
+
+.alert-box{margin-top:12px;border-top:1px solid var(--border);padding-top:12px;}
+.alert-box-title{font-size:9px;color:var(--muted);letter-spacing:2px;font-family:'Space Mono',monospace;margin-bottom:8px;}
+.alert-row{display:flex;gap:8px;}
+.alert-input{flex:1;background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:9px 12px;border-radius:8px;font-size:13px;font-family:'Space Mono',monospace;outline:none;}
+.alert-input:focus{border-color:var(--gold);}
+.alert-create-btn{background:linear-gradient(135deg,var(--gold),var(--gold2));color:#000;border:none;padding:9px 14px;border-radius:8px;font-size:12px;font-weight:700;font-family:'Space Mono',monospace;cursor:pointer;}
+.alert-status{margin-top:6px;font-size:11px;color:var(--muted);min-height:14px;}
+
+.reset-btn{display:block;width:100%;margin:12px 0 0;padding:14px;background:var(--surface2);color:var(--muted);border:1px solid var(--border);border-radius:12px;font-size:13px;font-family:'Space Mono',monospace;cursor:pointer;}
+
 .toast{position:fixed;bottom:90px;left:50%;transform:translateX(-50%) translateY(100px);background:#1f2937;color:var(--text);padding:12px 20px;border-radius:10px;font-size:13px;z-index:999;transition:transform .3s;white-space:nowrap;border:1px solid var(--border);}
 .toast.show{transform:translateX(-50%) translateY(0);}
 
-/* BOTTOM NAV */
 .bottom-nav{position:fixed;bottom:0;left:0;right:0;background:rgba(17,17,24,0.97);backdrop-filter:blur(20px);border-top:1px solid var(--border);display:flex;z-index:200;padding-bottom:env(safe-area-inset-bottom,4px);}
 .nav-item{flex:1;display:flex;flex-direction:column;align-items:center;padding:10px 0 6px;cursor:pointer;gap:3px;border:none;background:transparent;color:var(--muted);font-size:9px;font-weight:600;letter-spacing:0.5px;font-family:'Space Mono',monospace;-webkit-tap-highlight-color:transparent;transition:color .2s;}
 .nav-item.active{color:var(--gold);}
@@ -245,7 +200,6 @@ body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-h
 .nav-dot{width:4px;height:4px;border-radius:50%;background:var(--gold);opacity:0;transition:opacity .2s;}
 .nav-item.active .nav-dot{opacity:1;}
 
-/* SCREENS */
 .screen{display:none;}
 .screen.active{display:block;}
 
@@ -325,10 +279,9 @@ body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-h
   </div>
 </div>
 
-<!-- ══ HOME SCREEN ══ -->
+<!-- HOME -->
 <div id="screenHome" class="screen active">
 
-<!-- BIAS WIDGET -->
 <div class="bias-card neutral" id="biasWidget">
   <div class="bias-top">
     <div class="bias-left">
@@ -361,22 +314,27 @@ body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-h
     <div class="sent-bar"><div class="sent-needle" id="sentNeedle" style="left:50%"></div></div>
   </div>
   <div class="stats-row">
-    <div class="stat-box">
-      <div class="stat-label">24h High</div>
-      <div class="stat-val" id="highEl">--</div>
-    </div>
-    <div class="stat-box">
-      <div class="stat-label">Momentum</div>
-      <div class="stat-val"><span id="momIcon">⚠️</span> <span id="momVal" style="color:#e3b341">WAIT</span></div>
-    </div>
-    <div class="stat-box">
-      <div class="stat-label">Range Pos</div>
-      <div class="stat-val" id="rangePos">--</div>
-    </div>
+    <div class="stat-box"><div class="stat-label">24h High</div><div class="stat-val" id="highEl">--</div></div>
+    <div class="stat-box"><div class="stat-label">Momentum</div><div class="stat-val"><span id="momIcon">⚠️</span> <span id="momVal" style="color:#e3b341">WAIT</span></div></div>
+    <div class="stat-box"><div class="stat-label">Range Pos</div><div class="stat-val" id="rangePos">--</div></div>
   </div>
 </div>
 
-<!-- FUNDING + OI WIDGET -->
+<div class="section" style="margin-bottom:8px;">
+  <div class="section-title">Par — Funding + OI</div>
+  <div class="pairs-wrap" id="fundingPairBtns">
+    <button class="pair-btn active" onclick="selectFundingPair(this,'BTCUSD')">BTC</button>
+    <button class="pair-btn" onclick="selectFundingPair(this,'BNBUSD')">BNB</button>
+    <button class="pair-btn" onclick="selectFundingPair(this,'SOLUSD')">SOL</button>
+    <button class="pair-btn" onclick="selectFundingPair(this,'XRPUSD')">XRP</button>
+    <button class="pair-btn" onclick="selectFundingPair(this,'LINKUSD')">LINK</button>
+    <button class="pair-btn" onclick="selectFundingPair(this,'ETHUSD')">ETH</button>
+    <button class="pair-btn" onclick="selectFundingPair(this,'ADAUSD')">ADA</button>
+    <button class="pair-btn" onclick="selectFundingPair(this,'AVAXUSD')">AVAX</button>
+    <button class="pair-btn" onclick="selectFundingPair(this,'AAVEUSD')">AAVE</button>
+  </div>
+</div>
+
 <div class="funding-card neutral" id="fundingWidget">
   <div class="funding-top">
     <div class="funding-eyebrow" id="fundingPairLabel">BTC · Funding + OI · M15</div>
@@ -405,27 +363,44 @@ body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-h
 
 <div class="divider"></div>
 
-<!-- ══ MULTI-PAR UPLOAD ══ -->
+<!-- ══ MULTI PAR — NOVO FLUXO ══ -->
 <div class="section">
-  <div class="section-title">Carregar Gráficos — Vários Pares</div>
+  <div class="section-title">Análise Multi-Par</div>
+</div>
 
-  <!-- ZONA DE UPLOAD -->
-  <div class="upload-zone" id="uploadZone" onclick="document.getElementById('multiFileInput').click()">
-    <div class="upload-zone-icon">📊</div>
-    <div class="upload-zone-title">CARREGAR GRÁFICOS</div>
-    <div class="upload-zone-sub">Seleciona todos os prints de uma vez<br>BNB + SOL + BTC + qualquer par</div>
-    <input type="file" id="multiFileInput" accept="image/*" multiple style="display:none" onchange="handleMultiFiles(this)">
+<!-- SELECTOR DE PAR + UPLOAD -->
+<div class="pair-selector-card" id="addPairSection">
+  <div class="pair-selector-label">1. ESCOLHE O PAR</div>
+  <div class="pairs-wrap" id="pairBtns">
+    <button class="pair-btn active" onclick="selectActivePair(this,'BTCUSD')">BTC</button>
+    <button class="pair-btn" onclick="selectActivePair(this,'BNBUSD')">BNB</button>
+    <button class="pair-btn" onclick="selectActivePair(this,'SOLUSD')">SOL</button>
+    <button class="pair-btn" onclick="selectActivePair(this,'XRPUSD')">XRP</button>
+    <button class="pair-btn" onclick="selectActivePair(this,'LINKUSD')">LINK</button>
+    <button class="pair-btn" onclick="selectActivePair(this,'ETHUSD')">ETH</button>
+    <button class="pair-btn" onclick="selectActivePair(this,'ADAUSD')">ADA</button>
+    <button class="pair-btn" onclick="selectActivePair(this,'AVAXUSD')">AVAX</button>
+    <button class="pair-btn" onclick="selectActivePair(this,'AAVEUSD')">AAVE</button>
   </div>
 
-  <!-- LISTA DE IMAGENS CARREGADAS -->
-  <div id="imgListSection" style="display:none; margin-top:14px;">
-    <div class="section-title" style="margin-bottom:8px;">ROTULAR CADA GRÁFICO</div>
-    <div class="img-list" id="imgList"></div>
+  <div class="pair-selector-label">2. CARREGA OS GRÁFICOS</div>
+  <div class="upload-zone-mini" id="uploadZoneMini" onclick="document.getElementById('batchFileInput').click()">
+    <div class="upload-zone-mini-icon">📊</div>
+    <div class="upload-zone-mini-title" id="uploadZoneTitle">CARREGAR GRÁFICOS BTC</div>
+    <div class="upload-zone-mini-sub" id="uploadZoneSub">Seleciona os prints do par escolhido</div>
+    <div class="tf-preview" id="tfPreview"></div>
+    <input type="file" id="batchFileInput" accept="image/*" multiple style="display:none" onchange="handleBatchFiles(this)">
+  </div>
 
-    <div class="section-title" style="margin-top:12px; margin-bottom:8px;">AGRUPADO POR PAR</div>
-    <div class="group-list" id="groupList"></div>
+  <button class="add-pair-btn" id="addPairBtn" onclick="addPairToQueue()">+ ADICIONAR BTC À FILA</button>
+</div>
 
-    <button class="analyze-btn" id="analyzeBtn" onclick="analyzeMulti()">
+<!-- FILA -->
+<div id="queueSection" style="display:none; margin:0 16px 12px;">
+  <div class="section-title" style="margin-bottom:8px;">PARES NA FILA</div>
+  <div class="queue-list" id="queueList"></div>
+  <div style="padding:0;">
+    <button class="analyze-btn" id="analyzeBtn" onclick="analyzeAll()">
       ⚡ ANALISAR TODOS
       <span class="btn-count" id="btnPairCount">0 PARES</span>
     </button>
@@ -438,16 +413,16 @@ body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-h
   <div id="loadingCards"></div>
 </div>
 
-<!-- RESULTADO MULTI-PAR -->
+<!-- RESULTADOS -->
 <div class="result" id="result">
   <div class="section-title" style="margin-bottom:10px;" id="resultTitle">RESULTADOS</div>
   <div id="resultCards"></div>
-  <button class="reset-btn" style="margin:0 0 16px;" onclick="resetAnalysis()">+ Nova Sessão</button>
+  <button class="reset-btn" style="margin:0 0 16px;" onclick="resetAll()">+ Nova Sessão</button>
 </div>
 
 </div><!-- end screenHome -->
 
-<!-- ══ JOURNAL SCREEN ══ -->
+<!-- JOURNAL -->
 <div id="screenJournal" class="screen">
   <div class="pnl-hero">
     <div class="pnl-label">P&L TOTAL</div>
@@ -478,14 +453,13 @@ body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-h
   <div id="journalList"></div>
 </div>
 
-<!-- ══ STATS SCREEN ══ -->
+<!-- STATS -->
 <div id="screenStats" class="screen">
   <div style="margin-top:16px" id="statsContent">
     <div class="no-stats">A carregar stats...</div>
   </div>
 </div>
 
-<!-- BOTTOM NAV -->
 <nav class="bottom-nav">
   <button class="nav-item active" id="navHome" onclick="switchTab('Home')">
     <span class="nav-icon">🏠</span><span>HOME</span><div class="nav-dot"></div>
@@ -502,14 +476,17 @@ body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-h
 
 <script>
 // ── STATE ──
-let allImages = []; // [{file, dataUrl, base64, mimeType, name}]
+let activePair = 'BTCUSD';
+let currentBatchImages = []; // imagens do par atual ainda não adicionado à fila
+let pairQueue = []; // [{pair, images:[{base64,mimeType,tf}]}]
 let allTrades = [];
 let currentFilter = 'ALL';
+let isAnalyzing = false;
 
-const PAIRS = ['BTCUSD','BNBUSD','SOLUSD','ETHUSD','XRPUSD','LINKUSD','ADAUSD','AVAXUSD','AAVEUSD'];
-const TFS   = ['D1','H4','H1','M15','M5','M1'];
+const PAIRS = ['BTCUSD','BNBUSD','SOLUSD','XRPUSD','LINKUSD','ETHUSD','ADAUSD','AVAXUSD','AAVEUSD'];
+const TFS = ['D1','H4','H1','M15','M5','M1'];
 
-// ── TAB NAV ──
+// ── NAV ──
 function switchTab(tab){
   ['Home','Journal','Stats'].forEach(t=>{
     document.getElementById('screen'+t).classList.toggle('active',t===tab);
@@ -519,174 +496,200 @@ function switchTab(tab){
   if(tab==='Stats') loadStats();
 }
 
-// ── MULTI FILE HANDLER ──
-function handleMultiFiles(input){
+// ── FUNDING PAIR SELECTOR ──
+function selectFundingPair(el, pair){
+  document.querySelectorAll('#fundingPairBtns .pair-btn').forEach(b=>b.classList.remove('active'));
+  el.classList.add('active');
+  loadFundingOI(pair);
+}
+
+// ── PAIR SELECTOR ──
+function selectActivePair(el, pair){
+  document.querySelectorAll('#pairBtns .pair-btn').forEach(b=>b.classList.remove('active'));
+  el.classList.add('active');
+  activePair = pair;
+  currentBatchImages = [];
+  updateUploadZone();
+  loadFundingOI(pair);
+}
+
+function updateUploadZone(){
+  const label = activePair.replace('USD','');
+  document.getElementById('uploadZoneTitle').textContent = 'CARREGAR GRÁFICOS ' + label;
+  document.getElementById('addPairBtn').textContent = '+ ADICIONAR ' + label + ' À FILA';
+  const preview = document.getElementById('tfPreview');
+  if(currentBatchImages.length === 0){
+    preview.innerHTML = '';
+    document.getElementById('uploadZoneSub').textContent = 'Seleciona os prints do par escolhido';
+    document.getElementById('uploadZoneMini').classList.remove('has-files');
+  } else {
+    document.getElementById('uploadZoneSub').textContent = currentBatchImages.length + ' gráfico(s) carregado(s)';
+    document.getElementById('uploadZoneMini').classList.add('has-files');
+    preview.innerHTML = currentBatchImages.map((_,i)=>`<div class="tf-pill">TF${i+1}</div>`).join('');
+  }
+}
+
+// ── BATCH FILE HANDLER ──
+function handleBatchFiles(input){
   const files = Array.from(input.files);
   if(!files.length) return;
+  currentBatchImages = [];
   let loaded = 0;
   files.forEach(file=>{
     const reader = new FileReader();
     reader.onload = e => {
       const dataUrl = e.target.result;
-      const base64 = dataUrl.split(',')[1];
-      allImages.push({
-        file, dataUrl, base64,
+      currentBatchImages.push({
+        base64: dataUrl.split(',')[1],
         mimeType: file.type || 'image/jpeg',
-        name: file.name,
-        pair: 'BNBUSD',
-        tf: 'H4'
+        name: file.name
       });
       loaded++;
-      if(loaded === files.length) renderImgList();
+      if(loaded === files.length){
+        updateUploadZone();
+      }
     };
     reader.readAsDataURL(file);
   });
-  // reset input so same files can be re-selected
   input.value = '';
 }
 
-function renderImgList(){
-  if(!allImages.length){
-    document.getElementById('imgListSection').style.display='none';
+// ── ADD PAR À FILA ──
+function addPairToQueue(){
+  if(currentBatchImages.length < 2){
+    return showToast('Carrega pelo menos 2 gráficos para ' + activePair.replace('USD',''));
+  }
+
+  // Verificar se par já está na fila
+  const existing = pairQueue.findIndex(p=>p.pair===activePair);
+  if(existing >= 0){
+    pairQueue[existing].images = currentBatchImages.slice();
+    showToast(activePair.replace('USD','') + ' atualizado na fila');
+  } else {
+    pairQueue.push({ pair: activePair, images: currentBatchImages.slice() });
+    showToast('✓ ' + activePair.replace('USD','') + ' adicionado!');
+  }
+
+  currentBatchImages = [];
+  updateUploadZone();
+  renderQueue();
+}
+
+// ── RENDER FILA ──
+function renderQueue(){
+  const queueSection = document.getElementById('queueSection');
+  if(pairQueue.length === 0){
+    queueSection.style.display = 'none';
     return;
   }
-  document.getElementById('imgListSection').style.display='block';
+  queueSection.style.display = 'block';
+  document.getElementById('btnPairCount').textContent = pairQueue.length + (pairQueue.length===1?' PAR':' PARES');
 
-  // IMAGE ROWS
-  const listEl = document.getElementById('imgList');
-  listEl.innerHTML = allImages.map((img, idx) => `
-    <div class="img-row">
-      <div class="img-thumb"><img src="${img.dataUrl}" alt=""></div>
-      <div class="img-meta">
-        <div class="img-name">${img.name}</div>
-        <div class="img-selects">
-          <select onchange="updateImgMeta(${idx},'pair',this.value)">
-            ${PAIRS.map(p=>`<option value="${p}" ${img.pair===p?'selected':''}>${p.replace('USD','')}</option>`).join('')}
-          </select>
-          <select onchange="updateImgMeta(${idx},'tf',this.value)">
-            ${TFS.map(t=>`<option value="${t}" ${img.tf===t?'selected':''}>${t}</option>`).join('')}
-          </select>
+  document.getElementById('queueList').innerHTML = pairQueue.map((p,idx)=>`
+    <div class="queue-card">
+      <div>
+        <div class="queue-pair-name">⚡ ${p.pair.replace('USD','USDT')}</div>
+        <div class="queue-tfs">
+          ${p.images.map((_,i)=>`<div class="queue-tf-badge">IMG ${i+1}</div>`).join('')}
         </div>
       </div>
-      <div class="img-remove" onclick="removeImg(${idx})">✕</div>
-    </div>
-  `).join('');
-
-  renderGroupPreview();
-}
-
-function updateImgMeta(idx, key, val){
-  allImages[idx][key] = val;
-  renderGroupPreview();
-}
-
-function removeImg(idx){
-  allImages.splice(idx,1);
-  renderImgList();
-}
-
-function renderGroupPreview(){
-  // Group by pair
-  const groups = {};
-  allImages.forEach(img=>{
-    if(!groups[img.pair]) groups[img.pair]=[];
-    if(!groups[img.pair].includes(img.tf)) groups[img.pair].push(img.tf);
-  });
-
-  const pairCount = Object.keys(groups).length;
-  document.getElementById('btnPairCount').textContent = pairCount + (pairCount===1?' PAR':' PARES');
-
-  const groupEl = document.getElementById('groupList');
-  groupEl.innerHTML = Object.entries(groups).map(([pair, tfs])=>`
-    <div class="group-row">
       <div>
-        <div class="group-pair">⚡ ${pair.replace('USD','USDT')}</div>
-        <div class="group-count">${tfs.length} gráfico${tfs.length>1?'s':''}</div>
+        <div class="queue-count">${p.images.length} gráfico(s)</div>
+        <div class="queue-remove" onclick="removeFromQueue(${idx})">✕ remover</div>
       </div>
-      <div class="group-tfs">${tfs.map(t=>`<div class="tf-badge">${t}</div>`).join('')}</div>
     </div>
   `).join('');
 }
 
-// ── ANALYZE MULTI ──
-async function analyzeMulti(){
-  if(!allImages.length) return showToast('Carrega pelo menos 2 gráficos');
+function removeFromQueue(idx){
+  pairQueue.splice(idx,1);
+  renderQueue();
+}
 
-  // Validate: each pair needs at least 2 TFs
-  const groups = {};
-  allImages.forEach(img=>{
-    if(!groups[img.pair]) groups[img.pair]={};
-    groups[img.pair][img.tf] = {base64: img.base64, mimeType: img.mimeType};
-  });
+// ── ANALYZE ALL ──
+async function analyzeAll(){
+  if(isAnalyzing) return;
+  if(pairQueue.length === 0) return showToast('Adiciona pelo menos 1 par à fila');
+  isAnalyzing = true;
 
-  const validPairs = Object.entries(groups).filter(([,tfs])=>Object.keys(tfs).length>=2);
-  if(!validPairs.length){
-    return showToast('Cada par precisa de mínimo 2 TFs');
-  }
-
-  // Hide upload, show loading
-  document.getElementById('imgListSection').style.display='none';
+  document.getElementById('addPairSection').style.display = 'none';
+  document.getElementById('queueSection').style.display = 'none';
   document.getElementById('result').classList.remove('show');
-  document.getElementById('result').innerHTML='';
+  document.getElementById('resultCards').innerHTML = '';
+
   const loadingEl = document.getElementById('loading');
   loadingEl.classList.add('show');
 
   // Build loading cards
-  const loadingCards = document.getElementById('loadingCards');
-  loadingCards.innerHTML = validPairs.map(([pair])=>`
-    <div class="loading-pair-card" id="lcard_${pair}">
-      <div class="loading-spinner" id="lspinner_${pair}"></div>
+  document.getElementById('loadingCards').innerHTML = pairQueue.map(p=>`
+    <div class="loading-pair-card" id="lcard_${p.pair}">
+      <div class="loading-spinner" id="lspinner_${p.pair}"></div>
       <div>
-        <div class="loading-pair-name">${pair.replace('USD','USDT')}</div>
-        <div class="loading-pair-sub" id="lsub_${pair}">A aguardar...</div>
+        <div class="loading-pair-name">${p.pair.replace('USD','USDT')}</div>
+        <div class="loading-pair-sub" id="lsub_${p.pair}">A aguardar...</div>
       </div>
     </div>
   `).join('');
 
-  // Build payload
+  // Build payload — converter para formato que backend espera
+  // {pair: {TF_INDEX: {base64, mimeType}}}
   const pairsPayload = {};
-  validPairs.forEach(([pair, tfs])=>{ pairsPayload[pair]=tfs; });
+  pairQueue.forEach(p=>{
+    const tfsMap = {};
+    p.images.forEach((img, i)=>{
+      // Usar índice como TF label (o backend não precisa do TF real para analisar)
+      const tfLabel = TFS[i] || ('IMG'+(i+1));
+      tfsMap[tfLabel] = { base64: img.base64, mimeType: img.mimeType };
+    });
+    pairsPayload[p.pair] = tfsMap;
+  });
 
-  try{
-    // Mark first as processing
-    if(validPairs[0]){
-      document.getElementById('lsub_'+validPairs[0][0]).textContent='A analisar...';
+  const results = [];
+  const errors = [];
+
+  // Analisar par a par sequencialmente para não sobrecarregar
+  for(let i = 0; i < pairQueue.length; i++){
+    const p = pairQueue[i];
+    const spinnerEl = document.getElementById('lspinner_'+p.pair);
+    const subEl = document.getElementById('lsub_'+p.pair);
+    if(subEl) subEl.textContent = 'A analisar...';
+
+    try{
+      const singlePayload = {};
+      singlePayload[p.pair] = pairsPayload[p.pair];
+
+      const res = await fetch('/analyze_multi',{
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({pairs: singlePayload})
+      });
+      const data = await res.json();
+
+      if(data.error) throw new Error(data.error);
+      if(data.results && data.results.length > 0){
+        results.push(data.results[0]);
+        if(spinnerEl){ spinnerEl.className='loading-spinner done'; spinnerEl.textContent='✓'; }
+        if(subEl) subEl.textContent='Concluído ✓';
+      }
+      if(data.errors && data.errors.length > 0) errors.push(...data.errors);
+    }catch(e){
+      errors.push({pair:p.pair, error:e.message});
+      if(spinnerEl){ spinnerEl.style.borderColor='var(--red)'; spinnerEl.style.borderTopColor='var(--red)'; spinnerEl.style.animation='none'; }
+      if(subEl){ subEl.textContent='Erro ⚠️'; subEl.style.color='var(--red)'; }
     }
-
-    const res = await fetch('/analyze_multi',{
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({pairs: pairsPayload})
-    });
-    const data = await res.json();
-    if(data.error) throw new Error(data.error);
-
-    // Mark all as done
-    validPairs.forEach(([pair])=>{
-      const sp = document.getElementById('lspinner_'+pair);
-      const sb = document.getElementById('lsub_'+pair);
-      if(sp) sp.className='loading-spinner done';
-      if(sb) sb.textContent='Concluído ✓';
-    });
-
-    setTimeout(()=>{
-      loadingEl.classList.remove('show');
-      renderMultiResults(data.results, data.errors||[]);
-    }, 600);
-
-  }catch(e){
-    loadingEl.classList.remove('show');
-    document.getElementById('imgListSection').style.display='block';
-    showToast('Erro: '+e.message);
   }
+
+  setTimeout(()=>{
+    loadingEl.classList.remove('show');
+    isAnalyzing = false;
+    renderMultiResults(results, errors);
+  }, 500);
 }
 
 function renderMultiResults(results, errors){
   const resultEl = document.getElementById('result');
-  document.getElementById('resultTitle').textContent =
-    'RESULTADOS — '+results.length+' PAR'+(results.length>1?'ES':'');
+  document.getElementById('resultTitle').textContent = 'RESULTADOS — '+results.length+' PAR'+(results.length!==1?'ES':'');
 
-  // Sort by score desc
   results.sort((a,b)=>b.score-a.score);
 
   let html = results.map(r=>{
@@ -695,6 +698,7 @@ function renderMultiResults(results, errors){
     const scoreClass = r.score>=75?'score-high':r.score>=60?'score-mid':'score-low';
     const tfsArr = r.timeframes ? r.timeframes.split(',') : [];
     const formatted = formatAnalysis(r.result);
+    const pairKey = r.pair.replace(/[^a-zA-Z0-9]/g,'_');
 
     return `
     <div class="result-summary-card">
@@ -715,16 +719,16 @@ function renderMultiResults(results, errors){
           ${r.tp1?`<div class="rsc-level"><div class="rsc-level-label">TP1</div><div class="rsc-level-val green">$${r.tp1}</div></div>`:''}
           ${r.tp2?`<div class="rsc-level"><div class="rsc-level-label">TP2</div><div class="rsc-level-val green">$${r.tp2}</div></div>`:''}
         </div>
-        <button class="rsc-expand-btn" onclick="toggleFull('${r.pair}')">VER ANÁLISE COMPLETA ↓</button>
-        <div class="rsc-full" id="full_${r.pair}">
+        <button class="rsc-expand-btn" onclick="toggleFull('${pairKey}')">VER ANÁLISE COMPLETA ↓</button>
+        <div class="rsc-full" id="full_${pairKey}">
           <div class="analysis-text">${formatted}</div>
           <div class="alert-box">
             <div class="alert-box-title">CRIAR ALERTA DE PREÇO</div>
             <div class="alert-row">
-              <input id="alertPrice_${r.pair}" type="number" placeholder="Ex: 570.00" step="any" class="alert-input">
-              <button onclick="createAlert('${r.pair}','${r.result.replace(/'/g,"\\'")}','${r.timeframes}')" class="alert-create-btn">Criar</button>
+              <input id="alertPrice_${pairKey}" type="number" placeholder="Ex: 570.00" step="any" class="alert-input">
+              <button onclick="createAlert('${r.pair}','${r.result.replace(/'/g,"\\'").replace(/\n/g,' ')}','${r.timeframes}')" class="alert-create-btn">Criar</button>
             </div>
-            <div id="alertStatus_${r.pair}" class="alert-status"></div>
+            <div id="alertStatus_${pairKey}" class="alert-status"></div>
           </div>
         </div>
       </div>
@@ -733,7 +737,7 @@ function renderMultiResults(results, errors){
 
   if(errors.length){
     html += `<div style="margin-bottom:12px;padding:12px 14px;background:var(--surface);border:1px solid #3a1a1a;border-radius:10px;font-size:11px;color:var(--red);">
-      ⚠️ Erros em: ${errors.map(e=>e.pair.replace('USD','USDT')+' ('+e.error+')').join(', ')}
+      ⚠️ Erros: ${errors.map(e=>e.pair.replace('USD','USDT')+' ('+e.error+')').join(', ')}
     </div>`;
   }
 
@@ -742,8 +746,8 @@ function renderMultiResults(results, errors){
   resultEl.scrollIntoView({behavior:'smooth',block:'start'});
 }
 
-function toggleFull(pair){
-  const el = document.getElementById('full_'+pair);
+function toggleFull(pairKey){
+  const el = document.getElementById('full_'+pairKey);
   el.classList.toggle('open');
   const btn = el.previousElementSibling;
   btn.textContent = el.classList.contains('open') ? 'FECHAR ANÁLISE ↑' : 'VER ANÁLISE COMPLETA ↓';
@@ -762,9 +766,10 @@ function formatAnalysis(text){
 }
 
 async function createAlert(pair, analysis, timeframes){
-  const price = parseFloat(document.getElementById('alertPrice_'+pair).value);
+  const pairKey = pair.replace(/[^a-zA-Z0-9]/g,'_');
+  const price = parseFloat(document.getElementById('alertPrice_'+pairKey).value);
   if(!price||price<=0) return showToast('Mete um preço válido');
-  const statusEl = document.getElementById('alertStatus_'+pair);
+  const statusEl = document.getElementById('alertStatus_'+pairKey);
   statusEl.textContent='A criar alerta...';
   try{
     const currentPrice = await getPrice(pair);
@@ -784,14 +789,16 @@ async function createAlert(pair, analysis, timeframes){
   }
 }
 
-function resetAnalysis(){
-  allImages=[];
-  document.getElementById('imgList').innerHTML='';
-  document.getElementById('groupList').innerHTML='';
-  document.getElementById('imgListSection').style.display='none';
+function resetAll(){
+  pairQueue = [];
+  currentBatchImages = [];
+  isAnalyzing = false;
+  document.getElementById('addPairSection').style.display = 'block';
+  document.getElementById('queueSection').style.display = 'none';
   document.getElementById('result').classList.remove('show');
-  document.getElementById('resultCards').innerHTML='';
-  document.getElementById('uploadZone').style.display='block';
+  document.getElementById('resultCards').innerHTML = '';
+  document.getElementById('queueList').innerHTML = '';
+  updateUploadZone();
   window.scrollTo({top:0,behavior:'smooth'});
 }
 
@@ -884,8 +891,12 @@ function paintTfBox(prefix,deltaPct,fundingRate){
   const sig=fundingOiSignal(fundingRate,deltaPct);
   tagEl.className='tf-box-tag tf-tag-'+sig.cls;tagEl.textContent=sig.tag;return sig;
 }
-async function loadFundingOI(){
-  const symbol='BTCUSDT';
+async function loadFundingOI(pair){
+  const symbolMap={'BTCUSD':'BTCUSDT','ETHUSD':'ETHUSDT','SOLUSD':'SOLUSDT','XRPUSD':'XRPUSDT','LINKUSD':'LINKUSDT','ADAUSD':'ADAUSDT','AVAXUSD':'AVAXUSDT','BNBUSD':'BNBUSDT','AAVEUSD':'AAVEUSDT'};
+  const symbol=(pair&&symbolMap[pair])?symbolMap[pair]:'BTCUSDT';
+  const pairLabel=symbol.replace('USDT','');
+  const labelEl=document.getElementById('fundingPairLabel');
+  if(labelEl) labelEl.textContent=pairLabel+' · Funding + OI · M15';
   try{
     const tickerRes=await fetch('https://api.bybit.com/v5/market/tickers?category=linear&symbol='+symbol);
     const tickerData=await tickerRes.json();
@@ -915,11 +926,11 @@ async function loadFundingOI(){
     }
   }catch(e){
     const detailEl=document.getElementById('fundingSignalDetail');
-    if(detailEl)detailEl.textContent='⚠️ Erro ao buscar dados — tenta novamente';
+    if(detailEl)detailEl.textContent='⚠️ Erro ao buscar dados';
   }
 }
 
-// ── PRICE FETCHER ──
+// ── PRICE ──
 async function getPrice(pair){
   try{
     const symbolMap={'BTCUSD':'BTCUSDT','ETHUSD':'ETHUSDT','SOLUSD':'SOLUSDT','XRPUSD':'XRPUSDT','LINKUSD':'LINKUSDT','ADAUSD':'ADAUSDT','AVAXUSD':'AVAXUSDT','BNBUSD':'BNBUSDT','AAVEUSD':'AAVEUSDT'};
@@ -947,8 +958,8 @@ async function updateServerPrices(){
 
 setTimeout(updateServerPrices,500);
 setInterval(updateServerPrices,15000);
-setTimeout(loadFundingOI,1200);
-setInterval(loadFundingOI,60000);
+setTimeout(()=>loadFundingOI('BTCUSD'),1200);
+setInterval(()=>loadFundingOI(activePair),60000);
 
 // ── JOURNAL ──
 async function loadJournal(){

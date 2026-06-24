@@ -102,27 +102,21 @@ def check_alerts_inline():
             cursor = conn.cursor()
             cursor.execute("SELECT id, pair, target, analysis, timeframes FROM alerts")
             db_alerts = cursor.fetchall()
-        
         if not db_alerts:
             return
-
         for row in db_alerts:
             alert_id, pair, target, analysis, timeframes_str = row[0], row[1], row[2], row[3], row[4]
             if timeframes_str is None: timeframes_str = ""
-            
             current_price = PRECOS_TICKER.get(pair)
             if current_price is None: continue
-            
             distancia = abs(current_price - target)
             margem_tolerancia = target * 0.0015
-            
             if distancia <= margem_tolerancia:
                 with sqlite3.connect(DB_FILE) as conn_del:
                     cursor_del = conn_del.cursor()
                     cursor_del.execute("DELETE FROM alerts WHERE id = ?", (alert_id,))
                     linhas_afetadas = cursor_del.rowcount
                     conn_del.commit()
-                
                 if linhas_afetadas > 0:
                     direction, score, sl, tps, tf_label, entry = extract_trade_info(analysis, timeframes_str)
                     arrow = "📈" if direction == "LONG" else "📉"
@@ -211,6 +205,129 @@ ICT_SYSTEM_PROMPT = (
     "- Fecha todas as tags HTML abertas\n"
 )
 
+def build_dynamic_prompt(pair, valid_tfs):
+    return (
+        f"Analisa os graficos de {pair} nos timeframes ({', '.join(valid_tfs)}) com maxima precisao e objetividade.\n\n"
+        "FORMATO OBRIGATORIO DA RESPOSTA — SEGUIR EXATAMENTE:\n\n"
+
+        "<b>⚡ KAIROS MENTOR — " + pair + "</b>\n"
+        "Data/Hora: [data e hora UTC]\n\n"
+        "---\n\n"
+
+        "<b>🧭 SENTIDO DO MERCADO</b>\n"
+        "<b>Dominante:</b> [📈 LONG / 📉 SHORT / ⏸ NEUTRO — FORA]\n"
+        "<b>Tipo de Setup:</b> [TENDENCIA / REVERSAO / CONTINUIDADE]\n"
+        "<b>Proximo Passo Logico:</b> [1 frase direta — o que o mercado vai fazer]\n"
+        "<b>Midnight Open:</b> [valor exato] — preco esta [ACIMA/ABAIXO] — bias [BULLISH/BEARISH]\n"
+        "<b>ADR Hoje:</b> [range ja usado hoje] de [ADR medio] — [% usado] — [ENTRADA OK / CUIDADO — range quase esgotado]\n\n"
+        "---\n\n"
+
+        "<b>📉 CENARIO SHORT — Probabilidade: [X]%</b>\n"
+        "<b>Condicao:</b> [o que tem de acontecer para este cenario]\n\n"
+        "<b>⚡ SCALP (M5/M15):</b>\n"
+        "Short: $[valor] | SL: $[valor] | TP: $[valor] | RR: 1:[x]\n"
+        "<b>Trigger:</b> [vela de confirmacao obrigatoria]\n\n"
+        "<b>🕐 INTRADAY (H1):</b>\n"
+        "Short: $[valor] | SL: $[valor] | TP1: $[valor] | TP2: $[valor] | RR: 1:[x]\n"
+        "<b>Trigger:</b> [vela de confirmacao obrigatoria]\n\n"
+        "<b>📅 SWING (H4/D1):</b>\n"
+        "Short: $[valor] | SL: $[valor] | TP1: $[valor] | TP2: $[valor] | TP3: $[valor] | RR: 1:[x]\n"
+        "<b>Trigger:</b> [vela de confirmacao obrigatoria]\n\n"
+        "<b>😴 PASSIVO (ordem limite short):</b>\n"
+        "Limit Short: $[valor] | SL: $[valor] | TP: $[valor] | RR: 1:[x]\n\n"
+        "<b>⚠️ Invalida SHORT se:</b> [nivel exato]\n\n"
+        "---\n\n"
+
+        "<b>📈 CENARIO LONG — Probabilidade: [X]%</b>\n"
+        "<b>Condicao:</b> [o que tem de acontecer para este cenario]\n\n"
+        "<b>⚡ SCALP (M5/M15):</b>\n"
+        "Long: $[valor] | SL: $[valor] | TP: $[valor] | RR: 1:[x]\n"
+        "<b>Trigger:</b> [vela de confirmacao obrigatoria]\n\n"
+        "<b>🕐 INTRADAY (H1):</b>\n"
+        "Long: $[valor] | SL: $[valor] | TP1: $[valor] | TP2: $[valor] | RR: 1:[x]\n"
+        "<b>Trigger:</b> [vela de confirmacao obrigatoria]\n\n"
+        "<b>📅 SWING (H4/D1):</b>\n"
+        "Long: $[valor] | SL: $[valor] | TP1: $[valor] | TP2: $[valor] | TP3: $[valor] | RR: 1:[x]\n"
+        "<b>Trigger:</b> [vela de confirmacao obrigatoria]\n\n"
+        "<b>😴 PASSIVO (ordem limite long):</b>\n"
+        "Limit Long: $[valor] | SL: $[valor] | TP: $[valor] | RR: 1:[x]\n\n"
+        "<b>⚠️ Invalida LONG se:</b> [nivel exato]\n\n"
+        "---\n\n"
+
+        "<b>📊 ANALISE COMPLETA — 15 CAMADAS ICT</b>\n\n"
+
+        "<b>BIAS DE MERCADO</b>\n"
+        "- <b>D1:</b> [BULLISH/BEARISH] — RSI:[valor] MACD:[bull/bear] Estoc:[valor]\n"
+        "- <b>H4:</b> [BULLISH/BEARISH] — RSI:[valor] MACD:[bull/bear] Estoc:[valor]\n"
+        "- <b>H1:</b> [bias] — RSI:[valor] MACD:[bull/bear] Estoc:[valor]\n"
+        "- <b>M15/M5:</b> [bias] — RSI:[valor] MACD:[bull/bear] Estoc:[valor]\n\n"
+
+        "<b>LIQUIDEZ & ESTRUTURA</b>\n"
+        "- <b>BSL:</b> $[valor] — [contexto]\n"
+        "- <b>SSL:</b> $[valor] — [contexto]\n"
+        "- <b>AVISO LIQUIDEZ:</b> [BSL/SSL que pode varrer stop]\n"
+        "- <b>OB Bearish:</b> [zona exata]\n"
+        "- <b>OB Bullish:</b> [zona exata]\n"
+        "- <b>FVG Aberto:</b> [zona e status]\n"
+        "- <b>IFVG:</b> [zona e status]\n"
+        "- <b>Breaker Block:</b> [zona se existir]\n"
+        "- <b>CHoCH:</b> [status e nivel exato]\n\n"
+
+        "<b>OTE — OPTIMAL TRADE ENTRY</b>\n"
+        "- Swing: [low] para [high] — Range: [x] pontos\n"
+        "- 61.8%: $[valor]\n"
+        "- 70.5%: $[valor]\n"
+        "- 79.0%: $[valor]\n"
+        "- Zona OTE ideal: $[valor] — $[valor]\n\n"
+
+        "<b>WYCKOFF + PO3/AMD</b>\n"
+        "- Fase Wyckoff: [fase atual]\n"
+        "- PO3: Accumulation [zona] / Manipulation [nivel] / Distribution [em curso/aguarda]\n\n"
+
+        "<b>SCORE OPERACIONAL: [X]/100</b>\n"
+        "- Confluencias ativas: [lista]\n"
+        "- Penalizacoes: [lista]\n\n"
+
+        "<b>RECOMENDACAO FINAL</b>\n"
+        "[narrativa completa mas objetiva — maximo 5 linhas]"
+    )
+
+def analyze_single_pair(pair, images_by_tf):
+    """Analisa um único par e retorna o resultado."""
+    valid_tfs = [tf for tf, img in images_by_tf.items() if img and isinstance(img, dict) and img.get('base64')]
+    if len(valid_tfs) < 2:
+        return None, f"Par {pair} precisa de pelo menos 2 graficos"
+
+    dynamic_prompt = build_dynamic_prompt(pair, valid_tfs)
+
+    content = []
+    for tf in valid_tfs:
+        img = images_by_tf[tf]
+        b64_data = img['base64']
+        if "," in b64_data:
+            b64_data = b64_data.split(",")[-1]
+        b64_data = b64_data.strip().replace("\n", "").replace("\r", "")
+        mime = img.get('mimeType', 'image/jpeg') or 'image/jpeg'
+        content.append({"type": "text", "text": f"Grafico {tf}:"})
+        content.append({
+            "type": "image",
+            "source": {"type": "base64", "media_type": mime, "data": b64_data}
+        })
+    content.append({"type": "text", "text": dynamic_prompt})
+
+    response = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=16000,
+        system=[{
+            "type": "text",
+            "text": ICT_SYSTEM_PROMPT,
+            "cache_control": {"type": "ephemeral"}
+        }],
+        messages=[{"role": "user", "content": content}]
+    )
+
+    return response.content[0].text, None
+
 @app.route('/')
 def index():
     return send_from_directory('.', 'index.html')
@@ -227,6 +344,7 @@ def update_prices():
     except Exception as e:
         return jsonify({'error': str(e)}), 400
 
+# ─── ENDPOINT ANTIGO (um par) — mantido para compatibilidade ────────────────
 @app.route('/analyze', methods=['POST'])
 def analyze():
     try:
@@ -237,119 +355,9 @@ def analyze():
         if len(valid_tfs) < 2:
             return jsonify({'error': 'Carrega pelo menos 2 graficos validos!'}), 400
 
-        dynamic_prompt = (
-            f"Analisa os graficos de {pair} nos timeframes ({', '.join(valid_tfs)}) com maxima precisao e objetividade.\n\n"
-            "FORMATO OBRIGATORIO DA RESPOSTA — SEGUIR EXATAMENTE:\n\n"
-
-            "<b>⚡ KAIROS MENTOR — " + pair + "</b>\n"
-            "Data/Hora: [data e hora UTC]\n\n"
-            "---\n\n"
-
-            "<b>🧭 SENTIDO DO MERCADO</b>\n"
-            "<b>Dominante:</b> [📈 LONG / 📉 SHORT / ⏸ NEUTRO — FORA]\n"
-            "<b>Tipo de Setup:</b> [TENDENCIA / REVERSAO / CONTINUIDADE]\n"
-            "<b>Proximo Passo Logico:</b> [1 frase direta — o que o mercado vai fazer]\n"
-            "<b>Midnight Open:</b> [valor exato] — preco esta [ACIMA/ABAIXO] — bias [BULLISH/BEARISH]\n"
-            "<b>ADR Hoje:</b> [range ja usado hoje] de [ADR medio] — [% usado] — [ENTRADA OK / CUIDADO — range quase esgotado]\n\n"
-            "---\n\n"
-
-            "<b>📉 CENARIO SHORT — Probabilidade: [X]%</b>\n"
-            "<b>Condicao:</b> [o que tem de acontecer para este cenario]\n\n"
-            "<b>⚡ SCALP (M5/M15):</b>\n"
-            "Short: $[valor] | SL: $[valor] | TP: $[valor] | RR: 1:[x]\n"
-            "<b>Trigger:</b> [vela de confirmacao obrigatoria]\n\n"
-            "<b>🕐 INTRADAY (H1):</b>\n"
-            "Short: $[valor] | SL: $[valor] | TP1: $[valor] | TP2: $[valor] | RR: 1:[x]\n"
-            "<b>Trigger:</b> [vela de confirmacao obrigatoria]\n\n"
-            "<b>📅 SWING (H4/D1):</b>\n"
-            "Short: $[valor] | SL: $[valor] | TP1: $[valor] | TP2: $[valor] | TP3: $[valor] | RR: 1:[x]\n"
-            "<b>Trigger:</b> [vela de confirmacao obrigatoria]\n\n"
-            "<b>😴 PASSIVO (ordem limite short):</b>\n"
-            "Limit Short: $[valor] | SL: $[valor] | TP: $[valor] | RR: 1:[x]\n\n"
-            "<b>⚠️ Invalida SHORT se:</b> [nivel exato]\n\n"
-            "---\n\n"
-
-            "<b>📈 CENARIO LONG — Probabilidade: [X]%</b>\n"
-            "<b>Condicao:</b> [o que tem de acontecer para este cenario]\n\n"
-            "<b>⚡ SCALP (M5/M15):</b>\n"
-            "Long: $[valor] | SL: $[valor] | TP: $[valor] | RR: 1:[x]\n"
-            "<b>Trigger:</b> [vela de confirmacao obrigatoria]\n\n"
-            "<b>🕐 INTRADAY (H1):</b>\n"
-            "Long: $[valor] | SL: $[valor] | TP1: $[valor] | TP2: $[valor] | RR: 1:[x]\n"
-            "<b>Trigger:</b> [vela de confirmacao obrigatoria]\n\n"
-            "<b>📅 SWING (H4/D1):</b>\n"
-            "Long: $[valor] | SL: $[valor] | TP1: $[valor] | TP2: $[valor] | TP3: $[valor] | RR: 1:[x]\n"
-            "<b>Trigger:</b> [vela de confirmacao obrigatoria]\n\n"
-            "<b>😴 PASSIVO (ordem limite long):</b>\n"
-            "Limit Long: $[valor] | SL: $[valor] | TP: $[valor] | RR: 1:[x]\n\n"
-            "<b>⚠️ Invalida LONG se:</b> [nivel exato]\n\n"
-            "---\n\n"
-
-            "<b>📊 ANALISE COMPLETA — 15 CAMADAS ICT</b>\n\n"
-
-            "<b>BIAS DE MERCADO</b>\n"
-            "- <b>D1:</b> [BULLISH/BEARISH] — RSI:[valor] MACD:[bull/bear] Estoc:[valor]\n"
-            "- <b>H4:</b> [BULLISH/BEARISH] — RSI:[valor] MACD:[bull/bear] Estoc:[valor]\n"
-            "- <b>H1:</b> [bias] — RSI:[valor] MACD:[bull/bear] Estoc:[valor]\n"
-            "- <b>M15/M5:</b> [bias] — RSI:[valor] MACD:[bull/bear] Estoc:[valor]\n\n"
-
-            "<b>LIQUIDEZ & ESTRUTURA</b>\n"
-            "- <b>BSL:</b> $[valor] — [contexto]\n"
-            "- <b>SSL:</b> $[valor] — [contexto]\n"
-            "- <b>AVISO LIQUIDEZ:</b> [BSL/SSL que pode varrer stop]\n"
-            "- <b>OB Bearish:</b> [zona exata]\n"
-            "- <b>OB Bullish:</b> [zona exata]\n"
-            "- <b>FVG Aberto:</b> [zona e status]\n"
-            "- <b>IFVG:</b> [zona e status]\n"
-            "- <b>Breaker Block:</b> [zona se existir]\n"
-            "- <b>CHoCH:</b> [status e nivel exato]\n\n"
-
-            "<b>OTE — OPTIMAL TRADE ENTRY</b>\n"
-            "- Swing: [low] para [high] — Range: [x] pontos\n"
-            "- 61.8%: $[valor]\n"
-            "- 70.5%: $[valor]\n"
-            "- 79.0%: $[valor]\n"
-            "- Zona OTE ideal: $[valor] — $[valor]\n\n"
-
-            "<b>WYCKOFF + PO3/AMD</b>\n"
-            "- Fase Wyckoff: [fase atual]\n"
-            "- PO3: Accumulation [zona] / Manipulation [nivel] / Distribution [em curso/aguarda]\n\n"
-
-            "<b>SCORE OPERACIONAL: [X]/100</b>\n"
-            "- Confluencias ativas: [lista]\n"
-            "- Penalizacoes: [lista]\n\n"
-
-            "<b>RECOMENDACAO FINAL</b>\n"
-            "[narrativa completa mas objetiva — maximo 5 linhas]"
-        )
-
-        content = []
-        for tf in valid_tfs:
-            img = images[tf]
-            b64_data = img['base64']
-            if "," in b64_data:
-                b64_data = b64_data.split(",")[-1]
-            b64_data = b64_data.strip().replace("\n", "").replace("\r", "")
-            mime = img.get('mimeType', 'image/jpeg') or 'image/jpeg'
-            content.append({"type": "text", "text": f"Grafico {tf}:"})
-            content.append({
-                "type": "image",
-                "source": {"type": "base64", "media_type": mime, "data": b64_data}
-            })
-        content.append({"type": "text", "text": dynamic_prompt})
-
-        response = client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=16000,
-            system=[{
-                "type": "text",
-                "text": ICT_SYSTEM_PROMPT,
-                "cache_control": {"type": "ephemeral"}
-            }],
-            messages=[{"role": "user", "content": content}]
-        )
-
-        result_text = response.content[0].text
+        result_text, error = analyze_single_pair(pair, images)
+        if error:
+            return jsonify({'error': error}), 400
 
         direction, score, sl, tps, tf_label, entry = extract_trade_info(result_text, ','.join(valid_tfs))
         journal_id = f"{pair}_{int(time.time() * 1000)}"
@@ -375,6 +383,87 @@ def analyze():
     except Exception as e:
         return jsonify({'error': f"Erro na API Anthropic: {str(e)}"}), 500
 
+# ─── ENDPOINT NOVO (multi-par) ───────────────────────────────────────────────
+@app.route('/analyze_multi', methods=['POST'])
+def analyze_multi():
+    """
+    Recebe vários pares de uma vez.
+    Body: {
+      "pairs": {
+        "BNBUSD": { "D1": {base64, mimeType}, "H4": {...}, ... },
+        "SOLUSD": { "H4": {...}, "M15": {...} },
+        ...
+      }
+    }
+    Retorna: {
+      "results": [
+        { "pair": "BNBUSD", "result": "...", "timeframes": "D1,H4", "journal_id": "...", "score": 67, "direction": "SHORT", ... },
+        ...
+      ],
+      "errors": [ { "pair": "XRPUSD", "error": "..." } ]
+    }
+    """
+    try:
+        data = request.json or {}
+        pairs_data = data.get('pairs', {})
+
+        if not pairs_data:
+            return jsonify({'error': 'Nenhum par recebido'}), 400
+
+        results = []
+        errors = []
+
+        for pair, images_by_tf in pairs_data.items():
+            try:
+                result_text, error = analyze_single_pair(pair, images_by_tf)
+                if error:
+                    errors.append({'pair': pair, 'error': error})
+                    continue
+
+                valid_tfs = [tf for tf, img in images_by_tf.items() if img and isinstance(img, dict) and img.get('base64')]
+                direction, score, sl, tps, tf_label, entry = extract_trade_info(result_text, ','.join(valid_tfs))
+                journal_id = f"{pair}_{int(time.time() * 1000)}"
+
+                try:
+                    with sqlite3.connect(DB_FILE) as conn:
+                        cursor = conn.cursor()
+                        cursor.execute('''
+                            INSERT INTO journal (id, pair, created_at, direction, score, entry, sl, tp1, tp2, tp3, timeframes, analysis, status)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ''', (
+                            journal_id, pair, int(time.time()),
+                            direction, score, entry, sl,
+                            tps[0] if len(tps) > 0 else '',
+                            tps[1] if len(tps) > 1 else '',
+                            tps[2] if len(tps) > 2 else '',
+                            ','.join(valid_tfs), result_text, 'pending'
+                        ))
+                        conn.commit()
+                except Exception as e:
+                    print(f"Erro ao guardar journal {pair}: {e}")
+
+                results.append({
+                    'pair': pair,
+                    'result': result_text,
+                    'timeframes': ','.join(valid_tfs),
+                    'journal_id': journal_id,
+                    'score': score,
+                    'direction': direction,
+                    'entry': entry,
+                    'sl': sl,
+                    'tp1': tps[0] if len(tps) > 0 else '',
+                    'tp2': tps[1] if len(tps) > 1 else '',
+                    'tp3': tps[2] if len(tps) > 2 else '',
+                })
+
+            except Exception as e:
+                errors.append({'pair': pair, 'error': str(e)})
+
+        return jsonify({'results': results, 'errors': errors})
+
+    except Exception as e:
+        return jsonify({'error': f"Erro geral: {str(e)}"}), 500
+
 @app.route('/set_alert', methods=['POST'])
 def set_alert():
     try:
@@ -386,9 +475,7 @@ def set_alert():
         current_price = PRECOS_TICKER.get(pair)
         if not current_price:
             current_price = float(data.get('current_price', 0))
-
         alert_unique_id = f"{pair}_{target}_{int(time.time() * 1000)}"
-
         with sqlite3.connect(DB_FILE) as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -396,7 +483,6 @@ def set_alert():
                 (alert_unique_id, pair, target, analysis, timeframes)
             )
             conn.commit()
-
         send_telegram(f"<b>Alerta Gravado para {pair}</b>\nAlvo: ${target:,.2f}\nPreco atual: ${current_price:,.2f}")
         return jsonify({'ok': True, 'current_price': current_price})
     except Exception as e:
@@ -447,13 +533,11 @@ def journal_stats():
             cursor = conn.cursor()
             cursor.execute('SELECT status, pnl, score, pair FROM journal WHERE status != "pending" AND status != "cancelled"')
             rows = cursor.fetchall()
-        
         total_trades = len(rows)
         wins = sum(1 for r in rows if r[0] == 'win')
         losses = sum(1 for r in rows if r[0] == 'loss')
         total_pnl = sum(r[1] for r in rows)
         win_rate = round((wins / total_trades * 100), 1) if total_trades > 0 else 0
-
         score_brackets = {'75-100': {'w':0,'l':0}, '60-74': {'w':0,'l':0}, '50-59': {'w':0,'l':0}}
         for r in rows:
             s = r[2]
@@ -462,7 +546,6 @@ def journal_stats():
             else: bracket = '50-59'
             if r[0] == 'win': score_brackets[bracket]['w'] += 1
             else: score_brackets[bracket]['l'] += 1
-
         pair_stats = {}
         for r in rows:
             p = r[3]
@@ -470,7 +553,6 @@ def journal_stats():
             pair_stats[p]['pnl'] += r[1]
             if r[0] == 'win': pair_stats[p]['w'] += 1
             else: pair_stats[p]['l'] += 1
-
         return jsonify({
             'total_trades': total_trades, 'wins': wins, 'losses': losses,
             'total_pnl': round(total_pnl, 2), 'win_rate': win_rate,

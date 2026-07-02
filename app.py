@@ -5,6 +5,7 @@ import time
 import requests
 import sqlite3
 import re
+import hashlib
 
 app = Flask(__name__)
 client = anthropic.Anthropic(api_key=os.environ.get('ANTHROPIC_API_KEY'))
@@ -14,6 +15,13 @@ TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
 DB_FILE = 'alerts.db'
 
 PRECOS_TICKER = {}
+
+# --- CACHE DE ANÁLISES ---
+# Se as MESMAS imagens (mesmo par) forem analisadas de novo dentro desta
+# janela, devolve o resultado salvo em vez de chamar a API de novo.
+# Isso garante 100% de consistência quando o input é idêntico — não
+# depende de o modelo "acertar" a mesma resposta duas vezes.
+CACHE_WINDOW_SECONDS = 15 * 60  # 15 minutos
 
 # --- REGEX BLINDADAS CONTRA HTML E ESPAÇOS ---
 RE_SCORE = re.compile(r'SCORE\s*OPERACIONAL\s*:[^\d]*(\d{1,3})\s*/\s*100', re.IGNORECASE)
@@ -142,6 +150,15 @@ def init_db():
                     status TEXT DEFAULT 'pending',
                     pnl REAL DEFAULT 0,
                     notes TEXT DEFAULT ''
+                )
+            ''')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS analysis_cache (
+                    cache_key TEXT PRIMARY KEY,
+                    pair TEXT,
+                    created_at INTEGER,
+                    raw_text TEXT,
+                    display_text TEXT
                 )
             ''')
             conn.commit()
@@ -274,6 +291,17 @@ ICT_SYSTEM_PROMPT = (
     "14. IFVG - Inversion Fair Value Gap (FVGs invertidos)\n"
     "15. Gatilhos de Continuidade/Reversao (ver secao propria abaixo)\n"
     "16. Divergencias RSI/MACD x preco (ver secao propria abaixo)\n\n"
+
+    "ANCORAGEM OBRIGATORIA DE ZONAS ESTRUTURAIS (evitar adivinhacao):\n"
+    "Toda vez que identificares um OB, FVG, Breaker Block ou nivel de "
+    "suporte/resistencia, tens de citar a caracteristica exata da(s) "
+    "vela(s) que forma(m) aquela zona — nao basta dar a zona numerica "
+    "solta. Exemplo do nivel de detalhe exigido: 'OB Bearish em 61.915-"
+    "62.490: ultima vela vermelha antes do rompimento, seguida de 3 velas "
+    "verdes consecutivas de forte volume'. Se nao conseguires descrever a "
+    "vela especifica que forma a zona, isso e sinal de que estas a "
+    "adivinhar — nesse caso declara 'zona nao confirmada com clareza "
+    "suficiente' em vez de reportar como certeza.\n\n"
 
     "CAMADA 15 — GATILHOS DE CONTINUIDADE/REVERSAO (regras de classificacao):\n"
     "- Order Block (OB) -> papel: CONTINUIDADE. Sempre reporta e sempre "
@@ -499,11 +527,70 @@ def build_dynamic_prompt(pair, valid_tfs):
     )
 
 
+def compute_cache_key(pair, images_by_tf):
+    """
+    Gera uma impressão digital única (hash) baseada no par + no conteúdo
+    exato de cada imagem enviada. Se as imagens forem byte-a-byte iguais
+    às de uma análise anterior, o hash sai idêntico.
+    """
+    hasher = hashlib.sha256()
+    hasher.update(pair.encode('utf-8'))
+    for tf in sorted(images_by_tf.keys()):
+        img = images_by_tf[tf]
+        if img and isinstance(img, dict) and img.get('base64'):
+            hasher.update(tf.encode('utf-8'))
+            hasher.update(img['base64'].encode('utf-8'))
+    return hasher.hexdigest()
+
+
+def get_cached_analysis(cache_key):
+    """Retorna (raw_text, display_text) se existir cache válido, senão None."""
+    try:
+        cutoff = int(time.time()) - CACHE_WINDOW_SECONDS
+        with sqlite3.connect(DB_FILE) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                'SELECT raw_text, display_text FROM analysis_cache WHERE cache_key = ? AND created_at >= ?',
+                (cache_key, cutoff)
+            )
+            row = cursor.fetchone()
+        if row:
+            return row[0], row[1]
+    except Exception as e:
+        print(f"Erro ao ler cache: {e}")
+    return None
+
+
+def save_cache(cache_key, pair, raw_text, display_text):
+    try:
+        with sqlite3.connect(DB_FILE) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                'INSERT OR REPLACE INTO analysis_cache (cache_key, pair, created_at, raw_text, display_text) VALUES (?, ?, ?, ?, ?)',
+                (cache_key, pair, int(time.time()), raw_text, display_text)
+            )
+            # limpa entradas velhas pra não crescer pra sempre
+            cutoff = int(time.time()) - CACHE_WINDOW_SECONDS
+            cursor.execute('DELETE FROM analysis_cache WHERE created_at < ?', (cutoff,))
+            conn.commit()
+    except Exception as e:
+        print(f"Erro ao salvar cache: {e}")
+
+
 def analyze_single_pair(pair, images_by_tf):
     """Analisa um único par e retorna o resultado."""
     valid_tfs = [tf for tf, img in images_by_tf.items() if img and isinstance(img, dict) and img.get('base64')]
     if len(valid_tfs) < 2:
-        return None, f"Par {pair} precisa de pelo menos 2 graficos"
+        return None, None, f"Par {pair} precisa de pelo menos 2 graficos"
+
+    # --- CACHE: se essas mesmas imagens já foram analisadas recentemente,
+    # devolve o resultado salvo em vez de chamar a API de novo. Garante
+    # consistência 100% quando o input é idêntico. ---
+    cache_key = compute_cache_key(pair, images_by_tf)
+    cached = get_cached_analysis(cache_key)
+    if cached:
+        raw_text, display_text = cached
+        return raw_text, display_text, None
 
     dynamic_prompt = build_dynamic_prompt(pair, valid_tfs)
 
@@ -542,6 +629,8 @@ def analyze_single_pair(pair, images_by_tf):
     if "BLOCO_DADOS_INICIO" in raw_text:
         display_text = raw_text.split("BLOCO_DADOS_INICIO")[0].rstrip()
         display_text = display_text.rstrip("-").rstrip()
+
+    save_cache(cache_key, pair, raw_text, display_text)
 
     return raw_text, display_text, None
 

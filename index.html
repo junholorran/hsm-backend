@@ -387,7 +387,7 @@ body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-h
   <div class="upload-zone-mini" id="uploadZoneMini" onclick="document.getElementById('batchFileInput').click()">
     <div class="upload-zone-mini-icon">📊</div>
     <div class="upload-zone-mini-title" id="uploadZoneTitle">CARREGAR GRÁFICOS BTC</div>
-    <div class="upload-zone-mini-sub" id="uploadZoneSub">Seleciona os prints do par escolhido</div>
+    <div class="upload-zone-mini-sub" id="uploadZoneSub">Seleciona os prints do par escolhido, na ordem D1 → H4 → H1 → M15</div>
     <div class="tf-preview" id="tfPreview"></div>
     <input type="file" id="batchFileInput" accept="image/*" multiple style="display:none" onchange="handleBatchFiles(this)">
   </div>
@@ -513,6 +513,7 @@ function selectActivePair(el, pair){
   loadFundingOI(pair);
 }
 
+// ── UPDATE UPLOAD ZONE (CORRIGIDO — mostra o rótulo real de cada slot) ──
 function updateUploadZone(){
   const label = activePair.replace('USD','');
   document.getElementById('uploadZoneTitle').textContent = 'CARREGAR GRÁFICOS ' + label;
@@ -520,32 +521,56 @@ function updateUploadZone(){
   const preview = document.getElementById('tfPreview');
   if(currentBatchImages.length === 0){
     preview.innerHTML = '';
-    document.getElementById('uploadZoneSub').textContent = 'Seleciona os prints do par escolhido';
+    document.getElementById('uploadZoneSub').textContent = 'Seleciona os prints do par escolhido, na ordem D1 → H4 → H1 → M15';
     document.getElementById('uploadZoneMini').classList.remove('has-files');
   } else {
-    document.getElementById('uploadZoneSub').textContent = currentBatchImages.length + ' gráfico(s) carregado(s)';
+    document.getElementById('uploadZoneSub').textContent = currentBatchImages.length + ' gráfico(s) carregado(s) — confere a ordem abaixo';
     document.getElementById('uploadZoneMini').classList.add('has-files');
-    preview.innerHTML = currentBatchImages.map((_,i)=>`<div class="tf-pill">TF${i+1}</div>`).join('');
+    // Mostra o rótulo REAL que cada imagem vai receber (D1, H4, H1, M15...)
+    // em vez de "TF1, TF2" genérico — dá pra conferir visualmente antes
+    // de adicionar à fila, evitando gráfico com timeframe errado.
+    preview.innerHTML = currentBatchImages.map((img,i)=>{
+      const tfLabel = TFS[i] || ('IMG'+(i+1));
+      const shortName = (img.name || ('imagem ' + (i+1))).slice(0,18);
+      return `<div class="tf-pill">${tfLabel}: ${shortName}</div>`;
+    }).join('');
   }
 }
 
-// ── BATCH FILE HANDLER ──
+// ── BATCH FILE HANDLER (CORRIGIDO — preserva ordem de seleção) ──
 function handleBatchFiles(input){
   const files = Array.from(input.files);
   if(!files.length) return;
-  currentBatchImages = [];
+
+  // Pré-aloca o array no tamanho certo. Cada FileReader escreve no
+  // ÍNDICE ORIGINAL do arquivo (posição em que foi selecionado), NÃO na
+  // ordem de conclusão do carregamento assíncrono. Isso garante que o
+  // 1º arquivo selecionado sempre vira currentBatchImages[0] (= D1),
+  // o 2º vira [1] (= H4), etc — não importa qual imagem carrega mais
+  // rápido (arquivos maiores demoram mais e podiam embaralhar a ordem
+  // antes desta correção).
+  const results = new Array(files.length).fill(null);
   let loaded = 0;
-  files.forEach(file=>{
+
+  files.forEach((file, originalIndex) => {
     const reader = new FileReader();
     reader.onload = e => {
       const dataUrl = e.target.result;
-      currentBatchImages.push({
+      results[originalIndex] = {
         base64: dataUrl.split(',')[1],
         mimeType: file.type || 'image/jpeg',
         name: file.name
-      });
+      };
       loaded++;
       if(loaded === files.length){
+        currentBatchImages = results.filter(r => r !== null);
+        updateUploadZone();
+      }
+    };
+    reader.onerror = () => {
+      loaded++;
+      if(loaded === files.length){
+        currentBatchImages = results.filter(r => r !== null);
         updateUploadZone();
       }
     };
@@ -590,7 +615,7 @@ function renderQueue(){
       <div>
         <div class="queue-pair-name">⚡ ${p.pair.replace('USD','USDT')}</div>
         <div class="queue-tfs">
-          ${p.images.map((_,i)=>`<div class="queue-tf-badge">IMG ${i+1}</div>`).join('')}
+          ${p.images.map((_,i)=>`<div class="queue-tf-badge">${TFS[i] || ('IMG'+(i+1))}</div>`).join('')}
         </div>
       </div>
       <div>
@@ -637,7 +662,8 @@ async function analyzeAll(){
   pairQueue.forEach(p=>{
     const tfsMap = {};
     p.images.forEach((img, i)=>{
-      // Usar índice como TF label (o backend não precisa do TF real para analisar)
+      // Usar o rótulo real do timeframe baseado na posição preservada
+      // (ver comentário em handleBatchFiles sobre a correção de ordem)
       const tfLabel = TFS[i] || ('IMG'+(i+1));
       tfsMap[tfLabel] = { base64: img.base64, mimeType: img.mimeType };
     });

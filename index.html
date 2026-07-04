@@ -116,6 +116,23 @@ body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-h
 }
 .add-pair-btn:active{background:rgba(240,192,64,.08);}
 
+/* ── BOTÃO NOVO: ANALISAR AO VIVO (só adicionado, nada removido acima) ── */
+.live-btn{
+  width:100%;padding:13px 16px;margin-top:10px;
+  background:#14201a;border:1px solid var(--gold);
+  border-radius:10px;cursor:pointer;
+  display:flex;align-items:center;justify-content:space-between;
+  -webkit-tap-highlight-color:transparent;
+}
+.live-btn:disabled{opacity:.5;cursor:not-allowed;}
+.live-btn-left{display:flex;align-items:center;gap:10px;}
+.live-pulse-wrap{position:relative;width:12px;height:12px;flex-shrink:0;}
+.live-pulse-dot{width:8px;height:8px;border-radius:50%;background:var(--gold);position:absolute;top:2px;left:2px;}
+.live-pulse-ring{width:12px;height:12px;border-radius:50%;border:1.5px solid var(--gold);position:absolute;top:0;left:0;animation:livePulse 1.8s ease-out infinite;}
+@keyframes livePulse{0%{transform:scale(.6);opacity:.9;}100%{transform:scale(2.4);opacity:0;}}
+.live-btn-label{font-weight:700;font-size:13px;letter-spacing:.5px;color:var(--gold);font-family:'Space Mono',monospace;}
+.live-btn-sub{font-size:10px;color:var(--muted);margin-top:1px;}
+
 /* FILA DE PARES */
 .queue-list{display:flex;flex-direction:column;gap:8px;margin:0 16px 12px;}
 .queue-card{
@@ -393,6 +410,18 @@ body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-h
   </div>
 
   <button class="add-pair-btn" id="addPairBtn" onclick="addPairToQueue()">+ ADICIONAR BTC À FILA</button>
+
+  <!-- NOVO: botão de análise ao vivo, sem gráfico manual — usa candles reais da Bybit -->
+  <button class="live-btn" id="liveBtn" onclick="analyzeLive()">
+    <div class="live-btn-left">
+      <div class="live-pulse-wrap"><div class="live-pulse-ring"></div><div class="live-pulse-dot"></div></div>
+      <div>
+        <div class="live-btn-label" id="liveBtnLabel">ANALISAR AO VIVO — BTC</div>
+        <div class="live-btn-sub">Busca candles atuais e roda o ICT completo agora</div>
+      </div>
+    </div>
+    <div style="color:var(--gold);font-size:16px;">›</div>
+  </button>
 </div>
 
 <!-- FILA -->
@@ -511,6 +540,8 @@ function selectActivePair(el, pair){
   currentBatchImages = [];
   updateUploadZone();
   loadFundingOI(pair);
+  const liveLabelEl = document.getElementById('liveBtnLabel');
+  if(liveLabelEl) liveLabelEl.textContent = 'ANALISAR AO VIVO — ' + pair.replace('USD','');
 }
 
 // ── UPDATE UPLOAD ZONE (CORRIGIDO — mostra o rótulo real de cada slot) ──
@@ -826,6 +857,121 @@ function resetAll(){
   document.getElementById('queueList').innerHTML = '';
   updateUploadZone();
   window.scrollTo({top:0,behavior:'smooth'});
+}
+
+// ── ANALISAR AO VIVO (NOVO — reaproveita /analyze_multi que já existe) ──
+// Busca os candles reais da Bybit para D1/H4/H1/M15, desenha um gráfico
+// simples em canvas (candlestick), converte pra imagem e manda pro MESMO
+// endpoint /analyze_multi que a fila manual já usa. Nenhuma rota nova no
+// backend, nenhuma função existente foi alterada.
+const LIVE_TF_INTERVALS = { D1: 'D', H4: '240', H1: '60', M15: '15' };
+const LIVE_SYMBOL_MAP = {'BTCUSD':'BTCUSDT','ETHUSD':'ETHUSDT','SOLUSD':'SOLUSDT','XRPUSD':'XRPUSDT','LINKUSD':'LINKUSDT','ADAUSD':'ADAUSDT','AVAXUSD':'AVAXUSDT','BNBUSD':'BNBUSDT','AAVEUSD':'AAVEUSDT'};
+
+async function fetchLiveKlines(symbol, interval, limit){
+  const url = 'https://api.bybit.com/v5/market/kline?category=linear&symbol='+symbol+'&interval='+interval+'&limit='+(limit||120);
+  const r = await fetch(url);
+  const d = await r.json();
+  const list = d.result && d.result.list;
+  if(!list || list.length < 5) throw new Error('sem candles para '+symbol);
+  // Bybit devolve mais recente -> mais antigo; inverte pra ordem cronológica
+  return list.map(k=>({t:parseInt(k[0]),o:parseFloat(k[1]),h:parseFloat(k[2]),l:parseFloat(k[3]),c:parseFloat(k[4])})).reverse();
+}
+
+function renderLiveCandleImage(candles, pairLabel, tfLabel){
+  const W = 900, H = 460, padL = 60, padR = 20, padT = 40, padB = 30;
+  const canvas = document.createElement('canvas');
+  canvas.width = W; canvas.height = H;
+  const ctx = canvas.getContext('2d');
+
+  // fundo
+  ctx.fillStyle = '#0a0a0f';
+  ctx.fillRect(0,0,W,H);
+
+  const highs = candles.map(c=>c.h), lows = candles.map(c=>c.l);
+  const maxP = Math.max(...highs), minP = Math.min(...lows);
+  const range = (maxP - minP) || 1;
+  const plotW = W - padL - padR, plotH = H - padT - padB;
+  const cw = plotW / candles.length;
+
+  const yFor = p => padT + plotH - ((p - minP) / range) * plotH;
+
+  // grid horizontal
+  ctx.strokeStyle = '#2a2a3a';
+  ctx.lineWidth = 1;
+  ctx.font = '11px monospace';
+  ctx.fillStyle = '#6e7681';
+  for(let i=0;i<=4;i++){
+    const yy = padT + (plotH/4)*i;
+    ctx.beginPath(); ctx.moveTo(padL,yy); ctx.lineTo(W-padR,yy); ctx.stroke();
+    const priceAtY = maxP - (range/4)*i;
+    ctx.fillText(priceAtY.toFixed(priceAtY<10?4:2), 4, yy+4);
+  }
+
+  // candles
+  candles.forEach((c,i)=>{
+    const x = padL + i*cw + cw/2;
+    const up = c.c >= c.o;
+    ctx.strokeStyle = up ? '#3fb950' : '#f85149';
+    ctx.fillStyle = up ? '#3fb950' : '#f85149';
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(x, yFor(c.h)); ctx.lineTo(x, yFor(c.l)); ctx.stroke();
+    const bodyTop = yFor(Math.max(c.o,c.c));
+    const bodyH = Math.max(1, Math.abs(yFor(c.o)-yFor(c.c)));
+    ctx.fillRect(x - cw*0.35, bodyTop, cw*0.7, bodyH);
+  });
+
+  // título
+  ctx.fillStyle = '#f0c040';
+  ctx.font = 'bold 15px monospace';
+  const last = candles[candles.length-1];
+  ctx.fillText(pairLabel+' · '+tfLabel+' · $'+last.c.toLocaleString('en-US',{maximumFractionDigits:2}), padL, 22);
+
+  return canvas.toDataURL('image/png').split(',')[1];
+}
+
+async function analyzeLive(){
+  const btn = document.getElementById('liveBtn');
+  const symbol = LIVE_SYMBOL_MAP[activePair] || 'BTCUSDT';
+  const pairLabel = activePair.replace('USD','');
+  btn.disabled = true;
+  const originalLabel = document.getElementById('liveBtnLabel').textContent;
+  document.getElementById('liveBtnLabel').textContent = 'A buscar candles de ' + pairLabel + '...';
+
+  try{
+    const tfEntries = Object.entries(LIVE_TF_INTERVALS);
+    const imagesByTf = {};
+    for(const [tfLabel, interval] of tfEntries){
+      const candles = await fetchLiveKlines(symbol, interval, 120);
+      const base64 = renderLiveCandleImage(candles, pairLabel, tfLabel);
+      imagesByTf[tfLabel] = { base64, mimeType: 'image/png' };
+    }
+
+    document.getElementById('liveBtnLabel').textContent = 'A analisar ' + pairLabel + '...';
+
+    const singlePayload = {};
+    singlePayload[activePair] = imagesByTf;
+
+    const res = await fetch('/analyze_multi',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({pairs: singlePayload})
+    });
+    const data = await res.json();
+    if(data.error) throw new Error(data.error);
+    if(!data.results || data.results.length === 0){
+      throw new Error((data.errors && data.errors[0] && data.errors[0].error) || 'sem resultado');
+    }
+
+    renderMultiResults(data.results, data.errors || []);
+    document.getElementById('addPairSection').style.display = 'none';
+    document.getElementById('queueSection').style.display = 'none';
+    showToast('✓ Análise ao vivo de ' + pairLabel + ' concluída!');
+  }catch(e){
+    showToast('Erro na análise ao vivo: ' + e.message);
+  }finally{
+    btn.disabled = false;
+    document.getElementById('liveBtnLabel').textContent = originalLabel;
+  }
 }
 
 // ── MARKET BIAS ──

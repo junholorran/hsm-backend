@@ -1069,6 +1069,16 @@ function renderLiveCandleImage(candles, pairLabel, tfLabel){
   const last = candles[candles.length-1];
   ctx.fillText(pairLabel+' · '+tfLabel+' · $'+last.c.toLocaleString('en-US',{maximumFractionDigits:2}), padL, 20);
 
+  // Carimbo real de data/hora (UTC) — o navegador sabe a hora certa,
+  // então gravamos ela dentro da própria imagem. Isso evita que a IA
+  // "chute" uma data errada por não ter esse dado visível no gráfico.
+  const nowStamp = new Date();
+  const stampStr = nowStamp.toISOString().replace('T',' ').slice(0,16) + ' UTC';
+  ctx.font = '11px monospace';
+  ctx.fillStyle = '#6e7681';
+  const stampWidth = ctx.measureText(stampStr).width;
+  ctx.fillText(stampStr, W - padR - stampWidth, 20);
+
   // ── PAINEL RSI(14) ──
   ctx.strokeStyle = '#2a2a3a';
   ctx.beginPath(); ctx.moveTo(padL, rsiTop); ctx.lineTo(W-padR, rsiTop); ctx.stroke();
@@ -1182,6 +1192,113 @@ function renderLiveCandleImage(candles, pairLabel, tfLabel){
   return canvas.toDataURL('image/png').split(',')[1];
 }
 
+// ── FUNDING + OI PARA A ANÁLISE AO VIVO (dados reais, mesma fonte do widget) ──
+async function fetchLiveFundingOI(symbol){
+  const tickerRes = await fetch('https://api.bybit.com/v5/market/tickers?category=linear&symbol='+symbol);
+  const tickerData = await tickerRes.json();
+  const t = tickerData.result && tickerData.result.list && tickerData.result.list[0];
+  if(!t) throw new Error('sem ticker funding/OI');
+  const currentFunding = parseFloat(t.fundingRate)*100;
+  const nextFundingTime = parseInt(t.nextFundingTime);
+
+  let avg24h = null;
+  try{
+    const fr = await fetch('https://api.bybit.com/v5/market/funding/history?category=linear&symbol='+symbol+'&limit=4');
+    const fd = await fr.json();
+    const list = fd.result && fd.result.list;
+    if(list && list.length) avg24h = list.reduce((s,f)=>s+parseFloat(f.fundingRate),0)/list.length*100;
+  }catch(e){}
+
+  let oiSeries = null;
+  try{
+    const or_ = await fetch('https://api.bybit.com/v5/market/open-interest?category=linear&symbol='+symbol+'&intervalTime=15min&limit=100');
+    const od = await or_.json();
+    const list = od.result && od.result.list;
+    if(list && list.length >= 2) oiSeries = [...list].sort((a,b)=>parseInt(a.timestamp)-parseInt(b.timestamp));
+  }catch(e){}
+
+  function deltaFrom(stepsBack){
+    if(!oiSeries || oiSeries.length < 2) return null;
+    const newer = parseFloat(oiSeries[oiSeries.length-1].openInterest);
+    const olderIdx = Math.max(0, oiSeries.length-1-stepsBack);
+    const older = parseFloat(oiSeries[olderIdx].openInterest);
+    if(!older) return null;
+    return ((newer-older)/older)*100;
+  }
+
+  return {
+    currentFunding, nextFundingTime, avg24h,
+    oiM15: deltaFrom(1), oiH1: deltaFrom(4), oiH4: deltaFrom(16), oiD1: deltaFrom(96)
+  };
+}
+
+function renderFundingOIImage(pairLabel, fo){
+  const W = 900, H = 560, padL = 30, padR = 30;
+  const canvas = document.createElement('canvas');
+  canvas.width = W; canvas.height = H;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#0a0a0f'; ctx.fillRect(0,0,W,H);
+
+  ctx.fillStyle = '#f0c040'; ctx.font = 'bold 17px monospace';
+  ctx.fillText(pairLabel + ' · FUNDING RATE + OPEN INTEREST (dados reais, tempo real)', padL, 32);
+
+  const nowStamp = new Date().toISOString().replace('T',' ').slice(0,16) + ' UTC';
+  ctx.font = '11px monospace'; ctx.fillStyle = '#6e7681';
+  ctx.fillText(nowStamp, padL, 52);
+
+  ctx.font = 'bold 14px monospace';
+  ctx.fillStyle = fo.currentFunding >= 0 ? '#3fb950' : '#f85149';
+  ctx.fillText('Funding Rate Atual: ' + (fo.currentFunding>=0?'+':'') + fo.currentFunding.toFixed(4) + '%', padL, 90);
+  ctx.fillStyle = '#e6edf3';
+  if(fo.avg24h != null){
+    ctx.fillText('Média Funding 24h: ' + (fo.avg24h>=0?'+':'') + fo.avg24h.toFixed(4) + '%', padL, 116);
+  }
+  ctx.fillText('Próximo Pagamento: ' + new Date(fo.nextFundingTime).toISOString().slice(11,16) + ' UTC', padL, 142);
+
+  ctx.font = 'bold 13px monospace'; ctx.fillStyle = '#f0c040';
+  ctx.fillText('Leitura Funding + OI por Timeframe (crowding de alavancagem):', padL, 178);
+
+  // Reaproveita a MESMA função fundingOiSignal que já classifica o sinal
+  // no widget do Home (LIMPANDO/LOTANDO/COBRINDO/PRESSÃO/AGUARDA) — não
+  // duplica lógica, só aplica pra cada TF dentro desta imagem.
+  const rows = [
+    ['D1', fo.oiD1, fo.avg24h != null ? fo.avg24h : fo.currentFunding],
+    ['H4', fo.oiH4, fo.currentFunding],
+    ['H1', fo.oiH1, fo.currentFunding],
+    ['M15', fo.oiM15, fo.currentFunding],
+  ];
+  let y = 210;
+  rows.forEach(([label, oiVal, fundingRef])=>{
+    const sig = fundingOiSignal(fundingRef, oiVal);
+    ctx.font = 'bold 13px monospace'; ctx.fillStyle = '#f0c040';
+    ctx.fillText(label, padL, y);
+
+    ctx.font = '13px monospace'; ctx.fillStyle = '#e6edf3';
+    const oiText = oiVal == null ? 'OI sem dado' : 'OI ' + (oiVal>=0?'+':'') + oiVal.toFixed(2) + '%';
+    ctx.fillText(oiText, padL + 55, y);
+
+    const tagColor = sig.cls==='bull' ? '#3fb950' : sig.cls==='bear' ? '#f85149' : '#e3b341';
+    ctx.font = 'bold 12px monospace'; ctx.fillStyle = tagColor;
+    ctx.fillText('[' + sig.tag + ']', padL + 210, y);
+
+    ctx.font = '11px monospace'; ctx.fillStyle = '#8ea08e';
+    ctx.fillText(sig.detail, padL + 300, y);
+
+    y += 32;
+  });
+
+  ctx.font = 'bold 12px monospace'; ctx.fillStyle = '#f0c040';
+  ctx.fillText('Como interpretar (referência fixa, vale para qualquer par/momento):', padL, y + 20);
+  ctx.font = '11px monospace'; ctx.fillStyle = '#8ea08e';
+  ctx.fillText('LIMPANDO = funding positivo + OI caindo → longs alavancados sendo varridos (saudável para continuar alta).', padL, y + 42);
+  ctx.fillText('LOTANDO = funding positivo + OI subindo → risco de sweep para baixo aumentando.', padL, y + 62);
+  ctx.fillText('COBRINDO = funding negativo + OI caindo → shorts fechando posição, não é compra nova.', padL, y + 82);
+  ctx.fillText('PRESSAO = funding negativo + OI subindo → pressão vendedora nova e real entrando.', padL, y + 102);
+  ctx.fillText('AGUARDA = sem crowding relevante no momento.', padL, y + 122);
+
+  return canvas.toDataURL('image/png').split(',')[1];
+}
+
 async function analyzeLive(){
   const btn = document.getElementById('liveBtn');
   const symbol = LIVE_SYMBOL_MAP[activePair] || 'BTCUSDT';
@@ -1197,6 +1314,18 @@ async function analyzeLive(){
       const candles = await fetchLiveKlines(symbol, interval, 200);
       const base64 = renderLiveCandleImage(candles, pairLabel, tfLabel);
       imagesByTf[tfLabel] = { base64, mimeType: 'image/png' };
+    }
+
+    // Funding + OI reais (mesma fonte do widget já existente), incluídos
+    // como uma imagem extra pra IA ler o contexto de alavancagem/crowding
+    // no momento exato da análise.
+    try{
+      document.getElementById('liveBtnLabel').textContent = 'A buscar funding/OI de ' + pairLabel + '...';
+      const fo = await fetchLiveFundingOI(symbol);
+      const foBase64 = renderFundingOIImage(pairLabel, fo);
+      imagesByTf['FUNDING_OI'] = { base64: foBase64, mimeType: 'image/png' };
+    }catch(e){
+      console.warn('Funding/OI indisponível para esta análise ao vivo:', e.message);
     }
 
     document.getElementById('liveBtnLabel').textContent = 'A analisar ' + pairLabel + '...';

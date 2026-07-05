@@ -877,54 +877,307 @@ async function fetchLiveKlines(symbol, interval, limit){
   return list.map(k=>({t:parseInt(k[0]),o:parseFloat(k[1]),h:parseFloat(k[2]),l:parseFloat(k[3]),c:parseFloat(k[4])})).reverse();
 }
 
+// ── CÁLCULO DE INDICADORES (fórmula padrão, mesma matemática da Binance) ──
+function computeRSI(closes, period){
+  period = period || 14;
+  const rsi = new Array(closes.length).fill(null);
+  if(closes.length < period+1) return rsi;
+  let gains=0, losses=0;
+  for(let i=1;i<=period;i++){
+    const diff = closes[i]-closes[i-1];
+    if(diff>=0) gains+=diff; else losses-=diff;
+  }
+  let avgGain=gains/period, avgLoss=losses/period;
+  rsi[period] = avgLoss===0 ? 100 : 100-(100/(1+avgGain/avgLoss));
+  for(let i=period+1;i<closes.length;i++){
+    const diff = closes[i]-closes[i-1];
+    const gain = diff>0?diff:0;
+    const loss = diff<0?-diff:0;
+    avgGain = (avgGain*(period-1)+gain)/period;
+    avgLoss = (avgLoss*(period-1)+loss)/period;
+    rsi[i] = avgLoss===0 ? 100 : 100-(100/(1+avgGain/avgLoss));
+  }
+  return rsi;
+}
+
+function computeEMA(values, period){
+  const ema = new Array(values.length).fill(null);
+  if(values.length < period) return ema;
+  let sma = 0;
+  for(let i=0;i<period;i++) sma += values[i];
+  sma /= period;
+  ema[period-1] = sma;
+  const k = 2/(period+1);
+  for(let i=period;i<values.length;i++){
+    ema[i] = values[i]*k + ema[i-1]*(1-k);
+  }
+  return ema;
+}
+
+function computeMACD(closes, fast, slow, signalPeriod){
+  fast = fast || 12; slow = slow || 26; signalPeriod = signalPeriod || 9;
+  const emaFast = computeEMA(closes, fast);
+  const emaSlow = computeEMA(closes, slow);
+  const macdLine = closes.map((_,i)=> (emaFast[i]!=null && emaSlow[i]!=null) ? emaFast[i]-emaSlow[i] : null);
+  const firstValidIdx = macdLine.findIndex(v=>v!=null);
+  const macdValsOnly = macdLine.filter(v=>v!=null);
+  const signalOnlyEma = computeEMA(macdValsOnly, signalPeriod);
+  const signalLine = new Array(closes.length).fill(null);
+  for(let i=0;i<signalOnlyEma.length;i++){
+    if(signalOnlyEma[i]!=null) signalLine[firstValidIdx+i] = signalOnlyEma[i];
+  }
+  const histogram = closes.map((_,i)=> (macdLine[i]!=null && signalLine[i]!=null) ? macdLine[i]-signalLine[i] : null);
+  return {macdLine, signalLine, histogram};
+}
+
+function computeSMA(values, period){
+  const sma = new Array(values.length).fill(null);
+  if(values.length < period) return sma;
+  let sum = 0;
+  for(let i=0;i<period;i++) sum += values[i];
+  sma[period-1] = sum/period;
+  for(let i=period;i<values.length;i++){
+    sum += values[i] - values[i-period];
+    sma[i] = sum/period;
+  }
+  return sma;
+}
+
+function computeStochRSI(rsiArr, period, kSmooth, dSmooth){
+  period = period || 14; kSmooth = kSmooth || 3; dSmooth = dSmooth || 3;
+  const raw = new Array(rsiArr.length).fill(null);
+  for(let i=0;i<rsiArr.length;i++){
+    if(rsiArr[i]==null) continue;
+    let windowVals = [];
+    let ok = true;
+    for(let j=i-period+1;j<=i;j++){
+      if(j<0 || rsiArr[j]==null){ ok = false; break; }
+      windowVals.push(rsiArr[j]);
+    }
+    if(!ok) continue;
+    const mn = Math.min(...windowVals), mx = Math.max(...windowVals);
+    raw[i] = mx===mn ? 0 : ((rsiArr[i]-mn)/(mx-mn))*100;
+  }
+  const firstRawIdx = raw.findIndex(v=>v!=null);
+  const rawValsOnly = raw.filter(v=>v!=null);
+  const kOnly = computeSMA(rawValsOnly, kSmooth);
+  const kFull = new Array(raw.length).fill(null);
+  for(let i=0;i<kOnly.length;i++){
+    if(kOnly[i]!=null) kFull[firstRawIdx+i] = kOnly[i];
+  }
+  const firstKIdx = kFull.findIndex(v=>v!=null);
+  const kValsOnly = kFull.filter(v=>v!=null);
+  const dOnly = computeSMA(kValsOnly, dSmooth);
+  const dFull = new Array(raw.length).fill(null);
+  for(let i=0;i<dOnly.length;i++){
+    if(dOnly[i]!=null) dFull[firstKIdx+i] = dOnly[i];
+  }
+  return {k: kFull, d: dFull};
+}
+
+// ── DESENHO DO GRÁFICO — preço + MAs + RSI + MACD + StochRSI (paridade total com o print da Binance) ──
 function renderLiveCandleImage(candles, pairLabel, tfLabel){
-  const W = 900, H = 460, padL = 60, padR = 20, padT = 40, padB = 30;
+  const closes = candles.map(c=>c.c);
+  const rsi = computeRSI(closes, 14);
+  const {macdLine, signalLine, histogram} = computeMACD(closes, 12, 26, 9);
+  const {k: stochK, d: stochD} = computeStochRSI(rsi, 14, 3, 3);
+  const ma25 = computeSMA(closes, 25);
+  const ma50 = computeSMA(closes, 50);
+  const ma100 = computeSMA(closes, 100);
+  const ma200 = computeSMA(closes, 200);
+
+  const W = 900;
+  const padL = 64, padR = 20;
+  const priceH = 340, rsiH = 110, macdH = 130, stochH = 110;
+  const gap = 22;
+  const priceTop = 34;
+  const rsiTop = priceTop + priceH + gap;
+  const macdTop = rsiTop + rsiH + gap;
+  const stochTop = macdTop + macdH + gap;
+  const H = stochTop + stochH + 24;
+
   const canvas = document.createElement('canvas');
   canvas.width = W; canvas.height = H;
   const ctx = canvas.getContext('2d');
-
-  // fundo
   ctx.fillStyle = '#0a0a0f';
   ctx.fillRect(0,0,W,H);
 
+  const plotW = W - padL - padR;
+  const cw = plotW / candles.length;
+  const xFor = i => padL + i*cw + cw/2;
+
+  // ── PAINEL PREÇO ──
   const highs = candles.map(c=>c.h), lows = candles.map(c=>c.l);
   const maxP = Math.max(...highs), minP = Math.min(...lows);
   const range = (maxP - minP) || 1;
-  const plotW = W - padL - padR, plotH = H - padT - padB;
-  const cw = plotW / candles.length;
+  const yForPrice = p => priceTop + priceH - ((p - minP) / range) * priceH;
 
-  const yFor = p => padT + plotH - ((p - minP) / range) * plotH;
-
-  // grid horizontal
-  ctx.strokeStyle = '#2a2a3a';
-  ctx.lineWidth = 1;
-  ctx.font = '11px monospace';
-  ctx.fillStyle = '#6e7681';
+  ctx.strokeStyle = '#2a2a3a'; ctx.lineWidth = 1;
+  ctx.font = '11px monospace'; ctx.fillStyle = '#6e7681';
   for(let i=0;i<=4;i++){
-    const yy = padT + (plotH/4)*i;
+    const yy = priceTop + (priceH/4)*i;
     ctx.beginPath(); ctx.moveTo(padL,yy); ctx.lineTo(W-padR,yy); ctx.stroke();
     const priceAtY = maxP - (range/4)*i;
     ctx.fillText(priceAtY.toFixed(priceAtY<10?4:2), 4, yy+4);
   }
-
-  // candles
   candles.forEach((c,i)=>{
-    const x = padL + i*cw + cw/2;
+    const x = xFor(i);
     const up = c.c >= c.o;
     ctx.strokeStyle = up ? '#3fb950' : '#f85149';
     ctx.fillStyle = up ? '#3fb950' : '#f85149';
-    ctx.lineWidth = 1;
-    ctx.beginPath(); ctx.moveTo(x, yFor(c.h)); ctx.lineTo(x, yFor(c.l)); ctx.stroke();
-    const bodyTop = yFor(Math.max(c.o,c.c));
-    const bodyH = Math.max(1, Math.abs(yFor(c.o)-yFor(c.c)));
+    ctx.beginPath(); ctx.moveTo(x, yForPrice(c.h)); ctx.lineTo(x, yForPrice(c.l)); ctx.stroke();
+    const bodyTop = yForPrice(Math.max(c.o,c.c));
+    const bodyH = Math.max(1, Math.abs(yForPrice(c.o)-yForPrice(c.c)));
     ctx.fillRect(x - cw*0.35, bodyTop, cw*0.7, bodyH);
   });
 
-  // título
-  ctx.fillStyle = '#f0c040';
-  ctx.font = 'bold 15px monospace';
+  // médias móveis sobrepostas (mesmas cores do print: MA25 verde, MA50 amarelo, MA100 laranja, MA200 roxo)
+  function drawMA(values, color){
+    ctx.strokeStyle = color; ctx.lineWidth = 1.3; ctx.beginPath();
+    let s = false;
+    values.forEach((v,i)=>{
+      if(v==null) return;
+      const x = xFor(i), y = yForPrice(v);
+      if(!s){ ctx.moveTo(x,y); s = true; } else ctx.lineTo(x,y);
+    });
+    ctx.stroke();
+  }
+  drawMA(ma25, '#5fd968');
+  drawMA(ma50, '#e3b341');
+  drawMA(ma100, '#ff9800');
+  drawMA(ma200, '#bc8cff');
+
+  const lastMa25 = [...ma25].reverse().find(v=>v!=null);
+  const lastMa50 = [...ma50].reverse().find(v=>v!=null);
+  const lastMa100 = [...ma100].reverse().find(v=>v!=null);
+  const lastMa200 = [...ma200].reverse().find(v=>v!=null);
+  ctx.font = '10px monospace';
+  let maLabelX = padL;
+  const maLabels = [
+    ['MA25: '+(lastMa25!=null?lastMa25.toFixed(0):'N/A'), '#5fd968'],
+    ['MA50: '+(lastMa50!=null?lastMa50.toFixed(0):'N/A'), '#e3b341'],
+    ['MA100: '+(lastMa100!=null?lastMa100.toFixed(0):'N/A'), '#ff9800'],
+    ['MA200: '+(lastMa200!=null?lastMa200.toFixed(0):'N/A'), '#bc8cff'],
+  ];
+  maLabels.forEach(([txt,color])=>{
+    ctx.fillStyle = color;
+    ctx.fillText(txt, maLabelX, priceTop + 14);
+    maLabelX += ctx.measureText(txt).width + 16;
+  });
+
+  ctx.fillStyle = '#f0c040'; ctx.font = 'bold 15px monospace';
   const last = candles[candles.length-1];
-  ctx.fillText(pairLabel+' · '+tfLabel+' · $'+last.c.toLocaleString('en-US',{maximumFractionDigits:2}), padL, 22);
+  ctx.fillText(pairLabel+' · '+tfLabel+' · $'+last.c.toLocaleString('en-US',{maximumFractionDigits:2}), padL, 20);
+
+  // ── PAINEL RSI(14) ──
+  ctx.strokeStyle = '#2a2a3a';
+  ctx.beginPath(); ctx.moveTo(padL, rsiTop); ctx.lineTo(W-padR, rsiTop); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(padL, rsiTop+rsiH); ctx.lineTo(W-padR, rsiTop+rsiH); ctx.stroke();
+  const yForRsi = v => rsiTop + rsiH - (v/100)*rsiH;
+  // linhas guia 70/30
+  ctx.strokeStyle = '#3a3a3a'; ctx.setLineDash([4,3]);
+  [70,30].forEach(lvl=>{
+    const yy = yForRsi(lvl);
+    ctx.beginPath(); ctx.moveTo(padL,yy); ctx.lineTo(W-padR,yy); ctx.stroke();
+  });
+  ctx.setLineDash([]);
+  ctx.fillStyle = '#6e7681'; ctx.font = '10px monospace';
+  ctx.fillText('70', 4, yForRsi(70)+3);
+  ctx.fillText('30', 4, yForRsi(30)+3);
+  ctx.strokeStyle = '#f0c040'; ctx.lineWidth = 1.5; ctx.beginPath();
+  let started = false;
+  rsi.forEach((v,i)=>{
+    if(v==null) return;
+    const x = xFor(i), y = yForRsi(v);
+    if(!started){ ctx.moveTo(x,y); started = true; } else ctx.lineTo(x,y);
+  });
+  ctx.stroke();
+  const lastRsi = [...rsi].reverse().find(v=>v!=null);
+  ctx.fillStyle = '#f0c040'; ctx.font = 'bold 12px monospace';
+  ctx.fillText('RSI(14): ' + (lastRsi!=null ? lastRsi.toFixed(2) : 'N/A'), padL, rsiTop - 6);
+
+  // ── PAINEL MACD ──
+  const macdVals = macdLine.filter(v=>v!=null).concat(signalLine.filter(v=>v!=null));
+  const histVals = histogram.filter(v=>v!=null);
+  const macdMax = Math.max(...macdVals, ...histVals, 0.0001);
+  const macdMin = Math.min(...macdVals, ...histVals, -0.0001);
+  const macdRange = (macdMax - macdMin) || 1;
+  const yForMacd = v => macdTop + macdH - ((v - macdMin)/macdRange)*macdH;
+  ctx.strokeStyle = '#2a2a3a';
+  ctx.beginPath(); ctx.moveTo(padL, macdTop); ctx.lineTo(W-padR, macdTop); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(padL, macdTop+macdH); ctx.lineTo(W-padR, macdTop+macdH); ctx.stroke();
+  const zeroY = yForMacd(0);
+  ctx.strokeStyle = '#3a3a3a';
+  ctx.beginPath(); ctx.moveTo(padL, zeroY); ctx.lineTo(W-padR, zeroY); ctx.stroke();
+  // histograma
+  histogram.forEach((v,i)=>{
+    if(v==null) return;
+    const x = xFor(i);
+    const up = v >= 0;
+    ctx.fillStyle = up ? '#3fb95099' : '#f8514999';
+    const yTop = up ? yForMacd(v) : zeroY;
+    const yBot = up ? zeroY : yForMacd(v);
+    ctx.fillRect(x - cw*0.3, yTop, cw*0.6, Math.max(1, yBot - yTop));
+  });
+  // linha MACD
+  ctx.strokeStyle = '#58a6ff'; ctx.lineWidth = 1.5; ctx.beginPath(); started=false;
+  macdLine.forEach((v,i)=>{
+    if(v==null) return;
+    const x = xFor(i), y = yForMacd(v);
+    if(!started){ ctx.moveTo(x,y); started=true; } else ctx.lineTo(x,y);
+  });
+  ctx.stroke();
+  // linha Signal
+  ctx.strokeStyle = '#bc8cff'; ctx.lineWidth = 1.5; ctx.beginPath(); started=false;
+  signalLine.forEach((v,i)=>{
+    if(v==null) return;
+    const x = xFor(i), y = yForMacd(v);
+    if(!started){ ctx.moveTo(x,y); started=true; } else ctx.lineTo(x,y);
+  });
+  ctx.stroke();
+  const lastMacd = [...macdLine].reverse().find(v=>v!=null);
+  const lastSignal = [...signalLine].reverse().find(v=>v!=null);
+  ctx.font = 'bold 12px monospace';
+  ctx.fillStyle = '#58a6ff';
+  ctx.fillText('MACD: ' + (lastMacd!=null ? lastMacd.toFixed(2) : 'N/A'), padL, macdTop - 6);
+  ctx.fillStyle = '#bc8cff';
+  ctx.fillText('  Signal: ' + (lastSignal!=null ? lastSignal.toFixed(2) : 'N/A'), padL + 140, macdTop - 6);
+
+  // ── PAINEL STOCHRSI ──
+  ctx.strokeStyle = '#2a2a3a';
+  ctx.beginPath(); ctx.moveTo(padL, stochTop); ctx.lineTo(W-padR, stochTop); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(padL, stochTop+stochH); ctx.lineTo(W-padR, stochTop+stochH); ctx.stroke();
+  const yForStoch = v => stochTop + stochH - (v/100)*stochH;
+  ctx.strokeStyle = '#3a3a3a'; ctx.setLineDash([4,3]);
+  [80,20].forEach(lvl=>{
+    const yy = yForStoch(lvl);
+    ctx.beginPath(); ctx.moveTo(padL,yy); ctx.lineTo(W-padR,yy); ctx.stroke();
+  });
+  ctx.setLineDash([]);
+  ctx.fillStyle = '#6e7681'; ctx.font = '10px monospace';
+  ctx.fillText('80', 4, yForStoch(80)+3);
+  ctx.fillText('20', 4, yForStoch(20)+3);
+  ctx.strokeStyle = '#f0c040'; ctx.lineWidth = 1.3; ctx.beginPath(); started=false;
+  stochK.forEach((v,i)=>{
+    if(v==null) return;
+    const x = xFor(i), y = yForStoch(v);
+    if(!started){ ctx.moveTo(x,y); started=true; } else ctx.lineTo(x,y);
+  });
+  ctx.stroke();
+  ctx.strokeStyle = '#bc8cff'; ctx.lineWidth = 1.3; ctx.beginPath(); started=false;
+  stochD.forEach((v,i)=>{
+    if(v==null) return;
+    const x = xFor(i), y = yForStoch(v);
+    if(!started){ ctx.moveTo(x,y); started=true; } else ctx.lineTo(x,y);
+  });
+  ctx.stroke();
+  const lastK = [...stochK].reverse().find(v=>v!=null);
+  const lastD = [...stochD].reverse().find(v=>v!=null);
+  ctx.font = 'bold 12px monospace';
+  ctx.fillStyle = '#f0c040';
+  ctx.fillText('STOCHRSI: ' + (lastK!=null ? lastK.toFixed(2) : 'N/A'), padL, stochTop - 6);
+  ctx.fillStyle = '#bc8cff';
+  ctx.fillText('  MASTOCHRSI: ' + (lastD!=null ? lastD.toFixed(2) : 'N/A'), padL + 160, stochTop - 6);
 
   return canvas.toDataURL('image/png').split(',')[1];
 }
@@ -941,7 +1194,7 @@ async function analyzeLive(){
     const tfEntries = Object.entries(LIVE_TF_INTERVALS);
     const imagesByTf = {};
     for(const [tfLabel, interval] of tfEntries){
-      const candles = await fetchLiveKlines(symbol, interval, 120);
+      const candles = await fetchLiveKlines(symbol, interval, 200);
       const base64 = renderLiveCandleImage(candles, pairLabel, tfLabel);
       imagesByTf[tfLabel] = { base64, mimeType: 'image/png' };
     }

@@ -284,7 +284,28 @@ body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-h
 .pair-wl{font-size:11px;color:var(--muted);margin-top:2px;}
 .pair-pnl{font-size:15px;font-weight:700;font-family:'Space Mono',monospace;}
 .no-stats{text-align:center;padding:30px;color:var(--muted);font-size:13px;}
+
+/* ── SINAIS ATIVOS / RECENTES (novo painel) ── */
+.signals-card{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:12px 14px;margin-bottom:8px;}
+.signals-card.live{border-color:#3fb95044;}
+.signals-header-row{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;}
+.signals-pair{display:flex;align-items:center;gap:6px;font-size:13px;font-weight:700;font-family:'Space Mono',monospace;}
+.signals-dir-icon{font-size:13px;}
+.signals-live-badge{display:flex;align-items:center;gap:4px;font-size:9px;font-weight:700;color:var(--red);letter-spacing:1px;font-family:'Space Mono',monospace;}
+.signals-live-dot{width:6px;height:6px;border-radius:50%;background:var(--red);animation:livePulse2 1.5s ease-in-out infinite;}
+@keyframes livePulse2{0%,100%{opacity:1;}50%{opacity:.3;}}
+.signals-pnl{font-size:15px;font-weight:700;font-family:'Space Mono',monospace;}
+.signals-levels-row{display:flex;gap:10px;font-size:10px;color:var(--muted);font-family:'Space Mono',monospace;}
+.signals-levels-row b{color:var(--text2);}
+.signals-recent-row{display:flex;justify-content:space-between;align-items:center;padding:9px 0;border-bottom:1px solid var(--border);}
+.signals-recent-row:last-child{border-bottom:none;}
+.signals-recent-left{display:flex;align-items:center;gap:8px;}
+.signals-result-badge{font-size:10px;font-weight:700;padding:2px 8px;border-radius:5px;font-family:'Space Mono',monospace;}
+.signals-result-badge.win{background:rgba(63,185,80,.15);color:var(--green);}
+.signals-result-badge.loss{background:rgba(248,81,73,.15);color:var(--red);}
+.signals-empty{text-align:center;padding:18px;color:var(--muted);font-size:12px;}
 </style>
+<script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
 </head>
 <body>
 
@@ -337,6 +358,14 @@ body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-h
   </div>
 </div>
 
+<!-- ══ NOVO: GRÁFICO AO VIVO (widget TradingView oficial, gratuito, sem API key) ══ -->
+<div class="section" style="margin-bottom:8px;">
+  <div class="section-title">Gráfico Ao Vivo</div>
+  <div style="background:var(--surface);border:1px solid var(--border);border-radius:14px;overflow:hidden;">
+    <div id="liveChartWidget" style="height:360px;width:100%;"></div>
+  </div>
+</div>
+
 <div class="section" style="margin-bottom:8px;">
   <div class="section-title">Par — Funding + OI</div>
   <div class="pairs-wrap" id="fundingPairBtns">
@@ -376,6 +405,17 @@ body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-h
     <div class="tf-box"><div class="tf-box-name">H1</div><div class="tf-box-delta" id="tfDeltaH1">--</div><div class="tf-box-tag tf-tag-wait" id="tfTagH1">--</div></div>
     <div class="tf-box"><div class="tf-box-name">M15</div><div class="tf-box-delta" id="tfDeltaM15">--</div><div class="tf-box-tag tf-tag-wait" id="tfTagM15">--</div></div>
   </div>
+</div>
+
+<!-- ══ NOVO: SINAIS ATIVOS + SINAIS RECENTES (lê do Journal já existente, sem gastar API extra) ══ -->
+<div class="section">
+  <div class="section-title">Sinais Ativos</div>
+  <div id="sinaisAtivosList"><div class="signals-empty">A carregar...</div></div>
+</div>
+
+<div class="section">
+  <div class="section-title">Sinais Recentes</div>
+  <div id="sinaisRecentesList"><div class="signals-empty">A carregar...</div></div>
 </div>
 
 <div class="divider"></div>
@@ -530,6 +570,8 @@ function selectFundingPair(el, pair){
   document.querySelectorAll('#fundingPairBtns .pair-btn').forEach(b=>b.classList.remove('active'));
   el.classList.add('active');
   loadFundingOI(pair);
+  const liveSymbol = LIVE_SYMBOL_MAP[pair] || 'BTCUSDT';
+  initLiveChart(liveSymbol);
 }
 
 // ── PAIR SELECTOR ──
@@ -1070,14 +1112,20 @@ function renderLiveCandleImage(candles, pairLabel, tfLabel){
   ctx.fillText(pairLabel+' · '+tfLabel+' · $'+last.c.toLocaleString('en-US',{maximumFractionDigits:2}), padL, 20);
 
   // Carimbo real de data/hora (UTC) — o navegador sabe a hora certa,
-  // então gravamos ela dentro da própria imagem. Isso evita que a IA
-  // "chute" uma data errada por não ter esse dado visível no gráfico.
+  // então gravamos ela dentro da própria imagem, com destaque forte
+  // (caixa + fonte grande + alto contraste) pra IA LER o valor exato
+  // em vez de aproximar pelo candle mais próximo.
   const nowStamp = new Date();
-  const stampStr = nowStamp.toISOString().replace('T',' ').slice(0,16) + ' UTC';
-  ctx.font = '11px monospace';
-  ctx.fillStyle = '#6e7681';
+  const stampStr = 'GERADO EM: ' + nowStamp.toISOString().replace('T',' ').slice(0,16) + ' UTC';
+  ctx.font = 'bold 13px monospace';
   const stampWidth = ctx.measureText(stampStr).width;
-  ctx.fillText(stampStr, W - padR - stampWidth, 20);
+  const stampBoxX = W - padR - stampWidth - 14;
+  ctx.fillStyle = '#1a1200';
+  ctx.fillRect(stampBoxX, 6, stampWidth + 14, 22);
+  ctx.strokeStyle = '#f0c040'; ctx.lineWidth = 1;
+  ctx.strokeRect(stampBoxX, 6, stampWidth + 14, 22);
+  ctx.fillStyle = '#ffe58a';
+  ctx.fillText(stampStr, stampBoxX + 7, 21);
 
   // ── PAINEL RSI(14) ──
   ctx.strokeStyle = '#2a2a3a';
@@ -1299,6 +1347,68 @@ function renderFundingOIImage(pairLabel, fo){
   return canvas.toDataURL('image/png').split(',')[1];
 }
 
+// ── GRÁFICO ANOTADO (NOVO) — desenha Entrada/Stop/TP como linhas no candle real ──
+// Só visual, matemática pura (linha na altura do valor) — não depende de IA
+// pra "apontar" a zona, então nunca erra a posição.
+function renderAnnotatedChart(candles, pairLabel, tfLabel, entry, sl, tp1, tp2){
+  const W = 900, H = 420, padL = 64, padR = 90, padT = 34, padB = 20;
+  const canvas = document.createElement('canvas');
+  canvas.width = W; canvas.height = H;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#0a0a0f'; ctx.fillRect(0,0,W,H);
+
+  const levels = [
+    { label: 'TP2', value: parseFloat(tp2), color: '#3fb950' },
+    { label: 'TP1', value: parseFloat(tp1), color: '#5fd968' },
+    { label: 'ENTRADA', value: parseFloat(entry), color: '#f0c040' },
+    { label: 'STOP', value: parseFloat(sl), color: '#f85149' },
+  ].filter(l => !isNaN(l.value) && l.value > 0);
+
+  const highs = candles.map(c=>c.h), lows = candles.map(c=>c.l);
+  let maxP = Math.max(...highs, ...levels.map(l=>l.value));
+  let minP = Math.min(...lows, ...levels.map(l=>l.value));
+  const pad = (maxP - minP) * 0.06 || 1;
+  maxP += pad; minP -= pad;
+  const range = (maxP - minP) || 1;
+
+  const plotW = W - padL - padR;
+  const cw = plotW / candles.length;
+  const xFor = i => padL + i*cw + cw/2;
+  const yFor = p => padT + (H-padT-padB) - ((p - minP) / range) * (H-padT-padB);
+
+  ctx.strokeStyle = '#2a2a3a'; ctx.lineWidth = 1; ctx.font = '10px monospace'; ctx.fillStyle = '#6e7681';
+  for(let i=0;i<=4;i++){
+    const yy = padT + ((H-padT-padB)/4)*i;
+    ctx.beginPath(); ctx.moveTo(padL,yy); ctx.lineTo(W-padR,yy); ctx.stroke();
+  }
+
+  candles.forEach((c,i)=>{
+    const x = xFor(i);
+    const up = c.c >= c.o;
+    ctx.strokeStyle = up ? '#3fb950' : '#f85149';
+    ctx.fillStyle = up ? '#3fb950' : '#f85149';
+    ctx.beginPath(); ctx.moveTo(x, yFor(c.h)); ctx.lineTo(x, yFor(c.l)); ctx.stroke();
+    const bodyTop = yFor(Math.max(c.o,c.c));
+    const bodyH = Math.max(1, Math.abs(yFor(c.o)-yFor(c.c)));
+    ctx.fillRect(x - cw*0.35, bodyTop, cw*0.7, bodyH);
+  });
+
+  // linhas horizontais de Entrada/Stop/TP
+  levels.forEach(l=>{
+    const y = yFor(l.value);
+    ctx.strokeStyle = l.color; ctx.lineWidth = 1.3; ctx.setLineDash([6,4]);
+    ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(W-padR, y); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = l.color; ctx.font = 'bold 11px monospace';
+    ctx.fillText(l.label+': '+l.value.toLocaleString('en-US',{maximumFractionDigits:2}), W-padR+6, y+4);
+  });
+
+  ctx.fillStyle = '#f0c040'; ctx.font = 'bold 14px monospace';
+  ctx.fillText(pairLabel+' · '+tfLabel+' · Níveis do Setup', padL, 20);
+
+  return canvas.toDataURL('image/png').split(',')[1];
+}
+
 async function analyzeLive(){
   const btn = document.getElementById('liveBtn');
   const symbol = LIVE_SYMBOL_MAP[activePair] || 'BTCUSDT';
@@ -1310,8 +1420,10 @@ async function analyzeLive(){
   try{
     const tfEntries = Object.entries(LIVE_TF_INTERVALS);
     const imagesByTf = {};
+    let m15CandlesForChart = null;
     for(const [tfLabel, interval] of tfEntries){
       const candles = await fetchLiveKlines(symbol, interval, 200);
+      if(tfLabel === 'M15') m15CandlesForChart = candles;
       const base64 = renderLiveCandleImage(candles, pairLabel, tfLabel);
       imagesByTf[tfLabel] = { base64, mimeType: 'image/png' };
     }
@@ -1345,6 +1457,25 @@ async function analyzeLive(){
     }
 
     renderMultiResults(data.results, data.errors || []);
+
+    // ── NOVO: gráfico visual com Entrada/Stop/TP desenhados (igual ref. Vortex) ──
+    // Puramente visual, não é enviado pra IA — só ajuda o usuário a ver
+    // onde os níveis caem no candle real.
+    try{
+      const r = data.results[0];
+      if(m15CandlesForChart && r){
+        const annotatedBase64 = renderAnnotatedChart(m15CandlesForChart, pairLabel, 'M15', r.entry, r.sl, r.tp1, r.tp2);
+        const cardEl = document.querySelector('#resultCards .result-summary-card');
+        if(cardEl){
+          const rscBody = cardEl.querySelector('.rsc-body');
+          const imgHtml = '<div style="margin-bottom:12px;"><img src="data:image/png;base64,'+annotatedBase64+'" style="width:100%;display:block;border-radius:8px;border:1px solid var(--border);"/></div>';
+          rscBody.insertAdjacentHTML('afterbegin', imgHtml);
+        }
+      }
+    }catch(e){
+      console.warn('Não foi possível desenhar o gráfico anotado:', e.message);
+    }
+
     document.getElementById('addPairSection').style.display = 'none';
     document.getElementById('queueSection').style.display = 'none';
     showToast('✓ Análise ao vivo de ' + pairLabel + ' concluída!');
@@ -1355,6 +1486,30 @@ async function analyzeLive(){
     document.getElementById('liveBtnLabel').textContent = originalLabel;
   }
 }
+
+// ── GRÁFICO AO VIVO (NOVO — widget oficial TradingView, gratuito, atualiza sozinho) ──
+function initLiveChart(symbol){
+  const container = document.getElementById('liveChartWidget');
+  if(!container || typeof TradingView === 'undefined') return;
+  container.innerHTML = '';
+  new TradingView.widget({
+    "width": "100%",
+    "height": 360,
+    "symbol": "BINANCE:" + symbol,
+    "interval": "60",
+    "timezone": "Etc/UTC",
+    "theme": "dark",
+    "style": "1",
+    "locale": "pt",
+    "toolbar_bg": "#0a0a0f",
+    "enable_publishing": false,
+    "hide_side_toolbar": true,
+    "allow_symbol_change": false,
+    "save_image": false,
+    "container_id": "liveChartWidget"
+  });
+}
+setTimeout(()=>initLiveChart('BTCUSDT'), 800);
 
 // ── MARKET BIAS ──
 async function loadMarketBias(){
@@ -1514,6 +1669,86 @@ setTimeout(updateServerPrices,500);
 setInterval(updateServerPrices,15000);
 setTimeout(()=>loadFundingOI('BTCUSD'),1200);
 setInterval(()=>loadFundingOI(activePair),60000);
+
+// ── SINAIS ATIVOS / RECENTES (NOVO — só lê o Journal que já existe, zero custo extra de API) ──
+const SIGNALS_SYMBOL_MAP = {'BTCUSD':'BTCUSDT','ETHUSD':'ETHUSDT','SOLUSD':'SOLUSDT','XRPUSD':'XRPUSDT','LINKUSD':'LINKUSDT','ADAUSD':'ADAUSDT','AVAXUSD':'AVAXUSDT','BNBUSD':'BNBUSDT','AAVEUSD':'AAVEUSDT'};
+
+function computeLivePct(direction, entry, currentPrice){
+  const e = parseFloat(entry);
+  if(!e || !currentPrice) return null;
+  if(direction === 'SHORT') return ((e - currentPrice) / e) * 100;
+  return ((currentPrice - e) / e) * 100;
+}
+
+async function loadSignalsPanel(){
+  try{
+    const res = await fetch('/journal');
+    const data = await res.json();
+    if(data.error) throw new Error(data.error);
+    const trades = data.trades || [];
+
+    const ativos = trades.filter(t => t.status === 'pending');
+    const recentes = trades.filter(t => t.status === 'win' || t.status === 'loss').slice(0, 5);
+
+    // ── SINAIS ATIVOS ──
+    const ativosEl = document.getElementById('sinaisAtivosList');
+    if(ativos.length === 0){
+      ativosEl.innerHTML = '<div class="signals-empty">Nenhum sinal em aberto agora.</div>';
+    } else {
+      const cardsHtml = await Promise.all(ativos.map(async t=>{
+        const symbol = SIGNALS_SYMBOL_MAP[t.pair] || t.pair;
+        const currentPrice = await getPrice(t.pair).catch(()=>null);
+        const pct = computeLivePct(t.direction, t.entry, currentPrice);
+        const pctColor = pct == null ? 'var(--muted)' : (pct >= 0 ? 'var(--green)' : 'var(--red)');
+        const pctStr = pct == null ? '--' : (pct>=0?'+':'')+pct.toFixed(2)+'%';
+        const dirIcon = t.direction === 'SHORT' ? '📉' : '📈';
+        return `
+          <div class="signals-card live">
+            <div class="signals-header-row">
+              <div class="signals-pair"><span class="signals-dir-icon">${dirIcon}</span>${t.pair.replace('USD','USDT')} · ${t.direction}</div>
+              <div class="signals-live-badge"><span class="signals-live-dot"></span>AO VIVO</div>
+            </div>
+            <div class="signals-header-row" style="margin-bottom:6px;">
+              <div class="signals-levels-row">
+                <span>Entrada <b>$${t.entry||'--'}</b></span>
+                <span>Stop <b>$${t.sl||'--'}</b></span>
+                <span>TP1 <b>$${t.tp1||'--'}</b></span>
+              </div>
+              <div class="signals-pnl" style="color:${pctColor}">${pctStr}</div>
+            </div>
+          </div>`;
+      }));
+      ativosEl.innerHTML = cardsHtml.join('');
+    }
+
+    // ── SINAIS RECENTES ──
+    const recentesEl = document.getElementById('sinaisRecentesList');
+    if(recentes.length === 0){
+      recentesEl.innerHTML = '<div class="signals-empty">Sem sinais fechados ainda.</div>';
+    } else {
+      recentesEl.innerHTML = `<div class="signals-card">` + recentes.map(t=>{
+        const isWin = t.status === 'win';
+        const pnlVal = Math.abs(t.pnl || 0);
+        return `
+          <div class="signals-recent-row">
+            <div class="signals-recent-left">
+              <span class="signals-result-badge ${isWin?'win':'loss'}">${isWin?'LUCRO':'PERDA'}</span>
+              <span style="font-size:12px;font-weight:700;font-family:'Space Mono',monospace;">${t.pair.replace('USD','USDT')}</span>
+              <span style="font-size:10px;color:var(--muted);">${t.direction}</span>
+            </div>
+            <div style="font-size:13px;font-weight:700;font-family:'Space Mono',monospace;color:${isWin?'var(--green)':'var(--red)'}">
+              ${isWin?'+':'-'}$${pnlVal.toFixed(2)}
+            </div>
+          </div>`;
+      }).join('') + `</div>`;
+    }
+  }catch(e){
+    document.getElementById('sinaisAtivosList').innerHTML = '<div class="signals-empty">Erro ao carregar sinais</div>';
+  }
+}
+
+setTimeout(loadSignalsPanel, 1500);
+setInterval(loadSignalsPanel, 20000);
 
 // ── JOURNAL ──
 async function loadJournal(){

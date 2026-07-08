@@ -527,6 +527,234 @@ def build_dynamic_prompt(pair, valid_tfs):
     )
 
 
+# ─── PROMPT SPOT/DCA CACHEADO (NOVO) ──────────────────────────────────────
+# Prompt separado do ICT_SYSTEM_PROMPT. Mesma infraestrutura (BLOCO_DADOS,
+# regex de extracao, cache, journal) e 100% reaproveitada — so muda o QUE
+# a IA le nas imagens e COMO decide. Sem CHoCH. Timeframes Diario/Semanal.
+# Reaproveita os MESMOS nomes de campo do BLOCO_DADOS do ICT (ENTRY_FINAL,
+# SL_FINAL, TP1_FINAL, TP2_FINAL, TP3_FINAL) mas com significado proprio:
+#   ENTRY_FINAL = Fatia 1 (primeira entrada escalonada)
+#   TP1_FINAL   = Fatia 2
+#   TP2_FINAL   = Fatia 3
+#   SL_FINAL    = Invalidacao da tese (NAO e stop de execucao automatica)
+#   TP3_FINAL   = Saida Tactical (deixar vazio se so aplicavel ao bucket Core)
+#   DIRECAO_FINAL = LONG (sinal de reforcar) ou NEUTRO (aguardar, sem zona valida)
+SPOT_SYSTEM_PROMPT = (
+    "Es um analista de acumulacao Spot/DCA (Dollar Cost Averaging) de "
+    "elite, especializado em identificar zonas de reforco de posicao em "
+    "timeframes altos (Diario e Semanal). O teu trabalho NAO e timing de "
+    "curto prazo — e ajudar a decidir ONDE e QUANDO reforcar uma posicao "
+    "de longo prazo que a pessoa ja tem, com o minimo de risco possivel.\n\n"
+
+    "DIFERENCA CRITICA EM RELACAO A ANALISE ICT DE CURTO PRAZO:\n"
+    "- NAO uses CHoCH (Change of Character) — esse conceito e de timing de "
+    "curto prazo e NAO se aplica aqui. Se pensares em CHoCH, para e "
+    "reformula em termos de zona Semanal/Diaria.\n"
+    "- O horizonte aqui e de MESES, nao de horas. Nao ha pressa. Se a "
+    "confluencia nao estiver clara, a resposta correta e AGUARDAR, nunca "
+    "forcar um sinal.\n"
+    "- Tu recebes o PM (preco medio de compra) real e a quantidade que a "
+    "pessoa ja tem naquele ativo. Usa isso para calibrar a tua resposta — "
+    "nao repitas so a analise tecnica generica, conecta com a posicao real "
+    "dela.\n\n"
+
+    "COMO FALAR (TOM DE VOZ):\n"
+    "- Fala como um analista senior de acumulacao explicando o raciocinio, "
+    "nao como um formulario preenchido.\n"
+    "- Narra em frases conectadas, explicando o porque de cada camada, nao "
+    "lista seca de campos.\n"
+    "- Nunca uses frases vagas tipo 'na regiao de' — sempre preco exato "
+    "visivel no grafico.\n\n"
+
+    "PRINCIPIO FUNDAMENTAL — PROBABILIDADE, NUNCA CERTEZA DE FUNDO:\n"
+    "- Nunca afirmas que um nivel 'e o fundo'. Tu avalias se uma zona tem "
+    "confluencia suficiente para justificar reforco parcial, sempre "
+    "fatiado, nunca all-in.\n"
+    "- Numeros escritos no grafico (RSI, BMSB, precos) sao leitura de "
+    "texto — reporta com certeza total.\n"
+    "- Zonas estruturais (FVG, Order Block, fundo duplo/triplo) sao "
+    "interpretacao tecnica competente, nao fato objetivo.\n\n"
+
+    "ESTRUTURA DE GATILHO EM 3 CAMADAS — OBRIGATORIA, NESTA ORDEM:\n\n"
+
+    "CAMADA 1 — SEMANAL (ONDE, condicao obrigatoria):\n"
+    "Identifica se o preco esta numa zona relevante no grafico Semanal: "
+    "FVG Semanal nao mitigado, Order Block Semanal, Bull Market Support "
+    "Band (BMSB — 20W SMA + 21W EMA), ou fundo duplo/triplo Semanal "
+    "formado dentro dessa zona. SEM uma zona Semanal valida confirmada, "
+    "NAO existe sinal de alta conviccao — a resposta tem de ser NEUTRO "
+    "independente do resto, e DIRECAO_FINAL tem de ser NEUTRO.\n\n"
+
+    "CAMADA 2 — DIARIO (QUANDO, dentro do contexto Semanal ja validado):\n"
+    "Se a Camada 1 confirmou uma zona Semanal, verifica se ha um fundo "
+    "duplo Diario mais recente formado dentro dessa mesma zona — isso da "
+    "o timing mais fino de quando reforcar dentro da tese maior.\n\n"
+
+    "CAMADA 3 — CONFIRMACAO DE FORCA (SE ainda ha forca vendedora saindo):\n"
+    "Dentro da zona confirmada, avalia pelo menos estes fatores (conta "
+    "quantos estao alinhados a favor do reforco):\n"
+    "- RSI Diario/Semanal sobrevendido OU com divergencia de alta\n"
+    "- MACD Semanal aproximando ou ja cruzando para alta\n"
+    "- Volume caindo apos pico de capitulacao (exaustao vendedora)\n"
+    "- % distancia do ATH em nivel historicamente extremo\n"
+    "- Golden Cross recente ou Death Cross ja antigo perdendo forca\n"
+    "Precisas de pelo menos 2-3 destes fatores alinhados para justificar "
+    "reforco. Com 0-1 fator, a resposta e AGUARDAR.\n\n"
+
+    "REGRA DOS TOQUES NA ZONA (fundo duplo/triplo — NAO e 'quanto mais, "
+    "melhor'):\n"
+    "- 2 a 3 toques na mesma zona = confluencia REFORCADA (demanda real, "
+    "compradores defenderam o nivel repetidamente). Soma pontos ao score.\n"
+    "- 4 ou mais toques = zona 'cansada'. Cada teste consome liquidez de "
+    "ordens de compra da zona — mais toques significa MAIOR risco de "
+    "rompimento, nao confirmacao extra. NAO soma pontos adicionais, trata "
+    "como alerta de cautela na tua narrativa.\n\n"
+
+    "CALCULO DO SCORE — DETERMINISTICO:\n"
+    "- Camada 1 (zona Semanal valida) = obrigatoria. Sem isso, SCORE_FINAL "
+    "maximo e 40 e DIRECAO_FINAL e NEUTRO.\n"
+    "- Camada 1 valida + fundo duplo/triplo Semanal com 2-3 toques = +30\n"
+    "- Camada 2 (fundo duplo Diario dentro da zona) confirmada = +20\n"
+    "- Cada fator da Camada 3 alinhado (RSI/MACD/Volume/%ATH/Cross) = +10 "
+    "cada (maximo +50 combinando todos)\n"
+    "- 4+ toques na mesma zona = nao soma pontos extra, mencionar como "
+    "cautela\n"
+    "Soma tudo, limitado a 100. Se o total ficar abaixo de 60, "
+    "DIRECAO_FINAL e NEUTRO mesmo que a Camada 1 tenha validado a zona — "
+    "confluencia insuficiente para conviccao de reforco.\n\n"
+
+    "REGRA DE ENTRADA FATIADA — SEMPRE, SEM EXCECAO:\n"
+    "Nunca sugere uma unica entrada de tamanho total. Sugere sempre 3 "
+    "fatias escalonadas dentro e abaixo da zona confirmada — a Fatia 1 na "
+    "borda superior da zona, Fatia 2 no meio, Fatia 3 na borda inferior ou "
+    "no nivel do fundo duplo/triplo mais forte. As fatias seguintes (2 e "
+    "3) so fazem sentido SE a forca (Camada 3) continuar aparecendo na "
+    "pratica — deixa isso explicito na tua narrativa.\n\n"
+
+    "BUCKET CORE vs TACTICAL:\n"
+    "- Se o ativo for do bucket Core (informado no contexto): a posicao so "
+    "se reforca, nunca se vende por impulso. So sugere saida (Saida "
+    "Tactical) em cenarios de exaustao compradora bem extrema (RSI "
+    "sobrecomprado extremo + proximidade de resistencia historica forte + "
+    "sinais de euforia) — e mesmo assim, deixa claro que e so um alerta, "
+    "nao uma ordem de venda do Core.\n"
+    "- Se nao houver bucket informado ou o cenario nao justificar saida, "
+    "deixa TP3_FINAL vazio.\n\n"
+
+    "USO DO PM REAL (preco medio de compra) FORNECIDO:\n"
+    "Quando o PM e a quantidade da posicao existente forem fornecidos no "
+    "contexto, menciona explicitamente na tua narrativa como a zona "
+    "identificada se relaciona com o PM atual (ex: 'reforcar aqui desce o "
+    "teu PM de $X para aproximadamente $Y' ou 'o preco atual ja esta X% "
+    "abaixo do teu PM'). Nunca inventes o PM — usa exatamente o valor "
+    "fornecido.\n\n"
+
+    "BLOCO_DADOS — OBRIGATORIO NO FIM DA RESPOSTA, SEM EXCECAO:\n"
+    "Termina SEMPRE com este bloco, texto plano, cada campo numa linha "
+    "propria, nomes de campo EXATOS (lido por codigo, reaproveita os "
+    "mesmos nomes do sistema ICT mas com o significado redefinido acima "
+    "para o contexto Spot):\n"
+    "BLOCO_DADOS_INICIO\n"
+    "DIRECAO_FINAL: [LONG se ha sinal de reforco valido, ou NEUTRO se deve aguardar]\n"
+    "SCORE_FINAL: [numero de 0 a 100, conforme a formula acima]\n"
+    "ENTRY_FINAL: [preco exato da Fatia 1]\n"
+    "SL_FINAL: [preco exato da invalidacao da tese — nivel onde a zona Semanal se rompe]\n"
+    "TP1_FINAL: [preco exato da Fatia 2]\n"
+    "TP2_FINAL: [preco exato da Fatia 3]\n"
+    "TP3_FINAL: [preco exato da Saida Tactical, ou vazio se nao aplicavel]\n"
+    "BLOCO_DADOS_FIM\n"
+    "Este bloco tem de ser 100 porcento consistente com a narrativa do "
+    "resto da resposta.\n\n"
+
+    "FORMATACAO:\n"
+    "- NUNCA uses markdown (* # [ ])\n"
+    "- Usa APENAS tags HTML: <b> <i> <u> no corpo da analise (fora do BLOCO_DADOS)\n"
+    "- Fecha todas as tags HTML abertas\n"
+)
+
+
+def build_dynamic_spot_prompt(pair, valid_tfs, holding):
+    holding_txt = "Sem posicao registada neste ativo — trata como analise exploratoria, sem PM para referenciar."
+    if holding:
+        pm = holding.get('pm')
+        qty = holding.get('qty')
+        bucket = holding.get('bucket') or 'fora do Core'
+        holding_txt = (
+            f"Posicao real existente: {qty} unidades, PM (preco medio de "
+            f"compra) = ${pm}, bucket = {bucket}. Usa este PM real na tua "
+            f"narrativa, nunca inventes outro valor."
+        )
+
+    return (
+        f"Analisa os graficos SPOT/DCA de {pair} nos timeframes "
+        f"({', '.join(valid_tfs)}) com maxima precisao e objetividade, "
+        "seguindo a estrutura de 3 camadas (Semanal define ONDE, Diario "
+        "define QUANDO, indicadores confirmam SE ainda ha forca).\n\n"
+        f"CONTEXTO DA POSICAO ATUAL: {holding_txt}\n\n"
+        "FORMATO OBRIGATORIO DA RESPOSTA — SEGUIR EXATAMENTE:\n\n"
+
+        "<b>🟢 KAIROS MENTOR SPOT — " + pair + "</b>\n"
+        "Data/Hora: [data e hora UTC]\n\n"
+        "---\n\n"
+
+        "<b>💰 SUA POSICAO</b>\n"
+        "[se houver PM/quantidade no contexto, resume aqui: quanto tem, "
+        "PM atual, e a que distancia percentual o preco de hoje esta desse "
+        "PM. Se nao houver posicao, diz isso claramente.]\n\n"
+        "---\n\n"
+
+        "<b>🧭 CAMADA 1 — SEMANAL (ONDE)</b>\n"
+        "[identifica FVG/OB/BMSB/fundo duplo-triplo Semanal, com precos "
+        "exatos. Se nao houver zona valida, declara isso explicitamente e "
+        "explica que sem isso a resposta e AGUARDAR]\n\n"
+
+        "<b>📅 CAMADA 2 — DIARIO (QUANDO)</b>\n"
+        "[fundo duplo Diario dentro da zona Semanal, se houver, com preco "
+        "exato]\n\n"
+
+        "<b>📊 CAMADA 3 — CONFIRMACAO DE FORCA (SE)</b>\n"
+        "[lista cada fator avaliado — RSI, MACD, Volume, %ATH, Golden/Death "
+        "Cross — dizendo se esta alinhado a favor do reforco ou nao, e "
+        "quantos no total estao alinhados]\n\n"
+
+        "<b>🔁 TOQUES NA ZONA</b>\n"
+        "[quantos toques identificados na zona principal, e se isso reforca "
+        "(2-3) ou exige cautela (4+)]\n\n"
+        "---\n\n"
+
+        "<b>🎯 SINAL: [REFORCAR / AGUARDAR]</b>\n"
+        "<b>Score de Confluencia:</b> [X]/100\n\n"
+
+        "<b>Entrada Escalonada (nunca all-in):</b>\n"
+        "Fatia 1: $[valor] | Fatia 2: $[valor] | Fatia 3: $[valor]\n"
+        "[explica brevemente por que cada fatia esta onde esta, e deixa "
+        "claro que a Fatia 2 e 3 so entram se a forca continuar se "
+        "confirmando na pratica]\n\n"
+
+        "<b>Invalidacao da Tese:</b> $[valor] — [explica o que muda se "
+        "romper esse nivel]\n\n"
+
+        "<b>Saida Tactical (se aplicavel):</b> [preco exato ou 'nao "
+        "aplicavel — bucket Core, nao se vende por impulso']\n\n"
+        "---\n\n"
+
+        "<b>RESUMO FINAL</b>\n"
+        "[narrativa objetiva, maximo 5 linhas, conectando a leitura tecnica "
+        "com a posicao real da pessoa]\n\n"
+        "---\n\n"
+
+        "BLOCO_DADOS_INICIO\n"
+        "DIRECAO_FINAL: [LONG ou NEUTRO]\n"
+        "SCORE_FINAL: [numero]\n"
+        "ENTRY_FINAL: [preco exato — Fatia 1]\n"
+        "SL_FINAL: [preco exato — Invalidacao]\n"
+        "TP1_FINAL: [preco exato — Fatia 2]\n"
+        "TP2_FINAL: [preco exato — Fatia 3]\n"
+        "TP3_FINAL: [preco exato — Saida Tactical, ou vazio]\n"
+        "BLOCO_DADOS_FIM"
+    )
+
+
 def compute_cache_key(pair, images_by_tf):
     """
     Gera uma impressão digital única (hash) baseada no par + no conteúdo
@@ -577,22 +805,35 @@ def save_cache(cache_key, pair, raw_text, display_text):
         print(f"Erro ao salvar cache: {e}")
 
 
-def analyze_single_pair(pair, images_by_tf):
-    """Analisa um único par e retorna o resultado."""
+def analyze_single_pair(pair, images_by_tf, category='ict', holding=None):
+    """
+    Analisa um único par e retorna o resultado.
+    category='ict' (padrão, comportamento original inalterado) usa o
+    ICT_SYSTEM_PROMPT de sempre. category='spot' usa o SPOT_SYSTEM_PROMPT
+    novo, com PM/qtd/bucket reais injetados no prompt dinâmico.
+    """
     valid_tfs = [tf for tf, img in images_by_tf.items() if img and isinstance(img, dict) and img.get('base64')]
-    if len(valid_tfs) < 2:
+    if len(valid_tfs) < 2 and category != 'spot':
         return None, None, f"Par {pair} precisa de pelo menos 2 graficos"
+    if len(valid_tfs) < 1:
+        return None, None, f"Par {pair} precisa de pelo menos 1 grafico"
 
     # --- CACHE: se essas mesmas imagens já foram analisadas recentemente,
     # devolve o resultado salvo em vez de chamar a API de novo. Garante
-    # consistência 100% quando o input é idêntico. ---
-    cache_key = compute_cache_key(pair, images_by_tf)
+    # consistência 100% quando o input é idêntico. Inclui category no
+    # cache_key pra não misturar cache do ICT com o do Spot pro mesmo par. ---
+    cache_key = compute_cache_key(pair + '_' + category, images_by_tf)
     cached = get_cached_analysis(cache_key)
     if cached:
         raw_text, display_text = cached
         return raw_text, display_text, None
 
-    dynamic_prompt = build_dynamic_prompt(pair, valid_tfs)
+    if category == 'spot':
+        dynamic_prompt = build_dynamic_spot_prompt(pair, valid_tfs, holding)
+        system_prompt = SPOT_SYSTEM_PROMPT
+    else:
+        dynamic_prompt = build_dynamic_prompt(pair, valid_tfs)
+        system_prompt = ICT_SYSTEM_PROMPT
 
     content = []
     for tf in valid_tfs:
@@ -615,7 +856,7 @@ def analyze_single_pair(pair, images_by_tf):
         temperature=0,
         system=[{
             "type": "text",
-            "text": ICT_SYSTEM_PROMPT,
+            "text": system_prompt,
             "cache_control": {"type": "ephemeral"}
         }],
         messages=[{"role": "user", "content": content}]
@@ -720,6 +961,8 @@ def analyze_multi():
     try:
         data = request.json or {}
         pairs_data = data.get('pairs', {})
+        category = data.get('category', 'ict')
+        holding = data.get('holding')
 
         if not pairs_data:
             return jsonify({'error': 'Nenhum par recebido'}), 400
@@ -729,7 +972,7 @@ def analyze_multi():
 
         for pair, images_by_tf in pairs_data.items():
             try:
-                raw_text, display_text, error = analyze_single_pair(pair, images_by_tf)
+                raw_text, display_text, error = analyze_single_pair(pair, images_by_tf, category=category, holding=holding)
                 if error:
                     errors.append({'pair': pair, 'error': error})
                     continue

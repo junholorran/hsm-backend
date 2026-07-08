@@ -468,6 +468,18 @@ body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-h
     <button class="pair-btn" onclick="selectActivePair(this,'AVAXUSD')">AVAX</button>
     <button class="pair-btn" onclick="selectActivePair(this,'AAVEUSD')">AAVE</button>
   </div>
+  <div class="pair-selector-label" style="margin-top:2px;color:var(--green);">CORE SPOT (DCA)</div>
+  <div class="pairs-wrap" id="spotPairBtns">
+    <button class="pair-btn" onclick="selectActivePair(this,'ONDOUSD')">ONDO</button>
+    <button class="pair-btn" onclick="selectActivePair(this,'INJUSD')">INJ</button>
+    <button class="pair-btn" onclick="selectActivePair(this,'NEARUSD')">NEAR</button>
+    <button class="pair-btn" onclick="selectActivePair(this,'PENDLEUSD')">PENDLE</button>
+    <button class="pair-btn" onclick="selectActivePair(this,'SUIUSD')">SUI</button>
+    <button class="pair-btn" onclick="selectActivePair(this,'JTOUSD')">JTO</button>
+    <button class="pair-btn" onclick="selectActivePair(this,'ETHFIUSD')">ETHFI</button>
+    <button class="pair-btn" onclick="selectActivePair(this,'JUPUSD')">JUP</button>
+    <button class="pair-btn" onclick="selectActivePair(this,'ENAUSD')">ENA</button>
+  </div>
 
   <div class="pair-selector-label">2. CARREGA OS GRÁFICOS</div>
   <div class="upload-zone-mini" id="uploadZoneMini" onclick="document.getElementById('batchFileInput').click()">
@@ -597,6 +609,10 @@ let isAnalyzing = false;
 const PAIRS = ['BTCUSD','BNBUSD','SOLUSD','XRPUSD','LINKUSD','ETHUSD','ADAUSD','AVAXUSD','AAVEUSD'];
 const TFS = ['D1','H4','H1','M15','M5','M1'];
 
+// ── NOVO: pares do Core Spot (ONDO/INJ/NEAR/PENDLE/SUI/JTO/ETHFI/JUP/ENA) ──
+// Lista separada da PAIRS original pra não misturar com os pares ICT de sempre.
+const SPOT_PAIRS = ['ONDOUSD','INJUSD','NEARUSD','PENDLEUSD','SUIUSD','JTOUSD','ETHFIUSD','JUPUSD','ENAUSD'];
+
 // ── NAV ──
 function switchTab(tab){
   ['Home','Journal','Stats'].forEach(t=>{
@@ -619,6 +635,7 @@ function selectFundingPair(el, pair){
 // ── PAIR SELECTOR ──
 function selectActivePair(el, pair){
   document.querySelectorAll('#pairBtns .pair-btn').forEach(b=>b.classList.remove('active'));
+  document.querySelectorAll('#spotPairBtns .pair-btn').forEach(b=>b.classList.remove('active'));
   el.classList.add('active');
   activePair = pair;
   currentBatchImages = [];
@@ -951,7 +968,7 @@ function resetAll(){
 // endpoint /analyze_multi que a fila manual já usa. Nenhuma rota nova no
 // backend, nenhuma função existente foi alterada.
 const LIVE_TF_INTERVALS = { D1: 'D', H4: '240', H1: '60', M15: '15' };
-const LIVE_SYMBOL_MAP = {'BTCUSD':'BTCUSDT','ETHUSD':'ETHUSDT','SOLUSD':'SOLUSDT','XRPUSD':'XRPUSDT','LINKUSD':'LINKUSDT','ADAUSD':'ADAUSDT','AVAXUSD':'AVAXUSDT','BNBUSD':'BNBUSDT','AAVEUSD':'AAVEUSDT'};
+const LIVE_SYMBOL_MAP = {'BTCUSD':'BTCUSDT','ETHUSD':'ETHUSDT','SOLUSD':'SOLUSDT','XRPUSD':'XRPUSDT','LINKUSD':'LINKUSDT','ADAUSD':'ADAUSDT','AVAXUSD':'AVAXUSDT','BNBUSD':'BNBUSDT','AAVEUSD':'AAVEUSDT','ONDOUSD':'ONDOUSDT','INJUSD':'INJUSDT','NEARUSD':'NEARUSDT','PENDLEUSD':'PENDLEUSDT','SUIUSD':'SUIUSDT','JTOUSD':'JTOUSDT','ETHFIUSD':'ETHFIUSDT','JUPUSD':'JUPUSDT','ENAUSD':'ENAUSDT'};
 
 async function fetchLiveKlines(symbol, interval, limit){
   const url = 'https://api.bybit.com/v5/market/kline?category=linear&symbol='+symbol+'&interval='+interval+'&limit='+(limit||120);
@@ -1987,9 +2004,11 @@ async function analyzeSpot(){
     // igual já é feito no ICT com renderAnnotatedChart — puramente visual.
     try{
       const r = data.results[0];
-      const entryFatias = [r.entry, r.tp1, r.tp2].filter(v=>v); // fallback caso o backend ainda não tenha campos fatia1/2/3 dedicados
+      // Mapeamento real dos campos retornados pelo backend (app.py, SPOT_SYSTEM_PROMPT):
+      // ENTRY_FINAL=Fatia1, TP1_FINAL=Fatia2, TP2_FINAL=Fatia3, SL_FINAL=Invalidação, TP3_FINAL=Saída Tactical
+      const entryFatias = [r.entry, r.tp1, r.tp2].filter(v=>v);
       if(weeklyCandles && r){
-        const annotatedBase64 = renderAnnotatedSpotChart(weeklyCandles, pairLabel, entryFatias, r.sl, null);
+        const annotatedBase64 = renderAnnotatedSpotChart(weeklyCandles, pairLabel, entryFatias, r.tp3, r.sl);
         const cardEl = document.querySelector('#resultCards .result-summary-card');
         if(cardEl){
           const rscBody = cardEl.querySelector('.rsc-body');
@@ -2222,7 +2241,7 @@ function paintTfBox(prefix,deltaPct,fundingRate){
   tagEl.className='tf-box-tag tf-tag-'+sig.cls;tagEl.textContent=sig.tag;return sig;
 }
 async function loadFundingOI(pair){
-  const symbolMap={'BTCUSD':'BTCUSDT','ETHUSD':'ETHUSDT','SOLUSD':'SOLUSDT','XRPUSD':'XRPUSDT','LINKUSD':'LINKUSDT','ADAUSD':'ADAUSDT','AVAXUSD':'AVAXUSDT','BNBUSD':'BNBUSDT','AAVEUSD':'AAVEUSDT'};
+  const symbolMap={'BTCUSD':'BTCUSDT','ETHUSD':'ETHUSDT','SOLUSD':'SOLUSDT','XRPUSD':'XRPUSDT','LINKUSD':'LINKUSDT','ADAUSD':'ADAUSDT','AVAXUSD':'AVAXUSDT','BNBUSD':'BNBUSDT','AAVEUSD':'AAVEUSDT','ONDOUSD':'ONDOUSDT','INJUSD':'INJUSDT','NEARUSD':'NEARUSDT','PENDLEUSD':'PENDLEUSDT','SUIUSD':'SUIUSDT','JTOUSD':'JTOUSDT','ETHFIUSD':'ETHFIUSDT','JUPUSD':'JUPUSDT','ENAUSD':'ENAUSDT'};
   const symbol=(pair&&symbolMap[pair])?symbolMap[pair]:'BTCUSDT';
   const pairLabel=symbol.replace('USDT','');
   const labelEl=document.getElementById('fundingPairLabel');
@@ -2263,7 +2282,7 @@ async function loadFundingOI(pair){
 // ── PRICE ──
 async function getPrice(pair){
   try{
-    const symbolMap={'BTCUSD':'BTCUSDT','ETHUSD':'ETHUSDT','SOLUSD':'SOLUSDT','XRPUSD':'XRPUSDT','LINKUSD':'LINKUSDT','ADAUSD':'ADAUSDT','AVAXUSD':'AVAXUSDT','BNBUSD':'BNBUSDT','AAVEUSD':'AAVEUSDT'};
+    const symbolMap={'BTCUSD':'BTCUSDT','ETHUSD':'ETHUSDT','SOLUSD':'SOLUSDT','XRPUSD':'XRPUSDT','LINKUSD':'LINKUSDT','ADAUSD':'ADAUSDT','AVAXUSD':'AVAXUSDT','BNBUSD':'BNBUSDT','AAVEUSD':'AAVEUSDT','ONDOUSD':'ONDOUSDT','INJUSD':'INJUSDT','NEARUSD':'NEARUSDT','PENDLEUSD':'PENDLEUSDT','SUIUSD':'SUIUSDT','JTOUSD':'JTOUSDT','ETHFIUSD':'ETHFIUSDT','JUPUSD':'JUPUSDT','ENAUSD':'ENAUSDT'};
     const symbol=symbolMap[pair]||'BTCUSDT';
     const r=await fetch('https://api.bybit.com/v5/market/tickers?category=linear&symbol='+symbol);
     const d=await r.json();
@@ -2292,7 +2311,7 @@ setTimeout(()=>loadFundingOI('BTCUSD'),1200);
 setInterval(()=>loadFundingOI(activePair),60000);
 
 // ── SINAIS ATIVOS / RECENTES (NOVO — só lê o Journal que já existe, zero custo extra de API) ──
-const SIGNALS_SYMBOL_MAP = {'BTCUSD':'BTCUSDT','ETHUSD':'ETHUSDT','SOLUSD':'SOLUSDT','XRPUSD':'XRPUSDT','LINKUSD':'LINKUSDT','ADAUSD':'ADAUSDT','AVAXUSD':'AVAXUSDT','BNBUSD':'BNBUSDT','AAVEUSD':'AAVEUSDT'};
+const SIGNALS_SYMBOL_MAP = {'BTCUSD':'BTCUSDT','ETHUSD':'ETHUSDT','SOLUSD':'SOLUSDT','XRPUSD':'XRPUSDT','LINKUSD':'LINKUSDT','ADAUSD':'ADAUSDT','AVAXUSD':'AVAXUSDT','BNBUSD':'BNBUSDT','AAVEUSD':'AAVEUSDT','ONDOUSD':'ONDOUSDT','INJUSD':'INJUSDT','NEARUSD':'NEARUSDT','PENDLEUSD':'PENDLEUSDT','SUIUSD':'SUIUSDT','JTOUSD':'JTOUSDT','ETHFIUSD':'ETHFIUSDT','JUPUSD':'JUPUSDT','ENAUSD':'ENAUSDT'};
 
 function computeLivePct(direction, entry, currentPrice){
   const e = parseFloat(entry);

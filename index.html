@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="pt">
+<html lang="pt-PT">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
@@ -7,7 +7,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <style>
 :root{
-  --bg:#0a0a0f;
+  --bg:#0a0e14;
   --surface:#111118;
   --surface2:#1a1a24;
   --border:#2a2a3a;
@@ -132,6 +132,35 @@ body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-h
 @keyframes livePulse{0%{transform:scale(.6);opacity:.9;}100%{transform:scale(2.4);opacity:0;}}
 .live-btn-label{font-weight:700;font-size:13px;letter-spacing:.5px;color:var(--gold);font-family:'Space Mono',monospace;}
 .live-btn-sub{font-size:10px;color:var(--muted);margin-top:1px;}
+
+/* ── BOTÃO NOVO: ANALISAR SPOT / DCA (só adicionado, mesmo padrão do live-btn, cor verde) ── */
+.spot-btn{
+  width:100%;padding:13px 16px;margin-top:10px;
+  background:#0d1f14;border:1px solid var(--green);
+  border-radius:10px;cursor:pointer;
+  display:flex;align-items:center;justify-content:space-between;
+  -webkit-tap-highlight-color:transparent;
+}
+.spot-btn:disabled{opacity:.5;cursor:not-allowed;}
+.spot-btn-left{display:flex;align-items:center;gap:10px;}
+.spot-pulse-wrap{position:relative;width:12px;height:12px;flex-shrink:0;}
+.spot-pulse-dot{width:8px;height:8px;border-radius:50%;background:var(--green);position:absolute;top:2px;left:2px;}
+.spot-pulse-ring{width:12px;height:12px;border-radius:50%;border:1.5px solid var(--green);position:absolute;top:0;left:0;animation:livePulse 1.8s ease-out infinite;}
+.spot-btn-label{font-weight:700;font-size:13px;letter-spacing:.5px;color:var(--green);font-family:'Space Mono',monospace;}
+.spot-btn-sub{font-size:10px;color:var(--muted);margin-top:1px;}
+
+/* card de holding dentro do resultado Spot (PM / Qtd / PNL / Bucket) */
+.spot-holding-box{background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:10px 12px;margin-bottom:12px;}
+.spot-holding-row{display:flex;justify-content:space-between;font-size:11px;color:var(--text2);margin-bottom:4px;font-family:'Space Mono',monospace;}
+.spot-holding-row:last-child{margin-bottom:0;}
+.spot-holding-row b{color:var(--text);}
+.spot-holding-row b.neg{color:var(--red);}
+.spot-holding-row b.pos{color:var(--green);}
+
+/* legenda de zonas do gráfico Spot */
+.spot-legend{display:flex;gap:10px;flex-wrap:wrap;margin-top:8px;padding:0 2px;}
+.spot-legend-item{display:flex;align-items:center;gap:4px;font-size:9px;color:var(--muted);font-family:'Space Mono',monospace;}
+.spot-legend-swatch{width:9px;height:9px;border-radius:2px;flex-shrink:0;}
 
 /* FILA DE PARES */
 .queue-list{display:flex;flex-direction:column;gap:8px;margin:0 16px 12px;}
@@ -462,6 +491,19 @@ body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-h
     </div>
     <div style="color:var(--gold);font-size:16px;">›</div>
   </button>
+
+  <!-- NOVO: botão de análise Spot/DCA — timeframes D1/Semanal/Mensal, sem CHoCH,
+       usa FVG/OB/BMSB/fundo duplo-triplo e traz PM/Qtd/PNL reais do spot_holdings -->
+  <button class="spot-btn" id="spotBtn" onclick="analyzeSpot()">
+    <div class="spot-btn-left">
+      <div class="spot-pulse-wrap"><div class="spot-pulse-ring"></div><div class="spot-pulse-dot"></div></div>
+      <div>
+        <div class="spot-btn-label" id="spotBtnLabel">ANALISAR SPOT (DCA) — BTC</div>
+        <div class="spot-btn-sub">Semanal + Diário · confluência de acumulação, seu PM real</div>
+      </div>
+    </div>
+    <div style="color:var(--green);font-size:16px;">›</div>
+  </button>
 </div>
 
 <!-- FILA -->
@@ -584,6 +626,8 @@ function selectActivePair(el, pair){
   loadFundingOI(pair);
   const liveLabelEl = document.getElementById('liveBtnLabel');
   if(liveLabelEl) liveLabelEl.textContent = 'ANALISAR AO VIVO — ' + pair.replace('USD','');
+  const spotLabelEl = document.getElementById('spotBtnLabel');
+  if(spotLabelEl) spotLabelEl.textContent = 'ANALISAR SPOT (DCA) — ' + pair.replace('USD','');
 }
 
 // ── UPDATE UPLOAD ZONE (CORRIGIDO — mostra o rótulo real de cada slot) ──
@@ -1407,6 +1451,583 @@ function renderAnnotatedChart(candles, pairLabel, tfLabel, entry, sl, tp1, tp2){
   ctx.fillText(pairLabel+' · '+tfLabel+' · Níveis do Setup', padL, 20);
 
   return canvas.toDataURL('image/png').split(',')[1];
+}
+
+// ══════════════════════════════════════════════════════════════════
+// ANALISAR SPOT (DCA) — NOVO
+// Reaproveita fetchLiveKlines / computeRSI / computeEMA / computeMACD /
+// computeSMA / computeStochRSI já existentes. Só adiciona o que falta:
+// indicadores de acumulação (BB, BMSB, Ichimoku, OBV, Golden/Death Cross,
+// %ATH), detecção de FVG/OB/fundo duplo-triplo (sem CHoCH) e o PM real
+// do spot_holdings. Timeframes: Diário + Semanal + Mensal.
+// Nenhuma função ICT existente foi alterada.
+// ══════════════════════════════════════════════════════════════════
+
+// PM real por ativo, consolidado das contas (Bybit + MEXC Nete + MEXC Júnior).
+// Nunca inventado — vem do histórico de compra confirmado ou herdado.
+// bucket: 'core' (reforça, não vende por impulso) ou 'tactical'.
+// Editar aqui manualmente sempre que uma posição mudar (nova compra/venda).
+const SPOT_HOLDINGS = {
+  'ONDOUSD': { pm: 0.68193, qty: 372.83, bucket: 'core' },
+  'INJUSD':  { pm: 10.41,   qty: 212.764001, bucket: 'core' }, // MEXC Júnior, PM real Binance 01/07
+  'NEARUSD': { pm: 3.00,    qty: 66.1555, bucket: 'core' },     // MEXC Nete (há também lote na Bybit, PM $3.97)
+  'PENDLEUSD': { pm: 1.316, qty: 85.15166875, bucket: 'core' },
+  'SUIUSD':  { pm: 3.45,    qty: 57.4845, bucket: 'core' },     // MEXC Nete (há também lote na Bybit, PM $3.18)
+  'JTOUSD':  { pm: 2.07,    qty: 34.34846775, bucket: 'core' },
+  'ETHFIUSD':{ pm: 1.00,    qty: 165.35795132, bucket: 'core' },
+  'JUPUSD':  { pm: 0.59,    qty: 100.956049, bucket: 'core' },
+  'ENAUSD':  { pm: 0.27,    qty: 97.68254488, bucket: 'core' },
+  'WLDUSD':  { pm: 3.066,   qty: 59.42122265, bucket: null },   // fora de tudo, fundamento fraco
+};
+
+const SPOT_TF_INTERVALS = { D1: 'D', WEEK: 'W', MONTH: 'M' };
+
+async function fetchSpotKlines(symbol){
+  const [dailyCandles, weeklyCandles, monthlyCandles] = await Promise.all([
+    fetchLiveKlines(symbol, SPOT_TF_INTERVALS.D1, 200),
+    fetchLiveKlines(symbol, SPOT_TF_INTERVALS.WEEK, 150),
+    fetchLiveKlines(symbol, SPOT_TF_INTERVALS.MONTH, 60)
+  ]);
+  return { dailyCandles, weeklyCandles, monthlyCandles };
+}
+
+// ── Bollinger Bands: SMA(period) +/- stdDevMult desvios padrão ──
+function computeBollingerBands(candles, period, stdDevMult){
+  period = period || 20; stdDevMult = stdDevMult || 2;
+  const closes = candles.map(c=>c.c);
+  const middle = computeSMA(closes, period);
+  const upper = new Array(closes.length).fill(null);
+  const lower = new Array(closes.length).fill(null);
+  for(let i=period-1;i<closes.length;i++){
+    if(middle[i]==null) continue;
+    let sumSq = 0;
+    for(let j=i-period+1;j<=i;j++) sumSq += Math.pow(closes[j]-middle[i], 2);
+    const stdDev = Math.sqrt(sumSq/period);
+    upper[i] = middle[i] + stdDev*stdDevMult;
+    lower[i] = middle[i] - stdDev*stdDevMult;
+  }
+  return { upper, middle, lower };
+}
+
+// ── Bull Market Support Band: 20W SMA + 21W EMA (só faz sentido em candles semanais) ──
+function computeBMSB(weeklyCandles){
+  const closes = weeklyCandles.map(c=>c.c);
+  const sma20w = computeSMA(closes, 20);
+  const ema21w = computeEMA(closes, 21);
+  return { sma20w, ema21w };
+}
+
+// ── Ichimoku Cloud (Tenkan 9, Kijun 26, Senkou A/B) — aplicado no semanal ──
+function computeIchimoku(candles, tenkanP, kijunP, senkouBP){
+  tenkanP = tenkanP || 9; kijunP = kijunP || 26; senkouBP = senkouBP || 52;
+  const highs = candles.map(c=>c.h), lows = candles.map(c=>c.l);
+  function midOf(period){
+    const arr = new Array(candles.length).fill(null);
+    for(let i=period-1;i<candles.length;i++){
+      let hi = -Infinity, lo = Infinity;
+      for(let j=i-period+1;j<=i;j++){ hi = Math.max(hi, highs[j]); lo = Math.min(lo, lows[j]); }
+      arr[i] = (hi+lo)/2;
+    }
+    return arr;
+  }
+  const tenkan = midOf(tenkanP);
+  const kijun = midOf(kijunP);
+  const senkouA = candles.map((_,i)=> (tenkan[i]!=null && kijun[i]!=null) ? (tenkan[i]+kijun[i])/2 : null);
+  const senkouB = midOf(senkouBP);
+  return { tenkan, kijun, senkouA, senkouB };
+}
+
+// ── OBV (On-Balance Volume) — soma/subtrai conforme close sobe/desce ──
+// Nota: Bybit kline público não retorna volume no formato usado aqui
+// pelas outras funções (candles só têm t,o,h,l,c); se o volume vier
+// disponível no payload bruto, plugar em candles[i].v antes de chamar.
+function computeOBV(candles){
+  const obv = new Array(candles.length).fill(0);
+  for(let i=1;i<candles.length;i++){
+    const vol = candles[i].v || 0;
+    if(candles[i].c > candles[i-1].c) obv[i] = obv[i-1] + vol;
+    else if(candles[i].c < candles[i-1].c) obv[i] = obv[i-1] - vol;
+    else obv[i] = obv[i-1];
+  }
+  return obv;
+}
+
+// ── Golden Cross / Death Cross: SMA50 x SMA200 ──
+function computeGoldenDeathCross(candles){
+  const closes = candles.map(c=>c.c);
+  const sma50 = computeSMA(closes, 50);
+  const sma200 = computeSMA(closes, 200);
+  const crosses = [];
+  for(let i=1;i<closes.length;i++){
+    if(sma50[i]==null||sma200[i]==null||sma50[i-1]==null||sma200[i-1]==null) continue;
+    const wasBelow = sma50[i-1] < sma200[i-1];
+    const isAbove = sma50[i] >= sma200[i];
+    if(wasBelow && isAbove) crosses.push({ index: i, type: 'golden', t: candles[i].t });
+    const wasAbove = sma50[i-1] > sma200[i-1];
+    const isBelow = sma50[i] <= sma200[i];
+    if(wasAbove && isBelow) crosses.push({ index: i, type: 'death', t: candles[i].t });
+  }
+  return { sma50, sma200, crosses };
+}
+
+// ── % distância do ATH (dentro da série de candles buscada) ──
+function computeDistanceFromATH(candles){
+  const ath = Math.max(...candles.map(c=>c.h));
+  const current = candles[candles.length-1].c;
+  return ((current - ath) / ath) * 100;
+}
+
+// ── Detecção de FVG (Fair Value Gap) não mitigado — padrão clássico de 3 velas ──
+function detectFVG(candles){
+  const zones = [];
+  for(let i=1;i<candles.length-1;i++){
+    const prev = candles[i-1], next = candles[i+1];
+    // bullish FVG: low do candle seguinte > high do candle anterior
+    if(next.l > prev.h){
+      zones.push({ top: next.l, bottom: prev.h, type: 'bullish', index: i, mitigado: false });
+    }
+    // bearish FVG: high do candle seguinte < low do candle anterior
+    if(next.h < prev.l){
+      zones.push({ top: prev.l, bottom: next.h, type: 'bearish', index: i, mitigado: false });
+    }
+  }
+  // marca como mitigado se algum candle posterior "tapou" o gap
+  zones.forEach(z=>{
+    for(let k=z.index+2;k<candles.length;k++){
+      if(candles[k].l <= z.top && candles[k].h >= z.bottom){ z.mitigado = true; break; }
+    }
+  });
+  return zones.filter(z=>!z.mitigado);
+}
+
+// ── Detecção de Order Block — última vela de contra-tendência antes de impulso ──
+function detectOrderBlock(candles, impulsePct){
+  impulsePct = impulsePct || 3; // % mínima de corpo pra considerar "impulso"
+  const zones = [];
+  for(let i=1;i<candles.length;i++){
+    const move = ((candles[i].c - candles[i].o) / candles[i].o) * 100;
+    if(Math.abs(move) >= impulsePct){
+      const prev = candles[i-1];
+      const prevUp = prev.c >= prev.o;
+      const thisUp = candles[i].c >= candles[i].o;
+      // OB bullish: última vela de baixa antes de impulso de alta
+      if(thisUp && !prevUp){
+        zones.push({ top: prev.o, bottom: prev.c, type: 'bullish', index: i-1 });
+      }
+      // OB bearish: última vela de alta antes de impulso de baixa
+      if(!thisUp && prevUp){
+        zones.push({ top: prev.c, bottom: prev.o, type: 'bearish', index: i-1 });
+      }
+    }
+  }
+  return zones;
+}
+
+// ── Fundo duplo/triplo: contagem de toques nas mínimas locais dentro de tolerância ──
+// 2-3 toques reforça o score (zona defendida repetidamente = demanda real).
+// 4+ toques vira alerta: cada teste consome liquidez, zona fica "cansada".
+function detectMultipleBottoms(candles, tolerancePercent){
+  tolerancePercent = tolerancePercent || 2;
+  const lows = candles.map(c=>c.l);
+  // acha mínimas locais (menor que os 2 vizinhos de cada lado)
+  const localMins = [];
+  for(let i=2;i<lows.length-2;i++){
+    if(lows[i] <= lows[i-1] && lows[i] <= lows[i-2] && lows[i] <= lows[i+1] && lows[i] <= lows[i+2]){
+      localMins.push({ index: i, value: lows[i], t: candles[i].t });
+    }
+  }
+  if(localMins.length === 0) return { toques: 0, nivel: null, datas: [] };
+  // agrupa mínimas locais próximas entre si (dentro da tolerância %)
+  const groups = [];
+  localMins.forEach(m=>{
+    let placed = false;
+    for(const g of groups){
+      const pctDiff = Math.abs(m.value - g.nivel) / g.nivel * 100;
+      if(pctDiff <= tolerancePercent){
+        g.pontos.push(m);
+        g.nivel = g.pontos.reduce((s,p)=>s+p.value,0) / g.pontos.length;
+        placed = true;
+        break;
+      }
+    }
+    if(!placed) groups.push({ nivel: m.value, pontos: [m] });
+  });
+  // retorna o grupo com mais toques (zona mais relevante)
+  groups.sort((a,b)=>b.pontos.length - a.pontos.length);
+  const best = groups[0];
+  return {
+    toques: best.pontos.length,
+    nivel: best.nivel,
+    datas: best.pontos.map(p=>p.t)
+  };
+}
+
+// ── DESENHO DO GRÁFICO SPOT — Semanal (BMSB + Ichimoku + zonas) + Diário (BB) + RSI ──
+function renderSpotCandleImage(dailyCandles, weeklyCandles, pairLabel){
+  const closesD = dailyCandles.map(c=>c.c);
+  const closesW = weeklyCandles.map(c=>c.c);
+  const rsiD = computeRSI(closesD, 14);
+  const rsiW = computeRSI(closesW, 14);
+  const bb = computeBollingerBands(dailyCandles, 20, 2);
+  const bmsb = computeBMSB(weeklyCandles);
+  const fvgZones = detectFVG(weeklyCandles);
+  const obZones = detectOrderBlock(weeklyCandles);
+  const bottoms = detectMultipleBottoms(weeklyCandles);
+
+  const W = 900;
+  const padL = 64, padR = 20;
+  const weekH = 320, dayH = 220, rsiH = 100;
+  const gap = 22;
+  const weekTop = 34;
+  const dayTop = weekTop + weekH + gap;
+  const rsiTop = dayTop + dayH + gap;
+  const H = rsiTop + rsiH + 24;
+
+  const canvas = document.createElement('canvas');
+  canvas.width = W; canvas.height = H;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#0a0a0f';
+  ctx.fillRect(0,0,W,H);
+
+  // ── PAINEL SEMANAL (candles + BMSB + zonas FVG/OB + toques) ──
+  const wHighs = weeklyCandles.map(c=>c.h), wLows = weeklyCandles.map(c=>c.l);
+  const wMax = Math.max(...wHighs), wMin = Math.min(...wLows);
+  const wRange = (wMax - wMin) || 1;
+  const plotW = W - padL - padR;
+  const cwW = plotW / weeklyCandles.length;
+  const xForW = i => padL + i*cwW + cwW/2;
+  const yForWeek = p => weekTop + weekH - ((p - wMin) / wRange) * weekH;
+
+  ctx.strokeStyle = '#2a2a3a'; ctx.lineWidth = 1; ctx.font = '10px monospace'; ctx.fillStyle = '#6e7681';
+  for(let i=0;i<=4;i++){
+    const yy = weekTop + (weekH/4)*i;
+    ctx.beginPath(); ctx.moveTo(padL,yy); ctx.lineTo(W-padR,yy); ctx.stroke();
+    const priceAtY = wMax - (wRange/4)*i;
+    ctx.fillText(priceAtY.toFixed(priceAtY<10?4:2), 4, yy+4);
+  }
+
+  // zonas FVG (retângulo azul translúcido)
+  fvgZones.forEach(z=>{
+    const yTop = yForWeek(z.top), yBot = yForWeek(z.bottom);
+    ctx.fillStyle = 'rgba(88,166,255,0.14)';
+    ctx.fillRect(padL, yTop, plotW, yBot-yTop);
+    ctx.strokeStyle = 'rgba(88,166,255,0.4)'; ctx.setLineDash([4,4]);
+    ctx.strokeRect(padL, yTop, plotW, yBot-yTop); ctx.setLineDash([]);
+  });
+  // zonas Order Block (retângulo roxo translúcido)
+  obZones.forEach(z=>{
+    const yTop = yForWeek(Math.max(z.top,z.bottom)), yBot = yForWeek(Math.min(z.top,z.bottom));
+    ctx.fillStyle = 'rgba(188,140,255,0.14)';
+    ctx.fillRect(padL, yTop, plotW, yBot-yTop);
+    ctx.strokeStyle = 'rgba(188,140,255,0.4)'; ctx.setLineDash([4,4]);
+    ctx.strokeRect(padL, yTop, plotW, yBot-yTop); ctx.setLineDash([]);
+  });
+
+  // candles semanais
+  weeklyCandles.forEach((c,i)=>{
+    const x = xForW(i);
+    const up = c.c >= c.o;
+    ctx.strokeStyle = up ? '#3fb950' : '#f85149';
+    ctx.fillStyle = up ? '#3fb950' : '#f85149';
+    ctx.beginPath(); ctx.moveTo(x, yForWeek(c.h)); ctx.lineTo(x, yForWeek(c.l)); ctx.stroke();
+    const bodyTop = yForWeek(Math.max(c.o,c.c));
+    const bodyH = Math.max(1, Math.abs(yForWeek(c.o)-yForWeek(c.c)));
+    ctx.fillRect(x - cwW*0.35, bodyTop, cwW*0.7, bodyH);
+  });
+
+  // BMSB (linha dourada = 20W SMA, linha dourada clara = 21W EMA)
+  function drawWeekLine(values, color){
+    ctx.strokeStyle = color; ctx.lineWidth = 1.4; ctx.beginPath();
+    let started = false;
+    values.forEach((v,i)=>{
+      if(v==null) return;
+      const x = xForW(i), y = yForWeek(v);
+      if(!started){ ctx.moveTo(x,y); started=true; } else ctx.lineTo(x,y);
+    });
+    ctx.stroke();
+  }
+  drawWeekLine(bmsb.sma20w, '#f0c040');
+  drawWeekLine(bmsb.ema21w, '#ffe58a');
+
+  // marcação de fundo duplo/triplo (círculos verdes)
+  bottoms.datas.forEach(t=>{
+    const idx = weeklyCandles.findIndex(c=>c.t===t);
+    if(idx<0) return;
+    const x = xForW(idx), y = yForWeek(weeklyCandles[idx].l);
+    ctx.beginPath(); ctx.arc(x, y+8, 4, 0, Math.PI*2);
+    ctx.strokeStyle = '#3fb950'; ctx.lineWidth = 2; ctx.stroke();
+  });
+
+  ctx.fillStyle = '#f0c040'; ctx.font = 'bold 15px monospace';
+  const lastW = weeklyCandles[weeklyCandles.length-1];
+  ctx.fillText(pairLabel+' · SPOT (Semanal) · $'+lastW.c.toLocaleString('en-US',{maximumFractionDigits:2}), padL, 20);
+
+  // legenda de toques
+  if(bottoms.toques >= 2){
+    ctx.font = '11px monospace';
+    ctx.fillStyle = bottoms.toques >= 4 ? '#e3b341' : '#3fb950';
+    ctx.fillText((bottoms.toques>=4?'⚠ ':'✓ ') + bottoms.toques + ' toques na zona $'+bottoms.nivel.toFixed(bottoms.nivel<10?4:2), padL, weekTop + weekH + 16);
+  }
+
+  // carimbo real de data/hora (UTC)
+  const nowStamp = new Date();
+  const stampStr = 'GERADO EM: ' + nowStamp.toISOString().replace('T',' ').slice(0,16) + ' UTC';
+  ctx.font = 'bold 12px monospace';
+  const stampWidth = ctx.measureText(stampStr).width;
+  const stampBoxX = W - padR - stampWidth - 14;
+  ctx.fillStyle = '#0d1a10';
+  ctx.fillRect(stampBoxX, 6, stampWidth + 14, 22);
+  ctx.strokeStyle = '#3fb950'; ctx.lineWidth = 1;
+  ctx.strokeRect(stampBoxX, 6, stampWidth + 14, 22);
+  ctx.fillStyle = '#8ff0a4';
+  ctx.fillText(stampStr, stampBoxX + 7, 21);
+
+  // ── PAINEL DIÁRIO (candles + Bollinger Bands) ──
+  const dHighs = dailyCandles.map(c=>c.h), dLows = dailyCandles.map(c=>c.l);
+  const dMax = Math.max(...dHighs), dMin = Math.min(...dLows);
+  const dRange = (dMax - dMin) || 1;
+  const cwD = plotW / dailyCandles.length;
+  const xForD = i => padL + i*cwD + cwD/2;
+  const yForDay = p => dayTop + dayH - ((p - dMin) / dRange) * dayH;
+
+  ctx.strokeStyle = '#2a2a3a';
+  ctx.beginPath(); ctx.moveTo(padL, dayTop); ctx.lineTo(W-padR, dayTop); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(padL, dayTop+dayH); ctx.lineTo(W-padR, dayTop+dayH); ctx.stroke();
+
+  dailyCandles.forEach((c,i)=>{
+    const x = xForD(i);
+    const up = c.c >= c.o;
+    ctx.strokeStyle = up ? '#3fb950' : '#f85149';
+    ctx.fillStyle = up ? '#3fb950' : '#f85149';
+    ctx.beginPath(); ctx.moveTo(x, yForDay(c.h)); ctx.lineTo(x, yForDay(c.l)); ctx.stroke();
+    const bodyTop = yForDay(Math.max(c.o,c.c));
+    const bodyH = Math.max(1, Math.abs(yForDay(c.o)-yForDay(c.c)));
+    ctx.fillRect(x - cwD*0.35, bodyTop, cwD*0.7, bodyH);
+  });
+
+  function drawDayLine(values, color){
+    ctx.strokeStyle = color; ctx.lineWidth = 1; ctx.beginPath();
+    let started = false;
+    values.forEach((v,i)=>{
+      if(v==null) return;
+      const x = xForD(i), y = yForDay(v);
+      if(!started){ ctx.moveTo(x,y); started=true; } else ctx.lineTo(x,y);
+    });
+    ctx.stroke();
+  }
+  drawDayLine(bb.upper, 'rgba(88,166,255,0.6)');
+  drawDayLine(bb.middle, 'rgba(230,237,243,0.5)');
+  drawDayLine(bb.lower, 'rgba(88,166,255,0.6)');
+
+  ctx.fillStyle = '#58a6ff'; ctx.font = 'bold 12px monospace';
+  ctx.fillText('Diário · Bollinger Bands(20,2)', padL, dayTop - 6);
+
+  // ── PAINEL RSI (Diário e Semanal sobrepostos) ──
+  ctx.strokeStyle = '#2a2a3a';
+  ctx.beginPath(); ctx.moveTo(padL, rsiTop); ctx.lineTo(W-padR, rsiTop); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(padL, rsiTop+rsiH); ctx.lineTo(W-padR, rsiTop+rsiH); ctx.stroke();
+  const yForRsi = v => rsiTop + rsiH - (v/100)*rsiH;
+  ctx.strokeStyle = '#3a3a3a'; ctx.setLineDash([4,3]);
+  [70,30].forEach(lvl=>{
+    const yy = yForRsi(lvl);
+    ctx.beginPath(); ctx.moveTo(padL,yy); ctx.lineTo(W-padR,yy); ctx.stroke();
+  });
+  ctx.setLineDash([]);
+  ctx.fillStyle = '#6e7681'; ctx.font = '10px monospace';
+  ctx.fillText('70', 4, yForRsi(70)+3);
+  ctx.fillText('30', 4, yForRsi(30)+3);
+
+  ctx.strokeStyle = '#f0c040'; ctx.lineWidth = 1.3; ctx.beginPath();
+  let started = false;
+  rsiD.forEach((v,i)=>{
+    if(v==null) return;
+    const x = xForD(i), y = yForRsi(v);
+    if(!started){ ctx.moveTo(x,y); started=true; } else ctx.lineTo(x,y);
+  });
+  ctx.stroke();
+
+  const lastRsiD = [...rsiD].reverse().find(v=>v!=null);
+  const lastRsiW = [...rsiW].reverse().find(v=>v!=null);
+  ctx.font = 'bold 12px monospace';
+  ctx.fillStyle = '#f0c040';
+  ctx.fillText('RSI D1: ' + (lastRsiD!=null ? lastRsiD.toFixed(2) : 'N/A'), padL, rsiTop - 6);
+  ctx.fillStyle = '#ffe58a';
+  ctx.fillText('  RSI Semanal: ' + (lastRsiW!=null ? lastRsiW.toFixed(2) : 'N/A'), padL + 150, rsiTop - 6);
+
+  return canvas.toDataURL('image/png').split(',')[1];
+}
+
+// ── GRÁFICO ANOTADO SPOT — fatias de entrada 1/2/3 + zona de saída + invalidação ──
+// Mesmo princípio do renderAnnotatedChart (ICT): linha na altura real do
+// valor, matemática pura, não depende da IA "apontar" a posição no canvas.
+function renderAnnotatedSpotChart(weeklyCandles, pairLabel, entryFatias, exitTactical, invalidacao){
+  const W = 900, H = 420, padL = 64, padR = 100, padT = 34, padB = 20;
+  const canvas = document.createElement('canvas');
+  canvas.width = W; canvas.height = H;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#0a0a0f'; ctx.fillRect(0,0,W,H);
+
+  const levels = [];
+  (entryFatias||[]).forEach((v,i)=>{
+    const val = parseFloat(v);
+    if(!isNaN(val) && val>0) levels.push({ label: 'Fatia '+(i+1), value: val, color: i===0?'#3fb950':(i===1?'#5fd968':'#86efac') });
+  });
+  if(exitTactical && !isNaN(parseFloat(exitTactical))){
+    levels.push({ label: 'Saída Tactical', value: parseFloat(exitTactical), color: '#f59e0b' });
+  }
+  if(invalidacao && !isNaN(parseFloat(invalidacao))){
+    levels.push({ label: 'Invalidação', value: parseFloat(invalidacao), color: '#f85149' });
+  }
+
+  const highs = weeklyCandles.map(c=>c.h), lows = weeklyCandles.map(c=>c.l);
+  let maxP = Math.max(...highs, ...levels.map(l=>l.value));
+  let minP = Math.min(...lows, ...levels.map(l=>l.value));
+  const pad = (maxP - minP) * 0.06 || 1;
+  maxP += pad; minP -= pad;
+  const range = (maxP - minP) || 1;
+
+  const plotW = W - padL - padR;
+  const cw = plotW / weeklyCandles.length;
+  const xFor = i => padL + i*cw + cw/2;
+  const yFor = p => padT + (H-padT-padB) - ((p - minP) / range) * (H-padT-padB);
+
+  ctx.strokeStyle = '#2a2a3a'; ctx.lineWidth = 1;
+  for(let i=0;i<=4;i++){
+    const yy = padT + ((H-padT-padB)/4)*i;
+    ctx.beginPath(); ctx.moveTo(padL,yy); ctx.lineTo(W-padR,yy); ctx.stroke();
+  }
+
+  weeklyCandles.forEach((c,i)=>{
+    const x = xFor(i);
+    const up = c.c >= c.o;
+    ctx.strokeStyle = up ? '#3fb950' : '#f85149';
+    ctx.fillStyle = up ? '#3fb950' : '#f85149';
+    ctx.beginPath(); ctx.moveTo(x, yFor(c.h)); ctx.lineTo(x, yFor(c.l)); ctx.stroke();
+    const bodyTop = yFor(Math.max(c.o,c.c));
+    const bodyH = Math.max(1, Math.abs(yFor(c.o)-yFor(c.c)));
+    ctx.fillRect(x - cw*0.35, bodyTop, cw*0.7, bodyH);
+  });
+
+  levels.forEach(l=>{
+    const y = yFor(l.value);
+    ctx.strokeStyle = l.color; ctx.lineWidth = 1.3; ctx.setLineDash([6,4]);
+    ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(W-padR, y); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = l.color; ctx.font = 'bold 11px monospace';
+    ctx.fillText(l.label+': '+l.value.toLocaleString('en-US',{maximumFractionDigits:4}), W-padR+6, y+4);
+  });
+
+  ctx.fillStyle = '#3fb950'; ctx.font = 'bold 14px monospace';
+  ctx.fillText(pairLabel+' · Semanal · Zonas Spot', padL, 20);
+
+  return canvas.toDataURL('image/png').split(',')[1];
+}
+
+async function analyzeSpot(){
+  const btn = document.getElementById('spotBtn');
+  const symbol = LIVE_SYMBOL_MAP[activePair] || 'BTCUSDT';
+  const pairLabel = activePair.replace('USD','');
+  btn.disabled = true;
+  const originalLabel = document.getElementById('spotBtnLabel').textContent;
+  document.getElementById('spotBtnLabel').textContent = 'A buscar candles Semanal/Diário de ' + pairLabel + '...';
+
+  try{
+    const { dailyCandles, weeklyCandles, monthlyCandles } = await fetchSpotKlines(symbol);
+
+    // indicadores de confluência
+    const rsiD = computeRSI(dailyCandles.map(c=>c.c), 14);
+    const rsiW = computeRSI(weeklyCandles.map(c=>c.c), 14);
+    const bb = computeBollingerBands(dailyCandles);
+    const bmsb = computeBMSB(weeklyCandles);
+    const ichimoku = computeIchimoku(weeklyCandles);
+    const obv = computeOBV(dailyCandles);
+    const macdWeekly = computeMACD(weeklyCandles.map(c=>c.c));
+    const stochRsiD = computeStochRSI(rsiD);
+    const crosses = computeGoldenDeathCross(dailyCandles);
+    const athDistance = computeDistanceFromATH(dailyCandles);
+
+    // camada 1 (Semanal — ONDE) e camada 2 (Diário — QUANDO)
+    const fvgZonesWeekly = detectFVG(weeklyCandles);
+    const fvgZonesDaily = detectFVG(dailyCandles);
+    const obZonesWeekly = detectOrderBlock(weeklyCandles);
+    const bottomsWeekly = detectMultipleBottoms(weeklyCandles);
+    const bottomsDaily = detectMultipleBottoms(dailyCandles);
+
+    // holding real (PM/qtd/bucket) — nunca inventado
+    const holding = SPOT_HOLDINGS[activePair] || null;
+
+    document.getElementById('spotBtnLabel').textContent = 'A desenhar gráfico Spot de ' + pairLabel + '...';
+    const imageBase64 = renderSpotCandleImage(dailyCandles, weeklyCandles, pairLabel);
+
+    document.getElementById('spotBtnLabel').textContent = 'A analisar ' + pairLabel + ' (Spot)...';
+
+    // payload — mesmo formato de imagens que /analyze_multi já espera,
+    // usando rótulos de timeframe próprios do Spot pra não colidir com
+    // a análise ICT (D1/H4/H1/M15) já existente.
+    const imagesByTf = {
+      SPOT_WEEKLY: { base64: imageBase64, mimeType: 'image/png' }
+    };
+    const singlePayload = {};
+    singlePayload[activePair] = imagesByTf;
+
+    const res = await fetch('/analyze_multi',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ pairs: singlePayload, category: 'spot', holding: holding })
+    });
+    const data = await res.json();
+    if(data.error) throw new Error(data.error);
+    if(!data.results || data.results.length === 0){
+      throw new Error((data.errors && data.errors[0] && data.errors[0].error) || 'sem resultado');
+    }
+
+    renderMultiResults(data.results, data.errors || []);
+
+    // gráfico anotado com fatias de entrada + zona de saída + invalidação,
+    // igual já é feito no ICT com renderAnnotatedChart — puramente visual.
+    try{
+      const r = data.results[0];
+      const entryFatias = [r.entry, r.tp1, r.tp2].filter(v=>v); // fallback caso o backend ainda não tenha campos fatia1/2/3 dedicados
+      if(weeklyCandles && r){
+        const annotatedBase64 = renderAnnotatedSpotChart(weeklyCandles, pairLabel, entryFatias, r.sl, null);
+        const cardEl = document.querySelector('#resultCards .result-summary-card');
+        if(cardEl){
+          const rscBody = cardEl.querySelector('.rsc-body');
+          let holdingHtml = '';
+          if(holding){
+            const currentPrice = dailyCandles[dailyCandles.length-1].c;
+            const pnlPct = ((currentPrice - holding.pm) / holding.pm) * 100;
+            const pnlClass = pnlPct >= 0 ? 'pos' : 'neg';
+            holdingHtml = `<div class="spot-holding-box">
+              <div class="spot-holding-row"><span>Seu PM atual</span><b>$${holding.pm}</b></div>
+              <div class="spot-holding-row"><span>Quantidade</span><b>${holding.qty}</b></div>
+              <div class="spot-holding-row"><span>PNL atual</span><b class="${pnlClass}">${pnlPct>=0?'+':''}${pnlPct.toFixed(2)}%</b></div>
+              <div class="spot-holding-row"><span>Bucket</span><b>${holding.bucket || 'fora do Core'}</b></div>
+            </div>`;
+          }
+          const legendHtml = `<div class="spot-legend">
+            <div class="spot-legend-item"><span class="spot-legend-swatch" style="background:rgba(88,166,255,0.4)"></span>FVG</div>
+            <div class="spot-legend-item"><span class="spot-legend-swatch" style="background:rgba(188,140,255,0.4)"></span>Order Block</div>
+            <div class="spot-legend-item"><span class="spot-legend-swatch" style="background:#f0c040"></span>BMSB</div>
+            <div class="spot-legend-item"><span class="spot-legend-swatch" style="background:#3fb950;border-radius:50%"></span>Fundo duplo/triplo</div>
+          </div>`;
+          const imgHtml = '<div style="margin-bottom:10px;"><img src="data:image/png;base64,'+annotatedBase64+'" style="width:100%;display:block;border-radius:8px;border:1px solid var(--border);"/></div>' + legendHtml;
+          rscBody.insertAdjacentHTML('afterbegin', holdingHtml + imgHtml);
+        }
+      }
+    }catch(e){
+      console.warn('Não foi possível desenhar o gráfico anotado Spot:', e.message);
+    }
+
+    document.getElementById('addPairSection').style.display = 'none';
+    document.getElementById('queueSection').style.display = 'none';
+    showToast('✓ Análise Spot de ' + pairLabel + ' concluída!');
+  }catch(e){
+    showToast('Erro na análise Spot: ' + e.message);
+  }finally{
+    btn.disabled = false;
+    document.getElementById('spotBtnLabel').textContent = originalLabel;
+  }
 }
 
 async function analyzeLive(){

@@ -1972,7 +1972,8 @@ function renderSpotCandleImage(dailyCandles, weeklyCandles, pairLabel){
 // ── GRÁFICO ANOTADO SPOT — fatias de entrada 1/2/3 + zona de saída + invalidação ──
 // Mesmo princípio do renderAnnotatedChart (ICT): linha na altura real do
 // valor, matemática pura, não depende da IA "apontar" a posição no canvas.
-function renderAnnotatedSpotChart(weeklyCandles, pairLabel, entryFatias, exitTactical, invalidacao){
+function renderAnnotatedSpotChart(weeklyCandles, pairLabel, entryFatias, exitTactical, invalidacao, fvgZones, obZones, bmsb, bottoms){
+  fvgZones = fvgZones || []; obZones = obZones || []; bottoms = bottoms || { toques: 0, datas: [] };
   const W = 900, H = 420, padL = 64, padR = 100, padT = 34, padB = 20;
   const canvas = document.createElement('canvas');
   canvas.width = W; canvas.height = H;
@@ -2009,6 +2010,23 @@ function renderAnnotatedSpotChart(weeklyCandles, pairLabel, entryFatias, exitTac
     ctx.beginPath(); ctx.moveTo(padL,yy); ctx.lineTo(W-padR,yy); ctx.stroke();
   }
 
+  // ── ZONAS FVG (azul) — desenhadas ANTES dos candles, mesmo padrão do renderSpotCandleImage ──
+  fvgZones.forEach(z=>{
+    const yTop = yFor(z.top), yBot = yFor(z.bottom);
+    ctx.fillStyle = 'rgba(88,166,255,0.14)';
+    ctx.fillRect(padL, yTop, plotW, yBot-yTop);
+    ctx.strokeStyle = 'rgba(88,166,255,0.4)'; ctx.setLineDash([4,4]);
+    ctx.strokeRect(padL, yTop, plotW, yBot-yTop); ctx.setLineDash([]);
+  });
+  // ── ZONAS ORDER BLOCK (roxo) ──
+  obZones.forEach(z=>{
+    const yTop = yFor(Math.max(z.top,z.bottom)), yBot = yFor(Math.min(z.top,z.bottom));
+    ctx.fillStyle = 'rgba(188,140,255,0.14)';
+    ctx.fillRect(padL, yTop, plotW, yBot-yTop);
+    ctx.strokeStyle = 'rgba(188,140,255,0.4)'; ctx.setLineDash([4,4]);
+    ctx.strokeRect(padL, yTop, plotW, yBot-yTop); ctx.setLineDash([]);
+  });
+
   weeklyCandles.forEach((c,i)=>{
     const x = xFor(i);
     const up = c.c >= c.o;
@@ -2018,6 +2036,31 @@ function renderAnnotatedSpotChart(weeklyCandles, pairLabel, entryFatias, exitTac
     const bodyTop = yFor(Math.max(c.o,c.c));
     const bodyH = Math.max(1, Math.abs(yFor(c.o)-yFor(c.c)));
     ctx.fillRect(x - cw*0.35, bodyTop, cw*0.7, bodyH);
+  });
+
+  // ── BMSB (linha dourada = 20W SMA, clara = 21W EMA) ──
+  if(bmsb && bmsb.sma20w){
+    function drawZoneLine(values, color){
+      ctx.strokeStyle = color; ctx.lineWidth = 1.4; ctx.beginPath();
+      let started = false;
+      values.forEach((v,i)=>{
+        if(v==null) return;
+        const x = xFor(i), y = yFor(v);
+        if(!started){ ctx.moveTo(x,y); started=true; } else ctx.lineTo(x,y);
+      });
+      ctx.stroke();
+    }
+    drawZoneLine(bmsb.sma20w, '#f0c040');
+    if(bmsb.ema21w) drawZoneLine(bmsb.ema21w, '#ffe58a');
+  }
+
+  // ── fundo duplo/triplo (círculos verdes nos toques) ──
+  (bottoms.datas || []).forEach(t=>{
+    const idx = weeklyCandles.findIndex(c=>c.t===t);
+    if(idx<0) return;
+    const x = xFor(idx), y = yFor(weeklyCandles[idx].l);
+    ctx.beginPath(); ctx.arc(x, y+8, 4, 0, Math.PI*2);
+    ctx.strokeStyle = '#3fb950'; ctx.lineWidth = 2; ctx.stroke();
   });
 
   levels.forEach(l=>{
@@ -2103,7 +2146,7 @@ async function analyzeSpot(){
       // ENTRY_FINAL=Fatia1, TP1_FINAL=Fatia2, TP2_FINAL=Fatia3, SL_FINAL=Invalidação, TP3_FINAL=Saída Tactical
       const entryFatias = [r.entry, r.tp1, r.tp2].filter(v=>v);
       if(weeklyCandles && r){
-        const annotatedBase64 = renderAnnotatedSpotChart(weeklyCandles, pairLabel, entryFatias, r.tp3, r.sl);
+        const annotatedBase64 = renderAnnotatedSpotChart(weeklyCandles, pairLabel, entryFatias, r.tp3, r.sl, fvgZonesWeekly, obZonesWeekly, bmsb, bottomsWeekly);
         const cardEl = document.querySelector('#resultCards .result-summary-card');
         if(cardEl){
           const rscBody = cardEl.querySelector('.rsc-body');

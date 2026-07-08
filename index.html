@@ -1415,7 +1415,7 @@ function renderFundingOIImage(pairLabel, fo){
 // ponto exato onde o preço rompe essa estrutura na direção oposta.
 // Matemática pura sobre os candles reais — não depende da IA "apontar".
 function detectCHoCH(candles, lookback){
-  lookback = lookback || 3;
+  lookback = lookback || 5;
   const swings = [];
   for(let i=lookback;i<candles.length-lookback;i++){
     let isHigh = true, isLow = true;
@@ -1538,7 +1538,7 @@ function renderAnnotatedChart(candles, pairLabel, tfLabel, entry, sl, tp1, tp2, 
   });
 
   // ── marcadores de CHoCH (linha vertical no ponto de rompimento) ──
-  chochEvents.forEach(ev=>{
+  chochEvents.slice(-4).forEach(ev=>{
     const x = xFor(ev.index);
     const color = ev.type==='bullish' ? '#3fb950' : '#f85149';
     ctx.strokeStyle = color; ctx.lineWidth = 1.2; ctx.setLineDash([2,3]);
@@ -1690,17 +1690,20 @@ function computeDistanceFromATH(candles){
 }
 
 // ── Detecção de FVG (Fair Value Gap) não mitigado — padrão clássico de 3 velas ──
-function detectFVG(candles){
+function detectFVG(candles, minGapPercent){
+  minGapPercent = minGapPercent || 0; // % mínima do preço pro gap contar como FVG relevante
   const zones = [];
   for(let i=1;i<candles.length-1;i++){
     const prev = candles[i-1], next = candles[i+1];
     // bullish FVG: low do candle seguinte > high do candle anterior
     if(next.l > prev.h){
-      zones.push({ top: next.l, bottom: prev.h, type: 'bullish', index: i, mitigado: false });
+      const gapPct = ((next.l - prev.h) / prev.h) * 100;
+      if(gapPct >= minGapPercent) zones.push({ top: next.l, bottom: prev.h, type: 'bullish', index: i, mitigado: false });
     }
     // bearish FVG: high do candle seguinte < low do candle anterior
     if(next.h < prev.l){
-      zones.push({ top: prev.l, bottom: next.h, type: 'bearish', index: i, mitigado: false });
+      const gapPct = ((prev.l - next.h) / prev.l) * 100;
+      if(gapPct >= minGapPercent) zones.push({ top: prev.l, bottom: next.h, type: 'bearish', index: i, mitigado: false });
     }
   }
   // marca como mitigado se algum candle posterior "tapou" o gap
@@ -1782,7 +1785,7 @@ function renderSpotCandleImage(dailyCandles, weeklyCandles, pairLabel){
   const rsiW = computeRSI(closesW, 14);
   const bb = computeBollingerBands(dailyCandles, 20, 2);
   const bmsb = computeBMSB(weeklyCandles);
-  const fvgZones = detectFVG(weeklyCandles);
+  const fvgZones = detectFVG(weeklyCandles, 1);
   const obZones = detectOrderBlock(weeklyCandles, 15);
   const bottoms = detectMultipleBottoms(weeklyCandles);
 
@@ -2102,8 +2105,8 @@ async function analyzeSpot(){
     const athDistance = computeDistanceFromATH(dailyCandles);
 
     // camada 1 (Semanal — ONDE) e camada 2 (Diário — QUANDO)
-    const fvgZonesWeekly = detectFVG(weeklyCandles);
-    const fvgZonesDaily = detectFVG(dailyCandles);
+    const fvgZonesWeekly = detectFVG(weeklyCandles, 1);
+    const fvgZonesDaily = detectFVG(dailyCandles, 0.5);
     const obZonesWeekly = detectOrderBlock(weeklyCandles, 15);
     const bottomsWeekly = detectMultipleBottoms(weeklyCandles);
     const bottomsDaily = detectMultipleBottoms(dailyCandles);
@@ -2242,7 +2245,7 @@ async function analyzeLive(){
     try{
       const r = data.results[0];
       if(m15CandlesForChart && r){
-        const fvgZonesM15 = detectFVG(m15CandlesForChart);
+        const fvgZonesM15 = detectFVG(m15CandlesForChart, 0.3);
         const obZonesM15 = detectOrderBlock(m15CandlesForChart);
         const chochEventsM15 = detectCHoCH(m15CandlesForChart);
         const annotatedBase64 = renderAnnotatedChart(m15CandlesForChart, pairLabel, 'M15', r.entry, r.sl, r.tp1, r.tp2, fvgZonesM15, obZonesM15, chochEventsM15);

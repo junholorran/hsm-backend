@@ -1509,16 +1509,16 @@ function renderAnnotatedChart(candles, pairLabel, tfLabel, entry, sl, tp1, tp2, 
     ctx.beginPath(); ctx.moveTo(padL,yy); ctx.lineTo(W-padR,yy); ctx.stroke();
   }
 
-  // ── ZONAS FVG (retângulo azul=bullish, laranja=bearish) ──
-  fvgZones.forEach(z=>{
+  // ── ZONAS FVG (retângulo azul=bullish, laranja=bearish) — máx. 6 mais recentes ──
+  fvgZones.slice(-6).forEach(z=>{
     const yTop = yFor(z.top), yBot = yFor(z.bottom);
     ctx.fillStyle = z.type==='bullish' ? 'rgba(88,166,255,0.14)' : 'rgba(255,152,0,0.14)';
     ctx.fillRect(padL, yTop, plotW, yBot-yTop);
     ctx.strokeStyle = z.type==='bullish' ? 'rgba(88,166,255,0.4)' : 'rgba(255,152,0,0.4)';
     ctx.setLineDash([4,4]); ctx.strokeRect(padL, yTop, plotW, yBot-yTop); ctx.setLineDash([]);
   });
-  // ── ZONAS ORDER BLOCK (retângulo roxo) ──
-  obZones.forEach(z=>{
+  // ── ZONAS ORDER BLOCK (retângulo roxo) — máx. 6 mais recentes ──
+  obZones.slice(-6).forEach(z=>{
     const yTop = yFor(Math.max(z.top,z.bottom)), yBot = yFor(Math.min(z.top,z.bottom));
     ctx.fillStyle = 'rgba(188,140,255,0.14)';
     ctx.fillRect(padL, yTop, plotW, yBot-yTop);
@@ -1783,7 +1783,7 @@ function renderSpotCandleImage(dailyCandles, weeklyCandles, pairLabel){
   const bb = computeBollingerBands(dailyCandles, 20, 2);
   const bmsb = computeBMSB(weeklyCandles);
   const fvgZones = detectFVG(weeklyCandles);
-  const obZones = detectOrderBlock(weeklyCandles);
+  const obZones = detectOrderBlock(weeklyCandles, 15);
   const bottoms = detectMultipleBottoms(weeklyCandles);
 
   const W = 900;
@@ -1818,16 +1818,16 @@ function renderSpotCandleImage(dailyCandles, weeklyCandles, pairLabel){
     ctx.fillText(priceAtY.toFixed(priceAtY<10?4:2), 4, yy+4);
   }
 
-  // zonas FVG (retângulo azul translúcido)
-  fvgZones.forEach(z=>{
+  // zonas FVG (retângulo azul translúcido) — máx. 6 mais recentes
+  fvgZones.slice(-6).forEach(z=>{
     const yTop = yForWeek(z.top), yBot = yForWeek(z.bottom);
     ctx.fillStyle = 'rgba(88,166,255,0.14)';
     ctx.fillRect(padL, yTop, plotW, yBot-yTop);
     ctx.strokeStyle = 'rgba(88,166,255,0.4)'; ctx.setLineDash([4,4]);
     ctx.strokeRect(padL, yTop, plotW, yBot-yTop); ctx.setLineDash([]);
   });
-  // zonas Order Block (retângulo roxo translúcido)
-  obZones.forEach(z=>{
+  // zonas Order Block (retângulo roxo translúcido) — máx. 6 mais recentes
+  obZones.slice(-6).forEach(z=>{
     const yTop = yForWeek(Math.max(z.top,z.bottom)), yBot = yForWeek(Math.min(z.top,z.bottom));
     ctx.fillStyle = 'rgba(188,140,255,0.14)';
     ctx.fillRect(padL, yTop, plotW, yBot-yTop);
@@ -2010,16 +2010,16 @@ function renderAnnotatedSpotChart(weeklyCandles, pairLabel, entryFatias, exitTac
     ctx.beginPath(); ctx.moveTo(padL,yy); ctx.lineTo(W-padR,yy); ctx.stroke();
   }
 
-  // ── ZONAS FVG (azul) — desenhadas ANTES dos candles, mesmo padrão do renderSpotCandleImage ──
-  fvgZones.forEach(z=>{
+  // ── ZONAS FVG (azul) — desenhadas ANTES dos candles, máx. 6 mais recentes ──
+  fvgZones.slice(-6).forEach(z=>{
     const yTop = yFor(z.top), yBot = yFor(z.bottom);
     ctx.fillStyle = 'rgba(88,166,255,0.14)';
     ctx.fillRect(padL, yTop, plotW, yBot-yTop);
     ctx.strokeStyle = 'rgba(88,166,255,0.4)'; ctx.setLineDash([4,4]);
     ctx.strokeRect(padL, yTop, plotW, yBot-yTop); ctx.setLineDash([]);
   });
-  // ── ZONAS ORDER BLOCK (roxo) ──
-  obZones.forEach(z=>{
+  // ── ZONAS ORDER BLOCK (roxo) — máx. 6 mais recentes ──
+  obZones.slice(-6).forEach(z=>{
     const yTop = yFor(Math.max(z.top,z.bottom)), yBot = yFor(Math.min(z.top,z.bottom));
     ctx.fillStyle = 'rgba(188,140,255,0.14)';
     ctx.fillRect(padL, yTop, plotW, yBot-yTop);
@@ -2104,7 +2104,7 @@ async function analyzeSpot(){
     // camada 1 (Semanal — ONDE) e camada 2 (Diário — QUANDO)
     const fvgZonesWeekly = detectFVG(weeklyCandles);
     const fvgZonesDaily = detectFVG(dailyCandles);
-    const obZonesWeekly = detectOrderBlock(weeklyCandles);
+    const obZonesWeekly = detectOrderBlock(weeklyCandles, 15);
     const bottomsWeekly = detectMultipleBottoms(weeklyCandles);
     const bottomsDaily = detectMultipleBottoms(dailyCandles);
 

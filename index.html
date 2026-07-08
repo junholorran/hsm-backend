@@ -470,6 +470,7 @@ body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-h
   </div>
   <div class="pair-selector-label" style="margin-top:2px;color:var(--green);">CORE SPOT (DCA)</div>
   <div class="pairs-wrap" id="spotPairBtns">
+    <button class="pair-btn" onclick="selectActivePair(this,'BTCUSD')">BTC</button>
     <button class="pair-btn" onclick="selectActivePair(this,'ONDOUSD')">ONDO</button>
     <button class="pair-btn" onclick="selectActivePair(this,'INJUSD')">INJ</button>
     <button class="pair-btn" onclick="selectActivePair(this,'NEARUSD')">NEAR</button>
@@ -1408,10 +1409,75 @@ function renderFundingOIImage(pairLabel, fo){
   return canvas.toDataURL('image/png').split(',')[1];
 }
 
+// ── DETECÇÃO DE CHoCH (Change of Character) — NOVO ──
+// Acha swing highs/lows reais (pivôs locais), acompanha a sequência de
+// topos/fundos pra saber se a tendência é de alta ou baixa, e marca o
+// ponto exato onde o preço rompe essa estrutura na direção oposta.
+// Matemática pura sobre os candles reais — não depende da IA "apontar".
+function detectCHoCH(candles, lookback){
+  lookback = lookback || 3;
+  const swings = [];
+  for(let i=lookback;i<candles.length-lookback;i++){
+    let isHigh = true, isLow = true;
+    for(let j=i-lookback;j<=i+lookback;j++){
+      if(j===i) continue;
+      if(candles[j].h >= candles[i].h) isHigh = false;
+      if(candles[j].l <= candles[i].l) isLow = false;
+    }
+    if(isHigh) swings.push({ index: i, type: 'high', value: candles[i].h, t: candles[i].t });
+    if(isLow) swings.push({ index: i, type: 'low', value: candles[i].l, t: candles[i].t });
+  }
+  swings.sort((a,b)=>a.index-b.index);
+
+  const events = [];
+  let trend = null; // 'up' ou 'down'
+  let lastHigh = null, lastLow = null;
+
+  swings.forEach(s=>{
+    if(s.type==='high'){
+      if(lastHigh!=null && s.value > lastHigh.value && trend!=='up') trend='up';
+      lastHigh = s;
+    } else {
+      if(lastLow!=null && s.value < lastLow.value && trend!=='down') trend='down';
+      lastLow = s;
+    }
+  });
+
+  // percorre candle a candle procurando o rompimento do ultimo swing
+  // relevante na direcao oposta a tendencia vigente naquele momento
+  let curTrend = null, refHigh = null, refLow = null;
+  const swingByIndex = {};
+  swings.forEach(s=> swingByIndex[s.index] = s);
+
+  for(let i=0;i<candles.length;i++){
+    const s = swingByIndex[i];
+    if(s){
+      if(s.type==='high') refHigh = s;
+      else refLow = s;
+      if(refHigh && refLow){
+        curTrend = refHigh.index > refLow.index ? 'up' : 'down';
+      }
+    }
+    if(curTrend==='up' && refLow && candles[i].c < refLow.value){
+      events.push({ index: i, type: 'bearish', level: refLow.value, t: candles[i].t });
+      curTrend = 'down';
+    }
+    if(curTrend==='down' && refHigh && candles[i].c > refHigh.value){
+      events.push({ index: i, type: 'bullish', level: refHigh.value, t: candles[i].t });
+      curTrend = 'up';
+    }
+  }
+  return events;
+}
+
 // ── GRÁFICO ANOTADO (NOVO) — desenha Entrada/Stop/TP como linhas no candle real ──
 // Só visual, matemática pura (linha na altura do valor) — não depende de IA
 // pra "apontar" a zona, então nunca erra a posição.
-function renderAnnotatedChart(candles, pairLabel, tfLabel, entry, sl, tp1, tp2){
+// Parâmetros fvgZones/obZones/chochEvents são OPCIONAIS (zonas ICT reais,
+// calculadas por detectFVG/detectOrderBlock/detectCHoCH) — se não forem
+// passados, o gráfico funciona exatamente como antes (compatibilidade total).
+function renderAnnotatedChart(candles, pairLabel, tfLabel, entry, sl, tp1, tp2, fvgZones, obZones, chochEvents){
+  fvgZones = fvgZones || []; obZones = obZones || []; chochEvents = chochEvents || [];
   const W = 900, H = 420, padL = 64, padR = 90, padT = 34, padB = 20;
   const canvas = document.createElement('canvas');
   canvas.width = W; canvas.height = H;
@@ -1443,6 +1509,23 @@ function renderAnnotatedChart(candles, pairLabel, tfLabel, entry, sl, tp1, tp2){
     ctx.beginPath(); ctx.moveTo(padL,yy); ctx.lineTo(W-padR,yy); ctx.stroke();
   }
 
+  // ── ZONAS FVG (retângulo azul=bullish, laranja=bearish) ──
+  fvgZones.forEach(z=>{
+    const yTop = yFor(z.top), yBot = yFor(z.bottom);
+    ctx.fillStyle = z.type==='bullish' ? 'rgba(88,166,255,0.14)' : 'rgba(255,152,0,0.14)';
+    ctx.fillRect(padL, yTop, plotW, yBot-yTop);
+    ctx.strokeStyle = z.type==='bullish' ? 'rgba(88,166,255,0.4)' : 'rgba(255,152,0,0.4)';
+    ctx.setLineDash([4,4]); ctx.strokeRect(padL, yTop, plotW, yBot-yTop); ctx.setLineDash([]);
+  });
+  // ── ZONAS ORDER BLOCK (retângulo roxo) ──
+  obZones.forEach(z=>{
+    const yTop = yFor(Math.max(z.top,z.bottom)), yBot = yFor(Math.min(z.top,z.bottom));
+    ctx.fillStyle = 'rgba(188,140,255,0.14)';
+    ctx.fillRect(padL, yTop, plotW, yBot-yTop);
+    ctx.strokeStyle = 'rgba(188,140,255,0.4)';
+    ctx.setLineDash([4,4]); ctx.strokeRect(padL, yTop, plotW, yBot-yTop); ctx.setLineDash([]);
+  });
+
   candles.forEach((c,i)=>{
     const x = xFor(i);
     const up = c.c >= c.o;
@@ -1452,6 +1535,17 @@ function renderAnnotatedChart(candles, pairLabel, tfLabel, entry, sl, tp1, tp2){
     const bodyTop = yFor(Math.max(c.o,c.c));
     const bodyH = Math.max(1, Math.abs(yFor(c.o)-yFor(c.c)));
     ctx.fillRect(x - cw*0.35, bodyTop, cw*0.7, bodyH);
+  });
+
+  // ── marcadores de CHoCH (linha vertical no ponto de rompimento) ──
+  chochEvents.forEach(ev=>{
+    const x = xFor(ev.index);
+    const color = ev.type==='bullish' ? '#3fb950' : '#f85149';
+    ctx.strokeStyle = color; ctx.lineWidth = 1.2; ctx.setLineDash([2,3]);
+    ctx.beginPath(); ctx.moveTo(x, padT); ctx.lineTo(x, H-padB); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = color; ctx.font = 'bold 10px monospace';
+    ctx.fillText('CHoCH', x-16, padT-4);
   });
 
   // linhas horizontais de Entrada/Stop/TP
@@ -1485,6 +1579,7 @@ function renderAnnotatedChart(candles, pairLabel, tfLabel, entry, sl, tp1, tp2){
 // bucket: 'core' (reforça, não vende por impulso) ou 'tactical'.
 // Editar aqui manualmente sempre que uma posição mudar (nova compra/venda).
 const SPOT_HOLDINGS = {
+  'BTCUSD':  { pm: 55745.39, qty: 0.07858243, bucket: 'core' }, // PM ponderado Bybit ($30.905,69/0,02451243) + MEXC Nete ($67.006,38/0,05407). MEXC Júnior tem +0,02462137 BTC sem PM confirmado, não entra na média.
   'ONDOUSD': { pm: 0.68193, qty: 372.83, bucket: 'core' },
   'INJUSD':  { pm: 10.41,   qty: 212.764001, bucket: 'core' }, // MEXC Júnior, PM real Binance 01/07
   'NEARUSD': { pm: 3.00,    qty: 66.1555, bucket: 'core' },     // MEXC Nete (há também lote na Bybit, PM $3.97)
@@ -2098,17 +2193,26 @@ async function analyzeLive(){
 
     renderMultiResults(data.results, data.errors || []);
 
-    // ── NOVO: gráfico visual com Entrada/Stop/TP desenhados (igual ref. Vortex) ──
+    // ── NOVO: gráfico visual com Entrada/Stop/TP + FVG/OB/CHoCH desenhados ──
     // Puramente visual, não é enviado pra IA — só ajuda o usuário a ver
-    // onde os níveis caem no candle real.
+    // onde os níveis e zonas reais caem no candle real (M15).
     try{
       const r = data.results[0];
       if(m15CandlesForChart && r){
-        const annotatedBase64 = renderAnnotatedChart(m15CandlesForChart, pairLabel, 'M15', r.entry, r.sl, r.tp1, r.tp2);
+        const fvgZonesM15 = detectFVG(m15CandlesForChart);
+        const obZonesM15 = detectOrderBlock(m15CandlesForChart);
+        const chochEventsM15 = detectCHoCH(m15CandlesForChart);
+        const annotatedBase64 = renderAnnotatedChart(m15CandlesForChart, pairLabel, 'M15', r.entry, r.sl, r.tp1, r.tp2, fvgZonesM15, obZonesM15, chochEventsM15);
         const cardEl = document.querySelector('#resultCards .result-summary-card');
         if(cardEl){
           const rscBody = cardEl.querySelector('.rsc-body');
-          const imgHtml = '<div style="margin-bottom:12px;"><img src="data:image/png;base64,'+annotatedBase64+'" style="width:100%;display:block;border-radius:8px;border:1px solid var(--border);"/></div>';
+          const legendHtml = '<div class="spot-legend" style="margin-bottom:10px;">'
+            + '<div class="spot-legend-item"><span class="spot-legend-swatch" style="background:rgba(88,166,255,0.4)"></span>FVG Bullish</div>'
+            + '<div class="spot-legend-item"><span class="spot-legend-swatch" style="background:rgba(255,152,0,0.4)"></span>FVG Bearish</div>'
+            + '<div class="spot-legend-item"><span class="spot-legend-swatch" style="background:rgba(188,140,255,0.4)"></span>Order Block</div>'
+            + '<div class="spot-legend-item"><span class="spot-legend-swatch" style="background:#3fb950"></span>CHoCH</div>'
+            + '</div>';
+          const imgHtml = '<div style="margin-bottom:10px;"><img src="data:image/png;base64,'+annotatedBase64+'" style="width:100%;display:block;border-radius:8px;border:1px solid var(--border);"/></div>' + legendHtml;
           rscBody.insertAdjacentHTML('afterbegin', imgHtml);
         }
       }
@@ -2143,7 +2247,7 @@ function initLiveChart(symbol){
     "locale": "pt",
     "toolbar_bg": "#0a0a0f",
     "enable_publishing": false,
-    "hide_side_toolbar": true,
+    "hide_side_toolbar": false,
     "allow_symbol_change": false,
     "save_image": false,
     "container_id": "liveChartWidget"

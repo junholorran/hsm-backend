@@ -1409,13 +1409,15 @@ function renderFundingOIImage(pairLabel, fo){
   return canvas.toDataURL('image/png').split(',')[1];
 }
 
-// ── DETECÇÃO DE CHoCH (Change of Character) — NOVO ──
+// ── DETECÇÃO DE CHoCH (reversão) + BOS (continuação) — ATUALIZADA ──
 // Acha swing highs/lows reais (pivôs locais), acompanha a sequência de
-// topos/fundos pra saber se a tendência é de alta ou baixa, e marca o
-// ponto exato onde o preço rompe essa estrutura na direção oposta.
-// Matemática pura sobre os candles reais — não depende da IA "apontar".
-function detectCHoCH(candles, lookback){
+// topos/fundos pra saber se a tendência é de alta ou baixa, e marca:
+// - CHoCH: rompimento na direção OPOSTA à tendência vigente (reversão)
+// - BOS: rompimento na MESMA direção da tendência vigente (continuação)
+// Filtro de distância mínima entre eventos evita marcadores colados/redundantes.
+function detectCHoCH(candles, lookback, minEventDistance){
   lookback = lookback || 5;
+  minEventDistance = minEventDistance || 8;
   const swings = [];
   for(let i=lookback;i<candles.length-lookback;i++){
     let isHigh = true, isLow = true;
@@ -1430,24 +1432,10 @@ function detectCHoCH(candles, lookback){
   swings.sort((a,b)=>a.index-b.index);
 
   const events = [];
-  let trend = null; // 'up' ou 'down'
-  let lastHigh = null, lastLow = null;
-
-  swings.forEach(s=>{
-    if(s.type==='high'){
-      if(lastHigh!=null && s.value > lastHigh.value && trend!=='up') trend='up';
-      lastHigh = s;
-    } else {
-      if(lastLow!=null && s.value < lastLow.value && trend!=='down') trend='down';
-      lastLow = s;
-    }
-  });
-
-  // percorre candle a candle procurando o rompimento do ultimo swing
-  // relevante na direcao oposta a tendencia vigente naquele momento
-  let curTrend = null, refHigh = null, refLow = null;
   const swingByIndex = {};
   swings.forEach(s=> swingByIndex[s.index] = s);
+
+  let curTrend = null, refHigh = null, refLow = null;
 
   for(let i=0;i<candles.length;i++){
     const s = swingByIndex[i];
@@ -1458,12 +1446,23 @@ function detectCHoCH(candles, lookback){
         curTrend = refHigh.index > refLow.index ? 'up' : 'down';
       }
     }
-    if(curTrend==='up' && refLow && candles[i].c < refLow.value){
-      events.push({ index: i, type: 'bearish', level: refLow.value, t: candles[i].t });
+
+    const lastEvent = events[events.length-1];
+    const farEnough = !lastEvent || (i - lastEvent.index) >= minEventDistance;
+
+    if(refLow && candles[i].c < refLow.value){
+      if(farEnough){
+        const label = curTrend === 'up' ? 'CHoCH' : 'BOS';
+        events.push({ index: i, type: 'bearish', label, level: refLow.value, t: candles[i].t });
+      }
       curTrend = 'down';
     }
-    if(curTrend==='down' && refHigh && candles[i].c > refHigh.value){
-      events.push({ index: i, type: 'bullish', level: refHigh.value, t: candles[i].t });
+
+    if(refHigh && candles[i].c > refHigh.value){
+      if(farEnough){
+        const label = curTrend === 'down' ? 'CHoCH' : 'BOS';
+        events.push({ index: i, type: 'bullish', label, level: refHigh.value, t: candles[i].t });
+      }
       curTrend = 'up';
     }
   }
@@ -1537,15 +1536,17 @@ function renderAnnotatedChart(candles, pairLabel, tfLabel, entry, sl, tp1, tp2, 
     ctx.fillRect(x - cw*0.35, bodyTop, cw*0.7, bodyH);
   });
 
-  // ── marcadores de CHoCH (linha vertical no ponto de rompimento) ──
-  chochEvents.slice(-4).forEach(ev=>{
+  // ── marcadores de CHoCH (reversão, cor forte) e BOS (continuação, cor suave) ──
+  chochEvents.slice(-6).forEach(ev=>{
     const x = xFor(ev.index);
-    const color = ev.type==='bullish' ? '#3fb950' : '#f85149';
-    ctx.strokeStyle = color; ctx.lineWidth = 1.2; ctx.setLineDash([2,3]);
+    const isChoch = ev.label === 'CHoCH';
+    const baseColor = ev.type==='bullish' ? '#3fb950' : '#f85149';
+    const color = isChoch ? baseColor : (ev.type==='bullish' ? 'rgba(63,185,80,0.5)' : 'rgba(248,81,73,0.5)');
+    ctx.strokeStyle = color; ctx.lineWidth = isChoch ? 1.2 : 0.9; ctx.setLineDash([2,3]);
     ctx.beginPath(); ctx.moveTo(x, padT); ctx.lineTo(x, H-padB); ctx.stroke();
     ctx.setLineDash([]);
-    ctx.fillStyle = color; ctx.font = 'bold 10px monospace';
-    ctx.fillText('CHoCH', x-16, padT-4);
+    ctx.fillStyle = color; ctx.font = (isChoch ? 'bold ' : '') + '10px monospace';
+    ctx.fillText(ev.label || 'CHoCH', x-16, padT-4);
   });
 
   // linhas horizontais de Entrada/Stop/TP
@@ -2257,6 +2258,8 @@ async function analyzeLive(){
             + '<div class="spot-legend-item"><span class="spot-legend-swatch" style="background:rgba(255,152,0,0.4)"></span>FVG Bearish</div>'
             + '<div class="spot-legend-item"><span class="spot-legend-swatch" style="background:rgba(188,140,255,0.4)"></span>Order Block</div>'
             + '<div class="spot-legend-item"><span class="spot-legend-swatch" style="background:#3fb950"></span>CHoCH</div>'
+            + '<div class="spot-legend-item"><span class="spot-legend-swatch" style="background:rgba(63,185,80,0.5)"></span>BOS Alta</div>'
+            + '<div class="spot-legend-item"><span class="spot-legend-swatch" style="background:rgba(248,81,73,0.5)"></span>BOS Baixa</div>'
             + '</div>';
           const imgHtml = '<div style="margin-bottom:10px;"><img src="data:image/png;base64,'+annotatedBase64+'" style="width:100%;display:block;border-radius:8px;border:1px solid var(--border);"/></div>' + legendHtml;
           rscBody.insertAdjacentHTML('afterbegin', imgHtml);

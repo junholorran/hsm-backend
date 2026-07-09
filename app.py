@@ -12,7 +12,7 @@ client = anthropic.Anthropic(api_key=os.environ.get('ANTHROPIC_API_KEY'))
 
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
-DB_FILE = 'alerts.db'
+DB_FILE = '/data/alerts.db'
 
 PRECOS_TICKER = {}
 

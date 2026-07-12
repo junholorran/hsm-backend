@@ -1956,6 +1956,16 @@ function renderAnnotatedChart(candles, pairLabel, tfLabel, entry, sl, tp1, tp2, 
   // canvas "partido" (só linhas, sem velas) quando a busca de dados falhou
   // a meio ou veio vazia.
   if(!candles || candles.length < 5) return null;
+  // ── NOVO: proteção extra — se algum candle tiver valor inválido (NaN,
+  // Infinity, ou 0/negativo), um único Math.max/Math.min "envenena" toda a
+  // escala do gráfico (vira NaN) e o resultado sai com as velas invisíveis
+  // e os textos todos empilhados no mesmo sítio. Rejeita o lote inteiro
+  // nesse caso, em vez de desenhar algo quebrado.
+  const hasInvalidCandle = candles.some(c =>
+    !Number.isFinite(c.o) || !Number.isFinite(c.h) || !Number.isFinite(c.l) || !Number.isFinite(c.c) ||
+    c.o <= 0 || c.h <= 0 || c.l <= 0 || c.c <= 0
+  );
+  if(hasInvalidCandle) return null;
   fvgZones = fvgZones || []; obZones = obZones || []; chochEvents = chochEvents || [];
   const W = 900, H = 420, padL = 64, padR = 90, padT = 34, padB = 20;
   const canvas = document.createElement('canvas');
@@ -1968,11 +1978,12 @@ function renderAnnotatedChart(candles, pairLabel, tfLabel, entry, sl, tp1, tp2, 
     { label: 'TP1', value: parseFloat(tp1), color: '#5fd968' },
     { label: 'ENTRADA', value: parseFloat(entry), color: '#f0c040' },
     { label: 'STOP', value: parseFloat(sl), color: '#f85149' },
-  ].filter(l => !isNaN(l.value) && l.value > 0);
+  ].filter(l => Number.isFinite(l.value) && l.value > 0);
 
   const highs = candles.map(c=>c.h), lows = candles.map(c=>c.l);
   let maxP = Math.max(...highs, ...levels.map(l=>l.value));
   let minP = Math.min(...lows, ...levels.map(l=>l.value));
+  if(!Number.isFinite(maxP) || !Number.isFinite(minP)) return null; // proteção final
   const pad = (maxP - minP) * 0.06 || 1;
   maxP += pad; minP -= pad;
   const range = (maxP - minP) || 1;
@@ -2031,8 +2042,19 @@ function renderAnnotatedChart(candles, pairLabel, tfLabel, entry, sl, tp1, tp2, 
     ctx.strokeStyle = l.color; ctx.lineWidth = 1.3; ctx.setLineDash([6,4]);
     ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(W-padR, y); ctx.stroke();
     ctx.setLineDash([]);
+    l._y = y; // guarda a posição pra checar colisão a seguir
+  });
+  // ── NOVO: se dois níveis ficarem a menos de 14px um do outro, os textos
+  // colidem e ficam ilegíveis ("ENTRADA)389.8"). Afasta-os verticalmente. ──
+  const sortedLevels = levels.slice().sort((a,b)=>a._y-b._y);
+  for(let i=1;i<sortedLevels.length;i++){
+    if(sortedLevels[i]._y - sortedLevels[i-1]._y < 14){
+      sortedLevels[i]._y = sortedLevels[i-1]._y + 14;
+    }
+  }
+  levels.forEach(l=>{
     ctx.fillStyle = l.color; ctx.font = 'bold 11px monospace';
-    ctx.fillText(l.label+': '+l.value.toLocaleString('en-US',{maximumFractionDigits:2}), W-padR+6, y+4);
+    ctx.fillText(l.label+': '+l.value.toLocaleString('en-US',{maximumFractionDigits:2}), W-padR+6, l._y+4);
   });
 
   ctx.fillStyle = '#f0c040'; ctx.font = 'bold 14px monospace';

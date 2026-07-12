@@ -899,6 +899,40 @@ function handleServerLiveUpdate(w, shouldNotify){
       const expandBtn = firstCardFull.previousElementSibling;
       if(expandBtn) expandBtn.textContent = 'FECHAR ANÁLISE ↑';
     }
+
+    // ── NOVO: o gráfico anotado (FVG/OB/CHoCH/LIVE) também não vinha
+    // quando a atualização era do servidor — o browser busca os candles M15
+    // sozinho pra desenhar, igual já fazia no modo manual. ──
+    (async ()=>{
+      try{
+        const symbol = LIVE_SYMBOL_MAP[w.pair] || 'BTCUSDT';
+        const pairLabel = w.pair.replace('USD','');
+        const candles = await fetchLiveKlines(symbol, LIVE_TF_INTERVALS.M15, 200);
+        const fvgZones = detectFVG(candles, 0.3);
+        const obZones = detectOrderBlock(candles);
+        const chochEvents = detectCHoCH(candles);
+        const annotatedBase64 = renderAnnotatedChart(candles, pairLabel, 'M15', w.entry, w.sl, w.tp1, w.tp2, fvgZones, obZones, chochEvents);
+        const cardEl = document.querySelector('#resultCards .result-summary-card');
+        if(cardEl && annotatedBase64){
+          const rscBody = cardEl.querySelector('.rsc-body');
+          const legendHtml = '<div class="spot-legend" style="margin-bottom:10px;">'
+            + '<div class="spot-legend-item"><span class="spot-legend-swatch" style="background:rgba(88,166,255,0.4)"></span>FVG Bullish</div>'
+            + '<div class="spot-legend-item"><span class="spot-legend-swatch" style="background:rgba(255,152,0,0.4)"></span>FVG Bearish</div>'
+            + '<div class="spot-legend-item"><span class="spot-legend-swatch" style="background:rgba(188,140,255,0.4)"></span>Order Block</div>'
+            + '<div class="spot-legend-item"><span class="spot-legend-swatch" style="background:#3fb950"></span>CHoCH</div>'
+            + '<div class="spot-legend-item"><span class="spot-legend-swatch" style="background:rgba(63,185,80,0.5)"></span>BOS Alta</div>'
+            + '<div class="spot-legend-item"><span class="spot-legend-swatch" style="background:rgba(248,81,73,0.5)"></span>BOS Baixa</div>'
+            + '</div>';
+          const imgId = 'liveOverlayImg_' + Date.now();
+          const imgHtml = '<div class="live-overlay-wrap" style="margin-bottom:10px;">'
+            + '<div class="live-overlay-badge"><span class="lo-dot"></span>LIVE</div>'
+            + '<img id="'+imgId+'" src="data:image/png;base64,'+annotatedBase64+'" style="width:100%;display:block;border-radius:8px;border:1px solid var(--border);"/>'
+            + '</div>' + legendHtml;
+          rscBody.insertAdjacentHTML('afterbegin', imgHtml);
+          startLiveOverlayRefresh(imgId, w.pair, pairLabel, w.entry, w.sl, w.tp1, w.tp2);
+        }
+      }catch(e){ console.warn('Não foi possível desenhar o gráfico anotado (atualização do servidor):', e.message); }
+    })();
   }
 
   if(!shouldNotify) return; // primeira vez que vemos este par (ex: reabriste a app) — não repete aviso

@@ -789,8 +789,14 @@ function toggleLiveSession(pair){
   }
   const intervalMin = parseInt(document.getElementById('liveIntervalSelect').value) || 10;
   showToast('🔴 Trade Ao Vivo ligado em ' + pair.replace('USD','') + ' — a cada ' + intervalMin + 'min');
-  const intervalId = setInterval(()=>analyzeLive(pair, true), intervalMin*60*1000);
-  liveSessions[pair] = { intervalId, intervalMin, lastSetup: null };
+  const intervalId = setInterval(()=>{
+    // se o ciclo anterior deste par ainda estiver a correr, salta este
+    // tick em vez de sobrepor — evita dois analyzeLive() em paralelo
+    // corromperem o mesmo gráfico/canvas ao mesmo tempo.
+    if(liveSessions[pair] && liveSessions[pair].running) return;
+    analyzeLive(pair, true);
+  }, intervalMin*60*1000);
+  liveSessions[pair] = { intervalId, intervalMin, lastSetup: null, running: false };
   renderLiveSessions();
   analyzeLive(pair, true);
 }
@@ -871,7 +877,7 @@ async function refreshLiveOverlayNow(){
     const obZones = detectOrderBlock(candles);
     const chochEvents = detectCHoCH(candles);
     const base64 = renderAnnotatedChart(candles, pairLabel, liveChartTf, entry, sl, tp1, tp2, fvgZones, obZones, chochEvents);
-    imgEl.src = 'data:image/png;base64,'+base64;
+    if(base64) imgEl.src = 'data:image/png;base64,'+base64; // se vier null, mantém o último gráfico bom na tela
   }catch(e){ /* falha pontual de rede, tenta de novo no próximo ciclo */ }
 }
 
@@ -1790,6 +1796,10 @@ function detectCHoCH(candles, lookback, minEventDistance){
 }
 
 function renderAnnotatedChart(candles, pairLabel, tfLabel, entry, sl, tp1, tp2, fvgZones, obZones, chochEvents){
+  // proteção: sem candles válidos, não há gráfico pra desenhar — evita
+  // canvas "partido" (só linhas, sem velas) quando a busca de dados falhou
+  // a meio ou veio vazia.
+  if(!candles || candles.length < 5) return null;
   fvgZones = fvgZones || []; obZones = obZones || []; chochEvents = chochEvents || [];
   const W = 900, H = 420, padL = 64, padR = 90, padT = 34, padB = 20;
   const canvas = document.createElement('canvas');
@@ -2440,6 +2450,7 @@ async function analyzeSpot(){
 async function analyzeLive(targetPair, isAuto){
   targetPair = targetPair || activePair;
   isAuto = !!isAuto;
+  if(isAuto && liveSessions[targetPair]) liveSessions[targetPair].running = true;
   const btn = document.getElementById('liveBtn');
   const symbol = LIVE_SYMBOL_MAP[targetPair] || 'BTCUSDT';
   const pairLabel = targetPair.replace('USD','');
@@ -2541,7 +2552,7 @@ async function analyzeLive(targetPair, isAuto){
         const chochEventsM15 = detectCHoCH(m15CandlesForChart);
         const annotatedBase64 = renderAnnotatedChart(m15CandlesForChart, pairLabel, 'M15', r.entry, r.sl, r.tp1, r.tp2, fvgZonesM15, obZonesM15, chochEventsM15);
         const cardEl = document.querySelector('#resultCards .result-summary-card');
-        if(cardEl){
+        if(cardEl && annotatedBase64){
           const rscBody = cardEl.querySelector('.rsc-body');
           const legendHtml = '<div class="spot-legend" style="margin-bottom:10px;">'
             + '<div class="spot-legend-item"><span class="spot-legend-swatch" style="background:rgba(88,166,255,0.4)"></span>FVG Bullish</div>'
@@ -2578,6 +2589,7 @@ async function analyzeLive(targetPair, isAuto){
       showToast('Erro no Trade Ao Vivo: ' + e.message);
     }
   }finally{
+    if(isAuto && liveSessions[targetPair]) liveSessions[targetPair].running = false;
     if(!isAuto){
       btn.disabled = false;
       document.getElementById('liveBtnLabel').textContent = originalLabel;

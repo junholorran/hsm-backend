@@ -788,27 +788,117 @@ function toggleLiveSession(pair){
     return;
   }
   const intervalMin = parseInt(document.getElementById('liveIntervalSelect').value) || 10;
-  showToast('🔴 Trade Ao Vivo ligado em ' + pair.replace('USD','') + ' — a cada ' + intervalMin + 'min');
-  const intervalId = setInterval(()=>{
-    // se o ciclo anterior deste par ainda estiver a correr, salta este
-    // tick em vez de sobrepor — evita dois analyzeLive() em paralelo
-    // corromperem o mesmo gráfico/canvas ao mesmo tempo.
-    if(liveSessions[pair] && liveSessions[pair].running) return;
-    analyzeLive(pair, true);
-  }, intervalMin*60*1000);
-  liveSessions[pair] = { intervalId, intervalMin, lastSetup: null, running: false };
-  renderLiveSessions();
-  analyzeLive(pair, true);
+  // ── NOVO: liga o vigiamento NO SERVIDOR (corre 24/7, mesmo com o
+  // telemóvel fechado/bloqueado) — em vez do antigo setInterval local ──
+  fetch('/live/watch', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ pair, interval_min: intervalMin })
+  }).then(r=>r.json()).then(data=>{
+    if(data.error){ showToast('Erro ao ligar vigiamento: ' + data.error); return; }
+    showToast('🔴 Trade Ao Vivo ligado no SERVIDOR em ' + pair.replace('USD','') + ' — a cada ' + intervalMin + 'min');
+    liveSessions[pair] = { intervalMin };
+    renderLiveSessions();
+    startServerLivePolling();
+  }).catch(e=>showToast('Erro ao ligar vigiamento: ' + e.message));
 }
 
 function stopLiveSession(pair){
-  const s = liveSessions[pair];
-  if(!s) return;
-  clearInterval(s.intervalId);
-  delete liveSessions[pair];
-  showToast('⏹ Trade Ao Vivo desligado em ' + pair.replace('USD',''));
-  renderLiveSessions();
+  fetch('/live/unwatch', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ pair })
+  }).then(()=>{
+    delete liveSessions[pair];
+    showToast('⏹ Trade Ao Vivo desligado em ' + pair.replace('USD',''));
+    renderLiveSessions();
+  }).catch(e=>showToast('Erro ao desligar: ' + e.message));
 }
+
+// ── NOVO: consulta o estado do vigiamento no servidor a cada 20s, pra
+// atualizar a tela quando um ciclo novo terminar (mesmo que tenha corrido
+// enquanto tu não estavas a olhar pro telemóvel) ──
+let liveStatusPollId = null;
+let liveSeenUpdatedAt = {}; // pair -> último updated_at já mostrado (evita repetir aviso/voz)
+
+function startServerLivePolling(){
+  if(liveStatusPollId) return; // já está a correr
+  liveStatusPollId = setInterval(pollLiveStatus, 20000);
+  pollLiveStatus();
+}
+
+async function pollLiveStatus(){
+  try{
+    const res = await fetch('/live/status');
+    const data = await res.json();
+    const watches = (data.watches || []).filter(w => w.enabled);
+
+    if(watches.length === 0){
+      if(liveStatusPollId){ clearInterval(liveStatusPollId); liveStatusPollId = null; }
+      return;
+    }
+
+    liveSessions = {};
+    watches.forEach(w => { liveSessions[w.pair] = { intervalMin: w.interval_min }; });
+    renderLiveSessions();
+
+    watches.forEach(w => {
+      if(!w.updated_at) return;
+      const prevSeen = liveSeenUpdatedAt[w.pair];
+      if(prevSeen === w.updated_at) return; // nada novo pra este par
+      const isFirstLoad = (prevSeen === undefined);
+      liveSeenUpdatedAt[w.pair] = w.updated_at;
+      handleServerLiveUpdate(w, !isFirstLoad); // só narra/avisa se NÃO for a primeira vez que vemos (evita spam ao abrir a app)
+    });
+  }catch(e){ console.warn('Erro ao consultar /live/status:', e.message); }
+}
+
+function handleServerLiveUpdate(w, shouldNotify){
+  // monta um objeto no mesmo formato que renderMultiResults já espera
+  const resultObj = {
+    pair: w.pair, result: w.result || '', timeframes: 'D1,H4,H1,M15',
+    score: w.score, direction: w.direction, entry: w.entry, sl: w.sl, tp1: w.tp1, tp2: w.tp2
+  };
+
+  // só troca o card na tela se for o par que estás a ver agora
+  if(w.pair === activePair){
+    renderMultiResults([resultObj], []);
+    document.getElementById('addPairSection').style.display = 'none';
+    document.getElementById('queueSection').style.display = 'none';
+    const firstCardFull = document.querySelector('#resultCards .result-summary-card .rsc-full');
+    if(firstCardFull){
+      firstCardFull.classList.add('open');
+      const expandBtn = firstCardFull.previousElementSibling;
+      if(expandBtn) expandBtn.textContent = 'FECHAR ANÁLISE ↑';
+    }
+  }
+
+  if(!shouldNotify) return; // primeira vez que vemos este par (ex: reabriste a app) — não repete aviso
+
+  const invalidatedMsg = checkSetupInvalidation(w.pair, w.direction, w.entry, w.score);
+  if(invalidatedMsg) showToast(invalidatedMsg);
+  showToast('✓ Trade Ao Vivo (servidor) — ' + w.pair.replace('USD','') + ' atualizado!');
+
+  const dirWord = w.direction === 'SHORT' ? 'short' : w.direction === 'LONG' ? 'long' : 'neutro';
+  const narrationText = w.pair.replace('USD','') + ', ' + dirWord + ', score ' + w.score + '. ' + (w.result||'') + ' Entrada ' + (w.entry||'') + ', stop ' + (w.sl||'') + ', take profit ' + (w.tp1||'') + '.';
+  speakNarration((invalidatedMsg ? invalidatedMsg + ' ' : '') + narrationText);
+}
+
+// ao abrir a app, verifica se já há vigiamentos ligados no servidor (ex:
+// ligaste ontem e fechaste a app — o servidor continuou sozinho)
+setTimeout(async ()=>{
+  try{
+    const res = await fetch('/live/status');
+    const data = await res.json();
+    const activeWatches = (data.watches || []).filter(w => w.enabled);
+    if(activeWatches.length > 0){
+      activeWatches.forEach(w => { liveSessions[w.pair] = { intervalMin: w.interval_min }; });
+      renderLiveSessions();
+      startServerLivePolling();
+      showToast('🔴 ' + activeWatches.length + ' par(es) já vigiando no servidor');
+    }
+  }catch(e){}
+}, 2000);
 
 function renderLiveSessions(){
   const card = document.getElementById('liveSessionsCard');

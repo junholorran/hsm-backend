@@ -759,7 +759,22 @@ function setLiveMode(mode, el){
   }
 }
 
+// ── destrava a voz no iOS/Safari: precisa de um speak() disparado NA HORA do
+// clique (gesto do utilizador), senão o navegador bloqueia falas que só
+// chegam depois de esperas assíncronas (como as chamadas à Bybit demoram).
+function primeSpeechUnlock(){
+  const voiceOn = document.getElementById('liveVoiceToggle');
+  if(!voiceOn || !voiceOn.checked) return;
+  if(!('speechSynthesis' in window)) return;
+  try{
+    const silent = new SpeechSynthesisUtterance(' ');
+    silent.volume = 0;
+    window.speechSynthesis.speak(silent);
+  }catch(e){}
+}
+
 function handleLiveBtnClick(){
+  primeSpeechUnlock();
   if(liveMode === 'manual'){
     analyzeLive(activePair, false);
   } else {
@@ -1292,13 +1307,23 @@ function resetAll(){
 const LIVE_TF_INTERVALS = { D1: 'D', H4: '240', H1: '60', M15: '15' };
 const LIVE_SYMBOL_MAP = {'BTCUSD':'BTCUSDT','ETHUSD':'ETHUSDT','SOLUSD':'SOLUSDT','XRPUSD':'XRPUSDT','LINKUSD':'LINKUSDT','ADAUSD':'ADAUSDT','AVAXUSD':'AVAXUSDT','BNBUSD':'BNBUSDT','AAVEUSD':'AAVEUSDT','ONDOUSD':'ONDOUSDT','INJUSD':'INJUSDT','NEARUSD':'NEARUSDT','PENDLEUSD':'PENDLEUSDT','SUIUSD':'SUIUSDT','JTOUSD':'JTOUSDT','ETHFIUSD':'ETHFIUSDT','JUPUSD':'JUPUSDT','ENAUSD':'ENAUSDT'};
 
-async function fetchLiveKlines(symbol, interval, limit){
-  const url = 'https://api.bybit.com/v5/market/kline?category=linear&symbol='+symbol+'&interval='+interval+'&limit='+(limit||120);
-  const r = await fetch(url);
-  const d = await r.json();
-  const list = d.result && d.result.list;
-  if(!list || list.length < 5) throw new Error('sem candles para '+symbol);
-  return list.map(k=>({t:parseInt(k[0]),o:parseFloat(k[1]),h:parseFloat(k[2]),l:parseFloat(k[3]),c:parseFloat(k[4])})).reverse();
+async function fetchLiveKlines(symbol, interval, limit, _retried){
+  try{
+    const url = 'https://api.bybit.com/v5/market/kline?category=linear&symbol='+symbol+'&interval='+interval+'&limit='+(limit||120);
+    const r = await fetch(url);
+    const d = await r.json();
+    const list = d.result && d.result.list;
+    if(!list || list.length < 5) throw new Error('sem candles para '+symbol);
+    return list.map(k=>({t:parseInt(k[0]),o:parseFloat(k[1]),h:parseFloat(k[2]),l:parseFloat(k[3]),c:parseFloat(k[4])})).reverse();
+  }catch(e){
+    // 1 nova tentativa automática — cobre falhas pontuais de rede tipo
+    // "Load failed" no mobile (ecrã bloqueou, ligação oscilou um instante)
+    if(!_retried){
+      await new Promise(r=>setTimeout(r, 1200));
+      return fetchLiveKlines(symbol, interval, limit, true);
+    }
+    throw e;
+  }
 }
 
 function computeRSI(closes, period){
@@ -2544,7 +2569,14 @@ async function analyzeLive(targetPair, isAuto){
     showToast('✓ Trade Ao Vivo — ' + pairLabel + (isAuto?' (auto)':'') + ' concluído!');
   }catch(e){
     endLiveProgress();
-    showToast('Erro no Trade Ao Vivo: ' + e.message);
+    if(isAuto){
+      // no automático, uma falha pontual de rede (ex: "Load failed" quando o
+      // telemóvel bloqueia o ecrã ou a ligação cai por 1 instante) não deve
+      // assustar com erro — só regista e tenta de novo no próximo ciclo.
+      console.warn('Trade Ao Vivo (auto) falhou este ciclo, tenta de novo no próximo:', e.message);
+    } else {
+      showToast('Erro no Trade Ao Vivo: ' + e.message);
+    }
   }finally{
     if(!isAuto){
       btn.disabled = false;

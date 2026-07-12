@@ -929,11 +929,20 @@ AUTO_ALERT_SCORE_THRESHOLD = 75  # mesmo corte de "entrada livre" usado no resto
 def fetch_bybit_klines(symbol, interval, limit=200):
     url = 'https://api.bybit.com/v5/market/kline'
     params = {'category': 'linear', 'symbol': symbol, 'interval': interval, 'limit': limit}
-    r = requests.get(url, params=params, timeout=15)
-    data = r.json()
+    headers = {'User-Agent': 'Mozilla/5.0 (compatible; KairosMentor/1.0)'}
+    r = requests.get(url, params=params, headers=headers, timeout=15)
+    try:
+        data = r.json()
+    except Exception:
+        # NOVO: diagnóstico — se a resposta não for JSON válido, regista o
+        # status HTTP e o começo do texto devolvido, pra sabermos se é a
+        # Bybit a bloquear o IP da Railway (ex: página de erro em HTML) ou
+        # outra coisa. Isto aparece nos logs como "[bybit-diag]".
+        print(f"[bybit-diag] status={r.status_code} body_start={r.text[:300]!r}")
+        raise Exception(f"resposta não-JSON da Bybit (status {r.status_code}) — provável bloqueio de IP server-side")
     lst = (data.get('result') or {}).get('list') or []
     if len(lst) < 5:
-        raise Exception(f'sem candles suficientes para {symbol}')
+        raise Exception(f'sem candles suficientes para {symbol} — resposta: {str(data)[:200]}')
     candles = [{
         't': int(k[0]), 'o': float(k[1]), 'h': float(k[2]), 'l': float(k[3]), 'c': float(k[4])
     } for k in lst]

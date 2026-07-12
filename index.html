@@ -333,6 +333,45 @@ body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-h
 .signals-result-badge.win{background:rgba(63,185,80,.15);color:var(--green);}
 .signals-result-badge.loss{background:rgba(248,81,73,.15);color:var(--red);}
 .signals-empty{text-align:center;padding:18px;color:var(--muted);font-size:12px;}
+
+/* ── NOVO: checklist de progresso estilo "IA Analisando" (Trade Ao Vivo) ── */
+.live-progress-card{background:var(--surface);border:1px solid var(--gold);border-radius:12px;padding:14px 16px;margin-top:10px;display:none;}
+.live-progress-card.show{display:block;}
+.live-progress-title{font-size:11px;font-weight:700;color:var(--gold);font-family:'Space Mono',monospace;letter-spacing:1px;margin-bottom:10px;display:flex;align-items:center;gap:8px;}
+.live-progress-title .lp-dot{width:7px;height:7px;border-radius:50%;background:var(--gold);animation:livePulse2 1.2s ease-in-out infinite;}
+.lp-step{display:flex;align-items:center;gap:10px;padding:6px 0;font-size:12px;color:var(--muted);font-family:'Space Mono',monospace;}
+.lp-step .lp-icon{width:16px;text-align:center;flex-shrink:0;}
+.lp-step.done{color:var(--green);}
+.lp-step.active{color:var(--gold);}
+.lp-step.active .lp-icon{animation:spin .8s linear infinite;display:inline-block;}
+
+/* ── NOVO: toggle Manual / Automático + intervalo, dentro do live-btn ── */
+.live-mode-row{display:flex;gap:8px;margin-top:8px;align-items:center;}
+.live-mode-toggle{display:flex;background:var(--surface2);border:1px solid var(--border);border-radius:8px;overflow:hidden;flex-shrink:0;}
+.live-mode-opt{padding:6px 10px;font-size:10px;font-weight:700;font-family:'Space Mono',monospace;color:var(--muted);cursor:pointer;-webkit-tap-highlight-color:transparent;}
+.live-mode-opt.active{background:var(--gold);color:#000;}
+.live-interval-select{flex:1;background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:6px 8px;border-radius:8px;font-size:11px;font-family:'Space Mono',monospace;}
+.live-voice-toggle{display:flex;align-items:center;gap:5px;font-size:10px;color:var(--muted);font-family:'Space Mono',monospace;cursor:pointer;-webkit-tap-highlight-color:transparent;flex-shrink:0;}
+.live-voice-toggle input{accent-color:var(--gold);}
+
+/* ── NOVO: painel de sessões ao vivo (múltiplos pares em paralelo) ── */
+.live-sessions-card{background:var(--surface);border:1px solid #3fb95044;border-radius:12px;padding:10px 14px;margin-bottom:8px;}
+.live-session-row{display:flex;align-items:center;justify-content:space-between;padding:7px 0;border-bottom:1px solid var(--border);}
+.live-session-row:last-child{border-bottom:none;}
+.live-session-left{display:flex;align-items:center;gap:8px;}
+.live-session-pair{font-size:12px;font-weight:700;font-family:'Space Mono',monospace;color:var(--gold);}
+.live-session-sub{font-size:9px;color:var(--muted);}
+.live-session-stop{font-size:10px;color:var(--red);cursor:pointer;font-weight:700;font-family:'Space Mono',monospace;-webkit-tap-highlight-color:transparent;}
+
+/* ── NOVO: gráfico anotado que continua a atualizar sozinho (badge LIVE) ── */
+.live-overlay-wrap{position:relative;}
+.live-overlay-badge{position:absolute;top:8px;left:8px;background:#000000b0;color:var(--red);font-size:9px;font-weight:700;padding:3px 8px;border-radius:6px;display:flex;align-items:center;gap:5px;font-family:'Space Mono',monospace;letter-spacing:1px;z-index:2;}
+.live-overlay-badge .lo-dot{width:6px;height:6px;border-radius:50%;background:var(--red);animation:livePulse2 1.2s ease-in-out infinite;}
+
+/* ── NOVO: seletor de timeframe do gráfico ao vivo (M1 até Mensal) ── */
+.live-tf-row{display:flex;gap:5px;flex-wrap:wrap;margin-top:8px;}
+.live-tf-btn{background:var(--surface2);border:1px solid var(--border);color:var(--text2);padding:5px 10px;border-radius:6px;font-size:10px;font-weight:700;font-family:'Space Mono',monospace;cursor:pointer;-webkit-tap-highlight-color:transparent;}
+.live-tf-btn.active{background:var(--gold);color:#000;border-color:transparent;}
 </style>
 <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
 </head>
@@ -493,17 +532,60 @@ body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-h
 
   <button class="add-pair-btn" id="addPairBtn" onclick="addPairToQueue()">+ ADICIONAR BTC À FILA</button>
 
-  <!-- NOVO: botão de análise ao vivo, sem gráfico manual — usa candles reais da Bybit -->
-  <button class="live-btn" id="liveBtn" onclick="analyzeLive()">
+  <!-- ── TRADE AO VIVO (antigo "Analisar Ao Vivo") — usa candles reais da Bybit ── -->
+  <button class="live-btn" id="liveBtn" onclick="handleLiveBtnClick()">
     <div class="live-btn-left">
       <div class="live-pulse-wrap"><div class="live-pulse-ring"></div><div class="live-pulse-dot"></div></div>
       <div>
-        <div class="live-btn-label" id="liveBtnLabel">ANALISAR AO VIVO — BTC</div>
+        <div class="live-btn-label" id="liveBtnLabel">🔴 TRADE AO VIVO — BTC</div>
         <div class="live-btn-sub">Busca candles atuais e roda o ICT completo agora</div>
       </div>
     </div>
     <div style="color:var(--gold);font-size:16px;">›</div>
   </button>
+
+  <!-- NOVO: modo Manual/Automático + intervalo + narração por voz -->
+  <div class="live-mode-row">
+    <div class="live-mode-toggle" id="liveModeToggle">
+      <div class="live-mode-opt active" onclick="setLiveMode('manual',this)">MANUAL</div>
+      <div class="live-mode-opt" onclick="setLiveMode('auto',this)">AUTOMÁTICO</div>
+    </div>
+    <select class="live-interval-select" id="liveIntervalSelect">
+      <option value="5">a cada 5min</option>
+      <option value="10" selected>a cada 10min</option>
+      <option value="15">a cada 15min</option>
+      <option value="30">a cada 30min</option>
+    </select>
+  </div>
+  <div class="live-mode-row">
+    <label class="live-voice-toggle"><input type="checkbox" id="liveVoiceToggle" checked> 🔊 narrar em voz</label>
+  </div>
+
+  <!-- NOVO: seletor de TF do gráfico ao vivo — M1 até Mensal (só muda a visualização) -->
+  <div class="pair-selector-label" style="margin-top:6px;">GRÁFICO AO VIVO — TIMEFRAME</div>
+  <div class="live-tf-row" id="liveTfRow">
+    <div class="live-tf-btn" onclick="selectLiveChartTf('M1',this)">M1</div>
+    <div class="live-tf-btn" onclick="selectLiveChartTf('M5',this)">M5</div>
+    <div class="live-tf-btn active" onclick="selectLiveChartTf('M15',this)">M15</div>
+    <div class="live-tf-btn" onclick="selectLiveChartTf('M30',this)">M30</div>
+    <div class="live-tf-btn" onclick="selectLiveChartTf('H1',this)">H1</div>
+    <div class="live-tf-btn" onclick="selectLiveChartTf('H4',this)">H4</div>
+    <div class="live-tf-btn" onclick="selectLiveChartTf('D1',this)">D1</div>
+    <div class="live-tf-btn" onclick="selectLiveChartTf('W1',this)">Semanal</div>
+    <div class="live-tf-btn" onclick="selectLiveChartTf('MN',this)">Mensal</div>
+  </div>
+
+  <!-- NOVO: checklist de progresso (estilo "IA Analisando") -->
+  <div class="live-progress-card" id="liveProgressCard">
+    <div class="live-progress-title"><span class="lp-dot"></span>IA ANALISANDO <span id="liveProgressPair">BTC</span></div>
+    <div id="liveProgressSteps"></div>
+  </div>
+
+  <!-- NOVO: painel de sessões ao vivo ativas (multi-par em paralelo) -->
+  <div class="live-sessions-card" id="liveSessionsCard" style="display:none;">
+    <div class="pair-selector-label" style="margin-bottom:6px;">SESSÕES AO VIVO ATIVAS</div>
+    <div id="liveSessionsList"></div>
+  </div>
 
   <!-- NOVO: botão de análise Spot/DCA — timeframes D1/Semanal/Mensal, sem CHoCH,
        usa FVG/OB/BMSB/fundo duplo-triplo e traz PM/Qtd/PNL reais do spot_holdings -->
@@ -614,6 +696,265 @@ const TFS = ['D1','H4','H1','M15','M5','M1'];
 // Lista separada da PAIRS original pra não misturar com os pares ICT de sempre.
 const SPOT_PAIRS = ['ONDOUSD','INJUSD','NEARUSD','PENDLEUSD','SUIUSD','JTOUSD','ETHFIUSD','JUPUSD','ENAUSD'];
 
+// ── NOVO: TRADE AO VIVO — modo Manual/Automático, checklist, voz, multi-sessão ──
+let liveMode = 'manual'; // 'manual' | 'auto'
+let liveSessions = {}; // { pair: { intervalId, intervalMin } }
+const LIVE_PROGRESS_STEPS = [
+  'Coletando dados D1',
+  'Coletando dados H4',
+  'Coletando dados H1',
+  'Coletando dados M15',
+  'Funding + Open Interest',
+  'Análise ICT (16 camadas)',
+  'Calculando score final'
+];
+
+let liveOverlayRefreshId = null; // controla o setInterval que redesenha o gráfico anotado ao vivo
+let liveOverlayContext = null; // { imgElId, targetPair, pairLabel, entry, sl, tp1, tp2 } — guarda o setup atual pra redesenhar ao trocar de TF
+let liveChartTf = 'M15'; // TF só de VISUALIZAÇÃO do gráfico ao vivo — não afeta a cascata D1/H4/H1/M15 da análise
+const LIVE_CHART_TF_MAP = { M1:'1', M5:'5', M15:'15', M30:'30', H1:'60', H4:'240', D1:'D', W1:'W', MN:'M' };
+
+// ── NOVO: Telegram automático no modo Automático (reaproveita /set_alert, mesmo endpoint do alerta manual) ──
+const AUTO_ALERT_SCORE_THRESHOLD = 75; // mesmo corte de "entrada livre" já usado no scoring (75+)
+let lastAutoAlerted = {}; // { pair: "direction|entry" } — evita recriar o mesmo alerta a cada ciclo do automático
+
+async function maybeSendAutoTelegramAlert(targetPair, r, timeframes){
+  if(!r || !r.entry || !r.direction || r.direction === 'NEUTRO') return;
+  if(r.score < AUTO_ALERT_SCORE_THRESHOLD) return;
+  const signature = r.direction + '|' + r.entry;
+  if(lastAutoAlerted[targetPair] === signature) return; // já criámos alerta pra este exato setup, não repete
+  try{
+    const currentPrice = await getPrice(targetPair);
+    const analysisText = 'Trade Ao Vivo (automático) — ' + r.direction + ' score ' + r.score + '. ' + (r.result || '').slice(0, 400);
+    const res = await fetch('/set_alert',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ pair: targetPair, target: parseFloat(r.entry), current_price: currentPrice||0, analysis: analysisText, timeframes: timeframes || '' })
+    });
+    const data = await res.json();
+    if(!data.error){
+      lastAutoAlerted[targetPair] = signature;
+      showToast('🔔 Telegram: alerta automático criado — ' + targetPair.replace('USD','') + ' ' + r.direction);
+    }
+  }catch(e){ /* falha pontual, tenta de novo no próximo ciclo */ }
+}
+
+function selectLiveChartTf(tf, el){
+  liveChartTf = tf;
+  document.querySelectorAll('#liveTfRow .live-tf-btn').forEach(b=>b.classList.remove('active'));
+  el.classList.add('active');
+  // se já há um gráfico ao vivo na tela, redesenha imediatamente no novo TF
+  if(liveOverlayContext) refreshLiveOverlayNow();
+}
+
+function setLiveMode(mode, el){
+  liveMode = mode;
+  document.querySelectorAll('#liveModeToggle .live-mode-opt').forEach(o=>o.classList.remove('active'));
+  el.classList.add('active');
+  const sub = document.querySelector('.live-btn-sub');
+  if(mode === 'auto'){
+    if(sub) sub.textContent = 'Toca para ligar/desligar o Trade Ao Vivo automático deste par';
+  } else {
+    if(sub) sub.textContent = 'Busca candles atuais e roda o ICT completo agora';
+  }
+}
+
+function handleLiveBtnClick(){
+  if(liveMode === 'manual'){
+    analyzeLive(activePair, false);
+  } else {
+    toggleLiveSession(activePair);
+  }
+}
+
+function toggleLiveSession(pair){
+  if(liveSessions[pair]){
+    stopLiveSession(pair);
+    return;
+  }
+  const intervalMin = parseInt(document.getElementById('liveIntervalSelect').value) || 10;
+  showToast('🔴 Trade Ao Vivo ligado em ' + pair.replace('USD','') + ' — a cada ' + intervalMin + 'min');
+  const intervalId = setInterval(()=>analyzeLive(pair, true), intervalMin*60*1000);
+  liveSessions[pair] = { intervalId, intervalMin, lastSetup: null };
+  renderLiveSessions();
+  analyzeLive(pair, true);
+}
+
+function stopLiveSession(pair){
+  const s = liveSessions[pair];
+  if(!s) return;
+  clearInterval(s.intervalId);
+  delete liveSessions[pair];
+  showToast('⏹ Trade Ao Vivo desligado em ' + pair.replace('USD',''));
+  renderLiveSessions();
+}
+
+function renderLiveSessions(){
+  const card = document.getElementById('liveSessionsCard');
+  const list = document.getElementById('liveSessionsList');
+  const pairs = Object.keys(liveSessions);
+  if(pairs.length === 0){
+    card.style.display = 'none';
+    return;
+  }
+  card.style.display = 'block';
+  list.innerHTML = pairs.map(p=>`
+    <div class="live-session-row">
+      <div class="live-session-left">
+        <span class="signals-live-dot" style="background:var(--green);width:6px;height:6px;border-radius:50%;display:inline-block;"></span>
+        <div>
+          <div class="live-session-pair">${p.replace('USD','USDT')}</div>
+          <div class="live-session-sub">a cada ${liveSessions[p].intervalMin}min</div>
+        </div>
+      </div>
+      <div class="live-session-stop" onclick="stopLiveSession('${p}')">✕ parar</div>
+    </div>
+  `).join('');
+}
+
+// ── checklist de progresso ──
+function startLiveProgress(pairLabel){
+  const card = document.getElementById('liveProgressCard');
+  document.getElementById('liveProgressPair').textContent = pairLabel;
+  document.getElementById('liveProgressSteps').innerHTML = LIVE_PROGRESS_STEPS.map((s,i)=>`
+    <div class="lp-step" id="lpStep_${i}"><span class="lp-icon">○</span>${s}</div>
+  `).join('');
+  card.classList.add('show');
+}
+function setLiveProgressStep(i, status){
+  const el = document.getElementById('lpStep_'+i);
+  if(!el) return;
+  el.classList.remove('done','active');
+  const icon = el.querySelector('.lp-icon');
+  if(status==='active'){ el.classList.add('active'); icon.textContent='⏳'; }
+  else if(status==='done'){ el.classList.add('done'); icon.textContent='✓'; }
+}
+function endLiveProgress(){
+  const card = document.getElementById('liveProgressCard');
+  setTimeout(()=>card.classList.remove('show'), 1200);
+}
+
+// ── gráfico anotado que continua a atualizar sozinho (redesenha a cada 20s com preço fresco) ──
+function stopLiveOverlayRefresh(){
+  if(liveOverlayRefreshId){
+    clearInterval(liveOverlayRefreshId);
+    liveOverlayRefreshId = null;
+  }
+  liveOverlayContext = null;
+}
+
+async function refreshLiveOverlayNow(){
+  if(!liveOverlayContext) return;
+  const { imgElId, targetPair, pairLabel, entry, sl, tp1, tp2 } = liveOverlayContext;
+  const imgEl = document.getElementById(imgElId);
+  if(!imgEl){ stopLiveOverlayRefresh(); return; } // card já não está na tela, para sozinho
+  try{
+    const symbol = LIVE_SYMBOL_MAP[targetPair] || 'BTCUSDT';
+    const interval = LIVE_CHART_TF_MAP[liveChartTf] || '15';
+    const candles = await fetchLiveKlines(symbol, interval, 200);
+    const fvgZones = detectFVG(candles, 0.3);
+    const obZones = detectOrderBlock(candles);
+    const chochEvents = detectCHoCH(candles);
+    const base64 = renderAnnotatedChart(candles, pairLabel, liveChartTf, entry, sl, tp1, tp2, fvgZones, obZones, chochEvents);
+    imgEl.src = 'data:image/png;base64,'+base64;
+  }catch(e){ /* falha pontual de rede, tenta de novo no próximo ciclo */ }
+}
+
+function startLiveOverlayRefresh(imgElId, targetPair, pairLabel, entry, sl, tp1, tp2){
+  stopLiveOverlayRefresh(); // só um gráfico ao vivo por vez (o do resultado mais recente na tela)
+  liveOverlayContext = { imgElId, targetPair, pairLabel, entry, sl, tp1, tp2 };
+  liveOverlayRefreshId = setInterval(refreshLiveOverlayNow, 20000);
+}
+
+// ── narração por camada: OB em H4, CHoCH/BOS em H1, FVG em M15 — sempre calculado direto dos candles reais ──
+function buildLayerNarrationText(candlesByTf, direction, entry, sl, tp1){
+  const parts = [];
+
+  if(candlesByTf.D1){
+    const chochD1 = detectCHoCH(candlesByTf.D1);
+    const lastEventD1 = chochD1[chochD1.length-1];
+    if(lastEventD1){
+      parts.push('Em D1, tendência macro ' + (lastEventD1.type==='bullish'?'de alta':'de baixa') + ', última quebra de estrutura no nível ' + lastEventD1.level.toFixed(2) + '.');
+    } else {
+      parts.push('Em D1, estrutura macro ainda sem quebra recente relevante.');
+    }
+  }
+
+  if(candlesByTf.H4){
+    const obH4 = detectOrderBlock(candlesByTf.H4, 3);
+    const lastObH4 = obH4[obH4.length-1];
+    if(lastObH4){
+      parts.push('Em H4, order block ' + (lastObH4.type==='bullish'?'de alta':'de baixa') + ' identificado entre ' + lastObH4.bottom.toFixed(2) + ' e ' + lastObH4.top.toFixed(2) + '.');
+    } else {
+      parts.push('Em H4, sem order block relevante no momento.');
+    }
+  }
+
+  if(candlesByTf.H1){
+    const chochH1 = detectCHoCH(candlesByTf.H1);
+    const lastEventH1 = chochH1[chochH1.length-1];
+    if(lastEventH1){
+      parts.push('Em H1, ' + lastEventH1.label + ' ' + (lastEventH1.type==='bullish'?'de alta':'de baixa') + ' no nível ' + lastEventH1.level.toFixed(2) + '.');
+    } else {
+      parts.push('Em H1, estrutura ainda sem quebra clara, a aguardar confirmação.');
+    }
+  }
+
+  if(candlesByTf.M15){
+    const fvgM15 = detectFVG(candlesByTf.M15, 0.2);
+    const lastFvgM15 = fvgM15[fvgM15.length-1];
+    if(lastFvgM15){
+      parts.push('Em quinze minutos, fair value gap ' + (lastFvgM15.type==='bullish'?'de alta':'de baixa') + ' aberto entre ' + lastFvgM15.bottom.toFixed(2) + ' e ' + lastFvgM15.top.toFixed(2) + '.');
+    } else {
+      parts.push('Em quinze minutos, sem gap aberto relevante.');
+    }
+  }
+
+  if(entry && direction && direction !== 'NEUTRO'){
+    parts.push('Entrada em ' + entry + ', proteção do stop em ' + (sl||'--') + ', alvo de take profit em ' + (tp1||'--') + '.');
+  } else {
+    parts.push('Ainda sem confluência suficiente pra entrada — a aguardar melhor momento.');
+  }
+
+  return parts.join(' ');
+}
+
+// ── deteção de invalidação: compara o setup deste ciclo com o do ciclo anterior (só faz sentido no modo automático) ──
+function checkSetupInvalidation(targetPair, direction, entry, score){
+  const session = liveSessions[targetPair];
+  const prev = session ? session.lastSetup : null;
+  const isValidNow = direction && direction !== 'NEUTRO' && score >= 60; // 60 = corte mínimo "M15 confirmação"
+  let invalidatedMsg = null;
+
+  if(prev && prev.valid && !isValidNow){
+    invalidatedMsg = '⚠️ Setup anterior de ' + targetPair.replace('USD','') + ' (' + prev.direction + ' em ' + prev.entry + ') foi invalidado.';
+  } else if(prev && prev.valid && isValidNow && prev.direction !== direction){
+    invalidatedMsg = '⚠️ Setup de ' + targetPair.replace('USD','') + ' mudou de ' + prev.direction + ' pra ' + direction + ' — o anterior foi invalidado.';
+  }
+
+  if(session){
+    session.lastSetup = { valid: isValidNow, direction, entry, score };
+  }
+  return invalidatedMsg;
+}
+
+// ── narração por voz (Web Speech API, gratuita, sem custo de IA extra) ──
+function speakNarration(text){
+  const voiceOn = document.getElementById('liveVoiceToggle');
+  if(!voiceOn || !voiceOn.checked) return;
+  if(!('speechSynthesis' in window)) return;
+  try{
+    window.speechSynthesis.cancel();
+    // SEM corte de tamanho — lê o raciocínio inteiro, nada fica de fora.
+    // (browsers lidam bem com utterances longas; só limpa formatação markdown)
+    const clean = text.replace(/\*\*/g,'').replace(/[#_`]/g,'');
+    const utter = new SpeechSynthesisUtterance(clean);
+    utter.lang = 'pt-PT';
+    utter.rate = 1.05;
+    window.speechSynthesis.speak(utter);
+  }catch(e){}
+}
+
 // ── NAV ──
 function switchTab(tab){
   ['Home','Journal','Stats'].forEach(t=>{
@@ -643,7 +984,7 @@ function selectActivePair(el, pair){
   updateUploadZone();
   loadFundingOI(pair);
   const liveLabelEl = document.getElementById('liveBtnLabel');
-  if(liveLabelEl) liveLabelEl.textContent = 'ANALISAR AO VIVO — ' + pair.replace('USD','');
+  if(liveLabelEl) liveLabelEl.textContent = '🔴 TRADE AO VIVO — ' + pair.replace('USD','');
   const spotLabelEl = document.getElementById('spotBtnLabel');
   if(spotLabelEl) spotLabelEl.textContent = 'ANALISAR SPOT (DCA) — ' + pair.replace('USD','');
 }
@@ -661,9 +1002,6 @@ function updateUploadZone(){
   } else {
     document.getElementById('uploadZoneSub').textContent = currentBatchImages.length + ' gráfico(s) carregado(s) — confere a ordem abaixo';
     document.getElementById('uploadZoneMini').classList.add('has-files');
-    // Mostra o rótulo REAL que cada imagem vai receber (D1, H4, H1, M15...)
-    // em vez de "TF1, TF2" genérico — dá pra conferir visualmente antes
-    // de adicionar à fila, evitando gráfico com timeframe errado.
     preview.innerHTML = currentBatchImages.map((img,i)=>{
       const tfLabel = TFS[i] || ('IMG'+(i+1));
       const shortName = (img.name || ('imagem ' + (i+1))).slice(0,18);
@@ -677,13 +1015,6 @@ function handleBatchFiles(input){
   const files = Array.from(input.files);
   if(!files.length) return;
 
-  // Pré-aloca o array no tamanho certo. Cada FileReader escreve no
-  // ÍNDICE ORIGINAL do arquivo (posição em que foi selecionado), NÃO na
-  // ordem de conclusão do carregamento assíncrono. Isso garante que o
-  // 1º arquivo selecionado sempre vira currentBatchImages[0] (= D1),
-  // o 2º vira [1] (= H4), etc — não importa qual imagem carrega mais
-  // rápido (arquivos maiores demoram mais e podiam embaralhar a ordem
-  // antes desta correção).
   const results = new Array(files.length).fill(null);
   let loaded = 0;
 
@@ -720,7 +1051,6 @@ function addPairToQueue(){
     return showToast('Carrega pelo menos 2 gráficos para ' + activePair.replace('USD',''));
   }
 
-  // Verificar se par já está na fila
   const existing = pairQueue.findIndex(p=>p.pair===activePair);
   if(existing >= 0){
     pairQueue[existing].images = currentBatchImages.slice();
@@ -780,7 +1110,6 @@ async function analyzeAll(){
   const loadingEl = document.getElementById('loading');
   loadingEl.classList.add('show');
 
-  // Build loading cards
   document.getElementById('loadingCards').innerHTML = pairQueue.map(p=>`
     <div class="loading-pair-card" id="lcard_${p.pair}">
       <div class="loading-spinner" id="lspinner_${p.pair}"></div>
@@ -791,14 +1120,10 @@ async function analyzeAll(){
     </div>
   `).join('');
 
-  // Build payload — converter para formato que backend espera
-  // {pair: {TF_INDEX: {base64, mimeType}}}
   const pairsPayload = {};
   pairQueue.forEach(p=>{
     const tfsMap = {};
     p.images.forEach((img, i)=>{
-      // Usar o rótulo real do timeframe baseado na posição preservada
-      // (ver comentário em handleBatchFiles sobre a correção de ordem)
       const tfLabel = TFS[i] || ('IMG'+(i+1));
       tfsMap[tfLabel] = { base64: img.base64, mimeType: img.mimeType };
     });
@@ -808,7 +1133,6 @@ async function analyzeAll(){
   const results = [];
   const errors = [];
 
-  // Analisar par a par sequencialmente para não sobrecarregar
   for(let i = 0; i < pairQueue.length; i++){
     const p = pairQueue[i];
     const spinnerEl = document.getElementById('lspinner_'+p.pair);
@@ -951,6 +1275,7 @@ async function createAlert(pair, analysis, timeframes){
 }
 
 function resetAll(){
+  stopLiveOverlayRefresh();
   pairQueue = [];
   currentBatchImages = [];
   isAnalyzing = false;
@@ -964,10 +1289,6 @@ function resetAll(){
 }
 
 // ── ANALISAR AO VIVO (NOVO — reaproveita /analyze_multi que já existe) ──
-// Busca os candles reais da Bybit para D1/H4/H1/M15, desenha um gráfico
-// simples em canvas (candlestick), converte pra imagem e manda pro MESMO
-// endpoint /analyze_multi que a fila manual já usa. Nenhuma rota nova no
-// backend, nenhuma função existente foi alterada.
 const LIVE_TF_INTERVALS = { D1: 'D', H4: '240', H1: '60', M15: '15' };
 const LIVE_SYMBOL_MAP = {'BTCUSD':'BTCUSDT','ETHUSD':'ETHUSDT','SOLUSD':'SOLUSDT','XRPUSD':'XRPUSDT','LINKUSD':'LINKUSDT','ADAUSD':'ADAUSDT','AVAXUSD':'AVAXUSDT','BNBUSD':'BNBUSDT','AAVEUSD':'AAVEUSDT','ONDOUSD':'ONDOUSDT','INJUSD':'INJUSDT','NEARUSD':'NEARUSDT','PENDLEUSD':'PENDLEUSDT','SUIUSD':'SUIUSDT','JTOUSD':'JTOUSDT','ETHFIUSD':'ETHFIUSDT','JUPUSD':'JUPUSDT','ENAUSD':'ENAUSDT'};
 
@@ -977,11 +1298,9 @@ async function fetchLiveKlines(symbol, interval, limit){
   const d = await r.json();
   const list = d.result && d.result.list;
   if(!list || list.length < 5) throw new Error('sem candles para '+symbol);
-  // Bybit devolve mais recente -> mais antigo; inverte pra ordem cronológica
   return list.map(k=>({t:parseInt(k[0]),o:parseFloat(k[1]),h:parseFloat(k[2]),l:parseFloat(k[3]),c:parseFloat(k[4])})).reverse();
 }
 
-// ── CÁLCULO DE INDICADORES (fórmula padrão, mesma matemática da Binance) ──
 function computeRSI(closes, period){
   period = period || 14;
   const rsi = new Array(closes.length).fill(null);
@@ -1079,7 +1398,6 @@ function computeStochRSI(rsiArr, period, kSmooth, dSmooth){
   return {k: kFull, d: dFull};
 }
 
-// ── DESENHO DO GRÁFICO — preço + MAs + RSI + MACD + StochRSI (paridade total com o print da Binance) ──
 function renderLiveCandleImage(candles, pairLabel, tfLabel){
   const closes = candles.map(c=>c.c);
   const rsi = computeRSI(closes, 14);
@@ -1110,7 +1428,6 @@ function renderLiveCandleImage(candles, pairLabel, tfLabel){
   const cw = plotW / candles.length;
   const xFor = i => padL + i*cw + cw/2;
 
-  // ── PAINEL PREÇO ──
   const highs = candles.map(c=>c.h), lows = candles.map(c=>c.l);
   const maxP = Math.max(...highs), minP = Math.min(...lows);
   const range = (maxP - minP) || 1;
@@ -1135,7 +1452,6 @@ function renderLiveCandleImage(candles, pairLabel, tfLabel){
     ctx.fillRect(x - cw*0.35, bodyTop, cw*0.7, bodyH);
   });
 
-  // médias móveis sobrepostas (mesmas cores do print: MA25 verde, MA50 amarelo, MA100 laranja, MA200 roxo)
   function drawMA(values, color){
     ctx.strokeStyle = color; ctx.lineWidth = 1.3; ctx.beginPath();
     let s = false;
@@ -1173,10 +1489,6 @@ function renderLiveCandleImage(candles, pairLabel, tfLabel){
   const last = candles[candles.length-1];
   ctx.fillText(pairLabel+' · '+tfLabel+' · $'+last.c.toLocaleString('en-US',{maximumFractionDigits:2}), padL, 20);
 
-  // Carimbo real de data/hora (UTC) — o navegador sabe a hora certa,
-  // então gravamos ela dentro da própria imagem, com destaque forte
-  // (caixa + fonte grande + alto contraste) pra IA LER o valor exato
-  // em vez de aproximar pelo candle mais próximo.
   const nowStamp = new Date();
   const stampStr = 'GERADO EM: ' + nowStamp.toISOString().replace('T',' ').slice(0,16) + ' UTC';
   ctx.font = 'bold 13px monospace';
@@ -1189,12 +1501,10 @@ function renderLiveCandleImage(candles, pairLabel, tfLabel){
   ctx.fillStyle = '#ffe58a';
   ctx.fillText(stampStr, stampBoxX + 7, 21);
 
-  // ── PAINEL RSI(14) ──
   ctx.strokeStyle = '#2a2a3a';
   ctx.beginPath(); ctx.moveTo(padL, rsiTop); ctx.lineTo(W-padR, rsiTop); ctx.stroke();
   ctx.beginPath(); ctx.moveTo(padL, rsiTop+rsiH); ctx.lineTo(W-padR, rsiTop+rsiH); ctx.stroke();
   const yForRsi = v => rsiTop + rsiH - (v/100)*rsiH;
-  // linhas guia 70/30
   ctx.strokeStyle = '#3a3a3a'; ctx.setLineDash([4,3]);
   [70,30].forEach(lvl=>{
     const yy = yForRsi(lvl);
@@ -1216,7 +1526,6 @@ function renderLiveCandleImage(candles, pairLabel, tfLabel){
   ctx.fillStyle = '#f0c040'; ctx.font = 'bold 12px monospace';
   ctx.fillText('RSI(14): ' + (lastRsi!=null ? lastRsi.toFixed(2) : 'N/A'), padL, rsiTop - 6);
 
-  // ── PAINEL MACD ──
   const macdVals = macdLine.filter(v=>v!=null).concat(signalLine.filter(v=>v!=null));
   const histVals = histogram.filter(v=>v!=null);
   const macdMax = Math.max(...macdVals, ...histVals, 0.0001);
@@ -1229,7 +1538,6 @@ function renderLiveCandleImage(candles, pairLabel, tfLabel){
   const zeroY = yForMacd(0);
   ctx.strokeStyle = '#3a3a3a';
   ctx.beginPath(); ctx.moveTo(padL, zeroY); ctx.lineTo(W-padR, zeroY); ctx.stroke();
-  // histograma
   histogram.forEach((v,i)=>{
     if(v==null) return;
     const x = xFor(i);
@@ -1239,7 +1547,6 @@ function renderLiveCandleImage(candles, pairLabel, tfLabel){
     const yBot = up ? zeroY : yForMacd(v);
     ctx.fillRect(x - cw*0.3, yTop, cw*0.6, Math.max(1, yBot - yTop));
   });
-  // linha MACD
   ctx.strokeStyle = '#58a6ff'; ctx.lineWidth = 1.5; ctx.beginPath(); started=false;
   macdLine.forEach((v,i)=>{
     if(v==null) return;
@@ -1247,7 +1554,6 @@ function renderLiveCandleImage(candles, pairLabel, tfLabel){
     if(!started){ ctx.moveTo(x,y); started=true; } else ctx.lineTo(x,y);
   });
   ctx.stroke();
-  // linha Signal
   ctx.strokeStyle = '#bc8cff'; ctx.lineWidth = 1.5; ctx.beginPath(); started=false;
   signalLine.forEach((v,i)=>{
     if(v==null) return;
@@ -1263,7 +1569,6 @@ function renderLiveCandleImage(candles, pairLabel, tfLabel){
   ctx.fillStyle = '#bc8cff';
   ctx.fillText('  Signal: ' + (lastSignal!=null ? lastSignal.toFixed(2) : 'N/A'), padL + 140, macdTop - 6);
 
-  // ── PAINEL STOCHRSI ──
   ctx.strokeStyle = '#2a2a3a';
   ctx.beginPath(); ctx.moveTo(padL, stochTop); ctx.lineTo(W-padR, stochTop); ctx.stroke();
   ctx.beginPath(); ctx.moveTo(padL, stochTop+stochH); ctx.lineTo(W-padR, stochTop+stochH); ctx.stroke();
@@ -1302,7 +1607,6 @@ function renderLiveCandleImage(candles, pairLabel, tfLabel){
   return canvas.toDataURL('image/png').split(',')[1];
 }
 
-// ── FUNDING + OI PARA A ANÁLISE AO VIVO (dados reais, mesma fonte do widget) ──
 async function fetchLiveFundingOI(symbol){
   const tickerRes = await fetch('https://api.bybit.com/v5/market/tickers?category=linear&symbol='+symbol);
   const tickerData = await tickerRes.json();
@@ -1368,9 +1672,6 @@ function renderFundingOIImage(pairLabel, fo){
   ctx.font = 'bold 13px monospace'; ctx.fillStyle = '#f0c040';
   ctx.fillText('Leitura Funding + OI por Timeframe (crowding de alavancagem):', padL, 178);
 
-  // Reaproveita a MESMA função fundingOiSignal que já classifica o sinal
-  // no widget do Home (LIMPANDO/LOTANDO/COBRINDO/PRESSÃO/AGUARDA) — não
-  // duplica lógica, só aplica pra cada TF dentro desta imagem.
   const rows = [
     ['D1', fo.oiD1, fo.avg24h != null ? fo.avg24h : fo.currentFunding],
     ['H4', fo.oiH4, fo.currentFunding],
@@ -1409,12 +1710,6 @@ function renderFundingOIImage(pairLabel, fo){
   return canvas.toDataURL('image/png').split(',')[1];
 }
 
-// ── DETECÇÃO DE CHoCH (reversão) + BOS (continuação) — ATUALIZADA ──
-// Acha swing highs/lows reais (pivôs locais), acompanha a sequência de
-// topos/fundos pra saber se a tendência é de alta ou baixa, e marca:
-// - CHoCH: rompimento na direção OPOSTA à tendência vigente (reversão)
-// - BOS: rompimento na MESMA direção da tendência vigente (continuação)
-// Filtro de distância mínima entre eventos evita marcadores colados/redundantes.
 function detectCHoCH(candles, lookback, minEventDistance){
   lookback = lookback || 5;
   minEventDistance = minEventDistance || 8;
@@ -1469,12 +1764,6 @@ function detectCHoCH(candles, lookback, minEventDistance){
   return events;
 }
 
-// ── GRÁFICO ANOTADO (NOVO) — desenha Entrada/Stop/TP como linhas no candle real ──
-// Só visual, matemática pura (linha na altura do valor) — não depende de IA
-// pra "apontar" a zona, então nunca erra a posição.
-// Parâmetros fvgZones/obZones/chochEvents são OPCIONAIS (zonas ICT reais,
-// calculadas por detectFVG/detectOrderBlock/detectCHoCH) — se não forem
-// passados, o gráfico funciona exatamente como antes (compatibilidade total).
 function renderAnnotatedChart(candles, pairLabel, tfLabel, entry, sl, tp1, tp2, fvgZones, obZones, chochEvents){
   fvgZones = fvgZones || []; obZones = obZones || []; chochEvents = chochEvents || [];
   const W = 900, H = 420, padL = 64, padR = 90, padT = 34, padB = 20;
@@ -1502,13 +1791,12 @@ function renderAnnotatedChart(candles, pairLabel, tfLabel, entry, sl, tp1, tp2, 
   const xFor = i => padL + i*cw + cw/2;
   const yFor = p => padT + (H-padT-padB) - ((p - minP) / range) * (H-padT-padB);
 
-  ctx.strokeStyle = '#2a2a3a'; ctx.lineWidth = 1; ctx.font = '10px monospace'; ctx.fillStyle = '#6e7681';
+  ctx.strokeStyle = '#2a2a3a'; ctx.lineWidth = 1;
   for(let i=0;i<=4;i++){
     const yy = padT + ((H-padT-padB)/4)*i;
     ctx.beginPath(); ctx.moveTo(padL,yy); ctx.lineTo(W-padR,yy); ctx.stroke();
   }
 
-  // ── ZONAS FVG (retângulo azul=bullish, laranja=bearish) — máx. 6 mais recentes ──
   fvgZones.slice(-6).forEach(z=>{
     const yTop = yFor(z.top), yBot = yFor(z.bottom);
     ctx.fillStyle = z.type==='bullish' ? 'rgba(88,166,255,0.14)' : 'rgba(255,152,0,0.14)';
@@ -1516,7 +1804,6 @@ function renderAnnotatedChart(candles, pairLabel, tfLabel, entry, sl, tp1, tp2, 
     ctx.strokeStyle = z.type==='bullish' ? 'rgba(88,166,255,0.4)' : 'rgba(255,152,0,0.4)';
     ctx.setLineDash([4,4]); ctx.strokeRect(padL, yTop, plotW, yBot-yTop); ctx.setLineDash([]);
   });
-  // ── ZONAS ORDER BLOCK (retângulo roxo) — máx. 6 mais recentes ──
   obZones.slice(-6).forEach(z=>{
     const yTop = yFor(Math.max(z.top,z.bottom)), yBot = yFor(Math.min(z.top,z.bottom));
     ctx.fillStyle = 'rgba(188,140,255,0.14)';
@@ -1536,7 +1823,6 @@ function renderAnnotatedChart(candles, pairLabel, tfLabel, entry, sl, tp1, tp2, 
     ctx.fillRect(x - cw*0.35, bodyTop, cw*0.7, bodyH);
   });
 
-  // ── marcadores de CHoCH (reversão, cor forte) e BOS (continuação, cor suave) ──
   chochEvents.slice(-6).forEach(ev=>{
     const x = xFor(ev.index);
     const isChoch = ev.label === 'CHoCH';
@@ -1549,7 +1835,6 @@ function renderAnnotatedChart(candles, pairLabel, tfLabel, entry, sl, tp1, tp2, 
     ctx.fillText(ev.label || 'CHoCH', x-16, padT-4);
   });
 
-  // linhas horizontais de Entrada/Stop/TP
   levels.forEach(l=>{
     const y = yFor(l.value);
     ctx.strokeStyle = l.color; ctx.lineWidth = 1.3; ctx.setLineDash([6,4]);
@@ -1565,32 +1850,18 @@ function renderAnnotatedChart(candles, pairLabel, tfLabel, entry, sl, tp1, tp2, 
   return canvas.toDataURL('image/png').split(',')[1];
 }
 
-// ══════════════════════════════════════════════════════════════════
-// ANALISAR SPOT (DCA) — NOVO
-// Reaproveita fetchLiveKlines / computeRSI / computeEMA / computeMACD /
-// computeSMA / computeStochRSI já existentes. Só adiciona o que falta:
-// indicadores de acumulação (BB, BMSB, Ichimoku, OBV, Golden/Death Cross,
-// %ATH), detecção de FVG/OB/fundo duplo-triplo (sem CHoCH) e o PM real
-// do spot_holdings. Timeframes: Diário + Semanal + Mensal.
-// Nenhuma função ICT existente foi alterada.
-// ══════════════════════════════════════════════════════════════════
-
-// PM real por ativo, consolidado das contas (Bybit + MEXC Nete + MEXC Júnior).
-// Nunca inventado — vem do histórico de compra confirmado ou herdado.
-// bucket: 'core' (reforça, não vende por impulso) ou 'tactical'.
-// Editar aqui manualmente sempre que uma posição mudar (nova compra/venda).
 const SPOT_HOLDINGS = {
-  'BTCUSD':  { pm: 55745.39, qty: 0.07858243, bucket: 'core' }, // PM ponderado Bybit ($30.905,69/0,02451243) + MEXC Nete ($67.006,38/0,05407). MEXC Júnior tem +0,02462137 BTC sem PM confirmado, não entra na média.
+  'BTCUSD':  { pm: 55745.39, qty: 0.07858243, bucket: 'core' },
   'ONDOUSD': { pm: 0.68193, qty: 372.83, bucket: 'core' },
-  'INJUSD':  { pm: 10.41,   qty: 212.764001, bucket: 'core' }, // MEXC Júnior, PM real Binance 01/07
-  'NEARUSD': { pm: 3.00,    qty: 66.1555, bucket: 'core' },     // MEXC Nete (há também lote na Bybit, PM $3.97)
+  'INJUSD':  { pm: 10.41,   qty: 212.764001, bucket: 'core' },
+  'NEARUSD': { pm: 3.00,    qty: 66.1555, bucket: 'core' },
   'PENDLEUSD': { pm: 1.316, qty: 85.15166875, bucket: 'core' },
-  'SUIUSD':  { pm: 3.45,    qty: 57.4845, bucket: 'core' },     // MEXC Nete (há também lote na Bybit, PM $3.18)
+  'SUIUSD':  { pm: 3.45,    qty: 57.4845, bucket: 'core' },
   'JTOUSD':  { pm: 2.07,    qty: 34.34846775, bucket: 'core' },
   'ETHFIUSD':{ pm: 1.00,    qty: 165.35795132, bucket: 'core' },
   'JUPUSD':  { pm: 0.59,    qty: 100.956049, bucket: 'core' },
   'ENAUSD':  { pm: 0.27,    qty: 97.68254488, bucket: 'core' },
-  'WLDUSD':  { pm: 3.066,   qty: 59.42122265, bucket: null },   // fora de tudo, fundamento fraco
+  'WLDUSD':  { pm: 3.066,   qty: 59.42122265, bucket: null },
 };
 
 const SPOT_TF_INTERVALS = { D1: 'D', WEEK: 'W', MONTH: 'M' };
@@ -1604,7 +1875,6 @@ async function fetchSpotKlines(symbol){
   return { dailyCandles, weeklyCandles, monthlyCandles };
 }
 
-// ── Bollinger Bands: SMA(period) +/- stdDevMult desvios padrão ──
 function computeBollingerBands(candles, period, stdDevMult){
   period = period || 20; stdDevMult = stdDevMult || 2;
   const closes = candles.map(c=>c.c);
@@ -1622,7 +1892,6 @@ function computeBollingerBands(candles, period, stdDevMult){
   return { upper, middle, lower };
 }
 
-// ── Bull Market Support Band: 20W SMA + 21W EMA (só faz sentido em candles semanais) ──
 function computeBMSB(weeklyCandles){
   const closes = weeklyCandles.map(c=>c.c);
   const sma20w = computeSMA(closes, 20);
@@ -1630,7 +1899,6 @@ function computeBMSB(weeklyCandles){
   return { sma20w, ema21w };
 }
 
-// ── Ichimoku Cloud (Tenkan 9, Kijun 26, Senkou A/B) — aplicado no semanal ──
 function computeIchimoku(candles, tenkanP, kijunP, senkouBP){
   tenkanP = tenkanP || 9; kijunP = kijunP || 26; senkouBP = senkouBP || 52;
   const highs = candles.map(c=>c.h), lows = candles.map(c=>c.l);
@@ -1650,10 +1918,6 @@ function computeIchimoku(candles, tenkanP, kijunP, senkouBP){
   return { tenkan, kijun, senkouA, senkouB };
 }
 
-// ── OBV (On-Balance Volume) — soma/subtrai conforme close sobe/desce ──
-// Nota: Bybit kline público não retorna volume no formato usado aqui
-// pelas outras funções (candles só têm t,o,h,l,c); se o volume vier
-// disponível no payload bruto, plugar em candles[i].v antes de chamar.
 function computeOBV(candles){
   const obv = new Array(candles.length).fill(0);
   for(let i=1;i<candles.length;i++){
@@ -1665,7 +1929,6 @@ function computeOBV(candles){
   return obv;
 }
 
-// ── Golden Cross / Death Cross: SMA50 x SMA200 ──
 function computeGoldenDeathCross(candles){
   const closes = candles.map(c=>c.c);
   const sma50 = computeSMA(closes, 50);
@@ -1683,31 +1946,26 @@ function computeGoldenDeathCross(candles){
   return { sma50, sma200, crosses };
 }
 
-// ── % distância do ATH (dentro da série de candles buscada) ──
 function computeDistanceFromATH(candles){
   const ath = Math.max(...candles.map(c=>c.h));
   const current = candles[candles.length-1].c;
   return ((current - ath) / ath) * 100;
 }
 
-// ── Detecção de FVG (Fair Value Gap) não mitigado — padrão clássico de 3 velas ──
 function detectFVG(candles, minGapPercent){
-  minGapPercent = minGapPercent || 0; // % mínima do preço pro gap contar como FVG relevante
+  minGapPercent = minGapPercent || 0;
   const zones = [];
   for(let i=1;i<candles.length-1;i++){
     const prev = candles[i-1], next = candles[i+1];
-    // bullish FVG: low do candle seguinte > high do candle anterior
     if(next.l > prev.h){
       const gapPct = ((next.l - prev.h) / prev.h) * 100;
       if(gapPct >= minGapPercent) zones.push({ top: next.l, bottom: prev.h, type: 'bullish', index: i, mitigado: false });
     }
-    // bearish FVG: high do candle seguinte < low do candle anterior
     if(next.h < prev.l){
       const gapPct = ((prev.l - next.h) / prev.l) * 100;
       if(gapPct >= minGapPercent) zones.push({ top: prev.l, bottom: next.h, type: 'bearish', index: i, mitigado: false });
     }
   }
-  // marca como mitigado se algum candle posterior "tapou" o gap
   zones.forEach(z=>{
     for(let k=z.index+2;k<candles.length;k++){
       if(candles[k].l <= z.top && candles[k].h >= z.bottom){ z.mitigado = true; break; }
@@ -1716,9 +1974,8 @@ function detectFVG(candles, minGapPercent){
   return zones.filter(z=>!z.mitigado);
 }
 
-// ── Detecção de Order Block — última vela de contra-tendência antes de impulso ──
 function detectOrderBlock(candles, impulsePct){
-  impulsePct = impulsePct || 3; // % mínima de corpo pra considerar "impulso"
+  impulsePct = impulsePct || 3;
   const zones = [];
   for(let i=1;i<candles.length;i++){
     const move = ((candles[i].c - candles[i].o) / candles[i].o) * 100;
@@ -1726,11 +1983,9 @@ function detectOrderBlock(candles, impulsePct){
       const prev = candles[i-1];
       const prevUp = prev.c >= prev.o;
       const thisUp = candles[i].c >= candles[i].o;
-      // OB bullish: última vela de baixa antes de impulso de alta
       if(thisUp && !prevUp){
         zones.push({ top: prev.o, bottom: prev.c, type: 'bullish', index: i-1 });
       }
-      // OB bearish: última vela de alta antes de impulso de baixa
       if(!thisUp && prevUp){
         zones.push({ top: prev.c, bottom: prev.o, type: 'bearish', index: i-1 });
       }
@@ -1739,13 +1994,9 @@ function detectOrderBlock(candles, impulsePct){
   return zones;
 }
 
-// ── Fundo duplo/triplo: contagem de toques nas mínimas locais dentro de tolerância ──
-// 2-3 toques reforça o score (zona defendida repetidamente = demanda real).
-// 4+ toques vira alerta: cada teste consome liquidez, zona fica "cansada".
 function detectMultipleBottoms(candles, tolerancePercent){
   tolerancePercent = tolerancePercent || 2;
   const lows = candles.map(c=>c.l);
-  // acha mínimas locais (menor que os 2 vizinhos de cada lado)
   const localMins = [];
   for(let i=2;i<lows.length-2;i++){
     if(lows[i] <= lows[i-1] && lows[i] <= lows[i-2] && lows[i] <= lows[i+1] && lows[i] <= lows[i+2]){
@@ -1753,7 +2004,6 @@ function detectMultipleBottoms(candles, tolerancePercent){
     }
   }
   if(localMins.length === 0) return { toques: 0, nivel: null, datas: [] };
-  // agrupa mínimas locais próximas entre si (dentro da tolerância %)
   const groups = [];
   localMins.forEach(m=>{
     let placed = false;
@@ -1768,7 +2018,6 @@ function detectMultipleBottoms(candles, tolerancePercent){
     }
     if(!placed) groups.push({ nivel: m.value, pontos: [m] });
   });
-  // retorna o grupo com mais toques (zona mais relevante)
   groups.sort((a,b)=>b.pontos.length - a.pontos.length);
   const best = groups[0];
   return {
@@ -1778,7 +2027,6 @@ function detectMultipleBottoms(candles, tolerancePercent){
   };
 }
 
-// ── DESENHO DO GRÁFICO SPOT — Semanal (BMSB + Ichimoku + zonas) + Diário (BB) + RSI ──
 function renderSpotCandleImage(dailyCandles, weeklyCandles, pairLabel){
   const closesD = dailyCandles.map(c=>c.c);
   const closesW = weeklyCandles.map(c=>c.c);
@@ -1805,7 +2053,6 @@ function renderSpotCandleImage(dailyCandles, weeklyCandles, pairLabel){
   ctx.fillStyle = '#0a0a0f';
   ctx.fillRect(0,0,W,H);
 
-  // ── PAINEL SEMANAL (candles + BMSB + zonas FVG/OB + toques) ──
   const wHighs = weeklyCandles.map(c=>c.h), wLows = weeklyCandles.map(c=>c.l);
   const wMax = Math.max(...wHighs), wMin = Math.min(...wLows);
   const wRange = (wMax - wMin) || 1;
@@ -1822,7 +2069,6 @@ function renderSpotCandleImage(dailyCandles, weeklyCandles, pairLabel){
     ctx.fillText(priceAtY.toFixed(priceAtY<10?4:2), 4, yy+4);
   }
 
-  // zonas FVG (retângulo azul translúcido) — máx. 6 mais recentes
   fvgZones.slice(-6).forEach(z=>{
     const yTop = yForWeek(z.top), yBot = yForWeek(z.bottom);
     ctx.fillStyle = 'rgba(88,166,255,0.14)';
@@ -1830,7 +2076,6 @@ function renderSpotCandleImage(dailyCandles, weeklyCandles, pairLabel){
     ctx.strokeStyle = 'rgba(88,166,255,0.4)'; ctx.setLineDash([4,4]);
     ctx.strokeRect(padL, yTop, plotW, yBot-yTop); ctx.setLineDash([]);
   });
-  // zonas Order Block (retângulo roxo translúcido) — máx. 6 mais recentes
   obZones.slice(-6).forEach(z=>{
     const yTop = yForWeek(Math.max(z.top,z.bottom)), yBot = yForWeek(Math.min(z.top,z.bottom));
     ctx.fillStyle = 'rgba(188,140,255,0.14)';
@@ -1839,7 +2084,6 @@ function renderSpotCandleImage(dailyCandles, weeklyCandles, pairLabel){
     ctx.strokeRect(padL, yTop, plotW, yBot-yTop); ctx.setLineDash([]);
   });
 
-  // candles semanais
   weeklyCandles.forEach((c,i)=>{
     const x = xForW(i);
     const up = c.c >= c.o;
@@ -1851,7 +2095,6 @@ function renderSpotCandleImage(dailyCandles, weeklyCandles, pairLabel){
     ctx.fillRect(x - cwW*0.35, bodyTop, cwW*0.7, bodyH);
   });
 
-  // BMSB (linha dourada = 20W SMA, linha dourada clara = 21W EMA)
   function drawWeekLine(values, color){
     ctx.strokeStyle = color; ctx.lineWidth = 1.4; ctx.beginPath();
     let started = false;
@@ -1865,7 +2108,6 @@ function renderSpotCandleImage(dailyCandles, weeklyCandles, pairLabel){
   drawWeekLine(bmsb.sma20w, '#f0c040');
   drawWeekLine(bmsb.ema21w, '#ffe58a');
 
-  // marcação de fundo duplo/triplo (círculos verdes)
   bottoms.datas.forEach(t=>{
     const idx = weeklyCandles.findIndex(c=>c.t===t);
     if(idx<0) return;
@@ -1878,14 +2120,12 @@ function renderSpotCandleImage(dailyCandles, weeklyCandles, pairLabel){
   const lastW = weeklyCandles[weeklyCandles.length-1];
   ctx.fillText(pairLabel+' · SPOT (Semanal) · $'+lastW.c.toLocaleString('en-US',{maximumFractionDigits:2}), padL, 20);
 
-  // legenda de toques
   if(bottoms.toques >= 2){
     ctx.font = '11px monospace';
     ctx.fillStyle = bottoms.toques >= 4 ? '#e3b341' : '#3fb950';
     ctx.fillText((bottoms.toques>=4?'⚠ ':'✓ ') + bottoms.toques + ' toques na zona $'+bottoms.nivel.toFixed(bottoms.nivel<10?4:2), padL, weekTop + weekH + 16);
   }
 
-  // carimbo real de data/hora (UTC)
   const nowStamp = new Date();
   const stampStr = 'GERADO EM: ' + nowStamp.toISOString().replace('T',' ').slice(0,16) + ' UTC';
   ctx.font = 'bold 12px monospace';
@@ -1898,7 +2138,6 @@ function renderSpotCandleImage(dailyCandles, weeklyCandles, pairLabel){
   ctx.fillStyle = '#8ff0a4';
   ctx.fillText(stampStr, stampBoxX + 7, 21);
 
-  // ── PAINEL DIÁRIO (candles + Bollinger Bands) ──
   const dHighs = dailyCandles.map(c=>c.h), dLows = dailyCandles.map(c=>c.l);
   const dMax = Math.max(...dHighs), dMin = Math.min(...dLows);
   const dRange = (dMax - dMin) || 1;
@@ -1938,7 +2177,6 @@ function renderSpotCandleImage(dailyCandles, weeklyCandles, pairLabel){
   ctx.fillStyle = '#58a6ff'; ctx.font = 'bold 12px monospace';
   ctx.fillText('Diário · Bollinger Bands(20,2)', padL, dayTop - 6);
 
-  // ── PAINEL RSI (Diário e Semanal sobrepostos) ──
   ctx.strokeStyle = '#2a2a3a';
   ctx.beginPath(); ctx.moveTo(padL, rsiTop); ctx.lineTo(W-padR, rsiTop); ctx.stroke();
   ctx.beginPath(); ctx.moveTo(padL, rsiTop+rsiH); ctx.lineTo(W-padR, rsiTop+rsiH); ctx.stroke();
@@ -1973,9 +2211,6 @@ function renderSpotCandleImage(dailyCandles, weeklyCandles, pairLabel){
   return canvas.toDataURL('image/png').split(',')[1];
 }
 
-// ── GRÁFICO ANOTADO SPOT — fatias de entrada 1/2/3 + zona de saída + invalidação ──
-// Mesmo princípio do renderAnnotatedChart (ICT): linha na altura real do
-// valor, matemática pura, não depende da IA "apontar" a posição no canvas.
 function renderAnnotatedSpotChart(weeklyCandles, pairLabel, entryFatias, exitTactical, invalidacao, fvgZones, obZones, bmsb, bottoms){
   fvgZones = fvgZones || []; obZones = obZones || []; bottoms = bottoms || { toques: 0, datas: [] };
   const W = 900, H = 420, padL = 64, padR = 100, padT = 34, padB = 20;
@@ -2014,7 +2249,6 @@ function renderAnnotatedSpotChart(weeklyCandles, pairLabel, entryFatias, exitTac
     ctx.beginPath(); ctx.moveTo(padL,yy); ctx.lineTo(W-padR,yy); ctx.stroke();
   }
 
-  // ── ZONAS FVG (azul) — desenhadas ANTES dos candles, máx. 6 mais recentes ──
   fvgZones.slice(-6).forEach(z=>{
     const yTop = yFor(z.top), yBot = yFor(z.bottom);
     ctx.fillStyle = 'rgba(88,166,255,0.14)';
@@ -2022,7 +2256,6 @@ function renderAnnotatedSpotChart(weeklyCandles, pairLabel, entryFatias, exitTac
     ctx.strokeStyle = 'rgba(88,166,255,0.4)'; ctx.setLineDash([4,4]);
     ctx.strokeRect(padL, yTop, plotW, yBot-yTop); ctx.setLineDash([]);
   });
-  // ── ZONAS ORDER BLOCK (roxo) — máx. 6 mais recentes ──
   obZones.slice(-6).forEach(z=>{
     const yTop = yFor(Math.max(z.top,z.bottom)), yBot = yFor(Math.min(z.top,z.bottom));
     ctx.fillStyle = 'rgba(188,140,255,0.14)';
@@ -2042,7 +2275,6 @@ function renderAnnotatedSpotChart(weeklyCandles, pairLabel, entryFatias, exitTac
     ctx.fillRect(x - cw*0.35, bodyTop, cw*0.7, bodyH);
   });
 
-  // ── BMSB (linha dourada = 20W SMA, clara = 21W EMA) ──
   if(bmsb && bmsb.sma20w){
     function drawZoneLine(values, color){
       ctx.strokeStyle = color; ctx.lineWidth = 1.4; ctx.beginPath();
@@ -2058,7 +2290,6 @@ function renderAnnotatedSpotChart(weeklyCandles, pairLabel, entryFatias, exitTac
     if(bmsb.ema21w) drawZoneLine(bmsb.ema21w, '#ffe58a');
   }
 
-  // ── fundo duplo/triplo (círculos verdes nos toques) ──
   (bottoms.datas || []).forEach(t=>{
     const idx = weeklyCandles.findIndex(c=>c.t===t);
     if(idx<0) return;
@@ -2093,7 +2324,6 @@ async function analyzeSpot(){
   try{
     const { dailyCandles, weeklyCandles, monthlyCandles } = await fetchSpotKlines(symbol);
 
-    // indicadores de confluência
     const rsiD = computeRSI(dailyCandles.map(c=>c.c), 14);
     const rsiW = computeRSI(weeklyCandles.map(c=>c.c), 14);
     const bb = computeBollingerBands(dailyCandles);
@@ -2105,14 +2335,12 @@ async function analyzeSpot(){
     const crosses = computeGoldenDeathCross(dailyCandles);
     const athDistance = computeDistanceFromATH(dailyCandles);
 
-    // camada 1 (Semanal — ONDE) e camada 2 (Diário — QUANDO)
     const fvgZonesWeekly = detectFVG(weeklyCandles, 1);
     const fvgZonesDaily = detectFVG(dailyCandles, 0.5);
     const obZonesWeekly = detectOrderBlock(weeklyCandles, 15);
     const bottomsWeekly = detectMultipleBottoms(weeklyCandles);
     const bottomsDaily = detectMultipleBottoms(dailyCandles);
 
-    // holding real (PM/qtd/bucket) — nunca inventado
     const holding = SPOT_HOLDINGS[activePair] || null;
 
     document.getElementById('spotBtnLabel').textContent = 'A desenhar gráfico Spot de ' + pairLabel + '...';
@@ -2120,9 +2348,6 @@ async function analyzeSpot(){
 
     document.getElementById('spotBtnLabel').textContent = 'A analisar ' + pairLabel + ' (Spot)...';
 
-    // payload — mesmo formato de imagens que /analyze_multi já espera,
-    // usando rótulos de timeframe próprios do Spot pra não colidir com
-    // a análise ICT (D1/H4/H1/M15) já existente.
     const imagesByTf = {
       SPOT_WEEKLY: { base64: imageBase64, mimeType: 'image/png' }
     };
@@ -2142,12 +2367,8 @@ async function analyzeSpot(){
 
     renderMultiResults(data.results, data.errors || []);
 
-    // gráfico anotado com fatias de entrada + zona de saída + invalidação,
-    // igual já é feito no ICT com renderAnnotatedChart — puramente visual.
     try{
       const r = data.results[0];
-      // Mapeamento real dos campos retornados pelo backend (app.py, SPOT_SYSTEM_PROMPT):
-      // ENTRY_FINAL=Fatia1, TP1_FINAL=Fatia2, TP2_FINAL=Fatia3, SL_FINAL=Invalidação, TP3_FINAL=Saída Tactical
       const entryFatias = [r.entry, r.tp1, r.tp2].filter(v=>v);
       if(weeklyCandles && r){
         const annotatedBase64 = renderAnnotatedSpotChart(weeklyCandles, pairLabel, entryFatias, r.tp3, r.sl, fvgZonesWeekly, obZonesWeekly, bmsb, bottomsWeekly);
@@ -2191,41 +2412,50 @@ async function analyzeSpot(){
   }
 }
 
-async function analyzeLive(){
+async function analyzeLive(targetPair, isAuto){
+  targetPair = targetPair || activePair;
+  isAuto = !!isAuto;
   const btn = document.getElementById('liveBtn');
-  const symbol = LIVE_SYMBOL_MAP[activePair] || 'BTCUSDT';
-  const pairLabel = activePair.replace('USD','');
-  btn.disabled = true;
+  const symbol = LIVE_SYMBOL_MAP[targetPair] || 'BTCUSDT';
+  const pairLabel = targetPair.replace('USD','');
+  // em modo manual desativa o botão; em modo automático deixa livre pra poder parar a sessão
+  if(!isAuto) btn.disabled = true;
   const originalLabel = document.getElementById('liveBtnLabel').textContent;
-  document.getElementById('liveBtnLabel').textContent = 'A buscar candles de ' + pairLabel + '...';
+
+  startLiveProgress(pairLabel);
 
   try{
     const tfEntries = Object.entries(LIVE_TF_INTERVALS);
     const imagesByTf = {};
+    const candlesByTf = {}; // guarda os candles de CADA TF (não só M15) pra montar a narração por camada
     let m15CandlesForChart = null;
+    let stepIdx = 0;
     for(const [tfLabel, interval] of tfEntries){
+      setLiveProgressStep(stepIdx, 'active');
       const candles = await fetchLiveKlines(symbol, interval, 200);
+      candlesByTf[tfLabel] = candles;
       if(tfLabel === 'M15') m15CandlesForChart = candles;
       const base64 = renderLiveCandleImage(candles, pairLabel, tfLabel);
       imagesByTf[tfLabel] = { base64, mimeType: 'image/png' };
+      setLiveProgressStep(stepIdx, 'done');
+      stepIdx++;
     }
 
-    // Funding + OI reais (mesma fonte do widget já existente), incluídos
-    // como uma imagem extra pra IA ler o contexto de alavancagem/crowding
-    // no momento exato da análise.
+    setLiveProgressStep(4, 'active');
     try{
-      document.getElementById('liveBtnLabel').textContent = 'A buscar funding/OI de ' + pairLabel + '...';
       const fo = await fetchLiveFundingOI(symbol);
       const foBase64 = renderFundingOIImage(pairLabel, fo);
       imagesByTf['FUNDING_OI'] = { base64: foBase64, mimeType: 'image/png' };
     }catch(e){
       console.warn('Funding/OI indisponível para esta análise ao vivo:', e.message);
     }
+    setLiveProgressStep(4, 'done');
 
-    document.getElementById('liveBtnLabel').textContent = 'A analisar ' + pairLabel + '...';
+    setLiveProgressStep(5, 'active');
+    if(!isAuto) document.getElementById('liveBtnLabel').textContent = 'A analisar ' + pairLabel + '...';
 
     const singlePayload = {};
-    singlePayload[activePair] = imagesByTf;
+    singlePayload[targetPair] = imagesByTf;
 
     const res = await fetch('/analyze_multi',{
       method:'POST',
@@ -2237,12 +2467,47 @@ async function analyzeLive(){
     if(!data.results || data.results.length === 0){
       throw new Error((data.errors && data.errors[0] && data.errors[0].error) || 'sem resultado');
     }
+    setLiveProgressStep(5, 'done');
+    setLiveProgressStep(6, 'active');
 
     renderMultiResults(data.results, data.errors || []);
+    setLiveProgressStep(6, 'done');
+    endLiveProgress();
 
-    // ── NOVO: gráfico visual com Entrada/Stop/TP + FVG/OB/CHoCH desenhados ──
-    // Puramente visual, não é enviado pra IA — só ajuda o usuário a ver
-    // onde os níveis e zonas reais caem no candle real (M15).
+    // ── análise completa já vem aberta no Trade Ao Vivo (não fica escondida atrás do "Ver Análise Completa") ──
+    const firstCardFull = document.querySelector('#resultCards .result-summary-card .rsc-full');
+    if(firstCardFull){
+      firstCardFull.classList.add('open');
+      const expandBtn = firstCardFull.previousElementSibling;
+      if(expandBtn) expandBtn.textContent = 'FECHAR ANÁLISE ↑';
+    }
+
+    // narra o resultado em voz — raciocínio completo (tudo o que a análise "viu": FVG, CHoCH, por camada)
+    const rMain = data.results[0];
+    if(rMain){
+      const layerText = buildLayerNarrationText(candlesByTf, rMain.direction, rMain.entry, rMain.sl, rMain.tp1);
+      const dirWord = rMain.direction === 'SHORT' ? 'short' : rMain.direction === 'LONG' ? 'long' : 'neutro';
+      const intro = pairLabel + ', ' + dirWord + ', score ' + rMain.score + '. ';
+      const raciocinio = (rMain.result || '').trim();
+
+      // ── se estiver em modo automático, verifica se o setup anterior foi invalidado e avisa primeiro ──
+      let invalidationPrefix = '';
+      if(isAuto){
+        const invalidatedMsg = checkSetupInvalidation(targetPair, rMain.direction, rMain.entry, rMain.score);
+        if(invalidatedMsg){
+          invalidationPrefix = invalidatedMsg + ' ';
+          showToast(invalidatedMsg);
+        }
+      }
+
+      speakNarration(invalidationPrefix + intro + layerText + ' ' + raciocinio);
+    }
+
+    // ── NOVO: só no modo automático, dispara Telegram sozinho se o score for bom ──
+    if(isAuto && rMain){
+      maybeSendAutoTelegramAlert(targetPair, rMain, rMain.timeframes);
+    }
+
     try{
       const r = data.results[0];
       if(m15CandlesForChart && r){
@@ -2261,8 +2526,13 @@ async function analyzeLive(){
             + '<div class="spot-legend-item"><span class="spot-legend-swatch" style="background:rgba(63,185,80,0.5)"></span>BOS Alta</div>'
             + '<div class="spot-legend-item"><span class="spot-legend-swatch" style="background:rgba(248,81,73,0.5)"></span>BOS Baixa</div>'
             + '</div>';
-          const imgHtml = '<div style="margin-bottom:10px;"><img src="data:image/png;base64,'+annotatedBase64+'" style="width:100%;display:block;border-radius:8px;border:1px solid var(--border);"/></div>' + legendHtml;
+          const imgId = 'liveOverlayImg_' + Date.now();
+          const imgHtml = '<div class="live-overlay-wrap" style="margin-bottom:10px;">'
+            + '<div class="live-overlay-badge"><span class="lo-dot"></span>LIVE</div>'
+            + '<img id="'+imgId+'" src="data:image/png;base64,'+annotatedBase64+'" style="width:100%;display:block;border-radius:8px;border:1px solid var(--border);"/>'
+            + '</div>' + legendHtml;
           rscBody.insertAdjacentHTML('afterbegin', imgHtml);
+          startLiveOverlayRefresh(imgId, targetPair, pairLabel, r.entry, r.sl, r.tp1, r.tp2);
         }
       }
     }catch(e){
@@ -2271,16 +2541,18 @@ async function analyzeLive(){
 
     document.getElementById('addPairSection').style.display = 'none';
     document.getElementById('queueSection').style.display = 'none';
-    showToast('✓ Análise ao vivo de ' + pairLabel + ' concluída!');
+    showToast('✓ Trade Ao Vivo — ' + pairLabel + (isAuto?' (auto)':'') + ' concluído!');
   }catch(e){
-    showToast('Erro na análise ao vivo: ' + e.message);
+    endLiveProgress();
+    showToast('Erro no Trade Ao Vivo: ' + e.message);
   }finally{
-    btn.disabled = false;
-    document.getElementById('liveBtnLabel').textContent = originalLabel;
+    if(!isAuto){
+      btn.disabled = false;
+      document.getElementById('liveBtnLabel').textContent = originalLabel;
+    }
   }
 }
 
-// ── GRÁFICO AO VIVO (NOVO — widget oficial TradingView, gratuito, atualiza sozinho) ──
 function initLiveChart(symbol){
   const container = document.getElementById('liveChartWidget');
   if(!container || typeof TradingView === 'undefined') return;
@@ -2304,7 +2576,6 @@ function initLiveChart(symbol){
 }
 setTimeout(()=>initLiveChart('BTCUSDT'), 800);
 
-// ── MARKET BIAS ──
 async function loadMarketBias(){
   const widget=document.getElementById('biasWidget');
   try{
@@ -2367,7 +2638,6 @@ function generateSparkline(change){
   return{line,area:line+' L300,36 L0,36Z'};
 }
 
-// ── FUNDING + OI ──
 function pctDelta(now,before){if(!before)return null;return((now-before)/before)*100;}
 function fundingOiSignal(fundingRate,oiDeltaPct){
   const fPos=fundingRate>0.005,fNeg=fundingRate<-0.005;
@@ -2432,7 +2702,6 @@ async function loadFundingOI(pair){
   }
 }
 
-// ── PRICE ──
 async function getPrice(pair){
   try{
     const symbolMap={'BTCUSD':'BTCUSDT','ETHUSD':'ETHUSDT','SOLUSD':'SOLUSDT','XRPUSD':'XRPUSDT','LINKUSD':'LINKUSDT','ADAUSD':'ADAUSDT','AVAXUSD':'AVAXUSDT','BNBUSD':'BNBUSDT','AAVEUSD':'AAVEUSDT','ONDOUSD':'ONDOUSDT','INJUSD':'INJUSDT','NEARUSD':'NEARUSDT','PENDLEUSD':'PENDLEUSDT','SUIUSD':'SUIUSDT','JTOUSD':'JTOUSDT','ETHFIUSD':'ETHFIUSDT','JUPUSD':'JUPUSDT','ENAUSD':'ENAUSDT'};
@@ -2463,7 +2732,6 @@ setInterval(updateServerPrices,15000);
 setTimeout(()=>loadFundingOI('BTCUSD'),1200);
 setInterval(()=>loadFundingOI(activePair),60000);
 
-// ── SINAIS ATIVOS / RECENTES (NOVO — só lê o Journal que já existe, zero custo extra de API) ──
 const SIGNALS_SYMBOL_MAP = {'BTCUSD':'BTCUSDT','ETHUSD':'ETHUSDT','SOLUSD':'SOLUSDT','XRPUSD':'XRPUSDT','LINKUSD':'LINKUSDT','ADAUSD':'ADAUSDT','AVAXUSD':'AVAXUSDT','BNBUSD':'BNBUSDT','AAVEUSD':'AAVEUSDT','ONDOUSD':'ONDOUSDT','INJUSD':'INJUSDT','NEARUSD':'NEARUSDT','PENDLEUSD':'PENDLEUSDT','SUIUSD':'SUIUSDT','JTOUSD':'JTOUSDT','ETHFIUSD':'ETHFIUSDT','JUPUSD':'JUPUSDT','ENAUSD':'ENAUSDT'};
 
 function computeLivePct(direction, entry, currentPrice){
@@ -2483,7 +2751,6 @@ async function loadSignalsPanel(){
     const ativos = trades.filter(t => t.status === 'pending');
     const recentes = trades.filter(t => t.status === 'win' || t.status === 'loss').slice(0, 5);
 
-    // ── SINAIS ATIVOS ──
     const ativosEl = document.getElementById('sinaisAtivosList');
     if(ativos.length === 0){
       ativosEl.innerHTML = '<div class="signals-empty">Nenhum sinal em aberto agora.</div>';
@@ -2514,7 +2781,6 @@ async function loadSignalsPanel(){
       ativosEl.innerHTML = cardsHtml.join('');
     }
 
-    // ── SINAIS RECENTES ──
     const recentesEl = document.getElementById('sinaisRecentesList');
     if(recentes.length === 0){
       recentesEl.innerHTML = '<div class="signals-empty">Sem sinais fechados ainda.</div>';
@@ -2543,7 +2809,6 @@ async function loadSignalsPanel(){
 setTimeout(loadSignalsPanel, 1500);
 setInterval(loadSignalsPanel, 20000);
 
-// ── JOURNAL ──
 async function loadJournal(){
   try{
     const res=await fetch('/journal');const data=await res.json();
@@ -2627,7 +2892,6 @@ async function updateTrade(id,status){
   catch(e){showToast('Erro ao atualizar');}
 }
 
-// ── STATS ──
 async function loadStats(){
   try{
     const res=await fetch('/journal/stats');const d=await res.json();
@@ -2641,7 +2905,6 @@ async function loadStats(){
   }catch(e){document.getElementById('statsContent').innerHTML='<div class="no-stats">Erro ao carregar stats</div>';}
 }
 
-// ── UTILS ──
 function showToast(msg){const t=document.getElementById('toast');t.textContent=msg;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),3000);}
 </script>
 </body>

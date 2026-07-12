@@ -486,6 +486,15 @@ body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-h
   <div id="sinaisRecentesList"><div class="signals-empty">A carregar...</div></div>
 </div>
 
+<!-- NOVO: painel de sessões ao vivo ativas — fica SEMPRE visível (mesmo
+     com um resultado na tela), pra nunca perderes o controlo de parar ── -->
+<div class="section">
+  <div class="live-sessions-card" id="liveSessionsCard" style="display:none;">
+    <div class="pair-selector-label" style="margin-bottom:6px;">🔴 SESSÕES AO VIVO ATIVAS (SERVIDOR)</div>
+    <div id="liveSessionsList"></div>
+  </div>
+</div>
+
 <div class="divider"></div>
 
 <!-- ══ MULTI PAR — NOVO FLUXO ══ -->
@@ -579,12 +588,6 @@ body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-h
   <div class="live-progress-card" id="liveProgressCard">
     <div class="live-progress-title"><span class="lp-dot"></span>IA ANALISANDO <span id="liveProgressPair">BTC</span></div>
     <div id="liveProgressSteps"></div>
-  </div>
-
-  <!-- NOVO: painel de sessões ao vivo ativas (multi-par em paralelo) -->
-  <div class="live-sessions-card" id="liveSessionsCard" style="display:none;">
-    <div class="pair-selector-label" style="margin-bottom:6px;">SESSÕES AO VIVO ATIVAS</div>
-    <div id="liveSessionsList"></div>
   </div>
 
   <!-- NOVO: botão de análise Spot/DCA — timeframes D1/Semanal/Mensal, sem CHoCH,
@@ -788,8 +791,14 @@ function toggleLiveSession(pair){
     return;
   }
   const intervalMin = parseInt(document.getElementById('liveIntervalSelect').value) || 10;
-  // ── NOVO: liga o vigiamento NO SERVIDOR (corre 24/7, mesmo com o
-  // telemóvel fechado/bloqueado) — em vez do antigo setInterval local ──
+  // ── NOVO: confirmação antes de ligar — evita ficar a gastar API sem
+  // perceberes, já que corre sozinho no servidor mesmo sem tocares no telemóvel ──
+  const confirmMsg = 'Vais ligar o Trade Ao Vivo AUTOMÁTICO em ' + pair.replace('USD','') +
+    ', a cada ' + intervalMin + 'min, 24/7 no servidor — MESMO sem abrires a app.\n\n' +
+    'Isto consome créditos de API a cada ciclo, sem parar sozinho.\n\n' +
+    'Confirmas que queres ligar?';
+  if(!window.confirm(confirmMsg)) return;
+
   fetch('/live/watch', {
     method: 'POST',
     headers: {'Content-Type':'application/json'},
@@ -801,6 +810,25 @@ function toggleLiveSession(pair){
     renderLiveSessions();
     startServerLivePolling();
   }).catch(e=>showToast('Erro ao ligar vigiamento: ' + e.message));
+}
+
+// ── NOVO: para TODOS os pares vigiados de uma vez — botão de emergência ──
+async function stopAllLiveSessions(){
+  const pairs = Object.keys(liveSessions);
+  if(pairs.length === 0) return;
+  if(!window.confirm('Parar TODOS os ' + pairs.length + ' par(es) em vigiamento automático?')) return;
+  for(const pair of pairs){
+    try{
+      await fetch('/live/unwatch', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ pair })
+      });
+    }catch(e){}
+  }
+  liveSessions = {};
+  renderLiveSessions();
+  showToast('⏹ Todos os vigiamentos foram parados');
 }
 
 function stopLiveSession(pair){
@@ -915,12 +943,16 @@ function renderLiveSessions(){
         <span class="signals-live-dot" style="background:var(--green);width:6px;height:6px;border-radius:50%;display:inline-block;"></span>
         <div>
           <div class="live-session-pair">${p.replace('USD','USDT')}</div>
-          <div class="live-session-sub">a cada ${liveSessions[p].intervalMin}min</div>
+          <div class="live-session-sub">a cada ${liveSessions[p].intervalMin}min · a correr no servidor</div>
         </div>
       </div>
       <div class="live-session-stop" onclick="stopLiveSession('${p}')">✕ parar</div>
     </div>
-  `).join('');
+  `).join('') + `
+    <div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border);">
+      <button onclick="stopAllLiveSessions()" style="width:100%;background:transparent;border:1px solid var(--red);color:var(--red);padding:9px;border-radius:8px;font-size:11px;font-weight:700;font-family:'Space Mono',monospace;cursor:pointer;letter-spacing:1px;-webkit-tap-highlight-color:transparent;">⏹ PARAR TODOS (${pairs.length})</button>
+    </div>
+  `;
 }
 
 // ── checklist de progresso ──

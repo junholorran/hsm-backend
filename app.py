@@ -6,6 +6,11 @@ import requests
 import sqlite3
 import re
 import hashlib
+import threading
+import base64
+import io
+from datetime import datetime, timezone
+from PIL import Image, ImageDraw, ImageFont
 
 app = Flask(__name__)
 client = anthropic.Anthropic(api_key=os.environ.get('ANTHROPIC_API_KEY'))
@@ -159,6 +164,25 @@ def init_db():
                     created_at INTEGER,
                     raw_text TEXT,
                     display_text TEXT
+                )
+            ''')
+            # NOVO: Trade Ao Vivo server-side — corre 24/7 no servidor,
+            # independente do telemóvel estar aberto ou não.
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS live_watch (
+                    pair TEXT PRIMARY KEY,
+                    interval_min INTEGER DEFAULT 10,
+                    enabled INTEGER DEFAULT 1,
+                    last_run INTEGER DEFAULT 0,
+                    last_direction TEXT,
+                    last_score INTEGER,
+                    last_entry TEXT,
+                    last_sl TEXT,
+                    last_tp1 TEXT,
+                    last_tp2 TEXT,
+                    last_result TEXT,
+                    last_alerted_signature TEXT,
+                    updated_at INTEGER DEFAULT 0
                 )
             ''')
             conn.commit()
@@ -876,6 +900,217 @@ def analyze_single_pair(pair, images_by_tf, category='ict', holding=None):
     return raw_text, display_text, None
 
 
+# ─── TRADE AO VIVO SERVER-SIDE (NOVO) ────────────────────────────────────
+# Tudo o que o browser fazia sozinho (buscar candles na Bybit, desenhar o
+# gráfico, chamar a análise) passa a correr aqui no servidor também, numa
+# thread de fundo — assim continua a vigiar mesmo com o telemóvel fechado
+# ou o ecrã bloqueado.
+#
+# NOTA IMPORTANTE (honestidade sobre o escopo desta 1a versão):
+# O gráfico desenhado aqui é mais simples que o do browser — mostra só
+# velas + médias móveis (MA25/50/100/200), sem os painéis extra de RSI/
+# MACD/StochRSI/Funding+OI que o JS desenha. A cascata ICT (16 camadas)
+# continua a funcionar igual, porque o prompt já pede pra IA calcular
+# esses indicadores a partir da estrutura de preço visível — só fica um
+# pouco menos "pré-mastigado" visualmente. Dá pra evoluir depois se fizer
+# falta.
+
+LIVE_SYMBOL_MAP = {
+    'BTCUSD': 'BTCUSDT', 'ETHUSD': 'ETHUSDT', 'SOLUSD': 'SOLUSDT', 'XRPUSD': 'XRPUSDT',
+    'LINKUSD': 'LINKUSDT', 'ADAUSD': 'ADAUSDT', 'AVAXUSD': 'AVAXUSDT', 'BNBUSD': 'BNBUSDT',
+    'AAVEUSD': 'AAVEUSDT', 'ONDOUSD': 'ONDOUSDT', 'INJUSD': 'INJUSDT', 'NEARUSD': 'NEARUSDT',
+    'PENDLEUSD': 'PENDLEUSDT', 'SUIUSD': 'SUIUSDT', 'JTOUSD': 'JTOUSDT', 'ETHFIUSD': 'ETHFIUSDT',
+    'JUPUSD': 'JUPUSDT', 'ENAUSD': 'ENAUSDT'
+}
+LIVE_TF_INTERVALS = {'D1': 'D', 'H4': '240', 'H1': '60', 'M15': '15'}
+AUTO_ALERT_SCORE_THRESHOLD = 75  # mesmo corte de "entrada livre" usado no resto do app
+
+
+def fetch_bybit_klines(symbol, interval, limit=200):
+    url = 'https://api.bybit.com/v5/market/kline'
+    params = {'category': 'linear', 'symbol': symbol, 'interval': interval, 'limit': limit}
+    r = requests.get(url, params=params, timeout=15)
+    data = r.json()
+    lst = (data.get('result') or {}).get('list') or []
+    if len(lst) < 5:
+        raise Exception(f'sem candles suficientes para {symbol}')
+    candles = [{
+        't': int(k[0]), 'o': float(k[1]), 'h': float(k[2]), 'l': float(k[3]), 'c': float(k[4])
+    } for k in lst]
+    candles.reverse()  # Bybit devolve mais recente -> mais antigo
+    return candles
+
+
+def compute_sma(values, period):
+    out = [None] * len(values)
+    if len(values) < period:
+        return out
+    s = sum(values[:period])
+    out[period - 1] = s / period
+    for i in range(period, len(values)):
+        s += values[i] - values[i - period]
+        out[i] = s / period
+    return out
+
+
+def render_live_chart_png_base64(candles, pair_label, tf_label):
+    """Desenha um gráfico simples (velas + MAs) e devolve base64 PNG."""
+    W, H = 900, 500
+    padL, padR, padT, padB = 60, 20, 40, 30
+    img = Image.new('RGB', (W, H), (10, 10, 15))
+    draw = ImageDraw.Draw(img)
+    try:
+        font = ImageFont.load_default()
+    except Exception:
+        font = None
+
+    closes = [c['c'] for c in candles]
+    highs = [c['h'] for c in candles]
+    lows = [c['l'] for c in candles]
+    max_p, min_p = max(highs), min(lows)
+    rng = (max_p - min_p) or 1
+    plot_w = W - padL - padR
+    plot_h = H - padT - padB
+    cw = plot_w / len(candles)
+
+    def x_for(i):
+        return padL + i * cw + cw / 2
+
+    def y_for(p):
+        return padT + plot_h - ((p - min_p) / rng) * plot_h
+
+    # grid + labels de preço
+    for i in range(5):
+        yy = padT + (plot_h / 4) * i
+        draw.line([(padL, yy), (W - padR, yy)], fill=(42, 42, 58), width=1)
+        price_at_y = max_p - (rng / 4) * i
+        draw.text((4, yy - 5), f"{price_at_y:.2f}", fill=(110, 118, 129), font=font)
+
+    # velas
+    for i, c in enumerate(candles):
+        x = x_for(i)
+        up = c['c'] >= c['o']
+        color = (63, 185, 80) if up else (248, 81, 73)
+        draw.line([(x, y_for(c['h'])), (x, y_for(c['l']))], fill=color, width=1)
+        body_top = y_for(max(c['o'], c['c']))
+        body_bot = y_for(min(c['o'], c['c']))
+        half = max(1, cw * 0.35)
+        draw.rectangle([x - half, body_top, x + half, max(body_bot, body_top + 1)], fill=color)
+
+    # médias móveis
+    ma_specs = [(25, (95, 217, 104)), (50, (227, 179, 65)), (100, (255, 152, 0)), (200, (188, 140, 255))]
+    for period, color in ma_specs:
+        ma = compute_sma(closes, period)
+        pts = [(x_for(i), y_for(v)) for i, v in enumerate(ma) if v is not None]
+        if len(pts) >= 2:
+            draw.line(pts, fill=color, width=2)
+
+    # título + carimbo de hora real (UTC) — a IA lê isto pra saber o momento exato
+    last_close = candles[-1]['c']
+    draw.text((padL, 10), f"{pair_label} · {tf_label} · ${last_close:,.2f}", fill=(240, 192, 64), font=font)
+    stamp = 'GERADO EM: ' + datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M') + ' UTC'
+    draw.text((W - padR - 220, 10), stamp, fill=(255, 229, 138), font=font)
+
+    buf = io.BytesIO()
+    img.save(buf, format='PNG')
+    return base64.b64encode(buf.getvalue()).decode('utf-8')
+
+
+def run_live_cycle(pair, interval_min):
+    """Roda 1 ciclo completo do Trade Ao Vivo pra um par, no servidor."""
+    symbol = LIVE_SYMBOL_MAP.get(pair, pair.replace('USD', 'USDT'))
+    pair_label = pair.replace('USD', '')
+
+    images_by_tf = {}
+    for tf_label, interval in LIVE_TF_INTERVALS.items():
+        candles = fetch_bybit_klines(symbol, interval, 200)
+        base64_png = render_live_chart_png_base64(candles, pair_label, tf_label)
+        images_by_tf[tf_label] = {'base64': base64_png, 'mimeType': 'image/png'}
+
+    raw_text, display_text, error = analyze_single_pair(pair, images_by_tf, category='ict')
+    if error:
+        raise Exception(error)
+
+    direction, score, sl, tps, tf_label_full, entry = extract_trade_info(raw_text, ','.join(LIVE_TF_INTERVALS.keys()))
+    tp1 = tps[0] if len(tps) > 0 else ''
+    tp2 = tps[1] if len(tps) > 1 else ''
+
+    now = int(time.time())
+    with sqlite3.connect(DB_FILE) as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            UPDATE live_watch SET last_run=?, last_direction=?, last_score=?, last_entry=?,
+            last_sl=?, last_tp1=?, last_tp2=?, last_result=?, updated_at=? WHERE pair=?
+        ''', (now, direction, score, entry, sl, tp1, tp2, display_text, now, pair))
+        conn.commit()
+
+        # também grava no journal, igual à análise normal, pra aparecer em
+        # "Sinais Ativos/Recentes" e nas Stats sem precisar de código extra
+        journal_id = f"{pair}_{int(time.time() * 1000)}"
+        cursor.execute('''
+            INSERT INTO journal (id, pair, created_at, direction, score, entry, sl, tp1, tp2, tp3, timeframes, analysis, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (journal_id, pair, now, direction, score, entry, sl, tp1, tp2,
+              tps[2] if len(tps) > 2 else '', ','.join(LIVE_TF_INTERVALS.keys()), raw_text, 'pending'))
+        conn.commit()
+
+    # Telegram automático — só se score bom e direção não-neutra, e só se
+    # for um setup diferente do último que já avisámos (evita repetir).
+    if direction and direction != 'NEUTRO' and score >= AUTO_ALERT_SCORE_THRESHOLD and entry:
+        signature = f"{direction}|{entry}"
+        with sqlite3.connect(DB_FILE) as conn:
+            cursor = conn.cursor()
+            cursor.execute('SELECT last_alerted_signature FROM live_watch WHERE pair=?', (pair,))
+            row = cursor.fetchone()
+            already = row[0] if row else None
+            if already != signature:
+                arrow = "📈" if direction == "LONG" else "📉"
+                msg = f"🔴 <b>Trade Ao Vivo (servidor) — {pair}</b>\n\n"
+                msg += f"{arrow} <b>{direction}</b> | Score {score}/100\n"
+                if entry:
+                    msg += f"📍 <b>Entrada:</b> ${entry}\n"
+                if sl:
+                    msg += f"🛑 <b>Stop:</b> ${sl}\n"
+                if tp1:
+                    msg += f"✅ <b>TP1:</b> ${tp1}\n"
+                if tp2:
+                    msg += f"✅ <b>TP2:</b> ${tp2}\n"
+                msg += f"\n💡 <i>Vigiando sozinho no servidor, a cada {interval_min}min.</i>"
+                send_telegram(msg)
+                cursor.execute('UPDATE live_watch SET last_alerted_signature=? WHERE pair=?', (signature, pair))
+                conn.commit()
+
+    return {'pair': pair, 'direction': direction, 'score': score, 'entry': entry, 'sl': sl, 'tp1': tp1, 'tp2': tp2}
+
+
+def live_scheduler_loop():
+    """Thread de fundo: corre pra sempre enquanto o servidor estiver de pé,
+    verificando a cada 30s se algum par vigiado já passou do intervalo dele."""
+    while True:
+        try:
+            with sqlite3.connect(DB_FILE) as conn:
+                cursor = conn.cursor()
+                cursor.execute('SELECT pair, interval_min, last_run FROM live_watch WHERE enabled=1')
+                watches = cursor.fetchall()
+            now = int(time.time())
+            for pair, interval_min, last_run in watches:
+                due = (now - (last_run or 0)) >= (interval_min * 60)
+                if due:
+                    try:
+                        run_live_cycle(pair, interval_min)
+                        print(f"[live] ciclo concluído: {pair}")
+                    except Exception as e:
+                        print(f"[live] erro no ciclo de {pair}: {e}")
+                        # marca last_run mesmo em erro, pra não tentar de novo
+                        # a cada 30s sem parar — espera o próximo intervalo
+                        with sqlite3.connect(DB_FILE) as conn2:
+                            conn2.execute('UPDATE live_watch SET last_run=? WHERE pair=?', (now, pair))
+                            conn2.commit()
+        except Exception as e:
+            print(f"[live] erro no scheduler: {e}")
+        time.sleep(30)
+
+
 @app.route('/')
 def index():
     return send_from_directory('.', 'index.html')
@@ -1129,3 +1364,80 @@ def journal_stats():
         })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+
+# ─── ENDPOINTS DO TRADE AO VIVO SERVER-SIDE (NOVO) ───────────────────────
+@app.route('/live/watch', methods=['POST'])
+def live_watch_start():
+    """Liga (ou atualiza) o vigiamento automático de um par no servidor."""
+    try:
+        data = request.json or {}
+        pair = data.get('pair')
+        interval_min = int(data.get('interval_min', 10))
+        if not pair:
+            return jsonify({'error': 'pair obrigatório'}), 400
+        with sqlite3.connect(DB_FILE) as conn:
+            cursor = conn.cursor()
+            cursor.execute('SELECT pair FROM live_watch WHERE pair=?', (pair,))
+            exists = cursor.fetchone()
+            if exists:
+                cursor.execute(
+                    'UPDATE live_watch SET interval_min=?, enabled=1 WHERE pair=?',
+                    (interval_min, pair)
+                )
+            else:
+                cursor.execute(
+                    'INSERT INTO live_watch (pair, interval_min, enabled, last_run) VALUES (?, ?, 1, 0)',
+                    (pair, interval_min)
+                )
+            conn.commit()
+        return jsonify({'ok': True, 'pair': pair, 'interval_min': interval_min})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/live/unwatch', methods=['POST'])
+def live_watch_stop():
+    """Desliga o vigiamento de um par (fica na tabela, só não corre mais)."""
+    try:
+        data = request.json or {}
+        pair = data.get('pair')
+        if not pair:
+            return jsonify({'error': 'pair obrigatório'}), 400
+        with sqlite3.connect(DB_FILE) as conn:
+            cursor = conn.cursor()
+            cursor.execute('UPDATE live_watch SET enabled=0 WHERE pair=?', (pair,))
+            conn.commit()
+        return jsonify({'ok': True})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/live/status', methods=['GET'])
+def live_watch_status():
+    """Devolve o estado de todos os pares vigiados (ativos ou não), com o
+    último resultado — a app usa isto pra mostrar o painel de sessões."""
+    try:
+        with sqlite3.connect(DB_FILE) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT pair, interval_min, enabled, last_run, last_direction, last_score,
+                       last_entry, last_sl, last_tp1, last_tp2, last_result, updated_at
+                FROM live_watch
+            ''')
+            rows = cursor.fetchall()
+        watches = []
+        for r in rows:
+            watches.append({
+                'pair': r[0], 'interval_min': r[1], 'enabled': bool(r[2]), 'last_run': r[3],
+                'direction': r[4], 'score': r[5], 'entry': r[6], 'sl': r[7],
+                'tp1': r[8], 'tp2': r[9], 'result': r[10], 'updated_at': r[11]
+            })
+        return jsonify({'watches': watches})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+# Arranca a thread de fundo do Trade Ao Vivo — só uma vez, quando o
+# servidor sobe. daemon=True: morre sozinha se o processo principal parar.
+threading.Thread(target=live_scheduler_loop, daemon=True).start()

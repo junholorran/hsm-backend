@@ -385,6 +385,45 @@ body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-h
   </div>
 </div>
 
+<!-- NOVO: botão flutuante de microfone — sempre visível, mesmo com o
+     resultado/gráfico ocupando a tela (a seção original com o checkbox
+     de voz fica escondida nesse momento) -->
+<button id="floatingMicBtn" onclick="toggleVoiceFloating()" title="Ligar/desligar narração por voz" style="position:fixed;top:14px;right:14px;z-index:150;background:var(--surface);border:1px solid var(--border);border-radius:50%;width:38px;height:38px;font-size:17px;cursor:pointer;-webkit-tap-highlight-color:transparent;">🔊</button>
+
+<!-- NOVO: seletor de TF do gráfico ao vivo — movido pra cá (fora da seção
+     que some quando o resultado aparece) pra ficar SEMPRE visível, mesmo
+     com o gráfico anotado ocupando a tela toda. -->
+<div class="section" style="margin-bottom:8px;">
+  <div class="pair-selector-label">GRÁFICO AO VIVO — TIMEFRAME</div>
+  <div class="live-tf-row" id="liveTfRow">
+    <div class="live-tf-btn" onclick="selectLiveChartTf('M1',this)">M1</div>
+    <div class="live-tf-btn" onclick="selectLiveChartTf('M5',this)">M5</div>
+    <div class="live-tf-btn active" onclick="selectLiveChartTf('M15',this)">M15</div>
+    <div class="live-tf-btn" onclick="selectLiveChartTf('M30',this)">M30</div>
+    <div class="live-tf-btn" onclick="selectLiveChartTf('H1',this)">H1</div>
+    <div class="live-tf-btn" onclick="selectLiveChartTf('H4',this)">H4</div>
+    <div class="live-tf-btn" onclick="selectLiveChartTf('D1',this)">D1</div>
+    <div class="live-tf-btn" onclick="selectLiveChartTf('W1',this)">Semanal</div>
+    <div class="live-tf-btn" onclick="selectLiveChartTf('MN',this)">Mensal</div>
+  </div>
+  <button onclick="loadAllTfZones()" id="allTfZonesBtn" style="width:100%;margin-top:8px;padding:11px;background:transparent;border:1px solid var(--purple);color:var(--purple);border-radius:10px;font-size:12px;font-weight:700;font-family:'Space Mono',monospace;cursor:pointer;letter-spacing:0.5px;-webkit-tap-highlight-color:transparent;">🔍 COMBINAR ZONAS DE TODOS OS TFS NUM GRÁFICO</button>
+  <!-- NOVO: filtros pra evitar poluir o gráfico combinado com zona demais de uma vez -->
+  <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:8px;">
+    <label style="display:flex;align-items:center;gap:4px;font-size:10px;color:var(--text2);font-family:'Space Mono',monospace;"><input type="checkbox" id="filterFvg" checked onchange="if(document.getElementById('allTfZonesContainer').innerHTML.trim()!=='') loadAllTfZones()"> FVG</label>
+    <label style="display:flex;align-items:center;gap:4px;font-size:10px;color:var(--text2);font-family:'Space Mono',monospace;"><input type="checkbox" id="filterIfvg" checked onchange="if(document.getElementById('allTfZonesContainer').innerHTML.trim()!=='') loadAllTfZones()"> iFVG</label>
+    <label style="display:flex;align-items:center;gap:4px;font-size:10px;color:var(--text2);font-family:'Space Mono',monospace;"><input type="checkbox" id="filterOb" checked onchange="if(document.getElementById('allTfZonesContainer').innerHTML.trim()!=='') loadAllTfZones()"> OB</label>
+    <label style="display:flex;align-items:center;gap:4px;font-size:10px;color:var(--text2);font-family:'Space Mono',monospace;"><input type="checkbox" id="filterBreaker" checked onchange="if(document.getElementById('allTfZonesContainer').innerHTML.trim()!=='') loadAllTfZones()"> Breaker</label>
+  </div>
+  <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:6px;">
+    <label style="display:flex;align-items:center;gap:4px;font-size:10px;color:var(--text2);font-family:'Space Mono',monospace;"><input type="checkbox" id="filterD1" checked onchange="if(document.getElementById('allTfZonesContainer').innerHTML.trim()!=='') loadAllTfZones()"> D1</label>
+    <label style="display:flex;align-items:center;gap:4px;font-size:10px;color:var(--text2);font-family:'Space Mono',monospace;"><input type="checkbox" id="filterH4" checked onchange="if(document.getElementById('allTfZonesContainer').innerHTML.trim()!=='') loadAllTfZones()"> H4</label>
+    <label style="display:flex;align-items:center;gap:4px;font-size:10px;color:var(--text2);font-family:'Space Mono',monospace;"><input type="checkbox" id="filterH1" checked onchange="if(document.getElementById('allTfZonesContainer').innerHTML.trim()!=='') loadAllTfZones()"> H1</label>
+    <label style="display:flex;align-items:center;gap:4px;font-size:10px;color:var(--text2);font-family:'Space Mono',monospace;"><input type="checkbox" id="filterM15" checked onchange="if(document.getElementById('allTfZonesContainer').innerHTML.trim()!=='') loadAllTfZones()"> M15</label>
+    <label style="display:flex;align-items:center;gap:4px;font-size:10px;color:var(--text2);font-family:'Space Mono',monospace;"><input type="checkbox" id="filterM5" checked onchange="if(document.getElementById('allTfZonesContainer').innerHTML.trim()!=='') loadAllTfZones()"> M5</label>
+  </div>
+  <div id="allTfZonesContainer"></div>
+</div>
+
 <!-- HOME -->
 <div id="screenHome" class="screen active">
 
@@ -567,22 +606,11 @@ body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-h
     </select>
   </div>
   <div class="live-mode-row">
-    <label class="live-voice-toggle"><input type="checkbox" id="liveVoiceToggle" checked onchange="if(!this.checked && 'speechSynthesis' in window) window.speechSynthesis.cancel()"> 🔊 narrar em voz</label>
+    <label class="live-voice-toggle"><input type="checkbox" id="liveVoiceToggle" checked onchange="if(!this.checked && 'speechSynthesis' in window) window.speechSynthesis.cancel(); const fmb=document.getElementById('floatingMicBtn'); if(fmb) fmb.textContent = this.checked ? '🔊' : '🔇';"> 🔊 narrar em voz</label>
   </div>
 
-  <!-- NOVO: seletor de TF do gráfico ao vivo — M1 até Mensal (só muda a visualização) -->
-  <div class="pair-selector-label" style="margin-top:6px;">GRÁFICO AO VIVO — TIMEFRAME</div>
-  <div class="live-tf-row" id="liveTfRow">
-    <div class="live-tf-btn" onclick="selectLiveChartTf('M1',this)">M1</div>
-    <div class="live-tf-btn" onclick="selectLiveChartTf('M5',this)">M5</div>
-    <div class="live-tf-btn active" onclick="selectLiveChartTf('M15',this)">M15</div>
-    <div class="live-tf-btn" onclick="selectLiveChartTf('M30',this)">M30</div>
-    <div class="live-tf-btn" onclick="selectLiveChartTf('H1',this)">H1</div>
-    <div class="live-tf-btn" onclick="selectLiveChartTf('H4',this)">H4</div>
-    <div class="live-tf-btn" onclick="selectLiveChartTf('D1',this)">D1</div>
-    <div class="live-tf-btn" onclick="selectLiveChartTf('W1',this)">Semanal</div>
-    <div class="live-tf-btn" onclick="selectLiveChartTf('MN',this)">Mensal</div>
-  </div>
+  <!-- (seletor de TF do gráfico ao vivo foi movido pra fora daqui — ver logo
+       abaixo do header — pra ficar visível mesmo com o resultado na tela) -->
 
   <!-- NOVO: checklist de progresso (estilo "IA Analisando") -->
   <div class="live-progress-card" id="liveProgressCard">
@@ -742,12 +770,135 @@ async function maybeSendAutoTelegramAlert(targetPair, r, timeframes){
   }catch(e){ /* falha pontual, tenta de novo no próximo ciclo */ }
 }
 
+// ── NOVO: busca candles de D1/H4/H1/M15/M5, calcula FVG/iFVG/OB/Breaker
+// pra CADA um, e desenha um mini-gráfico por TF, empilhados — só roda
+// quando o utilizador clica no botão (não fica gastando rede sozinho). ──
+const ALL_TF_LIST = [
+  { label: 'D1', interval: 'D' },
+  { label: 'H4', interval: '240' },
+  { label: 'H1', interval: '60' },
+  { label: 'M15', interval: '15' },
+  { label: 'M5', interval: '5' }
+];
+
+async function loadAllTfZones(){
+  const btn = document.getElementById('allTfZonesBtn');
+  const container = document.getElementById('allTfZonesContainer');
+  const symbol = LIVE_SYMBOL_MAP[activePair] || 'BTCUSDT';
+  const pairLabel = activePair.replace('USD','');
+  const baseTfLabel = liveChartTf; // NOVO: usa o TF escolhido no seletor (M1...Mensal) como base
+  const originalText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'A combinar ' + pairLabel + ' (' + baseTfLabel + ') — todos os TFs...';
+  container.innerHTML = '';
+
+  let entry = null, sl = null, tp1 = null, tp2 = null;
+  try{
+    const statusRes = await fetch('/live/status');
+    const statusData = await statusRes.json();
+    const w = (statusData.watches || []).find(x => x.pair === activePair && x.result);
+    if(w){ entry = w.entry; sl = w.sl; tp1 = w.tp1; tp2 = w.tp2; }
+  }catch(e){}
+
+  try{
+    let allFvg = [], allIfvg = [], allOb = [], allBreaker = [];
+    let baseCandles = null; // candles que viram os "candlestick" desenhados na tela
+
+    for(const tf of ALL_TF_LIST){
+      // NOVO: pula esse TF inteiro se o checkbox dele estiver desmarcado
+      const tfCheckbox = document.getElementById('filter' + tf.label);
+      if(tfCheckbox && !tfCheckbox.checked) continue;
+      try{
+        const candles = await fetchLiveKlines(symbol, tf.interval, 200);
+        if(tf.label === baseTfLabel) baseCandles = candles; // é um dos 5 TFs "core", reaproveita
+
+        if(document.getElementById('filterFvg')?.checked !== false) detectFVG(candles, 0.2).forEach(z=>{ z.tf = tf.label; allFvg.push(z); });
+        if(document.getElementById('filterIfvg')?.checked !== false) detectIFVG(candles, 0.2).forEach(z=>{ z.tf = tf.label; allIfvg.push(z); });
+        if(document.getElementById('filterOb')?.checked !== false) detectOrderBlock(candles, 3).forEach(z=>{ z.tf = tf.label; allOb.push(z); });
+        if(document.getElementById('filterBreaker')?.checked !== false) detectBreakerBlock(candles, 3).forEach(z=>{ z.tf = tf.label; allBreaker.push(z); });
+      }catch(e){
+        container.insertAdjacentHTML('beforeend', `<div class="pair-selector-label" style="margin-top:6px;color:var(--red)">${tf.label} — erro ao buscar: ${e.message}</div>`);
+      }
+    }
+
+    // se o TF base foi desmarcado no filtro, ainda assim precisa dos candles
+    // pra desenhar o gráfico — busca separado nesse caso
+    if(!baseCandles){
+      const baseCoreMatch = ALL_TF_LIST.find(t => t.label === baseTfLabel);
+      if(baseCoreMatch){
+        try{ baseCandles = await fetchLiveKlines(symbol, baseCoreMatch.interval, 200); }catch(e){}
+      }
+    }
+
+    // NOVO: se o TF escolhido no seletor NÃO é um dos 5 "core" (ex: M1, M30,
+    // Semanal, Mensal), busca esse separadamente só pra servir de candle de
+    // fundo — as zonas continuam vindo só dos 5 TFs core (D1/H4/H1/M15/M5)
+    if(!baseCandles){
+      try{
+        const interval = LIVE_CHART_TF_MAP[baseTfLabel] || '15';
+        baseCandles = await fetchLiveKlines(symbol, interval, 200);
+      }catch(e){}
+    }
+
+    if(!baseCandles){
+      container.innerHTML = '<div class="pair-selector-label" style="color:var(--red)">Não foi possível carregar o gráfico base (' + baseTfLabel + ').</div>';
+      return;
+    }
+
+    function keepRecentPerTf(zones, n){
+      const byTf = {};
+      zones.forEach(z => { (byTf[z.tf] = byTf[z.tf] || []).push(z); });
+      let out = [];
+      Object.values(byTf).forEach(arr => out.push(...arr.slice(-n)));
+      return out;
+    }
+    allFvg = keepRecentPerTf(allFvg, 1);
+    allIfvg = keepRecentPerTf(allIfvg, 1);
+    allOb = keepRecentPerTf(allOb, 1);
+    allBreaker = keepRecentPerTf(allBreaker, 1);
+
+    // CHoCH/BOS/Sweep calculados no MESMO candle que virou a base — assim
+    // sempre fazem sentido posicional, seja qual for o TF escolhido
+    const chochEventsBase = detectCHoCH(baseCandles);
+    const liquiditySweepsBase = detectLiquiditySweep(baseCandles, 5, 0.15);
+
+    const base64 = renderAnnotatedChart(baseCandles, pairLabel, baseTfLabel + ' (base) + zonas de todos os TFs', entry, sl, tp1, tp2, allFvg, allOb, chochEventsBase, allIfvg, liquiditySweepsBase, allBreaker);
+
+    if(base64){
+      const levelsNote = entry ? '' : '<div class="pair-selector-label" style="margin-bottom:6px;color:var(--muted)">⚠️ Sem setup ativo salvo pra este par ainda — gráfico sem linhas de entrada/stop/TP.</div>';
+      container.innerHTML = levelsNote + `
+        <img src="data:image/png;base64,${base64}" style="width:100%;display:block;border-radius:8px;border:1px solid var(--border);"/>
+        <div class="spot-legend" style="margin-top:10px;">
+          <div class="spot-legend-item"><span class="spot-legend-swatch" style="background:rgba(88,166,255,0.4)"></span>FVG (etiqueta mostra o TF)</div>
+          <div class="spot-legend-item"><span class="spot-legend-swatch" style="background:rgba(236,72,153,0.5)"></span>iFVG</div>
+          <div class="spot-legend-item"><span class="spot-legend-swatch" style="background:rgba(188,140,255,0.4)"></span>Order Block</div>
+          <div class="spot-legend-item"><span class="spot-legend-swatch" style="background:rgba(245,158,11,0.6)"></span>Breaker Block</div>
+          <div class="spot-legend-item"><span class="spot-legend-swatch" style="background:#f85149"></span>Sweep BSL (do TF base)</div>
+          <div class="spot-legend-item"><span class="spot-legend-swatch" style="background:#3fb950"></span>CHoCH/BOS (do TF base)</div>
+        </div>
+        <div class="pair-selector-label" style="margin-top:6px;color:var(--muted)">Candle de fundo: ${baseTfLabel} (troca no seletor de TF acima). CHoCH/BOS/Sweep são sempre calculados nesse mesmo TF. Zonas FVG/iFVG/OB/Breaker vêm de D1, H4, H1, M15 e M5 juntas, etiquetadas por origem.</div>
+      `;
+    } else {
+      container.innerHTML = '<div class="pair-selector-label" style="color:var(--red)">Não foi possível desenhar o gráfico combinado.</div>';
+    }
+  }finally{
+    btn.disabled = false;
+    btn.textContent = originalText;
+  }
+}
+
 function selectLiveChartTf(tf, el){
   liveChartTf = tf;
   document.querySelectorAll('#liveTfRow .live-tf-btn').forEach(b=>b.classList.remove('active'));
   el.classList.add('active');
   // se já há um gráfico ao vivo na tela, redesenha imediatamente no novo TF
   if(liveOverlayContext) refreshLiveOverlayNow();
+  // NOVO: se o gráfico combinado (todos os TFs) já estiver aberto, redesenha
+  // ele também usando o candle do TF que acabou de ser escolhido como base
+  const combinedContainer = document.getElementById('allTfZonesContainer');
+  if(combinedContainer && combinedContainer.innerHTML.trim() !== ''){
+    loadAllTfZones();
+  }
 }
 
 function setLiveMode(mode, el){
@@ -765,6 +916,18 @@ function setLiveMode(mode, el){
 // ── destrava a voz no iOS/Safari: precisa de um speak() disparado NA HORA do
 // clique (gesto do utilizador), senão o navegador bloqueia falas que só
 // chegam depois de esperas assíncronas (como as chamadas à Bybit demoram).
+// NOVO: sincroniza o botão flutuante com o checkbox de voz já existente
+// (mesmo estado, um só "fonte da verdade" — o checkbox continua funcionando
+// normal quando a seção dele está visível).
+function toggleVoiceFloating(){
+  const cb = document.getElementById('liveVoiceToggle');
+  const btn = document.getElementById('floatingMicBtn');
+  if(!cb) return;
+  cb.checked = !cb.checked;
+  if(btn) btn.textContent = cb.checked ? '🔊' : '🔇';
+  if(!cb.checked && 'speechSynthesis' in window) window.speechSynthesis.cancel();
+}
+
 function primeSpeechUnlock(){
   const voiceOn = document.getElementById('liveVoiceToggle');
   if(!voiceOn || !voiceOn.checked) return;
@@ -913,7 +1076,8 @@ function handleServerLiveUpdate(w, shouldNotify){
         const chochEvents = detectCHoCH(candles);
         const ifvgZones = detectIFVG(candles, 0.2);
         const liquiditySweeps = detectLiquiditySweep(candles, 5, 0.15);
-        const annotatedBase64 = renderAnnotatedChart(candles, pairLabel, 'M15', w.entry, w.sl, w.tp1, w.tp2, fvgZones, obZones, chochEvents, ifvgZones, liquiditySweeps);
+        const breakerZones = detectBreakerBlock(candles, 3);
+        const annotatedBase64 = renderAnnotatedChart(candles, pairLabel, 'M15', w.entry, w.sl, w.tp1, w.tp2, fvgZones, obZones, chochEvents, ifvgZones, liquiditySweeps, breakerZones);
         const cardEl = document.querySelector('#resultCards .result-summary-card');
         if(cardEl && annotatedBase64){
           const rscBody = cardEl.querySelector('.rsc-body');
@@ -1069,7 +1233,8 @@ async function refreshLiveOverlayNow(){
     const chochEvents = detectCHoCH(candles);
     const ifvgZones = detectIFVG(candles, 0.2);
     const liquiditySweeps = detectLiquiditySweep(candles, 5, 0.15);
-    const base64 = renderAnnotatedChart(candles, pairLabel, liveChartTf, entry, sl, tp1, tp2, fvgZones, obZones, chochEvents, ifvgZones, liquiditySweeps);
+    const breakerZones = detectBreakerBlock(candles, 3);
+    const base64 = renderAnnotatedChart(candles, pairLabel, liveChartTf, entry, sl, tp1, tp2, fvgZones, obZones, chochEvents, ifvgZones, liquiditySweeps, breakerZones);
     if(base64) imgEl.src = 'data:image/png;base64,'+base64; // se vier null, mantém o último gráfico bom na tela
   }catch(e){ /* falha pontual de rede, tenta de novo no próximo ciclo */ }
 }
@@ -2049,7 +2214,7 @@ function detectLiquiditySweep(candles, lookback, tolerancePercent){
   return events.sort((a,b)=>a.index-b.index);
 }
 
-function renderAnnotatedChart(candles, pairLabel, tfLabel, entry, sl, tp1, tp2, fvgZones, obZones, chochEvents, ifvgZones, liquiditySweeps){
+function renderAnnotatedChart(candles, pairLabel, tfLabel, entry, sl, tp1, tp2, fvgZones, obZones, chochEvents, ifvgZones, liquiditySweeps, breakerZones){
   // proteção: sem candles válidos, não há gráfico pra desenhar — evita
   // canvas "partido" (só linhas, sem velas) quando a busca de dados falhou
   // a meio ou veio vazia.
@@ -2065,7 +2230,7 @@ function renderAnnotatedChart(candles, pairLabel, tfLabel, entry, sl, tp1, tp2, 
   );
   if(hasInvalidCandle) return null;
   fvgZones = fvgZones || []; obZones = obZones || []; chochEvents = chochEvents || [];
-  ifvgZones = ifvgZones || []; liquiditySweeps = liquiditySweeps || [];
+  ifvgZones = ifvgZones || []; liquiditySweeps = liquiditySweeps || []; breakerZones = breakerZones || [];
   const W = 900, H = 420, padL = 64, padR = 90, padT = 34, padB = 20;
   const canvas = document.createElement('canvas');
   canvas.width = W; canvas.height = H;
@@ -2104,6 +2269,7 @@ function renderAnnotatedChart(candles, pairLabel, tfLabel, entry, sl, tp1, tp2, 
     ctx.fillRect(padL, yTop, plotW, yBot-yTop);
     ctx.strokeStyle = z.type==='bullish' ? 'rgba(88,166,255,0.4)' : 'rgba(255,152,0,0.4)';
     ctx.setLineDash([4,4]); ctx.strokeRect(padL, yTop, plotW, yBot-yTop); ctx.setLineDash([]);
+    if(z.tf){ ctx.fillStyle = z.type==='bullish' ? '#58a6ff' : '#ff9800'; ctx.font = 'bold 9px monospace'; ctx.fillText('FVG '+z.tf, W-padR-46, yTop+10); }
   });
   // ── NOVO: iFVG — FVG que foi mitigado e inverteu o papel (cor rosa/magenta,
   // tracejado curto pra distinguir do FVG normal) ──
@@ -2114,7 +2280,7 @@ function renderAnnotatedChart(candles, pairLabel, tfLabel, entry, sl, tp1, tp2, 
     ctx.strokeStyle = 'rgba(236,72,153,0.55)';
     ctx.setLineDash([2,2]); ctx.strokeRect(padL, yTop, plotW, yBot-yTop); ctx.setLineDash([]);
     ctx.fillStyle = 'rgba(236,72,153,0.9)'; ctx.font = 'bold 9px monospace';
-    ctx.fillText('iFVG', padL+4, yTop+10);
+    ctx.fillText('iFVG' + (z.tf ? ' '+z.tf : ''), padL+4, yTop+10);
   });
   obZones.slice(-6).forEach(z=>{
     const yTop = yFor(Math.max(z.top,z.bottom)), yBot = yFor(Math.min(z.top,z.bottom));
@@ -2122,6 +2288,18 @@ function renderAnnotatedChart(candles, pairLabel, tfLabel, entry, sl, tp1, tp2, 
     ctx.fillRect(padL, yTop, plotW, yBot-yTop);
     ctx.strokeStyle = 'rgba(188,140,255,0.4)';
     ctx.setLineDash([4,4]); ctx.strokeRect(padL, yTop, plotW, yBot-yTop); ctx.setLineDash([]);
+    if(z.tf){ ctx.fillStyle = 'rgba(188,140,255,0.95)'; ctx.font = 'bold 9px monospace'; ctx.fillText('OB '+z.tf, W-padR-40, yTop+10); }
+  });
+
+  // ── NOVO: Breaker Block — cor âmbar, tracejado longo, pra distinguir de OB/FVG/iFVG ──
+  breakerZones.slice(-6).forEach(z=>{
+    const yTop = yFor(Math.max(z.top,z.bottom)), yBot = yFor(Math.min(z.top,z.bottom));
+    ctx.fillStyle = 'rgba(245,158,11,0.16)';
+    ctx.fillRect(padL, yTop, plotW, yBot-yTop);
+    ctx.strokeStyle = 'rgba(245,158,11,0.6)';
+    ctx.setLineDash([6,3]); ctx.strokeRect(padL, yTop, plotW, yBot-yTop); ctx.setLineDash([]);
+    ctx.fillStyle = 'rgba(245,158,11,0.95)'; ctx.font = 'bold 9px monospace';
+    ctx.fillText('BREAKER' + (z.tf ? ' '+z.tf : ''), padL+4, yTop+10);
   });
 
   candles.forEach((c,i)=>{
@@ -2189,6 +2367,35 @@ function renderAnnotatedChart(candles, pairLabel, tfLabel, entry, sl, tp1, tp2, 
 // mitigado (atravessado por completo) e cujo preço, depois disso, voltou
 // a respeitar a zona na direção OPOSTA — o papel inverteu de suporte pra
 // resistência ou vice-versa. ──
+// ── NOVO: Breaker Block — Order Block que foi rompido (preço fechou além
+// da zona, na direção oposta) e depois, quando o preço voltou a tocar essa
+// zona, respeitou-a na NOVA direção (invertida). Mesma lógica do iFVG, só
+// que aplicada a Order Blocks em vez de FVGs. ──
+function detectBreakerBlock(candles, impulsePct){
+  const obZones = detectOrderBlock(candles, impulsePct || 3);
+  const breakers = [];
+  obZones.forEach(z=>{
+    let violatedIdx = null;
+    for(let k=z.index+2;k<candles.length;k++){
+      const violated = z.type==='bullish' ? candles[k].c < z.bottom : candles[k].c > z.top;
+      if(violated){ violatedIdx = k; break; }
+    }
+    if(violatedIdx === null) return;
+    const invertedType = z.type==='bullish' ? 'bearish' : 'bullish';
+    for(let k=violatedIdx+1;k<candles.length;k++){
+      const touched = candles[k].l <= z.top && candles[k].h >= z.bottom;
+      if(touched){
+        const rejected = invertedType==='bearish' ? candles[k].c < z.bottom : candles[k].c > z.top;
+        if(rejected){
+          breakers.push({ top: z.top, bottom: z.bottom, type: invertedType, index: violatedIdx, origem: z.type });
+        }
+        break;
+      }
+    }
+  });
+  return breakers;
+}
+
 function detectIFVG(candles, minGapPercent){
   minGapPercent = minGapPercent || 0;
   const zones = [];
@@ -2893,7 +3100,8 @@ async function analyzeLive(targetPair, isAuto){
         const chochEventsM15 = detectCHoCH(m15CandlesForChart);
         const ifvgZonesM15 = detectIFVG(m15CandlesForChart, 0.2);
         const liquiditySweepsM15 = detectLiquiditySweep(m15CandlesForChart, 5, 0.15);
-        const annotatedBase64 = renderAnnotatedChart(m15CandlesForChart, pairLabel, 'M15', r.entry, r.sl, r.tp1, r.tp2, fvgZonesM15, obZonesM15, chochEventsM15, ifvgZonesM15, liquiditySweepsM15);
+        const breakerZonesM15 = detectBreakerBlock(m15CandlesForChart, 3);
+        const annotatedBase64 = renderAnnotatedChart(m15CandlesForChart, pairLabel, 'M15', r.entry, r.sl, r.tp1, r.tp2, fvgZonesM15, obZonesM15, chochEventsM15, ifvgZonesM15, liquiditySweepsM15, breakerZonesM15);
         const cardEl = document.querySelector('#resultCards .result-summary-card');
         if(cardEl && annotatedBase64){
           const rscBody = cardEl.querySelector('.rsc-body');

@@ -567,7 +567,7 @@ body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-h
     </select>
   </div>
   <div class="live-mode-row">
-    <label class="live-voice-toggle"><input type="checkbox" id="liveVoiceToggle" checked> 🔊 narrar em voz</label>
+    <label class="live-voice-toggle"><input type="checkbox" id="liveVoiceToggle" checked onchange="if(!this.checked && 'speechSynthesis' in window) window.speechSynthesis.cancel()"> 🔊 narrar em voz</label>
   </div>
 
   <!-- NOVO: seletor de TF do gráfico ao vivo — M1 até Mensal (só muda a visualização) -->
@@ -961,11 +961,41 @@ setTimeout(async ()=>{
     if(activeWatches.length > 0){
       activeWatches.forEach(w => { liveSessions[w.pair] = { intervalMin: w.interval_min }; });
       renderLiveSessions();
+
+      // NOVO: ao reabrir a app, o activePair sempre volta pro padrão (BTCUSD),
+      // então o gráfico/análise não aparecia se você estava vigiando outro
+      // par. Aqui: se só tem 1 par vigiado, muda o activePair pra ele e já
+      // desenha o último resultado salvo na hora, sem esperar o próximo ciclo.
+      if(activeWatches.length === 1){
+        activePair = activeWatches[0].pair;
+      }
+      const watchForActivePair = activeWatches.find(w => w.pair === activePair);
+      if(watchForActivePair && watchForActivePair.result){
+        liveSeenUpdatedAt[watchForActivePair.pair] = watchForActivePair.updated_at;
+        handleServerLiveUpdate(watchForActivePair, false);
+      }
+
       startServerLivePolling();
       showToast('🔴 ' + activeWatches.length + ' par(es) já vigiando no servidor');
     }
   }catch(e){}
 }, 2000);
+
+// NOVO: busca o último resultado salvo de um par direto do servidor e
+// desenha na hora — usado quando o utilizador troca de par manualmente,
+// pra não ficar esperando o próximo ciclo automático só pra ver o que já
+// existe guardado.
+async function syncActivePairFromServer(pair){
+  try{
+    const res = await fetch('/live/status');
+    const data = await res.json();
+    const w = (data.watches || []).find(x => x.pair === pair && x.enabled && x.result);
+    if(w){
+      liveSeenUpdatedAt[pair] = w.updated_at;
+      handleServerLiveUpdate(w, false);
+    }
+  }catch(e){}
+}
 
 function renderLiveSessions(){
   const card = document.getElementById('liveSessionsCard');
@@ -1171,6 +1201,7 @@ function selectActivePair(el, pair){
   if(liveLabelEl) liveLabelEl.textContent = '🔴 TRADE AO VIVO — ' + pair.replace('USD','');
   const spotLabelEl = document.getElementById('spotBtnLabel');
   if(spotLabelEl) spotLabelEl.textContent = 'ANALISAR SPOT (DCA) — ' + pair.replace('USD','');
+  syncActivePairFromServer(pair); // NOVO: se esse par já tem análise ao vivo salva, mostra na hora
 }
 
 // ── UPDATE UPLOAD ZONE (CORRIGIDO — mostra o rótulo real de cada slot) ──

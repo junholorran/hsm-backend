@@ -21,14 +21,8 @@ DB_FILE = '/data/alerts.db'
 
 PRECOS_TICKER = {}
 
-# --- CACHE DE ANÁLISES ---
-# Se as MESMAS imagens (mesmo par) forem analisadas de novo dentro desta
-# janela, devolve o resultado salvo em vez de chamar a API de novo.
-# Isso garante 100% de consistência quando o input é idêntico — não
-# depende de o modelo "acertar" a mesma resposta duas vezes.
 CACHE_WINDOW_SECONDS = 15 * 60  # 15 minutos
 
-# --- REGEX BLINDADAS CONTRA HTML E ESPAÇOS ---
 RE_SCORE = re.compile(r'SCORE\s*OPERACIONAL\s*:[^\d]*(\d{1,3})\s*/\s*100', re.IGNORECASE)
 RE_SL = re.compile(r'Stop\s*Loss\s*[^:]*:[^\d]*\$?\s*([\d,.]+)', re.IGNORECASE)
 RE_TP = re.compile(r'Take\s*Profit\s*\d?\s*[^:]*:[^\d]*\$?\s*([\d,.]+)', re.IGNORECASE)
@@ -36,9 +30,6 @@ RE_ENTRY = re.compile(r'Entrada\s*Conservadora\s*[^:\n]{0,30}:[^\d]*\$?\s*([\d,.
 RE_STYLE = re.compile(r'(scalp|swing|intraday)', re.IGNORECASE)
 TIMEFRAMES_MAP = ["D1", "H4", "H1", "M15", "M5", "M1"]
 
-# --- NOVO: BLOCO MÁQUINA — fonte de verdade para direção/score/entry ---
-# O prompt força o modelo a terminar SEMPRE com este bloco, sem HTML, sem
-# frases soltas. Isso elimina a contagem de palavras (bug do badge).
 RE_DIRECAO_FINAL = re.compile(r'DIRECAO_FINAL\s*:\s*(LONG|SHORT|NEUTRO)', re.IGNORECASE)
 RE_SCORE_FINAL = re.compile(r'SCORE_FINAL\s*:\s*(\d{1,3})', re.IGNORECASE)
 RE_ENTRY_FINAL = re.compile(r'ENTRY_FINAL\s*:\s*\$?\s*([\d,.]+)', re.IGNORECASE)
@@ -49,13 +40,6 @@ RE_TP3_FINAL = re.compile(r'TP3_FINAL\s*:\s*\$?\s*([\d,.]+)', re.IGNORECASE)
 
 
 def extract_trade_info(analysis, timeframes_str):
-    """
-    Extrai direção/score/entry/SL/TPs da análise.
-    PRIORIDADE 1: bloco máquina estruturado (BLOCO_DADOS no fim da resposta).
-    PRIORIDADE 2 (fallback, só se bloco máquina não vier): regex antigas
-    procurando dentro do SCORE OPERACIONAL / setup mais próximo do score,
-    nunca contagem de palavras no texto inteiro.
-    """
     if not analysis:
         return "LONG", 50, "", [], "", ""
 
@@ -68,7 +52,6 @@ def extract_trade_info(analysis, timeframes_str):
     tf_components.extend(found_tfs)
     tf_label = " ".join(tf_components)
 
-    # --- Tenta o bloco máquina primeiro (fonte de verdade) ---
     dm = RE_DIRECAO_FINAL.search(analysis)
     sm = RE_SCORE_FINAL.search(analysis)
     if dm and sm:
@@ -89,16 +72,11 @@ def extract_trade_info(analysis, timeframes_str):
                 tps.append(m.group(1).replace(',', '.'))
         return direction, score, sl, tps, tf_label, entry
 
-    # --- Fallback antigo (bloco máquina não veio — não deveria acontecer,
-    #     mas protege contra resposta fora do formato) ---
     sm_old = RE_SCORE.search(analysis)
     score = int(sm_old.group(1)) if sm_old else 50
     if score > 100:
         score = 100
 
-    # Direção no fallback: olha só a janela de texto perto do SCORE OPERACIONAL
-    # e da RECOMENDACAO FINAL, nunca o texto inteiro (evita pegar "LONG" dentro
-    # de avisos tipo "LONG AQUI É SUICÍDIO").
     window = analysis
     if sm_old:
         start = max(0, sm_old.start() - 200)
@@ -166,8 +144,6 @@ def init_db():
                     display_text TEXT
                 )
             ''')
-            # NOVO: Trade Ao Vivo server-side — corre 24/7 no servidor,
-            # independente do telemóvel estar aberto ou não.
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS live_watch (
                     pair TEXT PRIMARY KEY,
@@ -361,12 +337,38 @@ ICT_SYSTEM_PROMPT = (
     "- So conta no score como divergencia se a condicao dos dois topos/"
     "fundos comparaveis estiver satisfeita.\n\n"
 
+    "CAMADA EXTRA — QUALIDADE DA LIQUIDEZ VARRIDA (pre-requisito do CHoCH/BOS):\n"
+    "Antes de contar o peso do CHoCH/MSS no score, classifica a liquidez "
+    "varrida que o antecedeu:\n"
+    "- LIQUIDEZ FORTE (conta peso cheio): equal highs/lows com 2+ toques, "
+    "swing high/low estrutural relevante (respeitado por varias velas), "
+    "maxima/minima de sessao (killzone London/NY) — mesmo se de dias "
+    "anteriores e ainda intocada, ou equivalente em Semanal/Diario.\n"
+    "- LIQUIDEZ FRACA (NAO conta peso do CHoCH/MSS): pavio isolado sem "
+    "multiplos toques, sem ser topo/fundo estrutural relevante — trata "
+    "como possivel ruido, reduz a confianca da narrativa.\n"
+    "- Se o sweep ocorreu dentro de uma killzone (London 07-10h ou NY "
+    "13-16h, horario Portugal) ou coincide com fase de Acumulacao/"
+    "Distribuicao Wyckoff no TF maior, menciona isso como reforco extra "
+    "na narrativa (nao soma pontos separados, mas eleva a confianca do "
+    "peso do CHoCH ja concedido).\n"
+    "- Se a liquidez varrida coincide dentro de uma zona OB/FVG/iFVG ja "
+    "identificada (confluencia), destaca isso explicitamente — e o "
+    "gatilho de maior probabilidade do sistema.\n"
+    "- Classifica tambem se o CHoCH/BOS foi de CONTINUACAO (a favor do "
+    "bias D1/H4) ou REVERSAO (contra o bias anterior). Setups de reversao "
+    "exigem confirmacao mais forte (liquidez forte + displacement maior) "
+    "antes de contarem peso cheio.\n\n"
+
     "CALCULO DO SCORE — DETERMINISTICO, NUNCA POR SENSACAO:\n"
     "O SCORE_FINAL (0-100) e resultado de somar o peso de cada camada que "
     "vota, nao uma impressao geral. Estrutura de pesos (soma normalizada "
     "para 100):\n"
     "- Bias D1/H4 alinhado com a direcao = +15\n"
-    "- CHoCH/MSS confirmado na direcao = +15\n"
+    "- CHoCH/MSS confirmado na direcao, PRECEDIDO de liquidez FORTE "
+    "varrida (ver camada extra acima) = +15. Se o CHoCH nao foi precedido "
+    "de liquidez forte, este peso cai para +5 e a narrativa deve deixar "
+    "isso explicito como fator de cautela\n"
     "- Premium/Discount extremo (>70% ou <30% do range) a favor = +10\n"
     "- RSI/StochRSI sobrecomprado ou sobrevendido a favor = +10\n"
     "- MACD cruzamento confirmado a favor = +10\n"
@@ -551,18 +553,6 @@ def build_dynamic_prompt(pair, valid_tfs):
     )
 
 
-# ─── PROMPT SPOT/DCA CACHEADO (NOVO) ──────────────────────────────────────
-# Prompt separado do ICT_SYSTEM_PROMPT. Mesma infraestrutura (BLOCO_DADOS,
-# regex de extracao, cache, journal) e 100% reaproveitada — so muda o QUE
-# a IA le nas imagens e COMO decide. Sem CHoCH. Timeframes Diario/Semanal.
-# Reaproveita os MESMOS nomes de campo do BLOCO_DADOS do ICT (ENTRY_FINAL,
-# SL_FINAL, TP1_FINAL, TP2_FINAL, TP3_FINAL) mas com significado proprio:
-#   ENTRY_FINAL = Fatia 1 (primeira entrada escalonada)
-#   TP1_FINAL   = Fatia 2
-#   TP2_FINAL   = Fatia 3
-#   SL_FINAL    = Invalidacao da tese (NAO e stop de execucao automatica)
-#   TP3_FINAL   = Saida Tactical (deixar vazio se so aplicavel ao bucket Core)
-#   DIRECAO_FINAL = LONG (sinal de reforcar) ou NEUTRO (aguardar, sem zona valida)
 SPOT_SYSTEM_PROMPT = (
     "Es um analista de acumulacao Spot/DCA (Dollar Cost Averaging) de "
     "elite, especializado em identificar zonas de reforco de posicao em "
@@ -780,11 +770,6 @@ def build_dynamic_spot_prompt(pair, valid_tfs, holding):
 
 
 def compute_cache_key(pair, images_by_tf):
-    """
-    Gera uma impressão digital única (hash) baseada no par + no conteúdo
-    exato de cada imagem enviada. Se as imagens forem byte-a-byte iguais
-    às de uma análise anterior, o hash sai idêntico.
-    """
     hasher = hashlib.sha256()
     hasher.update(pair.encode('utf-8'))
     for tf in sorted(images_by_tf.keys()):
@@ -796,7 +781,6 @@ def compute_cache_key(pair, images_by_tf):
 
 
 def get_cached_analysis(cache_key):
-    """Retorna (raw_text, display_text) se existir cache válido, senão None."""
     try:
         cutoff = int(time.time()) - CACHE_WINDOW_SECONDS
         with sqlite3.connect(DB_FILE) as conn:
@@ -821,7 +805,6 @@ def save_cache(cache_key, pair, raw_text, display_text):
                 'INSERT OR REPLACE INTO analysis_cache (cache_key, pair, created_at, raw_text, display_text) VALUES (?, ?, ?, ?, ?)',
                 (cache_key, pair, int(time.time()), raw_text, display_text)
             )
-            # limpa entradas velhas pra não crescer pra sempre
             cutoff = int(time.time()) - CACHE_WINDOW_SECONDS
             cursor.execute('DELETE FROM analysis_cache WHERE created_at < ?', (cutoff,))
             conn.commit()
@@ -830,22 +813,12 @@ def save_cache(cache_key, pair, raw_text, display_text):
 
 
 def analyze_single_pair(pair, images_by_tf, category='ict', holding=None):
-    """
-    Analisa um único par e retorna o resultado.
-    category='ict' (padrão, comportamento original inalterado) usa o
-    ICT_SYSTEM_PROMPT de sempre. category='spot' usa o SPOT_SYSTEM_PROMPT
-    novo, com PM/qtd/bucket reais injetados no prompt dinâmico.
-    """
     valid_tfs = [tf for tf, img in images_by_tf.items() if img and isinstance(img, dict) and img.get('base64')]
     if len(valid_tfs) < 2 and category != 'spot':
         return None, None, f"Par {pair} precisa de pelo menos 2 graficos"
     if len(valid_tfs) < 1:
         return None, None, f"Par {pair} precisa de pelo menos 1 grafico"
 
-    # --- CACHE: se essas mesmas imagens já foram analisadas recentemente,
-    # devolve o resultado salvo em vez de chamar a API de novo. Garante
-    # consistência 100% quando o input é idêntico. Inclui category no
-    # cache_key pra não misturar cache do ICT com o do Spot pro mesmo par. ---
     cache_key = compute_cache_key(pair + '_' + category, images_by_tf)
     cached = get_cached_analysis(cache_key)
     if cached:
@@ -888,8 +861,6 @@ def analyze_single_pair(pair, images_by_tf, category='ict', holding=None):
 
     raw_text = response.content[0].text
 
-    # Remove o BLOCO_DADOS do texto que vai pro usuário ler (ele é só pra
-    # extração via código — não faz sentido mostrar isso no app).
     display_text = raw_text
     if "BLOCO_DADOS_INICIO" in raw_text:
         display_text = raw_text.split("BLOCO_DADOS_INICIO")[0].rstrip()
@@ -900,21 +871,6 @@ def analyze_single_pair(pair, images_by_tf, category='ict', holding=None):
     return raw_text, display_text, None
 
 
-# ─── TRADE AO VIVO SERVER-SIDE (NOVO) ────────────────────────────────────
-# Tudo o que o browser fazia sozinho (buscar candles na Bybit, desenhar o
-# gráfico, chamar a análise) passa a correr aqui no servidor também, numa
-# thread de fundo — assim continua a vigiar mesmo com o telemóvel fechado
-# ou o ecrã bloqueado.
-#
-# NOTA IMPORTANTE (honestidade sobre o escopo desta 1a versão):
-# O gráfico desenhado aqui é mais simples que o do browser — mostra só
-# velas + médias móveis (MA25/50/100/200), sem os painéis extra de RSI/
-# MACD/StochRSI/Funding+OI que o JS desenha. A cascata ICT (16 camadas)
-# continua a funcionar igual, porque o prompt já pede pra IA calcular
-# esses indicadores a partir da estrutura de preço visível — só fica um
-# pouco menos "pré-mastigado" visualmente. Dá pra evoluir depois se fizer
-# falta.
-
 LIVE_SYMBOL_MAP = {
     'BTCUSD': 'BTCUSDT', 'ETHUSD': 'ETHUSDT', 'SOLUSD': 'SOLUSDT', 'XRPUSD': 'XRPUSDT',
     'LINKUSD': 'LINKUSDT', 'ADAUSD': 'ADAUSDT', 'AVAXUSD': 'AVAXUSDT', 'BNBUSD': 'BNBUSDT',
@@ -922,8 +878,12 @@ LIVE_SYMBOL_MAP = {
     'PENDLEUSD': 'PENDLEUSDT', 'SUIUSD': 'SUIUSDT', 'JTOUSD': 'JTOUSDT', 'ETHFIUSD': 'ETHFIUSDT',
     'JUPUSD': 'JUPUSDT', 'ENAUSD': 'ENAUSDT'
 }
-LIVE_TF_INTERVALS = {'D1': 'D', 'H4': '240', 'H1': '60', 'M15': '15'}
-AUTO_ALERT_SCORE_THRESHOLD = 75  # mesmo corte de "entrada livre" usado no resto do app
+# PATCH M5: adicionado 'M5':'5' à lista — antes só ia até M15. Isso faz o
+# run_live_cycle (que é genérico, usa for tf_label, interval in
+# LIVE_TF_INTERVALS.items()) passar a buscar também o candle M5 e mandar
+# pro Claude, habilitando gatilho de scalp fino no live automático.
+LIVE_TF_INTERVALS = {'D1': 'D', 'H4': '240', 'H1': '60', 'M15': '15', 'M5': '5'}
+AUTO_ALERT_SCORE_THRESHOLD = 75
 
 
 def fetch_bybit_klines(symbol, interval, limit=200):
@@ -934,10 +894,6 @@ def fetch_bybit_klines(symbol, interval, limit=200):
     try:
         data = r.json()
     except Exception:
-        # NOVO: diagnóstico — se a resposta não for JSON válido, regista o
-        # status HTTP e o começo do texto devolvido, pra sabermos se é a
-        # Bybit a bloquear o IP da Railway (ex: página de erro em HTML) ou
-        # outra coisa. Isto aparece nos logs como "[bybit-diag]".
         print(f"[bybit-diag] status={r.status_code} body_start={r.text[:300]!r}")
         raise Exception(f"resposta não-JSON da Bybit (status {r.status_code}) — provável bloqueio de IP server-side")
     lst = (data.get('result') or {}).get('list') or []
@@ -946,7 +902,7 @@ def fetch_bybit_klines(symbol, interval, limit=200):
     candles = [{
         't': int(k[0]), 'o': float(k[1]), 'h': float(k[2]), 'l': float(k[3]), 'c': float(k[4])
     } for k in lst]
-    candles.reverse()  # Bybit devolve mais recente -> mais antigo
+    candles.reverse()
     return candles
 
 
@@ -963,7 +919,6 @@ def compute_sma(values, period):
 
 
 def render_live_chart_png_base64(candles, pair_label, tf_label):
-    """Desenha um gráfico simples (velas + MAs) e devolve base64 PNG."""
     W, H = 900, 500
     padL, padR, padT, padB = 60, 20, 40, 30
     img = Image.new('RGB', (W, H), (10, 10, 15))
@@ -988,14 +943,12 @@ def render_live_chart_png_base64(candles, pair_label, tf_label):
     def y_for(p):
         return padT + plot_h - ((p - min_p) / rng) * plot_h
 
-    # grid + labels de preço
     for i in range(5):
         yy = padT + (plot_h / 4) * i
         draw.line([(padL, yy), (W - padR, yy)], fill=(42, 42, 58), width=1)
         price_at_y = max_p - (rng / 4) * i
         draw.text((4, yy - 5), f"{price_at_y:.2f}", fill=(110, 118, 129), font=font)
 
-    # velas
     for i, c in enumerate(candles):
         x = x_for(i)
         up = c['c'] >= c['o']
@@ -1006,7 +959,6 @@ def render_live_chart_png_base64(candles, pair_label, tf_label):
         half = max(1, cw * 0.35)
         draw.rectangle([x - half, body_top, x + half, max(body_bot, body_top + 1)], fill=color)
 
-    # médias móveis
     ma_specs = [(25, (95, 217, 104)), (50, (227, 179, 65)), (100, (255, 152, 0)), (200, (188, 140, 255))]
     for period, color in ma_specs:
         ma = compute_sma(closes, period)
@@ -1014,7 +966,6 @@ def render_live_chart_png_base64(candles, pair_label, tf_label):
         if len(pts) >= 2:
             draw.line(pts, fill=color, width=2)
 
-    # título + carimbo de hora real (UTC) — a IA lê isto pra saber o momento exato
     last_close = candles[-1]['c']
     draw.text((padL, 10), f"{pair_label} · {tf_label} · ${last_close:,.2f}", fill=(240, 192, 64), font=font)
     stamp = 'GERADO EM: ' + datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M') + ' UTC'
@@ -1026,7 +977,6 @@ def render_live_chart_png_base64(candles, pair_label, tf_label):
 
 
 def run_live_cycle(pair, interval_min):
-    """Roda 1 ciclo completo do Trade Ao Vivo pra um par, no servidor."""
     symbol = LIVE_SYMBOL_MAP.get(pair, pair.replace('USD', 'USDT'))
     pair_label = pair.replace('USD', '')
 
@@ -1053,8 +1003,6 @@ def run_live_cycle(pair, interval_min):
         ''', (now, direction, score, entry, sl, tp1, tp2, display_text, now, pair))
         conn.commit()
 
-        # também grava no journal, igual à análise normal, pra aparecer em
-        # "Sinais Ativos/Recentes" e nas Stats sem precisar de código extra
         journal_id = f"{pair}_{int(time.time() * 1000)}"
         cursor.execute('''
             INSERT INTO journal (id, pair, created_at, direction, score, entry, sl, tp1, tp2, tp3, timeframes, analysis, status)
@@ -1063,8 +1011,6 @@ def run_live_cycle(pair, interval_min):
               tps[2] if len(tps) > 2 else '', ','.join(LIVE_TF_INTERVALS.keys()), raw_text, 'pending'))
         conn.commit()
 
-    # Telegram automático — só se score bom e direção não-neutra, e só se
-    # for um setup diferente do último que já avisámos (evita repetir).
     if direction and direction != 'NEUTRO' and score >= AUTO_ALERT_SCORE_THRESHOLD and entry:
         signature = f"{direction}|{entry}"
         with sqlite3.connect(DB_FILE) as conn:
@@ -1093,8 +1039,6 @@ def run_live_cycle(pair, interval_min):
 
 
 def live_scheduler_loop():
-    """Thread de fundo: corre pra sempre enquanto o servidor estiver de pé,
-    verificando a cada 30s se algum par vigiado já passou do intervalo dele."""
     while True:
         try:
             with sqlite3.connect(DB_FILE) as conn:
@@ -1110,8 +1054,6 @@ def live_scheduler_loop():
                         print(f"[live] ciclo concluído: {pair}")
                     except Exception as e:
                         print(f"[live] erro no ciclo de {pair}: {e}")
-                        # marca last_run mesmo em erro, pra não tentar de novo
-                        # a cada 30s sem parar — espera o próximo intervalo
                         with sqlite3.connect(DB_FILE) as conn2:
                             conn2.execute('UPDATE live_watch SET last_run=? WHERE pair=?', (now, pair))
                             conn2.commit()
@@ -1138,7 +1080,6 @@ def update_prices():
         return jsonify({'error': str(e)}), 400
 
 
-# ─── ENDPOINT ANTIGO (um par) — mantido para compatibilidade ────────────────
 @app.route('/analyze', methods=['POST'])
 def analyze():
     try:
@@ -1189,19 +1130,8 @@ def analyze():
         return jsonify({'error': f"Erro na API Anthropic: {str(e)}"}), 500
 
 
-# ─── ENDPOINT NOVO (multi-par) ───────────────────────────────────────────────
 @app.route('/analyze_multi', methods=['POST'])
 def analyze_multi():
-    """
-    Recebe vários pares de uma vez.
-    Body: {
-      "pairs": {
-        "BNBUSD": { "D1": {base64, mimeType}, "H4": {...}, ... },
-        "SOLUSD": { "H4": {...}, "M15": {...} },
-        ...
-      }
-    }
-    """
     try:
         data = request.json or {}
         pairs_data = data.get('pairs', {})
@@ -1375,10 +1305,8 @@ def journal_stats():
         return jsonify({'error': str(e)}), 500
 
 
-# ─── ENDPOINTS DO TRADE AO VIVO SERVER-SIDE (NOVO) ───────────────────────
 @app.route('/live/watch', methods=['POST'])
 def live_watch_start():
-    """Liga (ou atualiza) o vigiamento automático de um par no servidor."""
     try:
         data = request.json or {}
         pair = data.get('pair')
@@ -1407,7 +1335,6 @@ def live_watch_start():
 
 @app.route('/live/unwatch', methods=['POST'])
 def live_watch_stop():
-    """Desliga o vigiamento de um par (fica na tabela, só não corre mais)."""
     try:
         data = request.json or {}
         pair = data.get('pair')
@@ -1424,8 +1351,6 @@ def live_watch_stop():
 
 @app.route('/live/status', methods=['GET'])
 def live_watch_status():
-    """Devolve o estado de todos os pares vigiados (ativos ou não), com o
-    último resultado — a app usa isto pra mostrar o painel de sessões."""
     try:
         with sqlite3.connect(DB_FILE) as conn:
             cursor = conn.cursor()
@@ -1447,6 +1372,4 @@ def live_watch_status():
         return jsonify({'error': str(e)}), 500
 
 
-# Arranca a thread de fundo do Trade Ao Vivo — só uma vez, quando o
-# servidor sobe. daemon=True: morre sozinha se o processo principal parar.
 threading.Thread(target=live_scheduler_loop, daemon=True).start()

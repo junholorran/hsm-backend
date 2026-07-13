@@ -911,7 +911,9 @@ function handleServerLiveUpdate(w, shouldNotify){
         const fvgZones = detectFVG(candles, 0.3);
         const obZones = detectOrderBlock(candles);
         const chochEvents = detectCHoCH(candles);
-        const annotatedBase64 = renderAnnotatedChart(candles, pairLabel, 'M15', w.entry, w.sl, w.tp1, w.tp2, fvgZones, obZones, chochEvents);
+        const ifvgZones = detectIFVG(candles, 0.2);
+        const liquiditySweeps = detectLiquiditySweep(candles, 5, 0.15);
+        const annotatedBase64 = renderAnnotatedChart(candles, pairLabel, 'M15', w.entry, w.sl, w.tp1, w.tp2, fvgZones, obZones, chochEvents, ifvgZones, liquiditySweeps);
         const cardEl = document.querySelector('#resultCards .result-summary-card');
         if(cardEl && annotatedBase64){
           const rscBody = cardEl.querySelector('.rsc-body');
@@ -919,9 +921,12 @@ function handleServerLiveUpdate(w, shouldNotify){
             + '<div class="spot-legend-item"><span class="spot-legend-swatch" style="background:rgba(88,166,255,0.4)"></span>FVG Bullish</div>'
             + '<div class="spot-legend-item"><span class="spot-legend-swatch" style="background:rgba(255,152,0,0.4)"></span>FVG Bearish</div>'
             + '<div class="spot-legend-item"><span class="spot-legend-swatch" style="background:rgba(188,140,255,0.4)"></span>Order Block</div>'
+            + '<div class="spot-legend-item"><span class="spot-legend-swatch" style="background:rgba(236,72,153,0.5)"></span>iFVG</div>'
             + '<div class="spot-legend-item"><span class="spot-legend-swatch" style="background:#3fb950"></span>CHoCH</div>'
             + '<div class="spot-legend-item"><span class="spot-legend-swatch" style="background:rgba(63,185,80,0.5)"></span>BOS Alta</div>'
             + '<div class="spot-legend-item"><span class="spot-legend-swatch" style="background:rgba(248,81,73,0.5)"></span>BOS Baixa</div>'
+            + '<div class="spot-legend-item"><span class="spot-legend-swatch" style="background:#f85149"></span>Sweep BSL</div>'
+            + '<div class="spot-legend-item"><span class="spot-legend-swatch" style="background:#3fb950"></span>Sweep SSL</div>'
             + '</div>';
           const imgId = 'liveOverlayImg_' + Date.now();
           const imgHtml = '<div class="live-overlay-wrap" style="margin-bottom:10px;">'
@@ -1032,7 +1037,9 @@ async function refreshLiveOverlayNow(){
     const fvgZones = detectFVG(candles, 0.3);
     const obZones = detectOrderBlock(candles);
     const chochEvents = detectCHoCH(candles);
-    const base64 = renderAnnotatedChart(candles, pairLabel, liveChartTf, entry, sl, tp1, tp2, fvgZones, obZones, chochEvents);
+    const ifvgZones = detectIFVG(candles, 0.2);
+    const liquiditySweeps = detectLiquiditySweep(candles, 5, 0.15);
+    const base64 = renderAnnotatedChart(candles, pairLabel, liveChartTf, entry, sl, tp1, tp2, fvgZones, obZones, chochEvents, ifvgZones, liquiditySweeps);
     if(base64) imgEl.src = 'data:image/png;base64,'+base64; // se vier null, mantém o último gráfico bom na tela
   }catch(e){ /* falha pontual de rede, tenta de novo no próximo ciclo */ }
 }
@@ -1951,7 +1958,67 @@ function detectCHoCH(candles, lookback, minEventDistance){
   return events;
 }
 
-function renderAnnotatedChart(candles, pairLabel, tfLabel, entry, sl, tp1, tp2, fvgZones, obZones, chochEvents){
+// ── NOVO: deteção de sweep de liquidez FORTE (2+ toques no mesmo nível,
+// depois varrido por um candle). Marca no gráfico com X vermelho (BSL) ou
+// verde (SSL). Só entra liquidez com 2+ toques — pavio isolado é ignorado. ──
+function detectLiquiditySweep(candles, lookback, tolerancePercent){
+  lookback = lookback || 5;
+  tolerancePercent = tolerancePercent || 0.15;
+  const swings = [];
+  for(let i=lookback;i<candles.length-lookback;i++){
+    let isHigh = true, isLow = true;
+    for(let j=i-lookback;j<=i+lookback;j++){
+      if(j===i) continue;
+      if(candles[j].h >= candles[i].h) isHigh = false;
+      if(candles[j].l <= candles[i].l) isLow = false;
+    }
+    if(isHigh) swings.push({ index: i, type: 'high', value: candles[i].h });
+    if(isLow) swings.push({ index: i, type: 'low', value: candles[i].l });
+  }
+  function groupLevels(list){
+    const groups = [];
+    list.forEach(s=>{
+      let placed = false;
+      for(const g of groups){
+        const pctDiff = Math.abs(s.value - g.nivel) / g.nivel * 100;
+        if(pctDiff <= tolerancePercent){
+          g.pontos.push(s);
+          g.nivel = g.pontos.reduce((sum,p)=>sum+p.value,0) / g.pontos.length;
+          placed = true;
+          break;
+        }
+      }
+      if(!placed) groups.push({ nivel: s.value, pontos: [s] });
+    });
+    return groups;
+  }
+  const highGroups = groupLevels(swings.filter(s=>s.type==='high'));
+  const lowGroups = groupLevels(swings.filter(s=>s.type==='low'));
+  const events = [];
+  highGroups.forEach(g=>{
+    if(g.pontos.length < 2) return; // só liquidez FORTE (2+ toques)
+    const lastTouchIdx = Math.max(...g.pontos.map(p=>p.index));
+    for(let k=lastTouchIdx+1;k<candles.length;k++){
+      if(candles[k].h > g.nivel){
+        events.push({ index: k, level: g.nivel, type: 'BSL', rejected: candles[k].c < g.nivel });
+        break;
+      }
+    }
+  });
+  lowGroups.forEach(g=>{
+    if(g.pontos.length < 2) return;
+    const lastTouchIdx = Math.max(...g.pontos.map(p=>p.index));
+    for(let k=lastTouchIdx+1;k<candles.length;k++){
+      if(candles[k].l < g.nivel){
+        events.push({ index: k, level: g.nivel, type: 'SSL', rejected: candles[k].c > g.nivel });
+        break;
+      }
+    }
+  });
+  return events.sort((a,b)=>a.index-b.index);
+}
+
+function renderAnnotatedChart(candles, pairLabel, tfLabel, entry, sl, tp1, tp2, fvgZones, obZones, chochEvents, ifvgZones, liquiditySweeps){
   // proteção: sem candles válidos, não há gráfico pra desenhar — evita
   // canvas "partido" (só linhas, sem velas) quando a busca de dados falhou
   // a meio ou veio vazia.
@@ -1967,6 +2034,7 @@ function renderAnnotatedChart(candles, pairLabel, tfLabel, entry, sl, tp1, tp2, 
   );
   if(hasInvalidCandle) return null;
   fvgZones = fvgZones || []; obZones = obZones || []; chochEvents = chochEvents || [];
+  ifvgZones = ifvgZones || []; liquiditySweeps = liquiditySweeps || [];
   const W = 900, H = 420, padL = 64, padR = 90, padT = 34, padB = 20;
   const canvas = document.createElement('canvas');
   canvas.width = W; canvas.height = H;
@@ -2006,6 +2074,17 @@ function renderAnnotatedChart(candles, pairLabel, tfLabel, entry, sl, tp1, tp2, 
     ctx.strokeStyle = z.type==='bullish' ? 'rgba(88,166,255,0.4)' : 'rgba(255,152,0,0.4)';
     ctx.setLineDash([4,4]); ctx.strokeRect(padL, yTop, plotW, yBot-yTop); ctx.setLineDash([]);
   });
+  // ── NOVO: iFVG — FVG que foi mitigado e inverteu o papel (cor rosa/magenta,
+  // tracejado curto pra distinguir do FVG normal) ──
+  ifvgZones.slice(-6).forEach(z=>{
+    const yTop = yFor(z.top), yBot = yFor(z.bottom);
+    ctx.fillStyle = 'rgba(236,72,153,0.16)';
+    ctx.fillRect(padL, yTop, plotW, yBot-yTop);
+    ctx.strokeStyle = 'rgba(236,72,153,0.55)';
+    ctx.setLineDash([2,2]); ctx.strokeRect(padL, yTop, plotW, yBot-yTop); ctx.setLineDash([]);
+    ctx.fillStyle = 'rgba(236,72,153,0.9)'; ctx.font = 'bold 9px monospace';
+    ctx.fillText('iFVG', padL+4, yTop+10);
+  });
   obZones.slice(-6).forEach(z=>{
     const yTop = yFor(Math.max(z.top,z.bottom)), yBot = yFor(Math.min(z.top,z.bottom));
     ctx.fillStyle = 'rgba(188,140,255,0.14)';
@@ -2023,6 +2102,18 @@ function renderAnnotatedChart(candles, pairLabel, tfLabel, entry, sl, tp1, tp2, 
     const bodyTop = yFor(Math.max(c.o,c.c));
     const bodyH = Math.max(1, Math.abs(yFor(c.o)-yFor(c.c)));
     ctx.fillRect(x - cw*0.35, bodyTop, cw*0.7, bodyH);
+  });
+
+  // ── NOVO: marca sweep de liquidez forte com um X (vermelho = BSL, verde = SSL) ──
+  liquiditySweeps.slice(-6).forEach(sw=>{
+    const x = xFor(sw.index);
+    const y = yFor(sw.level);
+    const color = sw.type === 'BSL' ? '#f85149' : '#3fb950';
+    ctx.strokeStyle = color; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(x-10, y-10); ctx.lineTo(x+10, y+10); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(x+10, y-10); ctx.lineTo(x-10, y+10); ctx.stroke();
+    ctx.fillStyle = color; ctx.font = 'bold 9px monospace';
+    ctx.fillText(sw.type, x-10, y-14);
   });
 
   chochEvents.slice(-6).forEach(ev=>{
@@ -2061,6 +2152,47 @@ function renderAnnotatedChart(candles, pairLabel, tfLabel, entry, sl, tp1, tp2, 
   ctx.fillText(pairLabel+' · '+tfLabel+' · Níveis do Setup', padL, 20);
 
   return canvas.toDataURL('image/png').split(',')[1];
+}
+
+// ── NOVO: deteção de iFVG (Inversion Fair Value Gap) — um FVG que foi
+// mitigado (atravessado por completo) e cujo preço, depois disso, voltou
+// a respeitar a zona na direção OPOSTA — o papel inverteu de suporte pra
+// resistência ou vice-versa. ──
+function detectIFVG(candles, minGapPercent){
+  minGapPercent = minGapPercent || 0;
+  const zones = [];
+  for(let i=1;i<candles.length-1;i++){
+    const prev = candles[i-1], next = candles[i+1];
+    if(next.l > prev.h){
+      const gapPct = ((next.l - prev.h) / prev.h) * 100;
+      if(gapPct >= minGapPercent) zones.push({ top: next.l, bottom: prev.h, type: 'bullish', index: i, mitigadoIdx: null });
+    }
+    if(next.h < prev.l){
+      const gapPct = ((prev.l - next.h) / prev.l) * 100;
+      if(gapPct >= minGapPercent) zones.push({ top: prev.l, bottom: next.h, type: 'bearish', index: i, mitigadoIdx: null });
+    }
+  }
+  zones.forEach(z=>{
+    for(let k=z.index+2;k<candles.length;k++){
+      const atravessouTotal = z.type==='bullish' ? candles[k].c < z.bottom : candles[k].c > z.top;
+      if(atravessouTotal){ z.mitigadoIdx = k; break; }
+    }
+  });
+  const ifvgs = [];
+  zones.filter(z=>z.mitigadoIdx!==null).forEach(z=>{
+    const invertedType = z.type==='bullish' ? 'bearish' : 'bullish';
+    for(let k=z.mitigadoIdx+1;k<candles.length;k++){
+      const tocouZona = candles[k].l <= z.top && candles[k].h >= z.bottom;
+      if(tocouZona){
+        const rejeitou = invertedType==='bearish' ? candles[k].c < z.bottom : candles[k].c > z.top;
+        if(rejeitou){
+          ifvgs.push({ top: z.top, bottom: z.bottom, type: invertedType, index: z.mitigadoIdx, origem: z.type });
+        }
+        break;
+      }
+    }
+  });
+  return ifvgs;
 }
 
 const SPOT_HOLDINGS = {
@@ -2728,7 +2860,9 @@ async function analyzeLive(targetPair, isAuto){
         const fvgZonesM15 = detectFVG(m15CandlesForChart, 0.3);
         const obZonesM15 = detectOrderBlock(m15CandlesForChart);
         const chochEventsM15 = detectCHoCH(m15CandlesForChart);
-        const annotatedBase64 = renderAnnotatedChart(m15CandlesForChart, pairLabel, 'M15', r.entry, r.sl, r.tp1, r.tp2, fvgZonesM15, obZonesM15, chochEventsM15);
+        const ifvgZonesM15 = detectIFVG(m15CandlesForChart, 0.2);
+        const liquiditySweepsM15 = detectLiquiditySweep(m15CandlesForChart, 5, 0.15);
+        const annotatedBase64 = renderAnnotatedChart(m15CandlesForChart, pairLabel, 'M15', r.entry, r.sl, r.tp1, r.tp2, fvgZonesM15, obZonesM15, chochEventsM15, ifvgZonesM15, liquiditySweepsM15);
         const cardEl = document.querySelector('#resultCards .result-summary-card');
         if(cardEl && annotatedBase64){
           const rscBody = cardEl.querySelector('.rsc-body');
@@ -2736,9 +2870,12 @@ async function analyzeLive(targetPair, isAuto){
             + '<div class="spot-legend-item"><span class="spot-legend-swatch" style="background:rgba(88,166,255,0.4)"></span>FVG Bullish</div>'
             + '<div class="spot-legend-item"><span class="spot-legend-swatch" style="background:rgba(255,152,0,0.4)"></span>FVG Bearish</div>'
             + '<div class="spot-legend-item"><span class="spot-legend-swatch" style="background:rgba(188,140,255,0.4)"></span>Order Block</div>'
+            + '<div class="spot-legend-item"><span class="spot-legend-swatch" style="background:rgba(236,72,153,0.5)"></span>iFVG</div>'
             + '<div class="spot-legend-item"><span class="spot-legend-swatch" style="background:#3fb950"></span>CHoCH</div>'
             + '<div class="spot-legend-item"><span class="spot-legend-swatch" style="background:rgba(63,185,80,0.5)"></span>BOS Alta</div>'
             + '<div class="spot-legend-item"><span class="spot-legend-swatch" style="background:rgba(248,81,73,0.5)"></span>BOS Baixa</div>'
+            + '<div class="spot-legend-item"><span class="spot-legend-swatch" style="background:#f85149"></span>Sweep BSL</div>'
+            + '<div class="spot-legend-item"><span class="spot-legend-swatch" style="background:#3fb950"></span>Sweep SSL</div>'
             + '</div>';
           const imgId = 'liveOverlayImg_' + Date.now();
           const imgHtml = '<div class="live-overlay-wrap" style="margin-bottom:10px;">'

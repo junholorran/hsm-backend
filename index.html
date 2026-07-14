@@ -606,7 +606,7 @@ body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-h
     </select>
   </div>
   <div class="live-mode-row">
-    <label class="live-voice-toggle"><input type="checkbox" id="liveVoiceToggle" checked onchange="if(!this.checked && 'speechSynthesis' in window) window.speechSynthesis.cancel(); const fmb=document.getElementById('floatingMicBtn'); if(fmb) fmb.textContent = this.checked ? '🔊' : '🔇';"> 🔊 narrar em voz</label>
+    <label class="live-voice-toggle"><input type="checkbox" id="liveVoiceToggle" checked onchange="if(!this.checked) forceStopSpeech(); const fmb=document.getElementById('floatingMicBtn'); if(fmb) fmb.textContent = this.checked ? '🔊' : '🔇';"> 🔊 narrar em voz</label>
   </div>
 
   <!-- (seletor de TF do gráfico ao vivo foi movido pra fora daqui — ver logo
@@ -735,6 +735,7 @@ const LIVE_PROGRESS_STEPS = [
   'Coletando dados H4',
   'Coletando dados H1',
   'Coletando dados M15',
+  'Coletando dados M5',
   'Funding + Open Interest',
   'Análise ICT (16 camadas)',
   'Calculando score final'
@@ -916,6 +917,16 @@ function setLiveMode(mode, el){
 // ── destrava a voz no iOS/Safari: precisa de um speak() disparado NA HORA do
 // clique (gesto do utilizador), senão o navegador bloqueia falas que só
 // chegam depois de esperas assíncronas (como as chamadas à Bybit demoram).
+// NOVO: parar a fala no iOS/Safari às vezes não funciona numa chamada só de
+// speechSynthesis.cancel() — é um bug conhecido do WebKit. Repete a chamada
+// mais 2 vezes em sequência, cobre praticamente todos os casos.
+function forceStopSpeech(){
+  if(!('speechSynthesis' in window)) return;
+  try{ window.speechSynthesis.cancel(); }catch(e){}
+  setTimeout(()=>{ try{ window.speechSynthesis.cancel(); }catch(e){} }, 60);
+  setTimeout(()=>{ try{ window.speechSynthesis.cancel(); }catch(e){} }, 300);
+}
+
 // NOVO: sincroniza o botão flutuante com o checkbox de voz já existente
 // (mesmo estado, um só "fonte da verdade" — o checkbox continua funcionando
 // normal quando a seção dele está visível).
@@ -925,7 +936,7 @@ function toggleVoiceFloating(){
   if(!cb) return;
   cb.checked = !cb.checked;
   if(btn) btn.textContent = cb.checked ? '🔊' : '🔇';
-  if(!cb.checked && 'speechSynthesis' in window) window.speechSynthesis.cancel();
+  if(!cb.checked) forceStopSpeech();
 }
 
 function primeSpeechUnlock(){
@@ -1109,6 +1120,13 @@ function handleServerLiveUpdate(w, shouldNotify){
   const invalidatedMsg = checkSetupInvalidation(w.pair, w.direction, w.entry, w.score);
   if(invalidatedMsg) showToast(invalidatedMsg);
   showToast('✓ Trade Ao Vivo (servidor) — ' + w.pair.replace('USD','') + ' atualizado!');
+
+  // NOVO: só narra em MOMENTO DECISIVO — score 60+ (mesmo corte de "M15
+  // confirmação" já usado no resto do sistema) OU setup invalidado/mudou.
+  // Ciclo de rotina sem nada relevante (score baixo, sem mudança) fica em
+  // silêncio — só o toast visual avisa.
+  const isDecisiveMoment = (w.score >= 60) || !!invalidatedMsg;
+  if(!isDecisiveMoment) return;
 
   const dirWord = w.direction === 'SHORT' ? 'short' : w.direction === 'LONG' ? 'long' : 'neutro';
   const narrationText = w.pair.replace('USD','') + ', ' + dirWord + ', score ' + w.score + '. ' + (w.result||'') + ' Entrada ' + (w.entry||'') + ', stop ' + (w.sl||'') + ', take profit ' + (w.tp1||'') + '.';
@@ -1669,7 +1687,7 @@ function resetAll(){
 }
 
 // ── ANALISAR AO VIVO (NOVO — reaproveita /analyze_multi que já existe) ──
-const LIVE_TF_INTERVALS = { D1: 'D', H4: '240', H1: '60', M15: '15' };
+const LIVE_TF_INTERVALS = { D1: 'D', H4: '240', H1: '60', M15: '15', M5: '5' };
 const LIVE_SYMBOL_MAP = {'BTCUSD':'BTCUSDT','ETHUSD':'ETHUSDT','SOLUSD':'SOLUSDT','XRPUSD':'XRPUSDT','LINKUSD':'LINKUSDT','ADAUSD':'ADAUSDT','AVAXUSD':'AVAXUSDT','BNBUSD':'BNBUSDT','AAVEUSD':'AAVEUSDT','ONDOUSD':'ONDOUSDT','INJUSD':'INJUSDT','NEARUSD':'NEARUSDT','PENDLEUSD':'PENDLEUSDT','SUIUSD':'SUIUSDT','JTOUSD':'JTOUSDT','ETHFIUSD':'ETHFIUSDT','JUPUSD':'JUPUSDT','ENAUSD':'ENAUSDT'};
 
 async function fetchLiveKlines(symbol, interval, limit, _retried){
@@ -3025,7 +3043,11 @@ async function analyzeLive(targetPair, isAuto){
       stepIdx++;
     }
 
-    setLiveProgressStep(4, 'active');
+    const fundingStepIdx = stepIdx;     // NOVO: dinâmico, acompanha a quantidade real de TFs
+    const analiseStepIdx = stepIdx + 1;
+    const scoreStepIdx = stepIdx + 2;
+
+    setLiveProgressStep(fundingStepIdx, 'active');
     try{
       const fo = await fetchLiveFundingOI(symbol);
       const foBase64 = renderFundingOIImage(pairLabel, fo);
@@ -3033,9 +3055,9 @@ async function analyzeLive(targetPair, isAuto){
     }catch(e){
       console.warn('Funding/OI indisponível para esta análise ao vivo:', e.message);
     }
-    setLiveProgressStep(4, 'done');
+    setLiveProgressStep(fundingStepIdx, 'done');
 
-    setLiveProgressStep(5, 'active');
+    setLiveProgressStep(analiseStepIdx, 'active');
     if(!isAuto) document.getElementById('liveBtnLabel').textContent = 'A analisar ' + pairLabel + '...';
 
     const singlePayload = {};
@@ -3051,11 +3073,11 @@ async function analyzeLive(targetPair, isAuto){
     if(!data.results || data.results.length === 0){
       throw new Error((data.errors && data.errors[0] && data.errors[0].error) || 'sem resultado');
     }
-    setLiveProgressStep(5, 'done');
-    setLiveProgressStep(6, 'active');
+    setLiveProgressStep(analiseStepIdx, 'done');
+    setLiveProgressStep(scoreStepIdx, 'active');
 
     renderMultiResults(data.results, data.errors || []);
-    setLiveProgressStep(6, 'done');
+    setLiveProgressStep(scoreStepIdx, 'done');
     endLiveProgress();
 
     // ── análise completa já vem aberta no Trade Ao Vivo (não fica escondida atrás do "Ver Análise Completa") ──
@@ -3084,7 +3106,13 @@ async function analyzeLive(targetPair, isAuto){
         }
       }
 
-      speakNarration(invalidationPrefix + intro + layerText + ' ' + raciocinio);
+      // NOVO: só filtra por "momento decisivo" no modo AUTOMÁTICO (rotina
+      // sozinha) — se foi você que clicou o botão manualmente, já é um
+      // pedido explícito, então narra sempre, sem filtro de score.
+      const isDecisiveMoment = !isAuto || (rMain.score >= 60) || !!invalidationPrefix;
+      if(isDecisiveMoment){
+        speakNarration(invalidationPrefix + intro + layerText + ' ' + raciocinio);
+      }
     }
 
     // ── NOVO: só no modo automático, dispara Telegram sozinho se o score for bom ──

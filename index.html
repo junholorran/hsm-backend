@@ -465,6 +465,10 @@ body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-h
   </div>
 </div>
 
+<!-- NOVO: painel de notícias — logo após o Market Bias, sempre visível no
+     topo, sem precisar rolar a tela nem rodar nenhuma análise pra aparecer -->
+<div id="newsPanel" style="display:none; margin:0 16px 12px;"></div>
+
 <!-- ══ NOVO: GRÁFICO AO VIVO (widget TradingView oficial, gratuito, sem API key) ══ -->
 <div class="section" style="margin-bottom:8px;">
   <div class="section-title">Gráfico Ao Vivo</div>
@@ -1120,6 +1124,7 @@ function handleServerLiveUpdate(w, shouldNotify){
   const invalidatedMsg = checkSetupInvalidation(w.pair, w.direction, w.entry, w.score);
   if(invalidatedMsg) showToast(invalidatedMsg);
   showToast('✓ Trade Ao Vivo (servidor) — ' + w.pair.replace('USD','') + ' atualizado!');
+  loadNewsPanel(); // NOVO: notícia junto também no ciclo automático
 
   // NOVO: só narra em MOMENTO DECISIVO — score 60+ (mesmo corte de "M15
   // confirmação" já usado no resto do sistema) OU setup invalidado/mudou.
@@ -3034,10 +3039,22 @@ async function analyzeLive(targetPair, isAuto){
     let stepIdx = 0;
     for(const [tfLabel, interval] of tfEntries){
       setLiveProgressStep(stepIdx, 'active');
-      const candles = await fetchLiveKlines(symbol, interval, 200);
+      let candles;
+      try{
+        candles = await fetchLiveKlines(symbol, interval, 200);
+      }catch(fetchErr){
+        // NOVO: contexto específico — diz exatamente qual TF falhou, em vez
+        // de um erro genérico do navegador sem pista nenhuma de onde veio
+        throw new Error('Falha ao buscar candles de ' + tfLabel + ' (' + symbol + '): ' + fetchErr.message);
+      }
       candlesByTf[tfLabel] = candles;
       if(tfLabel === 'M15') m15CandlesForChart = candles;
-      const base64 = renderLiveCandleImage(candles, pairLabel, tfLabel);
+      let base64;
+      try{
+        base64 = renderLiveCandleImage(candles, pairLabel, tfLabel);
+      }catch(renderErr){
+        throw new Error('Falha ao desenhar gráfico de ' + tfLabel + ': ' + renderErr.message);
+      }
       imagesByTf[tfLabel] = { base64, mimeType: 'image/png' };
       setLiveProgressStep(stepIdx, 'done');
       stepIdx++;
@@ -3063,11 +3080,16 @@ async function analyzeLive(targetPair, isAuto){
     const singlePayload = {};
     singlePayload[targetPair] = imagesByTf;
 
-    const res = await fetch('/analyze_multi',{
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({pairs: singlePayload})
-    });
+    let res;
+    try{
+      res = await fetch('/analyze_multi',{
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({pairs: singlePayload})
+      });
+    }catch(analyzeErr){
+      throw new Error('Falha ao enviar análise pro servidor: ' + analyzeErr.message);
+    }
     const data = await res.json();
     if(data.error) throw new Error(data.error);
     if(!data.results || data.results.length === 0){
@@ -3160,6 +3182,10 @@ async function analyzeLive(targetPair, isAuto){
     document.getElementById('addPairSection').style.display = 'none';
     document.getElementById('queueSection').style.display = 'none';
     showToast('✓ Trade Ao Vivo — ' + pairLabel + (isAuto?' (auto)':'') + ' concluído!');
+
+    // NOVO: busca notícias junto, automaticamente, no mesmo clique — sem
+    // precisar de nada manual. RSS gratuito buscado pelo servidor.
+    loadNewsPanel();
   }catch(e){
     endLiveProgress();
     if(isAuto){
@@ -3435,6 +3461,12 @@ async function loadSignalsPanel(){
 setTimeout(loadSignalsPanel, 1500);
 setInterval(loadSignalsPanel, 20000);
 
+// NOVO: notícias carregam sozinhas ao abrir a app — não precisa rodar
+// nenhuma análise pra aparecer. Atualiza de tempos em tempos sozinho,
+// igual o painel de Sinais Ativos.
+setTimeout(loadNewsPanel, 1800);
+setInterval(loadNewsPanel, 5 * 60000); // a cada 5 min — notícia não muda tão rápido quanto preço
+
 async function loadJournal(){
   try{
     const res=await fetch('/journal');const data=await res.json();
@@ -3529,6 +3561,43 @@ async function loadStats(){
     const pnlColor=d.total_pnl>=0?'var(--green)':'var(--red)';
     document.getElementById('statsContent').innerHTML=`<div class="stats-card"><div class="stats-card-title">PERFORMANCE GERAL</div><div class="winrate-big">${d.win_rate}%</div><div class="winrate-label">win rate · ${d.wins}W / ${d.losses}L · <span style="color:${pnlColor}">${d.total_pnl>=0?'+':''}$${d.total_pnl}</span> net</div></div><div class="stats-card"><div class="stats-card-title">WIN RATE POR SCORE</div>${scoreRows||'<div class="no-stats">Sem dados</div>'}</div><div class="stats-card"><div class="stats-card-title">P&L POR PAR</div>${pairRows||'<div class="no-stats">Sem dados</div>'}</div>`;
   }catch(e){document.getElementById('statsContent').innerHTML='<div class="no-stats">Erro ao carregar stats</div>';}
+}
+
+// NOVO: busca notícias cripto (RSS gratuito, via servidor) e desenha um
+// painel compacto com tag bullish/bearish/neutro — chamado automaticamente
+// toda vez que uma análise (manual ou automática) termina.
+async function loadNewsPanel(){
+  const panel = document.getElementById('newsPanel');
+  if(!panel) return;
+  try{
+    const res = await fetch('/news');
+    const data = await res.json();
+    const items = data.news || [];
+    if(items.length === 0){ panel.style.display = 'none'; return; }
+
+    const rows = items.slice(0,5).map(n=>{
+      const color = n.sentiment==='bullish' ? 'var(--green)' : n.sentiment==='bearish' ? 'var(--red)' : 'var(--muted)';
+      const icon = n.sentiment==='bullish' ? '🟢' : n.sentiment==='bearish' ? '🔴' : '⚪';
+      const safeLink = n.link || '#';
+      return `<a href="${safeLink}" target="_blank" style="text-decoration:none;">
+        <div style="display:flex;gap:8px;align-items:flex-start;padding:8px 0;border-bottom:1px solid var(--border);">
+          <span style="flex-shrink:0;">${icon}</span>
+          <span style="font-size:12px;color:${color==='var(--muted)'?'var(--text2)':color};line-height:1.4;">${n.title}</span>
+        </div>
+      </a>`;
+    }).join('');
+
+    panel.innerHTML = `
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:14px;">
+        <div class="pair-selector-label" style="margin-bottom:6px;">📰 NOTÍCIAS — CONTEXTO ANTES DE ENTRAR</div>
+        ${rows}
+        <div style="font-size:9px;color:var(--muted);margin-top:8px;">🟢 pode favorecer alta · 🔴 pode favorecer queda · ⚪ neutro — classificação automática simples, confirma sempre pela sua leitura</div>
+      </div>
+    `;
+    panel.style.display = 'block';
+  }catch(e){
+    panel.style.display = 'none'; // falha silenciosa — notícia é contexto extra, não deve travar a análise principal
+  }
 }
 
 function showToast(msg){const t=document.getElementById('toast');t.textContent=msg;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),3000);}

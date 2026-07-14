@@ -1382,17 +1382,32 @@ def live_watch_stop():
 # navegador) porque RSS geralmente bloqueia fetch direto do browser (CORS).
 # Classificação bullish/bearish é por palavra-chave — simples e de graça,
 # não usa a API do Claude (evita gastar créditos a cada notícia).
+# NOVO: fontes trocadas pra português — sites de cripto BR, sem custo extra.
 NEWS_RSS_FEEDS = [
-    'https://www.coindesk.com/arc/outboundfeeds/rss/',
-    'https://cointelegraph.com/rss',
+    'https://pt.investing.com/rss/news_301.rss',  # Investing.com Portugal — cripto, português de Portugal (fonte principal, pedida pelo usuário)
+    'https://livecoins.com.br/feed/',
+    'https://portaldobitcoin.uol.com.br/feed/',
+    'https://www.coindesk.com/arc/outboundfeeds/rss/',  # mantido como reserva (inglês) caso as fontes PT falhem
 ]
 
 NEWS_BULLISH_WORDS = [
+    # português
+    'dispara', 'sobe', 'alta', 'aprovação', 'aprovado', 'aprova',
+    'recorde', 'máxima histórica', 'rompe', 'valoriza', 'ganhos',
+    'adoção', 'entrada', 'compra', 'corte de juros', 'reduz juros',
+    'estímulo', 'otimismo', 'avança',
+    # inglês (mantido caso venha manchete em inglês)
     'rally', 'surge', 'soars', 'approval', 'approved', 'etf approval',
     'record high', 'all-time high', 'breaks', 'bullish', 'gains',
     'adoption', 'inflow', 'buy', 'rate cut', 'cut rates', 'stimulus',
 ]
 NEWS_BEARISH_WORDS = [
+    # português
+    'despenca', 'cai', 'queda', 'banido', 'proibido', 'hackeado',
+    'invasão', 'ataque hacker', 'processo', 'processa', 'derruba',
+    'saída', 'venda', 'liquidação', 'liquidado', 'aumento de juros',
+    'fraude', 'colapso', 'investigação', 'baixa', 'pessimismo',
+    # inglês
     'crash', 'plunge', 'ban', 'banned', 'hack', 'hacked', 'exploit',
     'lawsuit', 'sec sues', 'bearish', 'sell-off', 'selloff', 'outflow',
     'liquidation', 'liquidated', 'rate hike', 'hikes rates', 'fraud',
@@ -1416,10 +1431,12 @@ def classify_news_sentiment(title):
 # menor. Cobre os ativos que o Kairos já acompanha + eventos macro grandes.
 NEWS_RELEVANT_WORDS = [
     'bitcoin', 'btc', 'ethereum', 'eth', 'solana', 'sol',
-    'fed', 'federal reserve', 'fomc', 'cpi', 'inflation', 'interest rate',
-    'sec', 'etf', 'regulation', 'regulatory', 'powell', 'treasury',
-    'binance', 'coinbase', 'stablecoin', 'liquidation', 'whale',
+    'fed', 'federal reserve', 'fomc', 'cpi', 'inflação', 'inflation',
+    'juros', 'interest rate', 'sec', 'etf', 'regulação', 'regulation',
+    'regulatório', 'powell', 'tesouro', 'treasury',
+    'binance', 'coinbase', 'stablecoin', 'liquidação', 'liquidation', 'whale', 'baleia',
 ]
+
 
 
 def relevance_score(title):
@@ -1465,6 +1482,40 @@ def fetch_crypto_news(limit=8):
 
     return items[:limit]
 
+
+
+# ─── CALENDÁRIO ECONÔMICO (NOVO) ──────────────────────────────────────────
+# Datas fixas, mantidas manualmente — confirmadas nas fontes oficiais
+# (federalreserve.gov e bls.gov) em 14/07/2026. Precisa de atualização
+# de vez em quando (novo ano, ou se o Fed remarcar alguma reunião).
+ECONOMIC_CALENDAR_2026 = [
+    {'date': '2026-08-12', 'event': 'CPI (EUA) — inflação ao consumidor', 'time': '08:30 ET'},
+    {'date': '2026-09-15', 'event': 'FOMC — decisão de juros (dia 1/2, com projeções)', 'time': '—'},
+    {'date': '2026-09-16', 'event': 'FOMC — decisão de juros (dia 2/2, com projeções)', 'time': '14:00 ET'},
+    {'date': '2026-09-10', 'event': 'CPI (EUA) — inflação ao consumidor (estimado, confirmar mais perto da data)', 'time': '08:30 ET'},
+    {'date': '2026-10-13', 'event': 'CPI (EUA) — inflação ao consumidor (estimado, confirmar mais perto da data)', 'time': '08:30 ET'},
+    {'date': '2026-10-27', 'event': 'FOMC — decisão de juros (dia 1/2)', 'time': '—'},
+    {'date': '2026-10-28', 'event': 'FOMC — decisão de juros (dia 2/2)', 'time': '14:00 ET'},
+    {'date': '2026-11-12', 'event': 'CPI (EUA) — inflação ao consumidor (estimado, confirmar mais perto da data)', 'time': '08:30 ET'},
+    {'date': '2026-12-08', 'event': 'FOMC — decisão de juros (dia 1/2, com projeções)', 'time': '—'},
+    {'date': '2026-12-09', 'event': 'FOMC — decisão de juros (dia 2/2, com projeções)', 'time': '14:00 ET'},
+    {'date': '2026-12-10', 'event': 'CPI (EUA) — inflação ao consumidor (estimado, confirmar mais perto da data)', 'time': '08:30 ET'},
+]
+
+
+def get_upcoming_events(limit=5):
+    today_str = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+    upcoming = [e for e in ECONOMIC_CALENDAR_2026 if e['date'] >= today_str]
+    upcoming.sort(key=lambda e: e['date'])
+    return upcoming[:limit]
+
+
+@app.route('/economic_calendar', methods=['GET'])
+def get_economic_calendar():
+    try:
+        return jsonify({'events': get_upcoming_events(6)})
+    except Exception as e:
+        return jsonify({'error': str(e), 'events': []}), 500
 
 
 @app.route('/news', methods=['GET'])

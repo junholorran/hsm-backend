@@ -1377,6 +1377,105 @@ def live_watch_stop():
         return jsonify({'error': str(e)}), 500
 
 
+# ─── NOTÍCIAS CRIPTO (NOVO) ──────────────────────────────────────────────
+# RSS público, gratuito, sem chave de API. Busca pelo servidor (não pelo
+# navegador) porque RSS geralmente bloqueia fetch direto do browser (CORS).
+# Classificação bullish/bearish é por palavra-chave — simples e de graça,
+# não usa a API do Claude (evita gastar créditos a cada notícia).
+NEWS_RSS_FEEDS = [
+    'https://www.coindesk.com/arc/outboundfeeds/rss/',
+    'https://cointelegraph.com/rss',
+]
+
+NEWS_BULLISH_WORDS = [
+    'rally', 'surge', 'soars', 'approval', 'approved', 'etf approval',
+    'record high', 'all-time high', 'breaks', 'bullish', 'gains',
+    'adoption', 'inflow', 'buy', 'rate cut', 'cut rates', 'stimulus',
+]
+NEWS_BEARISH_WORDS = [
+    'crash', 'plunge', 'ban', 'banned', 'hack', 'hacked', 'exploit',
+    'lawsuit', 'sec sues', 'bearish', 'sell-off', 'selloff', 'outflow',
+    'liquidation', 'liquidated', 'rate hike', 'hikes rates', 'fraud',
+    'collapse', 'investigation',
+]
+
+
+def classify_news_sentiment(title):
+    t = title.lower()
+    bull_hits = sum(1 for w in NEWS_BULLISH_WORDS if w in t)
+    bear_hits = sum(1 for w in NEWS_BEARISH_WORDS if w in t)
+    if bull_hits > bear_hits:
+        return 'bullish'
+    if bear_hits > bull_hits:
+        return 'bearish'
+    return 'neutral'
+
+
+# NOVO: palavras que marcam uma notícia como MAIS RELEVANTE — prioriza
+# essas no topo da lista, em vez de mostrar qualquer manchete de altcoin
+# menor. Cobre os ativos que o Kairos já acompanha + eventos macro grandes.
+NEWS_RELEVANT_WORDS = [
+    'bitcoin', 'btc', 'ethereum', 'eth', 'solana', 'sol',
+    'fed', 'federal reserve', 'fomc', 'cpi', 'inflation', 'interest rate',
+    'sec', 'etf', 'regulation', 'regulatory', 'powell', 'treasury',
+    'binance', 'coinbase', 'stablecoin', 'liquidation', 'whale',
+]
+
+
+def relevance_score(title):
+    t = title.lower()
+    return sum(1 for w in NEWS_RELEVANT_WORDS if w in t)
+
+
+def fetch_crypto_news(limit=8):
+    import xml.etree.ElementTree as ET
+    items = []
+    headers = {'User-Agent': 'Mozilla/5.0 (compatible; KairosMentor/1.0)'}
+    for feed_url in NEWS_RSS_FEEDS:
+        try:
+            r = requests.get(feed_url, headers=headers, timeout=8)
+            root = ET.fromstring(r.content)
+            for item in root.findall('.//item')[:limit]:
+                title_el = item.find('title')
+                link_el = item.find('link')
+                date_el = item.find('pubDate')
+                title = title_el.text.strip() if title_el is not None and title_el.text else ''
+                if not title:
+                    continue
+                items.append({
+                    'title': title,
+                    'link': link_el.text.strip() if link_el is not None and link_el.text else '',
+                    'pubDate': date_el.text.strip() if date_el is not None and date_el.text else '',
+                    'sentiment': classify_news_sentiment(title),
+                })
+        except Exception as e:
+            print(f"[news] erro ao buscar {feed_url}: {e}")
+    # ordena aproximadamente pelo texto da data (RSS já vem em ordem cronológica na maioria dos feeds)
+    # NOVO: ordena por relevância (mais palavras-chave importantes = mais
+    # pro topo), mantendo a ordem cronológica original como desempate —
+    # assim as notícias que realmente importam aparecem primeiro, mesmo
+    # que não sejam as mais recentes dos feeds combinados.
+    for i, item in enumerate(items):
+        item['_relevance'] = relevance_score(item['title'])
+        item['_originalOrder'] = i
+    items.sort(key=lambda x: (-x['_relevance'], x['_originalOrder']))
+    for item in items:
+        del item['_relevance']
+        del item['_originalOrder']
+
+    return items[:limit]
+
+
+
+@app.route('/news', methods=['GET'])
+def get_news():
+    try:
+        items = fetch_crypto_news(limit=8)
+        return jsonify({'news': items})
+    except Exception as e:
+        return jsonify({'error': str(e), 'news': []}), 500
+
+
 @app.route('/live/status', methods=['GET'])
 def live_watch_status():
     try:

@@ -381,6 +381,12 @@ ICT_SYSTEM_PROMPT = (
     "OB/FVG ja identificada) = +10. Sem candle de M5 fornecido nesta "
     "analise, ou sem gatilho claro nele, este peso e simplesmente omitido "
     "(nao soma, nao penaliza)\n"
+    "- Volume do candle-chave (sweep, CHoCH ou entrada) visivelmente acima "
+    "da media dos ultimos candles no mesmo grafico (ha um painel de volume "
+    "desenhado abaixo do preco em cada grafico) = +5 (confirma forca real "
+    "por tras do movimento). Se o volume nao estiver visivel ou for "
+    "medio/baixo no candle-chave, este peso e simplesmente omitido (nao "
+    "soma, nao penaliza)\n"
     "- ADR ja esgotado (>80% usado) contra novas entradas = -10 "
     "(penalizacao, nao soma para nenhum lado)\n"
     "- Preco AINDA fora da zona de entrada valida (OB/FVG) no momento "
@@ -906,10 +912,6 @@ LIVE_SYMBOL_MAP = {
     'PENDLEUSD': 'PENDLEUSDT', 'SUIUSD': 'SUIUSDT', 'JTOUSD': 'JTOUSDT', 'ETHFIUSD': 'ETHFIUSDT',
     'JUPUSD': 'JUPUSDT', 'ENAUSD': 'ENAUSDT'
 }
-# PATCH M5: adicionado 'M5':'5' à lista — antes só ia até M15. Isso faz o
-# run_live_cycle (que é genérico, usa for tf_label, interval in
-# LIVE_TF_INTERVALS.items()) passar a buscar também o candle M5 e mandar
-# pro Claude, habilitando gatilho de scalp fino no live automático.
 LIVE_TF_INTERVALS = {'D1': 'D', 'H4': '240', 'H1': '60', 'M15': '15', 'M5': '5'}
 AUTO_ALERT_SCORE_THRESHOLD = 75
 
@@ -927,8 +929,10 @@ def fetch_bybit_klines(symbol, interval, limit=200):
     lst = (data.get('result') or {}).get('list') or []
     if len(lst) < 5:
         raise Exception(f'sem candles suficientes para {symbol} — resposta: {str(data)[:200]}')
+    # NOVO: captura o volume (índice 5 do array da Bybit) — antes era ignorado.
     candles = [{
-        't': int(k[0]), 'o': float(k[1]), 'h': float(k[2]), 'l': float(k[3]), 'c': float(k[4])
+        't': int(k[0]), 'o': float(k[1]), 'h': float(k[2]), 'l': float(k[3]), 'c': float(k[4]),
+        'v': float(k[5]) if len(k) > 5 else 0.0
     } for k in lst]
     candles.reverse()
     return candles
@@ -947,8 +951,13 @@ def compute_sma(values, period):
 
 
 def render_live_chart_png_base64(candles, pair_label, tf_label):
-    W, H = 900, 500
+    # NOVO: altura total maior pra caber o painel de volume abaixo do preço
+    W, H = 900, 570
     padL, padR, padT, padB = 60, 20, 40, 30
+    priceH = 400
+    volH = 90
+    volGap = 20
+    volTop = padT + priceH + volGap
     img = Image.new('RGB', (W, H), (10, 10, 15))
     draw = ImageDraw.Draw(img)
     try:
@@ -959,20 +968,20 @@ def render_live_chart_png_base64(candles, pair_label, tf_label):
     closes = [c['c'] for c in candles]
     highs = [c['h'] for c in candles]
     lows = [c['l'] for c in candles]
+    volumes = [c.get('v', 0) for c in candles]
     max_p, min_p = max(highs), min(lows)
     rng = (max_p - min_p) or 1
     plot_w = W - padL - padR
-    plot_h = H - padT - padB
     cw = plot_w / len(candles)
 
     def x_for(i):
         return padL + i * cw + cw / 2
 
     def y_for(p):
-        return padT + plot_h - ((p - min_p) / rng) * plot_h
+        return padT + priceH - ((p - min_p) / rng) * priceH
 
     for i in range(5):
-        yy = padT + (plot_h / 4) * i
+        yy = padT + (priceH / 4) * i
         draw.line([(padL, yy), (W - padR, yy)], fill=(42, 42, 58), width=1)
         price_at_y = max_p - (rng / 4) * i
         draw.text((4, yy - 5), f"{price_at_y:.2f}", fill=(110, 118, 129), font=font)
@@ -993,6 +1002,27 @@ def render_live_chart_png_base64(candles, pair_label, tf_label):
         pts = [(x_for(i), y_for(v)) for i, v in enumerate(ma) if v is not None]
         if len(pts) >= 2:
             draw.line(pts, fill=color, width=2)
+
+    # ── NOVO: painel de volume abaixo do preço. Barras "vivas" (cor cheia)
+    # quando o volume do candle está 30%+ acima da média — dá sinal visual
+    # de força real por trás do movimento, pro Claude poder usar no score. ──
+    max_vol = max(volumes) if volumes and max(volumes) > 0 else 1
+    avg_vol = (sum(volumes) / len(volumes)) if volumes else 0
+    draw.line([(padL, volTop), (W - padR, volTop)], fill=(42, 42, 58), width=1)
+    draw.line([(padL, volTop + volH), (W - padR, volTop + volH)], fill=(42, 42, 58), width=1)
+    for i, c in enumerate(candles):
+        x = x_for(i)
+        vol = c.get('v', 0)
+        bar_h = (vol / max_vol) * volH if max_vol > 0 else 0
+        up = c['c'] >= c['o']
+        is_above_avg = vol > avg_vol * 1.3
+        if up:
+            color = (63, 185, 80) if is_above_avg else (45, 110, 58)
+        else:
+            color = (248, 81, 73) if is_above_avg else (140, 60, 58)
+        half = max(1, cw * 0.35)
+        draw.rectangle([x - half, volTop + volH - bar_h, x + half, volTop + volH], fill=color)
+    draw.text((padL, volTop - 14), "VOLUME (barras vivas = acima da média)", fill=(150, 150, 160), font=font)
 
     last_close = candles[-1]['c']
     draw.text((padL, 10), f"{pair_label} · {tf_label} · ${last_close:,.2f}", fill=(240, 192, 64), font=font)
@@ -1377,37 +1407,27 @@ def live_watch_stop():
         return jsonify({'error': str(e)}), 500
 
 
-# ─── NOTÍCIAS CRIPTO (NOVO) ──────────────────────────────────────────────
-# RSS público, gratuito, sem chave de API. Busca pelo servidor (não pelo
-# navegador) porque RSS geralmente bloqueia fetch direto do browser (CORS).
-# Classificação bullish/bearish é por palavra-chave — simples e de graça,
-# não usa a API do Claude (evita gastar créditos a cada notícia).
-# NOVO: fontes trocadas pra português — sites de cripto BR, sem custo extra.
 NEWS_RSS_FEEDS = [
-    'https://pt.investing.com/rss/news_301.rss',  # Investing.com Portugal — cripto, português de Portugal (fonte principal, pedida pelo usuário)
+    'https://pt.investing.com/rss/news_301.rss',
     'https://livecoins.com.br/feed/',
     'https://portaldobitcoin.uol.com.br/feed/',
-    'https://www.coindesk.com/arc/outboundfeeds/rss/',  # mantido como reserva (inglês) caso as fontes PT falhem
+    'https://www.coindesk.com/arc/outboundfeeds/rss/',
 ]
 
 NEWS_BULLISH_WORDS = [
-    # português
     'dispara', 'sobe', 'alta', 'aprovação', 'aprovado', 'aprova',
     'recorde', 'máxima histórica', 'rompe', 'valoriza', 'ganhos',
     'adoção', 'entrada', 'compra', 'corte de juros', 'reduz juros',
     'estímulo', 'otimismo', 'avança',
-    # inglês (mantido caso venha manchete em inglês)
     'rally', 'surge', 'soars', 'approval', 'approved', 'etf approval',
     'record high', 'all-time high', 'breaks', 'bullish', 'gains',
     'adoption', 'inflow', 'buy', 'rate cut', 'cut rates', 'stimulus',
 ]
 NEWS_BEARISH_WORDS = [
-    # português
     'despenca', 'cai', 'queda', 'banido', 'proibido', 'hackeado',
     'invasão', 'ataque hacker', 'processo', 'processa', 'derruba',
     'saída', 'venda', 'liquidação', 'liquidado', 'aumento de juros',
     'fraude', 'colapso', 'investigação', 'baixa', 'pessimismo',
-    # inglês
     'crash', 'plunge', 'ban', 'banned', 'hack', 'hacked', 'exploit',
     'lawsuit', 'sec sues', 'bearish', 'sell-off', 'selloff', 'outflow',
     'liquidation', 'liquidated', 'rate hike', 'hikes rates', 'fraud',
@@ -1426,9 +1446,6 @@ def classify_news_sentiment(title):
     return 'neutral'
 
 
-# NOVO: palavras que marcam uma notícia como MAIS RELEVANTE — prioriza
-# essas no topo da lista, em vez de mostrar qualquer manchete de altcoin
-# menor. Cobre os ativos que o Kairos já acompanha + eventos macro grandes.
 NEWS_RELEVANT_WORDS = [
     'bitcoin', 'btc', 'ethereum', 'eth', 'solana', 'sol',
     'fed', 'federal reserve', 'fomc', 'cpi', 'inflação', 'inflation',
@@ -1436,7 +1453,6 @@ NEWS_RELEVANT_WORDS = [
     'regulatório', 'powell', 'tesouro', 'treasury',
     'binance', 'coinbase', 'stablecoin', 'liquidação', 'liquidation', 'whale', 'baleia',
 ]
-
 
 
 def relevance_score(title):
@@ -1467,11 +1483,6 @@ def fetch_crypto_news(limit=8):
                 })
         except Exception as e:
             print(f"[news] erro ao buscar {feed_url}: {e}")
-    # ordena aproximadamente pelo texto da data (RSS já vem em ordem cronológica na maioria dos feeds)
-    # NOVO: ordena por relevância (mais palavras-chave importantes = mais
-    # pro topo), mantendo a ordem cronológica original como desempate —
-    # assim as notícias que realmente importam aparecem primeiro, mesmo
-    # que não sejam as mais recentes dos feeds combinados.
     for i, item in enumerate(items):
         item['_relevance'] = relevance_score(item['title'])
         item['_originalOrder'] = i
@@ -1483,11 +1494,6 @@ def fetch_crypto_news(limit=8):
     return items[:limit]
 
 
-
-# ─── CALENDÁRIO ECONÔMICO (NOVO) ──────────────────────────────────────────
-# Datas fixas, mantidas manualmente — confirmadas nas fontes oficiais
-# (federalreserve.gov e bls.gov) em 14/07/2026. Precisa de atualização
-# de vez em quando (novo ano, ou se o Fed remarcar alguma reunião).
 ECONOMIC_CALENDAR_2026 = [
     {'date': '2026-08-12', 'event': 'CPI (EUA) — inflação ao consumidor', 'time': '08:30 ET'},
     {'date': '2026-09-15', 'event': 'FOMC — decisão de juros (dia 1/2, com projeções)', 'time': '—'},

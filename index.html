@@ -648,6 +648,13 @@ body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-h
   </div>
 </div>
 
+<!-- NOVO: botão pra reabrir a seleção de par sem resetar as sessões ao
+     vivo já em andamento — permite ligar automático em vários pares
+     seguidos (ex: BTC, depois SOL, depois ETH) sem perder o que já roda. -->
+<div style="margin:0 16px 12px;">
+  <button onclick="document.getElementById('addPairSection').style.display='block'; window.scrollTo({top:0,behavior:'smooth'});" style="width:100%;padding:13px;background:transparent;border:1px dashed var(--gold);color:var(--gold);border-radius:10px;font-size:12px;font-weight:700;font-family:'Space Mono',monospace;cursor:pointer;letter-spacing:0.5px;-webkit-tap-highlight-color:transparent;">+ VIGIAR OUTRO PAR</button>
+</div>
+
 <!-- LOADING -->
 <div class="loading" id="loading">
   <div class="section-title" style="margin-bottom:10px;">A PROCESSAR...</div>
@@ -1062,7 +1069,7 @@ async function pollLiveStatus(){
 function handleServerLiveUpdate(w, shouldNotify){
   // monta um objeto no mesmo formato que renderMultiResults já espera
   const resultObj = {
-    pair: w.pair, result: w.result || '', timeframes: 'D1,H4,H1,M15',
+    pair: w.pair, result: w.result || '', timeframes: 'D1,H4,H1,M15,M5',
     score: w.score, direction: w.direction, entry: w.entry, sl: w.sl, tp1: w.tp1, tp2: w.tp2
   };
 
@@ -1702,7 +1709,7 @@ async function fetchLiveKlines(symbol, interval, limit, _retried){
     const d = await r.json();
     const list = d.result && d.result.list;
     if(!list || list.length < 5) throw new Error('sem candles para '+symbol);
-    return list.map(k=>({t:parseInt(k[0]),o:parseFloat(k[1]),h:parseFloat(k[2]),l:parseFloat(k[3]),c:parseFloat(k[4])})).reverse();
+    return list.map(k=>({t:parseInt(k[0]),o:parseFloat(k[1]),h:parseFloat(k[2]),l:parseFloat(k[3]),c:parseFloat(k[4]),v:parseFloat(k[5]||0)})).reverse();
   }catch(e){
     // 1 nova tentativa automática — cobre falhas pontuais de rede tipo
     // "Load failed" no mobile (ecrã bloqueou, ligação oscilou um instante)
@@ -1826,7 +1833,9 @@ function renderLiveCandleImage(candles, pairLabel, tfLabel){
   const priceH = 340, rsiH = 110, macdH = 130, stochH = 110;
   const gap = 22;
   const priceTop = 34;
-  const rsiTop = priceTop + priceH + gap;
+  const volH = 70;
+  const volTop = priceTop + priceH + 12;
+  const rsiTop = volTop + volH + gap;
   const macdTop = rsiTop + rsiH + gap;
   const stochTop = macdTop + macdH + gap;
   const H = stochTop + stochH + 24;
@@ -1864,6 +1873,25 @@ function renderLiveCandleImage(candles, pairLabel, tfLabel){
     const bodyH = Math.max(1, Math.abs(yForPrice(c.o)-yForPrice(c.c)));
     ctx.fillRect(x - cw*0.35, bodyTop, cw*0.7, bodyH);
   });
+
+  // ── NOVO: painel de volume ──
+  const volumes = candles.map(c=>c.v||0);
+  const maxVol = Math.max(...volumes, 1);
+  const avgVol = volumes.reduce((a,b)=>a+b,0) / (volumes.length||1);
+  ctx.strokeStyle = '#2a2a3a';
+  ctx.beginPath(); ctx.moveTo(padL, volTop); ctx.lineTo(W-padR, volTop); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(padL, volTop+volH); ctx.lineTo(W-padR, volTop+volH); ctx.stroke();
+  candles.forEach((c,i)=>{
+    const x = xFor(i);
+    const barH = (c.v||0)/maxVol*volH;
+    const up = c.c >= c.o;
+    const isAboveAvg = (c.v||0) > avgVol*1.3;
+    if(up) ctx.fillStyle = isAboveAvg ? '#3fb950' : '#2d6e3a';
+    else ctx.fillStyle = isAboveAvg ? '#f85149' : '#8c3c3a';
+    ctx.fillRect(x - cw*0.35, volTop+volH-barH, cw*0.7, barH);
+  });
+  ctx.fillStyle = '#96969f'; ctx.font = '10px monospace';
+  ctx.fillText('VOLUME (barras vivas = acima da média)', padL, volTop-4);
 
   function drawMA(values, color){
     ctx.strokeStyle = color; ctx.lineWidth = 1.3; ctx.beginPath();
@@ -2254,7 +2282,7 @@ function renderAnnotatedChart(candles, pairLabel, tfLabel, entry, sl, tp1, tp2, 
   if(hasInvalidCandle) return null;
   fvgZones = fvgZones || []; obZones = obZones || []; chochEvents = chochEvents || [];
   ifvgZones = ifvgZones || []; liquiditySweeps = liquiditySweeps || []; breakerZones = breakerZones || [];
-  const W = 900, H = 420, padL = 64, padR = 90, padT = 34, padB = 20;
+  const W = 900, H = 420, padL = 64, padR = 140, padT = 34, padB = 20;
   const canvas = document.createElement('canvas');
   canvas.width = W; canvas.height = H;
   const ctx = canvas.getContext('2d');
@@ -2360,10 +2388,18 @@ function renderAnnotatedChart(candles, pairLabel, tfLabel, entry, sl, tp1, tp2, 
     ctx.fillText(ev.label || 'CHoCH', x-16, padT-4);
   });
 
+  // NOVO: linha de Entry/SL/TP nasce a partir do candle onde o sinal foi
+  // gerado (o CHoCH mais recente), não desde o início do gráfico — mais
+  // limpo e mostra visualmente de onde o setup partiu.
+  let signalStartIndex = 0;
+  if(chochEvents && chochEvents.length > 0){
+    signalStartIndex = chochEvents[chochEvents.length-1].index;
+  }
+  const signalStartX = xFor(signalStartIndex);
   levels.forEach(l=>{
     const y = yFor(l.value);
     ctx.strokeStyle = l.color; ctx.lineWidth = 1.3; ctx.setLineDash([6,4]);
-    ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(W-padR, y); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(signalStartX, y); ctx.lineTo(W-padR, y); ctx.stroke();
     ctx.setLineDash([]);
     l._y = y; // guarda a posição pra checar colisão a seguir
   });
@@ -2376,7 +2412,7 @@ function renderAnnotatedChart(candles, pairLabel, tfLabel, entry, sl, tp1, tp2, 
     }
   }
   levels.forEach(l=>{
-    ctx.fillStyle = l.color; ctx.font = 'bold 11px monospace';
+    ctx.fillStyle = l.color; ctx.font = 'bold 10px monospace';
     ctx.fillText(l.label+': '+l.value.toLocaleString('en-US',{maximumFractionDigits:2}), W-padR+6, l._y+4);
   });
 

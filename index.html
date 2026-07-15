@@ -652,7 +652,7 @@ body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-h
      vivo já em andamento — permite ligar automático em vários pares
      seguidos (ex: BTC, depois SOL, depois ETH) sem perder o que já roda. -->
 <div style="margin:0 16px 12px;">
-  <button onclick="document.getElementById('addPairSection').style.display='block'; window.scrollTo({top:0,behavior:'smooth'});" style="width:100%;padding:13px;background:transparent;border:1px dashed var(--gold);color:var(--gold);border-radius:10px;font-size:12px;font-weight:700;font-family:'Space Mono',monospace;cursor:pointer;letter-spacing:0.5px;-webkit-tap-highlight-color:transparent;">+ VIGIAR OUTRO PAR</button>
+  <button onclick="const s=document.getElementById('addPairSection'); s.style.display='block'; s.scrollIntoView({behavior:'smooth',block:'start'});" style="width:100%;padding:13px;background:transparent;border:1px dashed var(--gold);color:var(--gold);border-radius:10px;font-size:12px;font-weight:700;font-family:'Space Mono',monospace;cursor:pointer;letter-spacing:0.5px;-webkit-tap-highlight-color:transparent;">+ VIGIAR OUTRO PAR</button>
 </div>
 
 <!-- LOADING -->
@@ -1073,15 +1073,16 @@ function handleServerLiveUpdate(w, shouldNotify){
     score: w.score, direction: w.direction, entry: w.entry, sl: w.sl, tp1: w.tp1, tp2: w.tp2
   };
 
-  // só troca o card na tela se for o par que estás a ver agora
-  if(w.pair === activePair){
-    renderMultiResults([resultObj], []);
+  // NOVO: todo par vigiado ganha seu próprio card — não apaga os outros,
+  // fica sempre visível junto com os demais pares em vigiamento
+  {
+    upsertLiveResultCard(resultObj);
     document.getElementById('addPairSection').style.display = 'none';
     document.getElementById('queueSection').style.display = 'none';
-    const firstCardFull = document.querySelector('#resultCards .result-summary-card .rsc-full');
-    if(firstCardFull){
-      firstCardFull.classList.add('open');
-      const expandBtn = firstCardFull.previousElementSibling;
+    const thisCardFull = document.querySelector(`#resultCards .result-summary-card[data-pair="${w.pair}"] .rsc-full`);
+    if(thisCardFull){
+      thisCardFull.classList.add('open');
+      const expandBtn = thisCardFull.previousElementSibling;
       if(expandBtn) expandBtn.textContent = 'FECHAR ANÁLISE ↑';
     }
 
@@ -1100,7 +1101,7 @@ function handleServerLiveUpdate(w, shouldNotify){
         const liquiditySweeps = detectLiquiditySweep(candles, 5, 0.15);
         const breakerZones = detectBreakerBlock(candles, 3);
         const annotatedBase64 = renderAnnotatedChart(candles, pairLabel, 'M15', w.entry, w.sl, w.tp1, w.tp2, fvgZones, obZones, chochEvents, ifvgZones, liquiditySweeps, breakerZones);
-        const cardEl = document.querySelector('#resultCards .result-summary-card');
+        const cardEl = document.querySelector(`#resultCards .result-summary-card[data-pair="${w.pair}"]`);
         if(cardEl && annotatedBase64){
           const rscBody = cardEl.querySelector('.rsc-body');
           const legendHtml = '<div class="spot-legend" style="margin-bottom:10px;">'
@@ -1639,6 +1640,54 @@ function renderMultiResults(results, errors){
   document.getElementById('resultCards').innerHTML = html;
   resultEl.classList.add('show');
   resultEl.scrollIntoView({behavior:'smooth',block:'start'});
+}
+
+// NOVO: cada par vigiado ganha seu próprio card, que fica na tela junto
+// com os outros — não substitui/apaga os cards de outros pares. Atualiza
+// só o card daquele par específico quando o ciclo dele termina.
+function upsertLiveResultCard(r){
+  const dir = r.direction==='SHORT'?'bear':r.direction==='LONG'?'bull':'neutral';
+  const dirLabel = r.direction==='SHORT'?'📉 SHORT':r.direction==='LONG'?'📈 LONG':'⏸ NEUTRO';
+  const scoreClass = r.score>=75?'score-high':r.score>=60?'score-mid':'score-low';
+  const tfsArr = r.timeframes ? r.timeframes.split(',') : [];
+  const formatted = formatAnalysis(r.result);
+  const pairKey = r.pair.replace(/[^a-zA-Z0-9]/g,'_');
+
+  const cardHtml = `
+  <div class="result-summary-card" data-pair="${r.pair}">
+    <div class="rsc-header">
+      <div>
+        <div class="rsc-pair">${r.pair.replace('USD','USDT')}</div>
+        <div class="rsc-tfs">${tfsArr.join(' · ')}</div>
+      </div>
+      <div class="rsc-right">
+        <div class="rsc-dir ${dir}">${dirLabel}</div>
+        <div class="rsc-score ${scoreClass}">${r.score}/100</div>
+      </div>
+    </div>
+    <div class="rsc-body" id="rscBody_${pairKey}">
+      <div class="rsc-levels">
+        ${r.entry?`<div class="rsc-level"><div class="rsc-level-label">ENTRADA</div><div class="rsc-level-val">$${r.entry}</div></div>`:''}
+        ${r.sl?`<div class="rsc-level"><div class="rsc-level-label">STOP</div><div class="rsc-level-val red">$${r.sl}</div></div>`:''}
+        ${r.tp1?`<div class="rsc-level"><div class="rsc-level-label">TP1</div><div class="rsc-level-val green">$${r.tp1}</div></div>`:''}
+        ${r.tp2?`<div class="rsc-level"><div class="rsc-level-label">TP2</div><div class="rsc-level-val green">$${r.tp2}</div></div>`:''}
+      </div>
+      <button class="rsc-expand-btn" onclick="toggleFull('${pairKey}')">VER ANÁLISE COMPLETA ↓</button>
+      <div class="rsc-full" id="full_${pairKey}">
+        <div class="analysis-text">${formatted}</div>
+      </div>
+    </div>
+  </div>`;
+
+  const container = document.getElementById('resultCards');
+  const existing = container.querySelector(`.result-summary-card[data-pair="${r.pair}"]`);
+  if(existing){
+    existing.outerHTML = cardHtml;
+  } else {
+    container.insertAdjacentHTML('beforeend', cardHtml);
+  }
+  document.getElementById('result').classList.add('show');
+  document.getElementById('resultTitle').textContent = 'PARES VIGIADOS AO VIVO';
 }
 
 function toggleFull(pairKey){

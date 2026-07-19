@@ -161,6 +161,20 @@ def init_db():
                     updated_at INTEGER DEFAULT 0
                 )
             ''')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS live_signals (
+                    id TEXT PRIMARY KEY,
+                    pair TEXT,
+                    created_at INTEGER,
+                    direction TEXT,
+                    score INTEGER,
+                    entry TEXT,
+                    sl TEXT,
+                    tp1 TEXT,
+                    tp2 TEXT,
+                    alerted INTEGER DEFAULT 0
+                )
+            ''')
             conn.commit()
         print("Base de dados SQLite inicializada com sucesso!")
     except Exception as e:
@@ -929,7 +943,6 @@ def fetch_bybit_klines(symbol, interval, limit=200):
     lst = (data.get('result') or {}).get('list') or []
     if len(lst) < 5:
         raise Exception(f'sem candles suficientes para {symbol} — resposta: {str(data)[:200]}')
-    # NOVO: captura o volume (índice 5 do array da Bybit) — antes era ignorado.
     candles = [{
         't': int(k[0]), 'o': float(k[1]), 'h': float(k[2]), 'l': float(k[3]), 'c': float(k[4]),
         'v': float(k[5]) if len(k) > 5 else 0.0
@@ -951,7 +964,6 @@ def compute_sma(values, period):
 
 
 def render_live_chart_png_base64(candles, pair_label, tf_label):
-    # NOVO: altura total maior pra caber o painel de volume abaixo do preço
     W, H = 900, 570
     padL, padR, padT, padB = 60, 20, 40, 30
     priceH = 400
@@ -1003,9 +1015,6 @@ def render_live_chart_png_base64(candles, pair_label, tf_label):
         if len(pts) >= 2:
             draw.line(pts, fill=color, width=2)
 
-    # ── NOVO: painel de volume abaixo do preço. Barras "vivas" (cor cheia)
-    # quando o volume do candle está 30%+ acima da média — dá sinal visual
-    # de força real por trás do movimento, pro Claude poder usar no score. ──
     max_vol = max(volumes) if volumes and max(volumes) > 0 else 1
     avg_vol = (sum(volumes) / len(volumes)) if volumes else 0
     draw.line([(padL, volTop), (W - padR, volTop)], fill=(42, 42, 58), width=1)
@@ -1053,6 +1062,7 @@ def run_live_cycle(pair, interval_min):
     tp2 = tps[1] if len(tps) > 1 else ''
 
     now = int(time.time())
+    signal_id = None
     with sqlite3.connect(DB_FILE) as conn:
         cursor = conn.cursor()
         cursor.execute('''
@@ -1067,6 +1077,15 @@ def run_live_cycle(pair, interval_min):
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (journal_id, pair, now, direction, score, entry, sl, tp1, tp2,
               tps[2] if len(tps) > 2 else '', ','.join(LIVE_TF_INTERVALS.keys()), raw_text, 'pending'))
+        conn.commit()
+
+        # ── NOVO: grava TODO ciclo (mesmo os fracos) numa tabela separada
+        # do journal, pra alimentar o feed "Sinais" sem poluir o journal ──
+        signal_id = f"sig_{pair}_{int(time.time() * 1000)}"
+        cursor.execute('''
+            INSERT INTO live_signals (id, pair, created_at, direction, score, entry, sl, tp1, tp2)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (signal_id, pair, now, direction, score, entry, sl, tp1, tp2))
         conn.commit()
 
     if direction and direction != 'NEUTRO' and score >= AUTO_ALERT_SCORE_THRESHOLD and entry:
@@ -1091,6 +1110,9 @@ def run_live_cycle(pair, interval_min):
                 msg += f"\n💡 <i>Vigiando sozinho no servidor, a cada {interval_min}min.</i>"
                 send_telegram(msg)
                 cursor.execute('UPDATE live_watch SET last_alerted_signature=? WHERE pair=?', (signature, pair))
+                # ── NOVO: marca esse ciclo específico como "alertado" no feed ──
+                if signal_id:
+                    cursor.execute('UPDATE live_signals SET alerted=1 WHERE id=?', (signal_id,))
                 conn.commit()
 
     return {'pair': pair, 'direction': direction, 'score': score, 'entry': entry, 'sl': sl, 'tp1': tp1, 'tp2': tp2}
@@ -1552,6 +1574,39 @@ def live_watch_status():
                 'tp1': r[8], 'tp2': r[9], 'result': r[10], 'updated_at': r[11]
             })
         return jsonify({'watches': watches})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/live/history', methods=['GET'])
+def live_signals_history():
+    # ── NOVO: feed com TODO ciclo já rodado (mesmo os fracos), pra
+    # alimentar a seção "Sinais" da Home e servir de diagnóstico do
+    # porquê o Telegram dispara ou não em cada ciclo. ──
+    try:
+        pair_filter = request.args.get('pair', '')
+        limit = int(request.args.get('limit', 30))
+        with sqlite3.connect(DB_FILE) as conn:
+            cursor = conn.cursor()
+            if pair_filter:
+                cursor.execute(
+                    'SELECT id, pair, created_at, direction, score, entry, sl, tp1, tp2, alerted FROM live_signals WHERE pair=? ORDER BY created_at DESC LIMIT ?',
+                    (pair_filter, limit)
+                )
+            else:
+                cursor.execute(
+                    'SELECT id, pair, created_at, direction, score, entry, sl, tp1, tp2, alerted FROM live_signals ORDER BY created_at DESC LIMIT ?',
+                    (limit,)
+                )
+            rows = cursor.fetchall()
+        signals = []
+        for r in rows:
+            signals.append({
+                'id': r[0], 'pair': r[1], 'created_at': r[2],
+                'direction': r[3], 'score': r[4], 'entry': r[5],
+                'sl': r[6], 'tp1': r[7], 'tp2': r[8], 'alerted': bool(r[9])
+            })
+        return jsonify({'signals': signals})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 

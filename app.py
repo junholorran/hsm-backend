@@ -12,6 +12,8 @@ import io
 from datetime import datetime, timezone
 from PIL import Image, ImageDraw, ImageFont
 
+import cascade_engine
+
 app = Flask(__name__)
 client = anthropic.Anthropic(api_key=os.environ.get('ANTHROPIC_API_KEY'))
 
@@ -239,6 +241,10 @@ def check_alerts_inline():
 
 
 init_db()
+# ── NOVO (aditivo): inicializa as tabelas do cascade_engine. Não mexe
+# em nenhuma tabela existente, só cria as duas próprias dele. ──
+cascade_engine.init_cascade_db(DB_FILE)
+cascade_engine.init_cascade_signal_db(DB_FILE)
 
 # ─── PROMPT ICT CACHEADO ─────────────────────────────────────────────────────
 ICT_SYSTEM_PROMPT = (
@@ -1048,10 +1054,30 @@ def run_live_cycle(pair, interval_min):
     pair_label = pair.replace('USD', '')
 
     images_by_tf = {}
+    # ── ALTERADO (aditivo): guarda os candles de cada TF já buscados
+    # neste loop, pra reaproveitar no cascade_engine sem gastar call
+    # extra na Bybit. O resto do loop é idêntico ao original. ──
+    candles_por_tf_cache = {}
     for tf_label, interval in LIVE_TF_INTERVALS.items():
         candles = fetch_bybit_klines(symbol, interval, 200)
+        candles_por_tf_cache[tf_label] = candles
         base64_png = render_live_chart_png_base64(candles, pair_label, tf_label)
         images_by_tf[tf_label] = {'base64': base64_png, 'mimeType': 'image/png'}
+
+    # ── NOVO (aditivo): roda a cascata estrutural (S/R diário, sweep,
+    # CHoCH, RSI, divergência) em paralelo, sem custo de IA. Isolado em
+    # try/except pra nunca derrubar o ciclo principal do Trade Ao Vivo
+    # se algo der errado aqui. ──
+    if 'D1' in candles_por_tf_cache and 'M15' in candles_por_tf_cache:
+        try:
+            cascade_engine.process_pair_full(
+                DB_FILE, pair,
+                candles_por_tf_cache['D1'],
+                candles_por_tf_cache['M15'],
+                send_telegram,
+            )
+        except Exception as e:
+            print(f"[cascade_engine] erro no ciclo de {pair}: {e}")
 
     raw_text, display_text, error = analyze_single_pair(pair, images_by_tf, category='ict')
     if error:

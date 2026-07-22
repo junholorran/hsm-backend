@@ -534,6 +534,31 @@ body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-h
       <div style="color:var(--gold);font-size:16px;">›</div>
     </button>
   </div>
+
+  <!-- Card com gráfico REAL do par ativo (candle real da Bybit + zona
+       D1/sweep/CHoCH/entrada desenhados a partir do /scalp/status) -->
+  <div class="result-summary-card" id="scalpChartCard" style="margin-bottom:12px;">
+    <div class="rsc-header">
+      <div>
+        <div class="rsc-pair" id="scalpChartPairLabel">BTCUSDT</div>
+        <div class="rsc-tfs" id="scalpChartSub">A carregar...</div>
+      </div>
+      <div class="rsc-right">
+        <div class="rsc-score score-mid" id="scalpChartScore">0/100</div>
+      </div>
+    </div>
+    <div class="rsc-body">
+      <div style="background:#0a0a0f;border-radius:8px;overflow:hidden;margin-bottom:10px;">
+        <canvas id="scalpChartCanvas" width="900" height="360" style="width:100%;display:block;"></canvas>
+      </div>
+      <div class="rsc-levels">
+        <div class="rsc-level"><div class="rsc-level-label">ENTRADA</div><div class="rsc-level-val" id="scalpChartEntry">—</div></div>
+        <div class="rsc-level"><div class="rsc-level-label">STOP</div><div class="rsc-level-val red" id="scalpChartSl">—</div></div>
+        <div class="rsc-level"><div class="rsc-level-label">TP</div><div class="rsc-level-val green" id="scalpChartTp">—</div></div>
+      </div>
+    </div>
+  </div>
+
   <div id="scalpFeedList"><div class="signals-empty">A carregar...</div></div>
 </div>
 
@@ -1330,6 +1355,7 @@ function selectActivePair(el, pair){
   const spotLabelEl = document.getElementById('spotBtnLabel');
   if(spotLabelEl) spotLabelEl.textContent = 'ANALISAR SPOT (DCA) — ' + pair.replace('USD','');
   if(typeof renderScalpBtnState === 'function') renderScalpBtnState();
+  if(typeof loadScalpDetailCard === 'function') loadScalpDetailCard();
   syncActivePairFromServer(pair);
 }
 
@@ -3465,6 +3491,7 @@ function setScalpExecTf(tf, el){
   scalpExecTf = tf;
   document.querySelectorAll('#scalpTfToggle .live-mode-opt').forEach(o=>o.classList.remove('active'));
   el.classList.add('active');
+  if(typeof loadScalpDetailCard === 'function') loadScalpDetailCard();
 }
 
 function updateScalpKillzoneNow(){
@@ -3582,6 +3609,143 @@ async function loadScalpFeed(){
 
 setTimeout(loadScalpFeed, 1500);
 setInterval(loadScalpFeed, 15000);
+
+// ── NOVO: card com gráfico REAL do par ativo no Scalp — candle real da
+// Bybit (TF de execução), com zona D1, sweep, CHoCH e entrada/SL/TP
+// desenhados a partir do que o /scalp/status devolve de verdade. ──
+function drawScalpChart(candles, result){
+  const canvas = document.getElementById('scalpChartCanvas');
+  if(!canvas || !candles || candles.length < 5) return;
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+  ctx.clearRect(0,0,W,H);
+  ctx.fillStyle = '#0a0a0f'; ctx.fillRect(0,0,W,H);
+
+  const highs = candles.map(c=>c.h), lows = candles.map(c=>c.l);
+  let maxP = Math.max(...highs), minP = Math.min(...lows);
+  if(result.zona_top) maxP = Math.max(maxP, result.zona_top);
+  if(result.zona_bottom) minP = Math.min(minP, result.zona_bottom);
+  const pad = (maxP - minP) * 0.08 || 1;
+  maxP += pad; minP -= pad;
+  const range = (maxP - minP) || 1;
+
+  const padL = 8, padR = 66, padT = 10, padB = 10;
+  const plotW = W - padL - padR;
+  const cw = plotW / candles.length;
+  const xFor = i => padL + i*cw + cw/2;
+  const yFor = p => padT + (H-padT-padB) - ((p - minP) / range) * (H-padT-padB);
+
+  ctx.strokeStyle = 'rgba(255,255,255,0.045)';
+  for(let i=1;i<5;i++){ const gy = padT + ((H-padT-padB)/5)*i; ctx.beginPath(); ctx.moveTo(padL,gy); ctx.lineTo(W-padR,gy); ctx.stroke(); }
+
+  if(result.zona_top && result.zona_bottom){
+    ctx.fillStyle = 'rgba(240,192,64,0.12)';
+    ctx.fillRect(padL, yFor(result.zona_top), plotW, yFor(result.zona_bottom)-yFor(result.zona_top));
+    ctx.strokeStyle = 'rgba(240,192,64,0.45)'; ctx.setLineDash([5,4]);
+    ctx.beginPath(); ctx.moveTo(padL,yFor(result.zona_top)); ctx.lineTo(W-padR,yFor(result.zona_top)); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(padL,yFor(result.zona_bottom)); ctx.lineTo(W-padR,yFor(result.zona_bottom)); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = '#f0c040'; ctx.font = 'bold 10px monospace';
+    ctx.fillText('ZONA D1', padL+4, yFor(result.zona_top)-4);
+  }
+
+  if(result.entry_zone_top && result.entry_zone_bottom){
+    ctx.fillStyle = 'rgba(188,140,255,0.16)';
+    ctx.fillRect(padL, yFor(result.entry_zone_top), plotW, yFor(result.entry_zone_bottom)-yFor(result.entry_zone_top));
+    ctx.strokeStyle = 'rgba(188,140,255,0.5)'; ctx.setLineDash([3,3]);
+    ctx.strokeRect(padL, yFor(result.entry_zone_top), plotW, yFor(result.entry_zone_bottom)-yFor(result.entry_zone_top));
+    ctx.setLineDash([]);
+  }
+
+  candles.forEach((c,i)=>{
+    const x = xFor(i);
+    const up = c.c >= c.o;
+    ctx.strokeStyle = up ? '#3fb950' : '#f85149';
+    ctx.fillStyle = up ? '#3fb950' : '#f85149';
+    ctx.beginPath(); ctx.moveTo(x, yFor(c.h)); ctx.lineTo(x, yFor(c.l)); ctx.stroke();
+    const bodyTop = yFor(Math.max(c.o,c.c));
+    const bodyH = Math.max(1, Math.abs(yFor(c.o)-yFor(c.c)));
+    ctx.fillRect(x - cw*0.35, bodyTop, cw*0.7, bodyH);
+  });
+
+  if(result.sweep_nivel){
+    const y = yFor(result.sweep_nivel);
+    const color = result.sweep_lado === 'alta' ? '#f85149' : '#3fb950';
+    const x = W - padR - 14;
+    ctx.strokeStyle = color; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(x-8,y-8); ctx.lineTo(x+8,y+8); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(x+8,y-8); ctx.lineTo(x-8,y+8); ctx.stroke();
+    ctx.fillStyle = color; ctx.font = 'bold 9px monospace';
+    ctx.fillText('SWEEP', x-40, y-12);
+  }
+
+  if(result.choch_nivel){
+    const y = yFor(result.choch_nivel);
+    ctx.strokeStyle = '#58a6ff'; ctx.lineWidth = 1.3; ctx.setLineDash([2,3]);
+    ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(W-padR, y); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = '#58a6ff'; ctx.font = 'bold 10px monospace';
+    ctx.fillText('CHoCH', padL+4, y-4);
+  }
+
+  const levels = [
+    result.entry ? { v: result.entry, label: 'ENTRADA', color: '#f0c040' } : null,
+    result.sl ? { v: result.sl, label: 'STOP', color: '#f85149' } : null,
+    result.tp ? { v: result.tp, label: 'TP', color: '#3fb950' } : null,
+  ].filter(Boolean);
+  levels.forEach(l=>{
+    const y = yFor(l.v);
+    ctx.strokeStyle = l.color; ctx.lineWidth = 1.3; ctx.setLineDash([6,4]);
+    ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(W-padR, y); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = l.color; ctx.font = 'bold 10px monospace';
+    ctx.fillText(l.label, W-padR+4, y+3);
+  });
+}
+
+async function loadScalpDetailCard(){
+  const pairLabelEl = document.getElementById('scalpChartPairLabel');
+  const subEl = document.getElementById('scalpChartSub');
+  const scoreEl = document.getElementById('scalpChartScore');
+  const entryEl = document.getElementById('scalpChartEntry');
+  const slEl = document.getElementById('scalpChartSl');
+  const tpEl = document.getElementById('scalpChartTp');
+  if(!pairLabelEl) return;
+  pairLabelEl.textContent = activePair.replace('USD','USDT');
+
+  try{
+    const res = await fetch('/scalp/status?pair='+activePair);
+    const data = await res.json();
+    const result = data.result || null;
+
+    if(!result){
+      subEl.textContent = 'Sem ciclo ainda — liga o Scalp neste par';
+      scoreEl.textContent = '0/100';
+      entryEl.textContent = slEl.textContent = tpEl.textContent = '—';
+      return;
+    }
+
+    const info = derivarFaseScalp({ result });
+    subEl.textContent = info.texto;
+    subEl.style.color = info.cor;
+    scoreEl.textContent = (result.score||0) + '/100';
+    scoreEl.className = 'rsc-score ' + (result.score>=75?'score-high':result.score>=50?'score-mid':'score-low');
+    entryEl.textContent = result.entry ? '$'+result.entry : '—';
+    slEl.textContent = result.sl ? '$'+result.sl : '—';
+    tpEl.textContent = result.tp ? '$'+result.tp : '—';
+
+    const execTf = result.exec_tf || scalpExecTf;
+    const symbol = LIVE_SYMBOL_MAP[activePair] || 'BTCUSDT';
+    const interval = LIVE_CHART_TF_MAP[execTf] || '5';
+    const candles = await fetchLiveKlines(symbol, interval, 150);
+    drawScalpChart(candles, result);
+  }catch(e){
+    subEl.textContent = 'Erro ao carregar gráfico do Scalp';
+  }
+}
+
+setTimeout(loadScalpDetailCard, 1600);
+setInterval(loadScalpDetailCard, 15000);
 
 // ── NOVO: Feed de Ciclos — busca /live/history e desenha todo ciclo do
 // scheduler (mesmo os fracos), separado dos Sinais Ativos/Recentes. ──

@@ -528,7 +528,7 @@ body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-h
         <div class="live-pulse-wrap"><div class="live-pulse-ring"></div><div class="live-pulse-dot"></div></div>
         <div>
           <div class="live-btn-label" id="scalpBtnLabel">⚡ SCALP AO VIVO — BTC</div>
-          <div class="live-btn-sub">Zona D1 → Sweep → CHoCH → FVG/OB → Score ≥75, só dentro da killzone</div>
+          <div class="live-btn-sub">Zona D1 → Sweep → CHoCH → FVG/OB → Score ≥75 (killzone só soma bônus, não bloqueia)</div>
         </div>
       </div>
       <div style="color:var(--gold);font-size:16px;">›</div>
@@ -3482,7 +3482,7 @@ setInterval(loadCascadeFeed, 15000);
 
 // ── NOVO: Scalp Ao Vivo — TF de execução escolhido pelo utilizador
 // (M1/M5/M15), sessões ligadas/desligadas por par, e o radar puxando
-// /scalp/status. Killzone é GATE real no backend (scalp_engine.py);
+// /scalp/status. Killzone é só INFORMATIVO (bônus no score, não gate);
 // aqui só mostramos o horário atual de forma informativa. ──
 let scalpExecTf = 'M5';
 let scalpSessions = {};
@@ -3503,11 +3503,11 @@ function updateScalpKillzoneNow(){
   if(ptHour >= 7 && ptHour < 10) dentro = 'London (07h-10h)';
   else if(ptHour >= 13 && ptHour < 16) dentro = 'New York (13h-16h)';
   if(dentro){
-    el.textContent = '🟢 dentro — ' + dentro;
+    el.textContent = '🟢 dentro — ' + dentro + ' (bônus no score)';
     el.style.color = 'var(--green)';
   } else {
-    el.textContent = '🔴 fora — só analisa, não sinaliza';
-    el.style.color = 'var(--red)';
+    el.textContent = '⚪ fora — sinaliza normal, sem o bônus';
+    el.style.color = 'var(--muted)';
   }
 }
 updateScalpKillzoneNow();
@@ -3528,7 +3528,7 @@ function toggleScalpSession(pair){
   const confirmMsg = 'Vais ligar o Scalp Ao Vivo em ' + pair.replace('USD','') +
     ' no timeframe de execução ' + scalpExecTf + '.\n\n' +
     'Isso também liga o Trade Ao Vivo automático nesse par (a cada 5min), já que o Scalp roda dentro desse ciclo — sem isso ele nunca teria dado pra analisar.\n\n' +
-    'Só sinaliza/manda Telegram DENTRO da killzone (London 07-10h ou NY 13-16h, horário PT), mesmo que o score bata 75.\n\n' +
+    'Sinaliza e manda Telegram sempre que o score bater 75, mesmo fora da killzone — cripto tem volume real 24h. Dentro de London (07-10h) ou NY (13-16h, horário PT) o score ganha um bônus, mas não é obrigatório.\n\n' +
     'Confirmas?';
   if(!window.confirm(confirmMsg)) return;
   fetch('/scalp/watch', {
@@ -3569,8 +3569,6 @@ function derivarFaseScalp(r){
     return {texto:'FVG/OB pronto — aguardando retorno do preço'+kzTag, cor:'#a685f2', dot:'🟣', fase:5};
   if(res.motivo === 'entrada')
     return {texto:'🔥 SETUP ATIVO — score '+res.score+' — '+(res.direcao==='alta'?'LONG':'SHORT')+' ('+res.exec_tf+')', cor:'#3fb950', dot:'🟢', fase:7};
-  if(res.motivo && res.motivo.indexOf('fora da killzone') >= 0)
-    return {texto:'Score '+res.score+' válido, mas fora da killzone — sem alerta', cor:'#e3b341', dot:'🟡', fase:6};
   if(res.motivo && res.motivo.indexOf('score') >= 0)
     return {texto:'Score '+res.score+' (falta pra 75)'+kzTag, cor:'#58a6ff', dot:'🔵', fase:6};
   return {texto:'Sem ciclo ainda', cor:'var(--muted)', dot:'⚪', fase:0};

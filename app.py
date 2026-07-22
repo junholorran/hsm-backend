@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from PIL import Image, ImageDraw, ImageFont
 
 import cascade_engine
+import scalp_engine
 
 app = Flask(__name__)
 client = anthropic.Anthropic(api_key=os.environ.get('ANTHROPIC_API_KEY'))
@@ -22,6 +23,14 @@ TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
 DB_FILE = '/data/alerts.db'
 
 PRECOS_TICKER = {}
+
+# ── NOVO: guarda o último resultado da cascata (zona/sweep/CHoCH/score)
+# por par, em memória, pra expor no /cascade/status pro frontend ler. ──
+CASCADE_STATUS = {}  # pair -> {'result': {...}, 'updated_at': int}
+
+# ── NOVO: mesmo padrão, mas pro Scalp Ao Vivo (zona D1 → killzone →
+# sweep → CHoCH no TF de execução → FVG/OB → score). ──
+SCALP_STATUS = {}  # pair -> {'result': {...}, 'updated_at': int}
 
 CACHE_WINDOW_SECONDS = 15 * 60  # 15 minutos
 
@@ -245,6 +254,7 @@ init_db()
 # em nenhuma tabela existente, só cria as duas próprias dele. ──
 cascade_engine.init_cascade_db(DB_FILE)
 cascade_engine.init_cascade_signal_db(DB_FILE)
+scalp_engine.init_scalp_db(DB_FILE)
 
 # ─── PROMPT ICT CACHEADO ─────────────────────────────────────────────────────
 ICT_SYSTEM_PROMPT = (
@@ -1067,17 +1077,49 @@ def run_live_cycle(pair, interval_min):
     # ── NOVO (aditivo): roda a cascata estrutural (S/R diário, sweep,
     # CHoCH, RSI, divergência) em paralelo, sem custo de IA. Isolado em
     # try/except pra nunca derrubar o ciclo principal do Trade Ao Vivo
-    # se algo der errado aqui. ──
+    # se algo der errado aqui. Guarda o resultado em CASCADE_STATUS pra
+    # o endpoint /cascade/status devolver ao frontend. ──
     if 'D1' in candles_por_tf_cache and 'M15' in candles_por_tf_cache:
         try:
-            cascade_engine.process_pair_full(
+            cascade_result = cascade_engine.process_pair_full(
                 DB_FILE, pair,
                 candles_por_tf_cache['D1'],
                 candles_por_tf_cache['M15'],
                 send_telegram,
             )
+            CASCADE_STATUS[pair] = {'result': cascade_result, 'updated_at': int(time.time())}
         except Exception as e:
             print(f"[cascade_engine] erro no ciclo de {pair}: {e}")
+
+    # ── NOVO (aditivo): roda o Scalp Ao Vivo (zona D1 → killzone → sweep
+    # → CHoCH no TF de execução escolhido → FVG/OB → score), só se o par
+    # estiver marcado em scalp_watch. Reaproveita candles já buscados
+    # acima; só busca M1 à parte se o TF de execução escolhido for M1
+    # (não faz parte do ciclo normal do Trade Ao Vivo). ──
+    try:
+        with sqlite3.connect(DB_FILE) as conn:
+            cursor = conn.cursor()
+            cursor.execute('SELECT exec_tf FROM scalp_watch WHERE pair=? AND enabled=1', (pair,))
+            row = cursor.fetchone()
+        if row and 'D1' in candles_por_tf_cache:
+            exec_tf = row[0] or 'M5'
+            if exec_tf in candles_por_tf_cache:
+                exec_candles = candles_por_tf_cache[exec_tf]
+            elif exec_tf == 'M1':
+                exec_candles = fetch_bybit_klines(symbol, '1', 200)
+            else:
+                exec_candles = None
+            if exec_candles:
+                scalp_result = scalp_engine.process_pair_scalp(
+                    DB_FILE, pair,
+                    candles_por_tf_cache['D1'],
+                    exec_candles,
+                    exec_tf,
+                    send_telegram,
+                )
+                SCALP_STATUS[pair] = {'result': scalp_result, 'updated_at': int(time.time())}
+    except Exception as e:
+        print(f"[scalp_engine] erro no ciclo de {pair}: {e}")
 
     raw_text, display_text, error = analyze_single_pair(pair, images_by_tf, category='ict')
     if error:
@@ -1633,6 +1675,77 @@ def live_signals_history():
                 'sl': r[6], 'tp1': r[7], 'tp2': r[8], 'alerted': bool(r[9])
             })
         return jsonify({'signals': signals})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+# ── NOVO: expõe o resultado da cascata (zona/sweep/CHoCH/score) em
+# tempo real, pra qualquer par vigiado. Sem par -> devolve todos, pro
+# radar multi-par. Com par -> devolve só aquele, pro card individual. ──
+@app.route('/cascade/status', methods=['GET'])
+def cascade_status():
+    try:
+        pair = request.args.get('pair')
+        if pair:
+            return jsonify(CASCADE_STATUS.get(pair, {}))
+        return jsonify(CASCADE_STATUS)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+# ── NOVO: Scalp Ao Vivo — liga/desliga vigiamento por par, com o TF de
+# execução (M1/M5/M15) escolhido pelo utilizador. Roda dentro do mesmo
+# ciclo do Trade Ao Vivo (run_live_cycle), não cria scheduler próprio. ──
+@app.route('/scalp/watch', methods=['POST'])
+def scalp_watch_start():
+    try:
+        data = request.json or {}
+        pair = data.get('pair')
+        exec_tf = data.get('exec_tf', 'M5')
+        if not pair:
+            return jsonify({'error': 'pair obrigatório'}), 400
+        if exec_tf not in ('M1', 'M5', 'M15'):
+            return jsonify({'error': 'exec_tf deve ser M1, M5 ou M15'}), 400
+        with sqlite3.connect(DB_FILE) as conn:
+            cursor = conn.cursor()
+            cursor.execute('SELECT pair FROM scalp_watch WHERE pair=?', (pair,))
+            exists = cursor.fetchone()
+            if exists:
+                cursor.execute('UPDATE scalp_watch SET exec_tf=?, enabled=1 WHERE pair=?', (exec_tf, pair))
+            else:
+                cursor.execute(
+                    'INSERT INTO scalp_watch (pair, exec_tf, enabled, created_at) VALUES (?, ?, 1, ?)',
+                    (pair, exec_tf, int(time.time()))
+                )
+            conn.commit()
+        return jsonify({'ok': True, 'pair': pair, 'exec_tf': exec_tf})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/scalp/unwatch', methods=['POST'])
+def scalp_watch_stop():
+    try:
+        data = request.json or {}
+        pair = data.get('pair')
+        if not pair:
+            return jsonify({'error': 'pair obrigatório'}), 400
+        with sqlite3.connect(DB_FILE) as conn:
+            cursor = conn.cursor()
+            cursor.execute('UPDATE scalp_watch SET enabled=0 WHERE pair=?', (pair,))
+            conn.commit()
+        return jsonify({'ok': True})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/scalp/status', methods=['GET'])
+def scalp_status():
+    try:
+        pair = request.args.get('pair')
+        if pair:
+            return jsonify(SCALP_STATUS.get(pair, {}))
+        return jsonify(SCALP_STATUS)
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 

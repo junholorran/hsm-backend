@@ -3527,6 +3527,7 @@ function toggleScalpSession(pair){
   }
   const confirmMsg = 'Vais ligar o Scalp Ao Vivo em ' + pair.replace('USD','') +
     ' no timeframe de execução ' + scalpExecTf + '.\n\n' +
+    'Isso também liga o Trade Ao Vivo automático nesse par (a cada 5min), já que o Scalp roda dentro desse ciclo — sem isso ele nunca teria dado pra analisar.\n\n' +
     'Só sinaliza/manda Telegram DENTRO da killzone (London 07-10h ou NY 13-16h, horário PT), mesmo que o score bata 75.\n\n' +
     'Confirmas?';
   if(!window.confirm(confirmMsg)) return;

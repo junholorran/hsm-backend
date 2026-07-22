@@ -1717,6 +1717,23 @@ def scalp_watch_start():
                     'INSERT INTO scalp_watch (pair, exec_tf, enabled, created_at) VALUES (?, ?, 1, ?)',
                     (pair, exec_tf, int(time.time()))
                 )
+            # ── NOVO: o Scalp só roda dentro do ciclo do Trade Ao Vivo
+            # (run_live_cycle). Sem isso, ligar o Scalp sozinho não
+            # dispara nenhum ciclo e o /scalp/status fica vazio pra
+            # sempre. Então garantimos que o par também está em
+            # live_watch, habilitado, com intervalo curto (5min) que
+            # combina com a cadência esperada do Scalp. Se o par já
+            # estiver em live_watch (mesmo com outro intervalo), não
+            # mexe — respeita o que o utilizador já configurou lá. ──
+            cursor.execute('SELECT pair, enabled FROM live_watch WHERE pair=?', (pair,))
+            live_row = cursor.fetchone()
+            if not live_row:
+                cursor.execute(
+                    'INSERT INTO live_watch (pair, interval_min, enabled, last_run) VALUES (?, 5, 1, 0)',
+                    (pair,)
+                )
+            elif live_row[1] == 0:
+                cursor.execute('UPDATE live_watch SET enabled=1 WHERE pair=?', (pair,))
             conn.commit()
         return jsonify({'ok': True, 'pair': pair, 'exec_tf': exec_tf})
     except Exception as e:

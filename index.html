@@ -3557,16 +3557,20 @@ function derivarFaseScalp(r){
   if(!r || !r.result) return {texto:'Sem ciclo ainda', cor:'var(--muted)', dot:'⚪', fase:0};
   const res = r.result;
   const kzTag = res.na_killzone ? ' 🟢KZ' : ' 🔴fora-KZ';
+  if(res.motivo === 'preço fora da zona D1 (última zona mapeada mantida)'){
+    const sweepTxt = res.sweep_nivel ? ' — sweep anterior ('+res.sweep_lado+') ainda guardado' : '';
+    return {texto:'Fora da zona agora (última zona mantida)'+sweepTxt, cor:'var(--muted)', dot:'⚪', fase:1};
+  }
   if(res.motivo === 'preço fora de qualquer banda D1 válida')
     return {texto:'Fora de zona D1', cor:'var(--muted)', dot:'⚪', fase:1};
   if(res.motivo === 'sem sweep detectado ainda')
     return {texto:'Na zona D1 — aguardando sweep'+kzTag, cor:'#f0c040', dot:'🟡', fase:2};
   if(res.motivo === 'sweep ok, mas CHoCH ainda não confirmou')
     return {texto:'Sweep — aguardando CHoCH ('+res.exec_tf+')'+kzTag, cor:'#f85149', dot:'🟠', fase:3};
-  if(res.motivo === 'CHoCH confirmado, mas sem FVG/OB de retorno ainda')
-    return {texto:'CHoCH confirmado — aguardando FVG/OB'+kzTag, cor:'#58a6ff', dot:'🔵', fase:4};
-  if(res.motivo === 'preço ainda fora da zona de entrada (FVG/OB) — aguardando retorno')
-    return {texto:'FVG/OB pronto — aguardando retorno do preço'+kzTag, cor:'#a685f2', dot:'🟣', fase:5};
+  if(res.motivo === 'CHoCH confirmado, mas sem FVG/OB/iFVG/Breaker de retorno ainda')
+    return {texto:'CHoCH confirmado — aguardando FVG/OB/iFVG/Breaker'+kzTag, cor:'#58a6ff', dot:'🔵', fase:4};
+  if(res.motivo === 'preço ainda fora da zona de entrada (FVG/OB/iFVG/Breaker) — aguardando retorno')
+    return {texto:'Zona de entrada pronta ('+(res.entry_zone_tipo||'FVG/OB')+') — aguardando retorno'+kzTag, cor:'#a685f2', dot:'🟣', fase:5};
   if(res.motivo === 'entrada')
     return {texto:'🔥 SETUP ATIVO — score '+res.score+' — '+(res.direcao==='alta'?'LONG':'SHORT')+' ('+res.exec_tf+')', cor:'#3fb950', dot:'🟢', fase:7};
   if(res.motivo && res.motivo.indexOf('score') >= 0)
@@ -3638,22 +3642,33 @@ function drawScalpChart(candles, result){
   for(let i=1;i<5;i++){ const gy = padT + ((H-padT-padB)/5)*i; ctx.beginPath(); ctx.moveTo(padL,gy); ctx.lineTo(W-padR,gy); ctx.stroke(); }
 
   if(result.zona_top && result.zona_bottom){
-    ctx.fillStyle = 'rgba(240,192,64,0.12)';
+    const zonaAtiva = result.zona_ativa !== false;
+    const corPreenchimento = zonaAtiva ? 'rgba(240,192,64,0.12)' : 'rgba(150,150,160,0.08)';
+    const corBorda = zonaAtiva ? 'rgba(240,192,64,0.45)' : 'rgba(150,150,160,0.35)';
+    const corLabel = zonaAtiva ? '#f0c040' : '#8a8a95';
+    ctx.fillStyle = corPreenchimento;
     ctx.fillRect(padL, yFor(result.zona_top), plotW, yFor(result.zona_bottom)-yFor(result.zona_top));
-    ctx.strokeStyle = 'rgba(240,192,64,0.45)'; ctx.setLineDash([5,4]);
+    ctx.strokeStyle = corBorda; ctx.setLineDash(zonaAtiva ? [5,4] : [2,4]);
     ctx.beginPath(); ctx.moveTo(padL,yFor(result.zona_top)); ctx.lineTo(W-padR,yFor(result.zona_top)); ctx.stroke();
     ctx.beginPath(); ctx.moveTo(padL,yFor(result.zona_bottom)); ctx.lineTo(W-padR,yFor(result.zona_bottom)); ctx.stroke();
     ctx.setLineDash([]);
-    ctx.fillStyle = '#f0c040'; ctx.font = 'bold 10px monospace';
-    ctx.fillText('ZONA D1', padL+4, yFor(result.zona_top)-4);
+    ctx.fillStyle = corLabel; ctx.font = 'bold 10px monospace';
+    ctx.fillText(zonaAtiva ? 'ZONA D1' : 'ZONA D1 (fora agora)', padL+4, yFor(result.zona_top)-4);
   }
 
   if(result.entry_zone_top && result.entry_zone_bottom){
-    ctx.fillStyle = 'rgba(188,140,255,0.16)';
+    const tipo = result.entry_zone_tipo;
+    let fillCor, strokeCor, labelCor;
+    if(tipo === 'iFVG'){ fillCor='rgba(236,72,153,0.16)'; strokeCor='rgba(236,72,153,0.5)'; labelCor='#ec48a1'; }
+    else if(tipo === 'Breaker'){ fillCor='rgba(245,158,11,0.16)'; strokeCor='rgba(245,158,11,0.55)'; labelCor='#f5a623'; }
+    else { fillCor='rgba(188,140,255,0.16)'; strokeCor='rgba(188,140,255,0.5)'; labelCor='#bc8cff'; }
+    ctx.fillStyle = fillCor;
     ctx.fillRect(padL, yFor(result.entry_zone_top), plotW, yFor(result.entry_zone_bottom)-yFor(result.entry_zone_top));
-    ctx.strokeStyle = 'rgba(188,140,255,0.5)'; ctx.setLineDash([3,3]);
+    ctx.strokeStyle = strokeCor; ctx.setLineDash([3,3]);
     ctx.strokeRect(padL, yFor(result.entry_zone_top), plotW, yFor(result.entry_zone_bottom)-yFor(result.entry_zone_top));
     ctx.setLineDash([]);
+    ctx.fillStyle = labelCor; ctx.font = 'bold 9px monospace';
+    ctx.fillText(tipo || 'ENTRADA', padL+4, yFor(result.entry_zone_bottom)+11);
   }
 
   candles.forEach((c,i)=>{

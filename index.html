@@ -500,6 +500,43 @@ body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-h
   <div id="sinaisRecentesList"><div class="signals-empty">A carregar...</div></div>
 </div>
 
+<!-- NOVO: Radar da Cascata — todos os pares vigiados, fase atual de
+     cada um (zona/sweep/CHoCH/score), puxado do /cascade/status.
+     Ordenado com os mais quentes (score>=75) no topo. -->
+<div class="section">
+  <div class="section-title">🎯 Setups Ao Vivo — Cascata (todos os pares)</div>
+  <div id="cascadeFeedList"><div class="signals-empty">A carregar...</div></div>
+</div>
+
+<!-- NOVO: Scalp Ao Vivo — zona D1 + killzone + sweep + CHoCH no TF de
+     execução escolhido (M1/M5/M15) + retorno FVG/OB + score. Controle
+     de ligar/desligar por par fica aqui, o radar embaixo mostra todos
+     os pares vigiados de uma vez. -->
+<div class="section">
+  <div class="section-title">⚡ Scalp Ao Vivo</div>
+  <div class="pair-selector-card" style="margin:0 0 12px;">
+    <div class="pair-selector-label">Killzone agora: <span id="scalpKillzoneNow" class="mono">a verificar...</span></div>
+    <div class="live-mode-row" style="margin-top:8px;">
+      <div class="live-mode-toggle" id="scalpTfToggle">
+        <div class="live-mode-opt" onclick="setScalpExecTf('M1',this)">M1</div>
+        <div class="live-mode-opt active" onclick="setScalpExecTf('M5',this)">M5</div>
+        <div class="live-mode-opt" onclick="setScalpExecTf('M15',this)">M15</div>
+      </div>
+    </div>
+    <button class="live-btn" id="scalpBtn" onclick="toggleScalpSession(activePair)" style="margin-top:10px;">
+      <div class="live-btn-left">
+        <div class="live-pulse-wrap"><div class="live-pulse-ring"></div><div class="live-pulse-dot"></div></div>
+        <div>
+          <div class="live-btn-label" id="scalpBtnLabel">⚡ SCALP AO VIVO — BTC</div>
+          <div class="live-btn-sub">Zona D1 → Sweep → CHoCH → FVG/OB → Score ≥75, só dentro da killzone</div>
+        </div>
+      </div>
+      <div style="color:var(--gold);font-size:16px;">›</div>
+    </button>
+  </div>
+  <div id="scalpFeedList"><div class="signals-empty">A carregar...</div></div>
+</div>
+
 <!-- NOVO: Feed de Ciclos — todo ciclo do scheduler, mesmo os fracos,
      separado do journal, pra ver histórico completo e debugar Telegram -->
 <div class="section">
@@ -990,7 +1027,6 @@ async function pollLiveStatus(){
     });
   }catch(e){ console.warn('Erro ao consultar /live/status:', e.message); }
 }
-
 function handleServerLiveUpdate(w, shouldNotify){
   const resultObj = {
     pair: w.pair, result: w.result || '', timeframes: 'D1,H4,H1,M15,M5',
@@ -1293,6 +1329,7 @@ function selectActivePair(el, pair){
   if(liveLabelEl) liveLabelEl.textContent = '🔴 TRADE AO VIVO — ' + pair.replace('USD','');
   const spotLabelEl = document.getElementById('spotBtnLabel');
   if(spotLabelEl) spotLabelEl.textContent = 'ANALISAR SPOT (DCA) — ' + pair.replace('USD','');
+  if(typeof renderScalpBtnState === 'function') renderScalpBtnState();
   syncActivePairFromServer(pair);
 }
 
@@ -1398,7 +1435,6 @@ function removeFromQueue(idx){
   pairQueue.splice(idx,1);
   renderQueue();
 }
-
 async function analyzeAll(){
   if(isAnalyzing) return;
   if(pairQueue.length === 0) return showToast('Adiciona pelo menos 1 par à fila');
@@ -1654,7 +1690,6 @@ async function fetchLiveKlines(symbol, interval, limit, _retried){
     throw e;
   }
 }
-
 function computeRSI(closes, period){
   period = period || 14;
   const rsi = new Array(closes.length).fill(null);
@@ -1807,24 +1842,6 @@ function renderLiveCandleImage(candles, pairLabel, tfLabel){
     const bodyH = Math.max(1, Math.abs(yForPrice(c.o)-yForPrice(c.c)));
     ctx.fillRect(x - cw*0.35, bodyTop, cw*0.7, bodyH);
   });
-
-  const volumes = candles.map(c=>c.v||0);
-  const maxVol = Math.max(...volumes, 1);
-  const avgVol = volumes.reduce((a,b)=>a+b,0) / (volumes.length||1);
-  ctx.strokeStyle = '#2a2a3a';
-  ctx.beginPath(); ctx.moveTo(padL, volTop); ctx.lineTo(W-padR, volTop); ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(padL, volTop+volH); ctx.lineTo(W-padR, volTop+volH); ctx.stroke();
-  candles.forEach((c,i)=>{
-    const x = xFor(i);
-    const barH = (c.v||0)/maxVol*volH;
-    const up = c.c >= c.o;
-    const isAboveAvg = (c.v||0) > avgVol*1.3;
-    if(up) ctx.fillStyle = isAboveAvg ? '#3fb950' : '#2d6e3a';
-    else ctx.fillStyle = isAboveAvg ? '#f85149' : '#8c3c3a';
-    ctx.fillRect(x - cw*0.35, volTop+volH-barH, cw*0.7, barH);
-  });
-  ctx.fillStyle = '#96969f'; ctx.font = '10px monospace';
-  ctx.fillText('VOLUME (barras vivas = acima da média)', padL, volTop-4);
 
   function drawMA(values, color){
     ctx.strokeStyle = color; ctx.lineWidth = 1.3; ctx.beginPath();
@@ -1980,7 +1997,6 @@ function renderLiveCandleImage(candles, pairLabel, tfLabel){
 
   return canvas.toDataURL('image/png').split(',')[1];
 }
-
 async function fetchLiveFundingOI(symbol){
   const tickerRes = await fetch('https://api.bybit.com/v5/market/tickers?category=linear&symbol='+symbol);
   const tickerData = await tickerRes.json();
@@ -2194,7 +2210,6 @@ function detectLiquiditySweep(candles, lookback, tolerancePercent){
   });
   return events.sort((a,b)=>a.index-b.index);
 }
-
 function renderAnnotatedChart(candles, pairLabel, tfLabel, entry, sl, tp1, tp2, fvgZones, obZones, chochEvents, ifvgZones, liquiditySweeps, breakerZones){
   if(!candles || candles.length < 5) return null;
   const hasInvalidCandle = candles.some(c =>
@@ -2396,7 +2411,6 @@ function detectIFVG(candles, minGapPercent){
   });
   return ifvgs;
 }
-
 const SPOT_HOLDINGS = {
   'BTCUSD':  { pm: 55745.39, qty: 0.07858243, bucket: 'core' },
   'ONDOUSD': { pm: 0.68193, qty: 372.83, bucket: 'core' },
@@ -2573,7 +2587,6 @@ function detectMultipleBottoms(candles, tolerancePercent){
     datas: best.pontos.map(p=>p.t)
   };
 }
-
 function renderSpotCandleImage(dailyCandles, weeklyCandles, pairLabel){
   const closesD = dailyCandles.map(c=>c.c);
   const closesW = weeklyCandles.map(c=>c.c);
@@ -2859,7 +2872,6 @@ function renderAnnotatedSpotChart(weeklyCandles, pairLabel, entryFatias, exitTac
 
   return canvas.toDataURL('image/png').split(',')[1];
 }
-
 async function analyzeSpot(){
   const btn = document.getElementById('spotBtn');
   const symbol = LIVE_SYMBOL_MAP[activePair] || 'BTCUSDT';
@@ -3154,7 +3166,6 @@ function initLiveChart(symbol){
   });
 }
 setTimeout(()=>initLiveChart('BTCUSDT'), 800);
-
 async function loadMarketBias(){
   const widget=document.getElementById('biasWidget');
   try{
@@ -3388,6 +3399,190 @@ async function loadSignalsPanel(){
 setTimeout(loadSignalsPanel, 1500);
 setInterval(loadSignalsPanel, 20000);
 
+// ── NOVO: Radar da Cascata — traduz o resultado bruto do cascade_engine
+// (motivo/score) numa fase visual, pra cada par que o /cascade/status
+// devolver. Ordena com os mais quentes (score>=75) no topo. ──
+function derivarFaseCascade(r){
+  if(!r || !r.result) return {fase:0, texto:'Sem ciclo ainda', cor:'var(--muted)', dot:'⚪'};
+  const res = r.result;
+  if(res.motivo === 'preço fora de qualquer banda D1 válida')
+    return {fase:1, texto:'Fora de zona D1', cor:'var(--muted)', dot:'⚪'};
+  if(res.motivo === 'sem sweep detectado ainda')
+    return {fase:2, texto:'Na zona D1 — aguardando sweep', cor:'#f0c040', dot:'🟡'};
+  if(res.motivo === 'sweep ok, mas CHoCH ainda não confirmou')
+    return {fase:3, texto:'Sweep detectado — aguardando CHoCH', cor:'#f85149', dot:'🟠'};
+  if(typeof res.score === 'number' && res.score >= 75)
+    return {fase:5, texto:'🔥 SETUP ATIVO — score '+res.score+' — '+(res.direcao==='alta'?'LONG':'SHORT'), cor:'#3fb950', dot:'🟢'};
+  if(typeof res.score === 'number')
+    return {fase:4, texto:'CHoCH confirmado — score '+res.score+' (falta pra 75)', cor:'#58a6ff', dot:'🔵'};
+  return {fase:0, texto:'Sem ciclo ainda', cor:'var(--muted)', dot:'⚪'};
+}
+
+async function loadCascadeFeed(){
+  try{
+    const res = await fetch('/cascade/status');
+    const data = await res.json();
+    const pairs = Object.keys(data);
+    const el = document.getElementById('cascadeFeedList');
+    if(pairs.length === 0){
+      el.innerHTML = '<div class="signals-empty">Nenhum par vigiado ainda. Liga o Trade Ao Vivo automático em pelo menos 1 par.</div>';
+      return;
+    }
+    const linhas = pairs.map(pair=>{
+      const info = derivarFaseCascade(data[pair]);
+      return { pair, info, updatedAt: (data[pair]||{}).updated_at || 0 };
+    });
+    linhas.sort((a,b)=> b.info.fase - a.info.fase || b.updatedAt - a.updatedAt);
+
+    el.innerHTML = linhas.map(l=>{
+      const isHot = l.info.fase === 5;
+      const time = l.updatedAt ? new Date(l.updatedAt*1000).toLocaleTimeString('pt-PT',{hour:'2-digit',minute:'2-digit'}) : '--';
+      return `
+        <div class="signals-card ${isHot?'live':''}" style="margin-bottom:6px;${isHot?'animation:livePulse2 1.6s ease-in-out infinite;':''}">
+          <div class="signals-header-row">
+            <div class="signals-pair">${l.info.dot} ${l.pair.replace('USD','USDT')}</div>
+            <div style="font-size:10px;color:var(--muted);font-family:'Space Mono',monospace;">${time}</div>
+          </div>
+          <div style="font-size:12px;color:${l.info.cor};font-weight:700;font-family:'Space Mono',monospace;">${l.info.texto}</div>
+        </div>`;
+    }).join('');
+  }catch(e){
+    document.getElementById('cascadeFeedList').innerHTML = '<div class="signals-empty">Erro ao carregar cascata</div>';
+  }
+}
+
+setTimeout(loadCascadeFeed, 1500);
+setInterval(loadCascadeFeed, 15000);
+
+// ── NOVO: Scalp Ao Vivo — TF de execução escolhido pelo utilizador
+// (M1/M5/M15), sessões ligadas/desligadas por par, e o radar puxando
+// /scalp/status. Killzone é GATE real no backend (scalp_engine.py);
+// aqui só mostramos o horário atual de forma informativa. ──
+let scalpExecTf = 'M5';
+let scalpSessions = {};
+
+function setScalpExecTf(tf, el){
+  scalpExecTf = tf;
+  document.querySelectorAll('#scalpTfToggle .live-mode-opt').forEach(o=>o.classList.remove('active'));
+  el.classList.add('active');
+}
+
+function updateScalpKillzoneNow(){
+  const el = document.getElementById('scalpKillzoneNow');
+  if(!el) return;
+  const nowUtc = new Date();
+  const ptHour = (nowUtc.getUTCHours() + 1) % 24; // aproximação UTC+1, igual ao backend
+  let dentro = null;
+  if(ptHour >= 7 && ptHour < 10) dentro = 'London (07h-10h)';
+  else if(ptHour >= 13 && ptHour < 16) dentro = 'New York (13h-16h)';
+  if(dentro){
+    el.textContent = '🟢 dentro — ' + dentro;
+    el.style.color = 'var(--green)';
+  } else {
+    el.textContent = '🔴 fora — só analisa, não sinaliza';
+    el.style.color = 'var(--red)';
+  }
+}
+updateScalpKillzoneNow();
+setInterval(updateScalpKillzoneNow, 60000);
+
+function toggleScalpSession(pair){
+  if(scalpSessions[pair]){
+    fetch('/scalp/unwatch', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ pair })
+    }).then(()=>{
+      delete scalpSessions[pair];
+      showToast('⏹ Scalp Ao Vivo desligado em ' + pair.replace('USD',''));
+      renderScalpBtnState();
+    }).catch(e=>showToast('Erro ao desligar Scalp: ' + e.message));
+    return;
+  }
+  const confirmMsg = 'Vais ligar o Scalp Ao Vivo em ' + pair.replace('USD','') +
+    ' no timeframe de execução ' + scalpExecTf + '.\n\n' +
+    'Só sinaliza/manda Telegram DENTRO da killzone (London 07-10h ou NY 13-16h, horário PT), mesmo que o score bata 75.\n\n' +
+    'Confirmas?';
+  if(!window.confirm(confirmMsg)) return;
+  fetch('/scalp/watch', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ pair, exec_tf: scalpExecTf })
+  }).then(r=>r.json()).then(data=>{
+    if(data.error){ showToast('Erro ao ligar Scalp: ' + data.error); return; }
+    showToast('⚡ Scalp Ao Vivo ligado em ' + pair.replace('USD','') + ' (' + scalpExecTf + ')');
+    scalpSessions[pair] = { exec_tf: scalpExecTf };
+    renderScalpBtnState();
+  }).catch(e=>showToast('Erro ao ligar Scalp: ' + e.message));
+}
+
+function renderScalpBtnState(){
+  const label = document.getElementById('scalpBtnLabel');
+  if(!label) return;
+  const pairLabel = activePair.replace('USD','');
+  if(scalpSessions[activePair]){
+    label.textContent = '⏹ SCALP LIGADO — ' + pairLabel + ' (' + scalpSessions[activePair].exec_tf + ')';
+  } else {
+    label.textContent = '⚡ SCALP AO VIVO — ' + pairLabel;
+  }
+}
+
+function derivarFaseScalp(r){
+  if(!r || !r.result) return {texto:'Sem ciclo ainda', cor:'var(--muted)', dot:'⚪', fase:0};
+  const res = r.result;
+  const kzTag = res.na_killzone ? ' 🟢KZ' : ' 🔴fora-KZ';
+  if(res.motivo === 'preço fora de qualquer banda D1 válida')
+    return {texto:'Fora de zona D1', cor:'var(--muted)', dot:'⚪', fase:1};
+  if(res.motivo === 'sem sweep detectado ainda')
+    return {texto:'Na zona D1 — aguardando sweep'+kzTag, cor:'#f0c040', dot:'🟡', fase:2};
+  if(res.motivo === 'sweep ok, mas CHoCH ainda não confirmou')
+    return {texto:'Sweep — aguardando CHoCH ('+res.exec_tf+')'+kzTag, cor:'#f85149', dot:'🟠', fase:3};
+  if(res.motivo === 'CHoCH confirmado, mas sem FVG/OB de retorno ainda')
+    return {texto:'CHoCH confirmado — aguardando FVG/OB'+kzTag, cor:'#58a6ff', dot:'🔵', fase:4};
+  if(res.motivo === 'preço ainda fora da zona de entrada (FVG/OB) — aguardando retorno')
+    return {texto:'FVG/OB pronto — aguardando retorno do preço'+kzTag, cor:'#a685f2', dot:'🟣', fase:5};
+  if(res.motivo === 'entrada')
+    return {texto:'🔥 SETUP ATIVO — score '+res.score+' — '+(res.direcao==='alta'?'LONG':'SHORT')+' ('+res.exec_tf+')', cor:'#3fb950', dot:'🟢', fase:7};
+  if(res.motivo && res.motivo.indexOf('fora da killzone') >= 0)
+    return {texto:'Score '+res.score+' válido, mas fora da killzone — sem alerta', cor:'#e3b341', dot:'🟡', fase:6};
+  if(res.motivo && res.motivo.indexOf('score') >= 0)
+    return {texto:'Score '+res.score+' (falta pra 75)'+kzTag, cor:'#58a6ff', dot:'🔵', fase:6};
+  return {texto:'Sem ciclo ainda', cor:'var(--muted)', dot:'⚪', fase:0};
+}
+
+async function loadScalpFeed(){
+  try{
+    const res = await fetch('/scalp/status');
+    const data = await res.json();
+    const pairs = Object.keys(data);
+    const el = document.getElementById('scalpFeedList');
+    if(pairs.length === 0){
+      el.innerHTML = '<div class="signals-empty">Nenhum par vigiado no Scalp ainda. Escolhe o TF de execução e liga acima.</div>';
+      return;
+    }
+    const linhas = pairs.map(pair=>{
+      const info = derivarFaseScalp(data[pair]);
+      return { pair, info, updatedAt: (data[pair]||{}).updated_at || 0 };
+    });
+    linhas.sort((a,b)=> b.info.fase - a.info.fase || b.updatedAt - a.updatedAt);
+    el.innerHTML = linhas.map(l=>{
+      const isHot = l.info.fase === 7;
+      const time = l.updatedAt ? new Date(l.updatedAt*1000).toLocaleTimeString('pt-PT',{hour:'2-digit',minute:'2-digit'}) : '--';
+      return `
+        <div class="signals-card ${isHot?'live':''}" style="margin-bottom:6px;${isHot?'animation:livePulse2 1.6s ease-in-out infinite;':''}">
+          <div class="signals-header-row">
+            <div class="signals-pair">${l.info.dot} ${l.pair.replace('USD','USDT')}</div>
+            <div style="font-size:10px;color:var(--muted);font-family:'Space Mono',monospace;">${time}</div>
+          </div>
+          <div style="font-size:12px;color:${l.info.cor};font-weight:700;font-family:'Space Mono',monospace;">${l.info.texto}</div>
+        </div>`;
+    }).join('');
+  }catch(e){
+    document.getElementById('scalpFeedList').innerHTML = '<div class="signals-empty">Erro ao carregar Scalp</div>';
+  }
+}
+
+setTimeout(loadScalpFeed, 1500);
+setInterval(loadScalpFeed, 15000);
+
 // ── NOVO: Feed de Ciclos — busca /live/history e desenha todo ciclo do
 // scheduler (mesmo os fracos), separado dos Sinais Ativos/Recentes. ──
 async function loadFeedCiclos(){
@@ -3423,7 +3618,6 @@ async function loadFeedCiclos(){
 
 setTimeout(loadFeedCiclos, 1500);
 setInterval(loadFeedCiclos, 20000);
-
 async function loadJournal(){
   try{
     const res = await fetch('/journal');

@@ -24,11 +24,11 @@ DB_FILE = '/data/alerts.db'
 
 PRECOS_TICKER = {}
 
-# ── NOVO: guarda o último resultado da cascata (zona/sweep/CHoCH/score)
+# ── guarda o último resultado da cascata (zona/sweep/CHoCH/score)
 # por par, em memória, pra expor no /cascade/status pro frontend ler. ──
 CASCADE_STATUS = {}  # pair -> {'result': {...}, 'updated_at': int}
 
-# ── NOVO: mesmo padrão, mas pro Scalp Ao Vivo (zona D1 → killzone →
+# ── mesmo padrão, mas pro Scalp Ao Vivo (zona D1 → killzone →
 # sweep → CHoCH no TF de execução → FVG/OB → score). ──
 SCALP_STATUS = {}  # pair -> {'result': {...}, 'updated_at': int}
 
@@ -172,6 +172,9 @@ def init_db():
                     updated_at INTEGER DEFAULT 0
                 )
             ''')
+            # ── MODO SOMBRA: 3 colunas novas no fim (gate_teria_pulado,
+            # cascade_score, cascade_motivo). Aditivo — não mexe em
+            # nenhuma coluna existente. ──
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS live_signals (
                     id TEXT PRIMARY KEY,
@@ -183,10 +186,29 @@ def init_db():
                     sl TEXT,
                     tp1 TEXT,
                     tp2 TEXT,
-                    alerted INTEGER DEFAULT 0
+                    alerted INTEGER DEFAULT 0,
+                    gate_teria_pulado INTEGER DEFAULT 0,
+                    cascade_score INTEGER,
+                    cascade_motivo TEXT
                 )
             ''')
             conn.commit()
+
+            # ── MODO SOMBRA: se a tabela já existia de antes (sem essas
+            # colunas), o CREATE TABLE IF NOT EXISTS acima não adiciona
+            # nada — então tenta o ALTER TABLE aqui, ignorando erro se
+            # a coluna já existir (idempotente, seguro rodar sempre). ──
+            for alter_sql in [
+                "ALTER TABLE live_signals ADD COLUMN gate_teria_pulado INTEGER DEFAULT 0",
+                "ALTER TABLE live_signals ADD COLUMN cascade_score INTEGER",
+                "ALTER TABLE live_signals ADD COLUMN cascade_motivo TEXT",
+            ]:
+                try:
+                    cursor.execute(alter_sql)
+                    conn.commit()
+                except Exception:
+                    pass  # coluna já existe, tudo bem
+
         print("Base de dados SQLite inicializada com sucesso!")
     except Exception as e:
         print(f"Erro ao inicializar Base de Dados: {e}")
@@ -250,8 +272,6 @@ def check_alerts_inline():
 
 
 init_db()
-# ── NOVO (aditivo): inicializa as tabelas do cascade_engine. Não mexe
-# em nenhuma tabela existente, só cria as duas próprias dele. ──
 cascade_engine.init_cascade_db(DB_FILE)
 cascade_engine.init_cascade_signal_db(DB_FILE)
 scalp_engine.init_scalp_db(DB_FILE)
@@ -1064,9 +1084,6 @@ def run_live_cycle(pair, interval_min):
     pair_label = pair.replace('USD', '')
 
     images_by_tf = {}
-    # ── ALTERADO (aditivo): guarda os candles de cada TF já buscados
-    # neste loop, pra reaproveitar no cascade_engine sem gastar call
-    # extra na Bybit. O resto do loop é idêntico ao original. ──
     candles_por_tf_cache = {}
     for tf_label, interval in LIVE_TF_INTERVALS.items():
         candles = fetch_bybit_klines(symbol, interval, 200)
@@ -1074,11 +1091,12 @@ def run_live_cycle(pair, interval_min):
         base64_png = render_live_chart_png_base64(candles, pair_label, tf_label)
         images_by_tf[tf_label] = {'base64': base64_png, 'mimeType': 'image/png'}
 
-    # ── NOVO (aditivo): roda a cascata estrutural (S/R diário, sweep,
-    # CHoCH, RSI, divergência) em paralelo, sem custo de IA. Isolado em
-    # try/except pra nunca derrubar o ciclo principal do Trade Ao Vivo
-    # se algo der errado aqui. Guarda o resultado em CASCADE_STATUS pra
-    # o endpoint /cascade/status devolver ao frontend. ──
+    # ── MODO SOMBRA: guarda o resultado da cascata e marca se o gate
+    # TERIA pulado a chamada cara ao Claude — mas NÃO pula ainda. Isso é
+    # só coleta de prova por 2-3 dias antes de cortar de verdade. ──
+    gate_teria_pulado = 0
+    cascade_score_log = None
+    cascade_motivo_log = None
     if 'D1' in candles_por_tf_cache and 'M15' in candles_por_tf_cache:
         try:
             cascade_result = cascade_engine.process_pair_full(
@@ -1088,14 +1106,16 @@ def run_live_cycle(pair, interval_min):
                 send_telegram,
             )
             CASCADE_STATUS[pair] = {'result': cascade_result, 'updated_at': int(time.time())}
+            cascade_score_log = cascade_result.get('score')
+            cascade_motivo_log = cascade_result.get('motivo')
+            if cascade_score_log == 0:
+                gate_teria_pulado = 1
         except Exception as e:
             print(f"[cascade_engine] erro no ciclo de {pair}: {e}")
 
-    # ── NOVO (aditivo): roda o Scalp Ao Vivo (zona D1 → killzone → sweep
-    # → CHoCH no TF de execução escolhido → FVG/OB → score), só se o par
-    # estiver marcado em scalp_watch. Reaproveita candles já buscados
-    # acima; só busca M1 à parte se o TF de execução escolhido for M1
-    # (não faz parte do ciclo normal do Trade Ao Vivo). ──
+    # ── Scalp Ao Vivo (zona D1 → killzone → sweep → CHoCH no TF de
+    # execução escolhido → FVG/OB → score), só se o par estiver marcado
+    # em scalp_watch. Reaproveita candles já buscados acima. ──
     try:
         with sqlite3.connect(DB_FILE) as conn:
             cursor = conn.cursor()
@@ -1147,13 +1167,17 @@ def run_live_cycle(pair, interval_min):
               tps[2] if len(tps) > 2 else '', ','.join(LIVE_TF_INTERVALS.keys()), raw_text, 'pending'))
         conn.commit()
 
-        # ── NOVO: grava TODO ciclo (mesmo os fracos) numa tabela separada
-        # do journal, pra alimentar o feed "Sinais" sem poluir o journal ──
+        # ── MODO SOMBRA: grava também gate_teria_pulado/cascade_score/
+        # cascade_motivo junto de cada ciclo, pra comparar depois no
+        # endpoint /gate_shadow_report. ──
         signal_id = f"sig_{pair}_{int(time.time() * 1000)}"
         cursor.execute('''
-            INSERT INTO live_signals (id, pair, created_at, direction, score, entry, sl, tp1, tp2)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (signal_id, pair, now, direction, score, entry, sl, tp1, tp2))
+            INSERT INTO live_signals
+                (id, pair, created_at, direction, score, entry, sl, tp1, tp2,
+                 gate_teria_pulado, cascade_score, cascade_motivo)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (signal_id, pair, now, direction, score, entry, sl, tp1, tp2,
+              gate_teria_pulado, cascade_score_log, cascade_motivo_log))
         conn.commit()
 
     if direction and direction != 'NEUTRO' and score >= AUTO_ALERT_SCORE_THRESHOLD and entry:
@@ -1178,7 +1202,6 @@ def run_live_cycle(pair, interval_min):
                 msg += f"\n💡 <i>Vigiando sozinho no servidor, a cada {interval_min}min.</i>"
                 send_telegram(msg)
                 cursor.execute('UPDATE live_watch SET last_alerted_signature=? WHERE pair=?', (signature, pair))
-                # ── NOVO: marca esse ciclo específico como "alertado" no feed ──
                 if signal_id:
                     cursor.execute('UPDATE live_signals SET alerted=1 WHERE id=?', (signal_id,))
                 conn.commit()
@@ -1648,9 +1671,6 @@ def live_watch_status():
 
 @app.route('/live/history', methods=['GET'])
 def live_signals_history():
-    # ── NOVO: feed com TODO ciclo já rodado (mesmo os fracos), pra
-    # alimentar a seção "Sinais" da Home e servir de diagnóstico do
-    # porquê o Telegram dispara ou não em cada ciclo. ──
     try:
         pair_filter = request.args.get('pair', '')
         limit = int(request.args.get('limit', 30))
@@ -1679,9 +1699,6 @@ def live_signals_history():
         return jsonify({'error': str(e)}), 500
 
 
-# ── NOVO: expõe o resultado da cascata (zona/sweep/CHoCH/score) em
-# tempo real, pra qualquer par vigiado. Sem par -> devolve todos, pro
-# radar multi-par. Com par -> devolve só aquele, pro card individual. ──
 @app.route('/cascade/status', methods=['GET'])
 def cascade_status():
     try:
@@ -1693,9 +1710,43 @@ def cascade_status():
         return jsonify({'error': str(e)}), 500
 
 
-# ── NOVO: Scalp Ao Vivo — liga/desliga vigiamento por par, com o TF de
-# execução (M1/M5/M15) escolhido pelo utilizador. Roda dentro do mesmo
-# ciclo do Trade Ao Vivo (run_live_cycle), não cria scheduler próprio. ──
+# ── MODO SOMBRA: relatório pra comparar, depois de 2-3 dias rodando,
+# se o gate (baseado no cascade_engine) teria descartado algum caso que
+# na real deu score alto no Claude. Se 'casos_suspeitos' vier vazio,
+# é seguro ligar o corte de verdade. ──
+@app.route('/gate_shadow_report', methods=['GET'])
+def gate_shadow_report():
+    try:
+        with sqlite3.connect(DB_FILE) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT pair, created_at, direction, score, cascade_score, cascade_motivo
+                FROM live_signals
+                WHERE gate_teria_pulado = 1 AND score >= 60
+                ORDER BY created_at DESC
+            ''')
+            casos_suspeitos = cursor.fetchall()
+
+            cursor.execute('SELECT COUNT(*) FROM live_signals')
+            total = cursor.fetchone()[0]
+
+            cursor.execute('SELECT COUNT(*) FROM live_signals WHERE gate_teria_pulado = 1')
+            teria_pulado = cursor.fetchone()[0]
+
+        return jsonify({
+            'total_ciclos': total,
+            'gate_teria_pulado': teria_pulado,
+            'pct_economia_estimada': round((teria_pulado / total * 100), 1) if total else 0,
+            'casos_suspeitos_score_alto_apesar_do_gate': [
+                {'pair': c[0], 'created_at': c[1], 'direction': c[2], 'score_claude': c[3],
+                 'cascade_score': c[4], 'cascade_motivo': c[5]}
+                for c in casos_suspeitos
+            ]
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/scalp/watch', methods=['POST'])
 def scalp_watch_start():
     try:
@@ -1717,14 +1768,6 @@ def scalp_watch_start():
                     'INSERT INTO scalp_watch (pair, exec_tf, enabled, created_at) VALUES (?, ?, 1, ?)',
                     (pair, exec_tf, int(time.time()))
                 )
-            # ── NOVO: o Scalp só roda dentro do ciclo do Trade Ao Vivo
-            # (run_live_cycle). Sem isso, ligar o Scalp sozinho não
-            # dispara nenhum ciclo e o /scalp/status fica vazio pra
-            # sempre. Então garantimos que o par também está em
-            # live_watch, habilitado, com intervalo curto (5min) que
-            # combina com a cadência esperada do Scalp. Se o par já
-            # estiver em live_watch (mesmo com outro intervalo), não
-            # mexe — respeita o que o utilizador já configurou lá. ──
             cursor.execute('SELECT pair, enabled FROM live_watch WHERE pair=?', (pair,))
             live_row = cursor.fetchone()
             if not live_row:

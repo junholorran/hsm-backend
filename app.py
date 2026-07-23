@@ -1152,12 +1152,13 @@ def run_live_cycle(pair, interval_min):
         images_by_tf[tf_label] = {'base64': base64_png, 'mimeType': 'image/png'}
 
     # ── CORTE ATIVO: o gate agora REALMENTE pula a chamada cara ao
-    # Claude quando o cascade_engine não achou nem zona+sweep+CHoCH
-    # (score == 0). Validado no modo sombra: 106+ ciclos, gate pegou
-    # casos e ZERO casos suspeitos (nenhum score alto do Claude nos
-    # ciclos que o gate teria pulado). Continua gravando gate_teria_pulado
-    # / cascade_score / cascade_motivo em live_signals pra seguir
-    # monitorando a qualidade do corte ao longo do tempo. ──
+    # ── MODO SOMBRA (revertido do corte real): o gate NÃO pula mais a
+    # chamada ao Claude — descobrimos um caso (BTCUSD, score Claude 85)
+    # onde o cascade_engine disse "sem zona D1" mas o Claude achou um
+    # sinal forte de verdade. Corte de 9% de economia não compensava o
+    # risco de perder sinais bons silenciosamente. Continua gravando
+    # gate_teria_pulado / cascade_score / cascade_motivo em live_signals
+    # pra seguir monitorando, mas SEMPRE chama o Claude. ──
     gate_teria_pulado = 0
     cascade_score_log = None
     cascade_motivo_log = None
@@ -1176,23 +1177,6 @@ def run_live_cycle(pair, interval_min):
                 gate_teria_pulado = 1
         except Exception as e:
             print(f"[cascade_engine] erro no ciclo de {pair}: {e}")
-
-    if gate_teria_pulado == 1:
-        now = int(time.time())
-        with sqlite3.connect(DB_FILE) as conn:
-            cursor = conn.cursor()
-            cursor.execute('UPDATE live_watch SET last_run=? WHERE pair=?', (now, pair))
-            signal_id = f"sig_{pair}_{int(time.time() * 1000)}"
-            cursor.execute('''
-                INSERT INTO live_signals
-                    (id, pair, created_at, direction, score, entry, sl, tp1, tp2,
-                     gate_teria_pulado, cascade_score, cascade_motivo)
-                VALUES (?, ?, ?, 'NEUTRO', 0, '', '', '', '', 1, ?, ?)
-            ''', (signal_id, pair, now, cascade_score_log, cascade_motivo_log))
-            conn.commit()
-        print(f"[gate] chamada Claude PULADA para {pair} — {cascade_motivo_log}")
-        return {'pair': pair, 'direction': 'NEUTRO', 'score': 0,
-                'entry': '', 'sl': '', 'tp1': '', 'tp2': ''}
 
     # ── Scalp Ao Vivo (zona D1 → killzone → sweep → CHoCH no TF de
     # execução escolhido → FVG/OB → score), só se o par estiver marcado

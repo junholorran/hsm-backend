@@ -493,6 +493,56 @@ ICT_SYSTEM_PROMPT = (
     "- Probabilidade: 3=60%, 4=70%, 5=80%, 6+=90%\n"
     "- Trigger obrigatorio: Engolfo Bullish/Bearish, Pin Bar, Inside Bar no M15\n\n"
 
+    "GATE DE RISCO/RETORNO — OBRIGATORIO, POR SETUP, NAO GLOBAL:\n"
+    "O documento ja pede 3 setups por cenario (SCALP M5/M15, INTRADAY "
+    "H1, SWING H4/D1). Cada um tem seu proprio Entry/SL/TP — e cada um "
+    "TEM DE SER avaliado por RR de forma INDEPENDENTE, nunca misturados "
+    "num score unico. Um setup pode ser viavel e outro invalido ao "
+    "mesmo tempo.\n\n"
+    "Para CADA setup (Scalp, Intraday, Swing), dentro do cenario LONG e "
+    "dentro do cenario SHORT, calcula:\n"
+    "RR = distancia(Entry, TP1) / distancia(Entry, SL)\n"
+    "Mostra essa conta por extenso ao lado de cada setup (ex: \"RR "
+    "Scalp: 136/492 = 0.28 — INVIAVEL\").\n\n"
+    "RR MINIMO POR SETUP: 1.5.\n\n"
+    "Se um setup especifico ficar abaixo de 1.5, antes de descarta-lo, "
+    "tenta as duas correcoes (SL mais proximo real, ou TP mais "
+    "distante real) so DENTRO daquele mesmo timeframe do setup — nao "
+    "pega emprestado nivel de outro timeframe. Se ainda assim nao "
+    "resolver, esse setup especifico fica marcado como \"INVIAVEL (RR "
+    "[X])\" no corpo da resposta, mas isso NAO invalida os outros "
+    "setups do mesmo par.\n\n"
+    "REGRA DE OURO: cada setup que aparecer na resposta com "
+    "Entry/SL/TP preenchidos TEM de ter RR >= 1.5 ao lado. Se nao "
+    "tiver, o setup nao pode ser apresentado como executavel — ou "
+    "corrige com nivel real, ou marca como INVIAVEL explicitamente.\n\n"
+    "QUAL SETUP REPORTAR NO BLOCO_DADOS FINAL:\n"
+    "O bloco de dados no fim da resposta (ENTRY_FINAL, SL_FINAL, etc.) "
+    "reporta o setup de MAIOR PRIORIDADE que passou no RR minimo, "
+    "nesta ordem de preferencia: Scalp > Intraday > Swing (prioriza a "
+    "entrada mais proxima do preco atual, entre as que sao viaveis).\n"
+    "Se NENHUM dos 3 setups (nem Scalp, nem Intraday, nem Swing) "
+    "passar do RR minimo de 1.5, entao e so entao:\n"
+    "- DIRECAO_FINAL = NEUTRO\n"
+    "- SCORE_FINAL nao ultrapassa 40\n"
+    "Se PELO MENOS UM setup passar, o SCORE_FINAL reflete a forca "
+    "tecnica normal (soma de camadas), e o BLOCO_DADOS usa os niveis "
+    "daquele setup especifico que passou — nunca mistura niveis de "
+    "setups diferentes.\n\n"
+
+    "AMARRACAO SCORE x SETUP REPORTADO — OBRIGATORIO:\n"
+    "As camadas de score que dependem de UMA entrada especifica — 'OB "
+    "ativo na direcao' (+10), 'FVG aberto na direcao' (+10), e 'Preco "
+    "AINDA fora da zona de entrada valida' (-15) — usam SEMPRE a zona "
+    "de entrada do setup que sera reportado no BLOCO_DADOS (o setup de "
+    "maior prioridade que passou no RR minimo, seguindo Scalp > "
+    "Intraday > Swing). Nunca usa zona de entrada de um timeframe "
+    "diferente do que sera efetivamente reportado. As demais camadas "
+    "(bias D1/H4, CHoCH, RSI, divergencia, ADR, etc.) continuam "
+    "avaliadas para o par como um todo, independente de qual setup for "
+    "reportado. Isso garante que o SCORE_FINAL nunca contradiga o "
+    "proprio setup que aparece no BLOCO_DADOS.\n\n"
+
     "BLOCO_DADOS — OBRIGATORIO NO FIM DA RESPOSTA, SEM EXCECAO:\n"
     "Depois de toda a analise narrada, termina SEMPRE com este bloco "
     "exatamente neste formato, em texto plano (sem tags HTML dentro do "
@@ -1091,9 +1141,13 @@ def run_live_cycle(pair, interval_min):
         base64_png = render_live_chart_png_base64(candles, pair_label, tf_label)
         images_by_tf[tf_label] = {'base64': base64_png, 'mimeType': 'image/png'}
 
-    # ── MODO SOMBRA: guarda o resultado da cascata e marca se o gate
-    # TERIA pulado a chamada cara ao Claude — mas NÃO pula ainda. Isso é
-    # só coleta de prova por 2-3 dias antes de cortar de verdade. ──
+    # ── CORTE ATIVO: o gate agora REALMENTE pula a chamada cara ao
+    # Claude quando o cascade_engine não achou nem zona+sweep+CHoCH
+    # (score == 0). Validado no modo sombra: 106+ ciclos, gate pegou
+    # casos e ZERO casos suspeitos (nenhum score alto do Claude nos
+    # ciclos que o gate teria pulado). Continua gravando gate_teria_pulado
+    # / cascade_score / cascade_motivo em live_signals pra seguir
+    # monitorando a qualidade do corte ao longo do tempo. ──
     gate_teria_pulado = 0
     cascade_score_log = None
     cascade_motivo_log = None
@@ -1112,6 +1166,23 @@ def run_live_cycle(pair, interval_min):
                 gate_teria_pulado = 1
         except Exception as e:
             print(f"[cascade_engine] erro no ciclo de {pair}: {e}")
+
+    if gate_teria_pulado == 1:
+        now = int(time.time())
+        with sqlite3.connect(DB_FILE) as conn:
+            cursor = conn.cursor()
+            cursor.execute('UPDATE live_watch SET last_run=? WHERE pair=?', (now, pair))
+            signal_id = f"sig_{pair}_{int(time.time() * 1000)}"
+            cursor.execute('''
+                INSERT INTO live_signals
+                    (id, pair, created_at, direction, score, entry, sl, tp1, tp2,
+                     gate_teria_pulado, cascade_score, cascade_motivo)
+                VALUES (?, ?, ?, 'NEUTRO', 0, '', '', '', '', 1, ?, ?)
+            ''', (signal_id, pair, now, cascade_score_log, cascade_motivo_log))
+            conn.commit()
+        print(f"[gate] chamada Claude PULADA para {pair} — {cascade_motivo_log}")
+        return {'pair': pair, 'direction': 'NEUTRO', 'score': 0,
+                'entry': '', 'sl': '', 'tp1': '', 'tp2': ''}
 
     # ── Scalp Ao Vivo (zona D1 → killzone → sweep → CHoCH no TF de
     # execução escolhido → FVG/OB → score), só se o par estiver marcado

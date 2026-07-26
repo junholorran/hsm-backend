@@ -35,9 +35,11 @@
 
 import sqlite3
 import time
+import random
 from datetime import datetime, timezone, timedelta
 
 SCORE_THRESHOLD_SINAL = 75
+COOLDOWN_SECONDS = 45 * 60  # 45min — meio-termo da faixa 30-60min do Vortex
 TOLERANCIA_CLUSTER_PCT = 0.006   # 0.6% — mesma tolerância usada no cascade pra clusterizar toques
 MIN_EVENTOS_BANDA = 2            # mínimo de toques pra uma banda D1 ser considerada válida
 SWING_LOOKBACK = 5               # candles de cada lado pra confirmar swing high/low no TF de execução
@@ -436,11 +438,423 @@ def compute_rsi(closes, period=14):
     return rsi
 
 
-def compute_score(zona, sweep, choch, entry_zone, exec_candles, na_killzone):
+# ═══════════════════════════════════════════════════════════════════════
+# INDICADORES TÉCNICOS PADRÃO — cálculo real (fórmulas de mercado
+# convencionais), não texto gerado. Pedido explícito do Juninho depois de
+# ver a lista completa que o Vortex usa (RSI, MACD, ATR, ADX, Bollinger,
+# EMAs, Stochastic). Cada função devolve uma SÉRIE (lista, mesmo tamanho
+# dos candles, com None nos pontos sem dado suficiente ainda) — quem
+# consome pega o último valor válido com a função `last()` no fundo do
+# arquivo (compute_technical_indicators).
+# ═══════════════════════════════════════════════════════════════════════
+
+def compute_ema(values, period):
+    """Média móvel exponencial padrão. Primeiro valor válido é uma SMA
+    simples do período (ponto de partida clássico), depois aplica o fator
+    de suavização k = 2/(period+1)."""
+    n = len(values)
+    if n < period:
+        return [None] * n
+    ema = [None] * n
+    k = 2 / (period + 1)
+    sma_inicial = sum(values[:period]) / period
+    ema[period - 1] = sma_inicial
+    for i in range(period, n):
+        ema[i] = values[i] * k + ema[i - 1] * (1 - k)
+    return ema
+
+
+def compute_macd(closes, fast=12, slow=26, signal_period=9):
+    """MACD padrão: linha = EMA rápida - EMA lenta; sinal = EMA da linha;
+    histograma = linha - sinal. Alinha os índices manualmente porque a
+    EMA lenta (26) começa bem depois da rápida (12)."""
+    n = len(closes)
+    ema_fast = compute_ema(closes, fast)
+    ema_slow = compute_ema(closes, slow)
+
+    macd_line = [None] * n
+    for i in range(n):
+        if ema_fast[i] is not None and ema_slow[i] is not None:
+            macd_line[i] = ema_fast[i] - ema_slow[i]
+
+    valid_idx = [i for i, v in enumerate(macd_line) if v is not None]
+    signal_line = [None] * n
+    if valid_idx:
+        macd_values = [macd_line[i] for i in valid_idx]
+        ema_sinal_sub = compute_ema(macd_values, signal_period)
+        for j, idx in enumerate(valid_idx):
+            signal_line[idx] = ema_sinal_sub[j]
+
+    histogram = [None] * n
+    for i in range(n):
+        if macd_line[i] is not None and signal_line[i] is not None:
+            histogram[i] = macd_line[i] - signal_line[i]
+
+    return macd_line, signal_line, histogram
+
+
+def compute_atr(candles, period=14):
+    """Average True Range, suavização de Wilder (padrão do mercado —
+    mesma usada no Supertrend, que também depende de ATR)."""
+    n = len(candles)
+    if n < period + 1:
+        return [None] * n
+    tr = [None] * n
+    for i in range(1, n):
+        h, l, prev_c = candles[i]['h'], candles[i]['l'], candles[i - 1]['c']
+        tr[i] = max(h - l, abs(h - prev_c), abs(l - prev_c))
+
+    atr = [None] * n
+    primeiros_tr = [tr[i] for i in range(1, period + 1)]
+    atr[period] = sum(primeiros_tr) / period
+    for i in range(period + 1, n):
+        atr[i] = (atr[i - 1] * (period - 1) + tr[i]) / period
+    return atr
+
+
+def compute_adx(candles, period=14):
+    """ADX de Wilder — força de tendência (não direção). +DI/-DI internos
+    calculados por suavização de Wilder, DX = diferença normalizada entre
+    eles, ADX = média suavizada do DX."""
+    n = len(candles)
+    if n < period * 2 + 2:
+        return [None] * n
+
+    plus_dm = [0.0] * n
+    minus_dm = [0.0] * n
+    tr = [0.0] * n
+    for i in range(1, n):
+        up_move = candles[i]['h'] - candles[i - 1]['h']
+        down_move = candles[i - 1]['l'] - candles[i]['l']
+        plus_dm[i] = up_move if (up_move > down_move and up_move > 0) else 0.0
+        minus_dm[i] = down_move if (down_move > up_move and down_move > 0) else 0.0
+        h, l, prev_c = candles[i]['h'], candles[i]['l'], candles[i - 1]['c']
+        tr[i] = max(h - l, abs(h - prev_c), abs(l - prev_c))
+
+    atr_s = [None] * n
+    plus_di_s = [None] * n
+    minus_di_s = [None] * n
+    dx = [None] * n
+
+    atr_s[period] = sum(tr[1:period + 1])
+    plus_di_s[period] = sum(plus_dm[1:period + 1])
+    minus_di_s[period] = sum(minus_dm[1:period + 1])
+
+    def _dx_de(plus_s, minus_s, atr_val):
+        if not atr_val:
+            return None
+        pdi = 100 * plus_s / atr_val
+        mdi = 100 * minus_s / atr_val
+        if pdi + mdi == 0:
+            return 0.0
+        return 100 * abs(pdi - mdi) / (pdi + mdi)
+
+    dx[period] = _dx_de(plus_di_s[period], minus_di_s[period], atr_s[period])
+
+    for i in range(period + 1, n):
+        atr_s[i] = atr_s[i - 1] - (atr_s[i - 1] / period) + tr[i]
+        plus_di_s[i] = plus_di_s[i - 1] - (plus_di_s[i - 1] / period) + plus_dm[i]
+        minus_di_s[i] = minus_di_s[i - 1] - (minus_di_s[i - 1] / period) + minus_dm[i]
+        dx[i] = _dx_de(plus_di_s[i], minus_di_s[i], atr_s[i])
+
+    adx = [None] * n
+    janela_inicial = [v for v in dx[period:period * 2] if v is not None]
+    if len(janela_inicial) < period:
+        return adx
+    idx_primeiro_adx = period * 2 - 1
+    adx[idx_primeiro_adx] = sum(janela_inicial) / period
+    for i in range(idx_primeiro_adx + 1, n):
+        if dx[i] is None:
+            continue
+        adx[i] = (adx[i - 1] * (period - 1) + dx[i]) / period
+    return adx
+
+
+def compute_bollinger(closes, period=20, std_mult=2):
+    """Bandas de Bollinger: SMA central + desvio-padrão populacional das
+    últimas `period` velas, multiplicado por std_mult (padrão 2σ)."""
+    n = len(closes)
+    upper, mid, lower = [None] * n, [None] * n, [None] * n
+    for i in range(period - 1, n):
+        window = closes[i - period + 1:i + 1]
+        m = sum(window) / period
+        variancia = sum((x - m) ** 2 for x in window) / period
+        desvio = variancia ** 0.5
+        mid[i] = m
+        upper[i] = m + std_mult * desvio
+        lower[i] = m - std_mult * desvio
+    return upper, mid, lower
+
+
+def compute_stochastic(candles, k_period=14, d_period=3, smooth=3):
+    """Estocástico lento (%K suavizado + %D): %K bruto = posição do close
+    dentro do range high/low das últimas k_period velas, suavizado por
+    `smooth` períodos; %D = média móvel de `d_period` sobre o %K já
+    suavizado."""
+    n = len(candles)
+    raw_k = [None] * n
+    for i in range(k_period - 1, n):
+        window = candles[i - k_period + 1:i + 1]
+        hh = max(c['h'] for c in window)
+        ll = min(c['l'] for c in window)
+        c_atual = candles[i]['c']
+        raw_k[i] = 0.0 if hh == ll else 100 * (c_atual - ll) / (hh - ll)
+
+    k = [None] * n
+    for i in range(n):
+        start = i - smooth + 1
+        if start < 0 or raw_k[i] is None:
+            continue
+        window = raw_k[start:i + 1]
+        if any(v is None for v in window):
+            continue
+        k[i] = sum(window) / smooth
+
+    d = [None] * n
+    for i in range(n):
+        start = i - d_period + 1
+        if start < 0 or k[i] is None:
+            continue
+        window = k[start:i + 1]
+        if any(v is None for v in window):
+            continue
+        d[i] = sum(window) / d_period
+
+    return k, d
+
+
+def compute_vwap(exec_candles):
+    """VWAP institucional, ancorado na sessão (dia UTC atual) — mesma
+    lógica que mesas institucionais usam: preço médio ponderado por
+    volume, resetado a cada novo dia. Usa apenas os candles do dia UTC
+    corrente dentro da janela de exec_candles disponível."""
+    if not exec_candles:
+        return None
+    dia_atual = datetime.fromtimestamp(exec_candles[-1]['t'], tz=timezone.utc).date()
+    cum_pv, cum_vol = 0.0, 0.0
+    for c in exec_candles:
+        if datetime.fromtimestamp(c['t'], tz=timezone.utc).date() != dia_atual:
+            continue
+        typical = (c['h'] + c['l'] + c['c']) / 3
+        vol = c.get('v', 0)
+        cum_pv += typical * vol
+        cum_vol += vol
+    if cum_vol == 0:
+        return None
+    return round(cum_pv / cum_vol, 6)
+
+
+def compute_volume_profile_poc(exec_candles, lookback=100, bins=24):
+    """Volume Profile simplificado: agrupa os closes das últimas
+    `lookback` velas em `bins` faixas de preço, soma o volume de cada
+    faixa, e devolve o POC (Point of Control) — o preço onde mais volume
+    trocou de mãos. Mesma ideia do POC pontilhado que aparece no chart
+    do Vortex."""
+    candles = exec_candles[-lookback:]
+    if not candles:
+        return None
+    precos = [c['c'] for c in candles]
+    lo, hi = min(precos), max(precos)
+    if hi == lo:
+        return round(lo, 6)
+    largura_bin = (hi - lo) / bins
+    vol_por_bin = [0.0] * bins
+    for c in candles:
+        idx = min(int((c['c'] - lo) / largura_bin), bins - 1)
+        vol_por_bin[idx] += c.get('v', 0)
+    idx_max = max(range(bins), key=lambda i: vol_por_bin[i])
+    poc = lo + (idx_max + 0.5) * largura_bin
+    return round(poc, 6)
+
+
+def compute_ichimoku(exec_candles):
+    """Ichimoku Kinko Hyo — Tenkan-sen (9), Kijun-sen (26), Senkou Span
+    A e B (nuvem/Kumo). Valores calculados no ponto atual, sem o
+    deslocamento de 26 períodos à frente que o Ichimoku tradicional usa
+    pra desenhar a nuvem projetada — aqui reporta os valores DE HOJE
+    (equivalente ao 'onde a nuvem está formando agora')."""
+    def hh_ll(candles, period):
+        window = candles[-period:]
+        return max(c['h'] for c in window), min(c['l'] for c in window)
+
+    if len(exec_candles) < 52:
+        return {'tenkan': None, 'kijun': None, 'senkou_a': None, 'senkou_b': None}
+
+    hh9, ll9 = hh_ll(exec_candles, 9)
+    hh26, ll26 = hh_ll(exec_candles, 26)
+    hh52, ll52 = hh_ll(exec_candles, 52)
+    tenkan = (hh9 + ll9) / 2
+    kijun = (hh26 + ll26) / 2
+    senkou_a = (tenkan + kijun) / 2
+    senkou_b = (hh52 + ll52) / 2
+    return {
+        'tenkan': round(tenkan, 6), 'kijun': round(kijun, 6),
+        'senkou_a': round(senkou_a, 6), 'senkou_b': round(senkou_b, 6),
+    }
+
+
+def compute_monte_carlo(exec_candles, n_sims=1000, n_steps=20):
+    """Simulação de Monte Carlo real: mede a média e o desvio-padrão dos
+    retornos históricos recentes (não inventa volatilidade), e projeta
+    `n_sims` caminhos aleatórios de `n_steps` candles à frente a partir
+    do preço atual (passeio aleatório gaussiano com a volatilidade real
+    medida). Devolve % de simulações que terminaram acima/abaixo do
+    preço atual, e os cenários pessimista (percentil 10), mediano
+    (percentil 50) e otimista (percentil 90) — mesmo espírito dos "1000
+    sims" que o Vortex mostra."""
+    closes = [c['c'] for c in exec_candles]
+    if len(closes) < 30:
+        return None
+    retornos = [(closes[i] - closes[i - 1]) / closes[i - 1] for i in range(1, len(closes)) if closes[i - 1] > 0]
+    if not retornos:
+        return None
+    media_r = sum(retornos) / len(retornos)
+    var_r = sum((r - media_r) ** 2 for r in retornos) / len(retornos)
+    desvio_r = var_r ** 0.5
+
+    preco_atual = closes[-1]
+    rng = random.Random()
+    precos_finais = []
+    for _ in range(n_sims):
+        p = preco_atual
+        for _ in range(n_steps):
+            p = p * (1 + rng.gauss(media_r, desvio_r))
+        precos_finais.append(p)
+
+    precos_finais.sort()
+    acima = sum(1 for p in precos_finais if p > preco_atual)
+    p10 = precos_finais[int(n_sims * 0.10)]
+    p50 = precos_finais[int(n_sims * 0.50)]
+    p90 = precos_finais[int(n_sims * 0.90)]
+
+    return {
+        'prob_alta_pct': round(100 * acima / n_sims, 1),
+        'prob_baixa_pct': round(100 * (n_sims - acima) / n_sims, 1),
+        'cenario_pessimista': round(p10, 6),
+        'cenario_mediano': round(p50, 6),
+        'cenario_otimista': round(p90, 6),
+        'n_sims': n_sims,
+        'n_steps': n_steps,
+    }
+
+
+def detect_candle_pattern(exec_candles):
+    """Detecta o padrão de candle mais recente, com regras geométricas
+    reais (não classificação por 'achismo'): Doji, Engolfo de Alta/Baixa,
+    Martelo, Estrela Cadente. Retorna None se o último candle não bater
+    em nenhum padrão claro."""
+    if len(exec_candles) < 2:
+        return None
+    c = exec_candles[-1]
+    prev = exec_candles[-2]
+    corpo = abs(c['c'] - c['o'])
+    range_total = c['h'] - c['l']
+    if range_total == 0:
+        return None
+
+    if corpo <= range_total * 0.1:
+        return 'Doji'
+
+    prev_bear = prev['c'] < prev['o']
+    cur_bull = c['c'] > c['o']
+    if prev_bear and cur_bull and c['c'] >= prev['o'] and c['o'] <= prev['c']:
+        return 'Engolfo de Alta'
+
+    prev_bull = prev['c'] > prev['o']
+    cur_bear = c['c'] < c['o']
+    if prev_bull and cur_bear and c['o'] >= prev['c'] and c['c'] <= prev['o']:
+        return 'Engolfo de Baixa'
+
+    pavio_inferior = min(c['o'], c['c']) - c['l']
+    pavio_superior = c['h'] - max(c['o'], c['c'])
+    if pavio_inferior >= corpo * 2 and pavio_superior <= corpo * 0.5:
+        return 'Martelo (Hammer)'
+    if pavio_superior >= corpo * 2 and pavio_inferior <= corpo * 0.5:
+        return 'Estrela Cadente (Shooting Star)'
+
+    return None
+
+
+def compute_technical_indicators(exec_candles):
+    """Roda todos os indicadores acima em cima do TF de execução e
+    devolve só o ÚLTIMO valor válido de cada um — é isso que entra no
+    resultado do ciclo (scalp_result['indicadores']), pra tela mostrar
+    os números reais igual o Vortex mostra, sem inventar nada."""
+    closes = [c['c'] for c in exec_candles]
+
+    rsi_series = compute_rsi(closes)
+    ema9 = compute_ema(closes, 9)
+    ema21 = compute_ema(closes, 21)
+    ema50 = compute_ema(closes, 50)
+    ema200 = compute_ema(closes, 200)
+    macd_line, macd_signal, macd_hist = compute_macd(closes)
+    atr_series = compute_atr(exec_candles, 14)
+    adx_series = compute_adx(exec_candles, 14)
+    bb_upper, bb_mid, bb_lower = compute_bollinger(closes, 20, 2)
+    stoch_k, stoch_d = compute_stochastic(exec_candles, 14, 3, 3)
+
+    def last(series):
+        for v in reversed(series):
+            if v is not None:
+                return round(v, 4)
+        return None
+
+    indicadores = {
+        'rsi14': last(rsi_series),
+        'ema9': last(ema9), 'ema21': last(ema21), 'ema50': last(ema50), 'ema200': last(ema200),
+        'macd_line': last(macd_line), 'macd_signal': last(macd_signal), 'macd_hist': last(macd_hist),
+        'atr14': last(atr_series),
+        'adx14': last(adx_series),
+        'bollinger_upper': last(bb_upper), 'bollinger_mid': last(bb_mid), 'bollinger_lower': last(bb_lower),
+        'stoch_k': last(stoch_k), 'stoch_d': last(stoch_d),
+    }
+
+    # ── Bloco 2: VWAP, Volume Profile, Ichimoku, Monte Carlo, Candle
+    # Patterns — cada um com try/except isolado, pra um indicador falhar
+    # (ex: par muito novo, poucos candles) nunca derrubar os outros. ──
+    try:
+        indicadores['vwap'] = compute_vwap(exec_candles)
+    except Exception as e:
+        print(f"[scalp_engine] erro no VWAP: {e}")
+        indicadores['vwap'] = None
+
+    try:
+        indicadores['volume_profile_poc'] = compute_volume_profile_poc(exec_candles)
+    except Exception as e:
+        print(f"[scalp_engine] erro no Volume Profile: {e}")
+        indicadores['volume_profile_poc'] = None
+
+    try:
+        indicadores['ichimoku'] = compute_ichimoku(exec_candles)
+    except Exception as e:
+        print(f"[scalp_engine] erro no Ichimoku: {e}")
+        indicadores['ichimoku'] = None
+
+    try:
+        indicadores['monte_carlo'] = compute_monte_carlo(exec_candles)
+    except Exception as e:
+        print(f"[scalp_engine] erro no Monte Carlo: {e}")
+        indicadores['monte_carlo'] = None
+
+    try:
+        indicadores['candle_pattern'] = detect_candle_pattern(exec_candles)
+    except Exception as e:
+        print(f"[scalp_engine] erro no Candle Pattern: {e}")
+        indicadores['candle_pattern'] = None
+
+    return indicadores
+
+
+def compute_score(zona, sweep, choch, entry_zone, exec_candles, na_killzone, indicadores=None):
     """Soma de pesos determinística, mesmo espírito do cascade_engine.
     Killzone aqui é só um BÔNUS de qualidade (cripto tem volume real 24h,
     não é gate) — soma pontos se bateu dentro da janela, mas a ausência
     dela não impede o score de chegar em 75.
+
+    `indicadores` é o dict já calculado por compute_technical_indicators()
+    (reaproveitado do início do ciclo, pra não recalcular tudo de novo).
+    Se vier None (chamada antiga/isolada), calcula na hora como fallback.
+
     Retorna (score, detalhes[(nome, pontos), ...])."""
     detalhes = []
     score = 0
@@ -492,6 +906,140 @@ def compute_score(zona, sweep, choch, entry_zone, exec_candles, na_killzone):
             score += 8
             detalhes.append(('volume_choch_forte', 8))
 
+    # ── NOVO: indicadores técnicos pesando de verdade no score, não só
+    # aparecendo como dado solto. Reaproveita `indicadores` já calculado
+    # no início do ciclo (compute_technical_indicators) — se não vier
+    # (chamada isolada/antiga), calcula na hora como fallback. ──
+    if indicadores is None:
+        indicadores = compute_technical_indicators(exec_candles)
+    direcao = choch['direcao']
+
+    # MACD: histograma a favor da direção = momentum real confirmando
+    macd_hist = indicadores.get('macd_hist')
+    if macd_hist is not None:
+        if (direcao == 'alta' and macd_hist > 0) or (direcao == 'baixa' and macd_hist < 0):
+            score += 8
+            detalhes.append(('macd_confirmando', 8))
+
+    # ADX: força de tendência real (>=25 é padrão de mercado pra "tendência
+    # de verdade", <20 é lateral/fraco) — não indica direção, só se vale a
+    # pena confiar no movimento
+    adx = indicadores.get('adx14')
+    if adx is not None and adx >= 25:
+        score += 7
+        detalhes.append(('adx_tendencia_forte', 7))
+
+    # EMAs empilhadas na direção certa (9>21>50 pra alta, invertido pra
+    # baixa) = estrutura de tendência de curto prazo alinhada
+    ema9, ema21, ema50 = indicadores.get('ema9'), indicadores.get('ema21'), indicadores.get('ema50')
+    if ema9 is not None and ema21 is not None and ema50 is not None:
+        if direcao == 'alta' and ema9 > ema21 > ema50:
+            score += 8
+            detalhes.append(('emas_alinhadas', 8))
+        elif direcao == 'baixa' and ema9 < ema21 < ema50:
+            score += 8
+            detalhes.append(('emas_alinhadas', 8))
+
+    # Stochastic: %K e %D ambos do lado favorável (mesmo espírito do RSI,
+    # mas outro oscilador — reforça sem duplicar o mesmo sinal)
+    stoch_k, stoch_d = indicadores.get('stoch_k'), indicadores.get('stoch_d')
+    if stoch_k is not None and stoch_d is not None:
+        if direcao == 'alta' and stoch_k <= 30 and stoch_d <= 30:
+            score += 6
+            detalhes.append(('stochastic_favoravel', 6))
+        elif direcao == 'baixa' and stoch_k >= 70 and stoch_d >= 70:
+            score += 6
+            detalhes.append(('stochastic_favoravel', 6))
+
+    # Bollinger: preço no candle de CHoCH tocou/passou a banda oposta à
+    # direção (ex: CHoCH de alta com o sweep tendo tocado a banda inferior)
+    # = movimento esticado o suficiente pra justificar reversão real, não
+    # só ruído dentro do canal
+    bb_lower, bb_upper = indicadores.get('bollinger_lower'), indicadores.get('bollinger_upper')
+    if bb_lower is not None and bb_upper is not None and sweep.get('nivel') is not None:
+        if direcao == 'alta' and sweep['nivel'] <= bb_lower:
+            score += 5
+            detalhes.append(('bollinger_extremo_favoravel', 5))
+        elif direcao == 'baixa' and sweep['nivel'] >= bb_upper:
+            score += 5
+            detalhes.append(('bollinger_extremo_favoravel', 5))
+
+    # ATR: valida se o risco (distância entrada→stop) é saudável em
+    # relação à volatilidade real do par — stop grudado demais no preço
+    # (menos de 0.5x ATR) é fácil de ser varrido por ruído; stop longe
+    # demais (mais de 4x ATR) incha o risco sem necessidade. Faixa
+    # saudável = confirma que o stop tá calibrado com o mercado real.
+    atr = indicadores.get('atr14')
+    if atr and atr > 0 and sweep.get('nivel') is not None:
+        preco_atual_est = exec_candles[-1]['c']
+        risco_est = abs(preco_atual_est - sweep['nivel'])
+        razao_atr = risco_est / atr
+        if 0.5 <= razao_atr <= 4:
+            score += 5
+            detalhes.append(('atr_risco_saudavel', 5))
+
+    preco_atual = exec_candles[-1]['c']
+
+    # VWAP institucional: preço do lado certo do VWAP (acima pra compra,
+    # abaixo pra venda) = viés institucional da sessão alinhado
+    vwap = indicadores.get('vwap')
+    if vwap is not None:
+        if direcao == 'alta' and preco_atual > vwap:
+            score += 5
+            detalhes.append(('vwap_alinhado', 5))
+        elif direcao == 'baixa' and preco_atual < vwap:
+            score += 5
+            detalhes.append(('vwap_alinhado', 5))
+
+    # Volume Profile POC: entrada perto do preço onde mais volume trocou
+    # de mãos recentemente = zona com liquidez/interesse real, não vazio
+    poc = indicadores.get('volume_profile_poc')
+    if poc is not None and poc > 0:
+        distancia_pct = abs(preco_atual - poc) / poc
+        if distancia_pct <= 0.008:  # dentro de 0.8% do POC
+            score += 5
+            detalhes.append(('poc_proximo', 5))
+
+    # Ichimoku: preço FORA da nuvem (Kumo) na direção certa = estrutura
+    # de tendência mais ampla concordando, não só o TF de execução
+    ichimoku = indicadores.get('ichimoku') or {}
+    senkou_a, senkou_b = ichimoku.get('senkou_a'), ichimoku.get('senkou_b')
+    if senkou_a is not None and senkou_b is not None:
+        topo_nuvem = max(senkou_a, senkou_b)
+        fundo_nuvem = min(senkou_a, senkou_b)
+        if direcao == 'alta' and preco_atual > topo_nuvem:
+            score += 6
+            detalhes.append(('ichimoku_fora_nuvem', 6))
+        elif direcao == 'baixa' and preco_atual < fundo_nuvem:
+            score += 6
+            detalhes.append(('ichimoku_fora_nuvem', 6))
+
+    # Monte Carlo: maioria das 1000 simulações (baseadas na volatilidade
+    # real medida) termina do lado da direção do sinal
+    mc = indicadores.get('monte_carlo') or {}
+    prob_alta = mc.get('prob_alta_pct')
+    prob_baixa = mc.get('prob_baixa_pct')
+    if prob_alta is not None and prob_baixa is not None:
+        if direcao == 'alta' and prob_alta >= 55:
+            score += 6
+            detalhes.append(('monte_carlo_favoravel', 6))
+        elif direcao == 'baixa' and prob_baixa >= 55:
+            score += 6
+            detalhes.append(('monte_carlo_favoravel', 6))
+
+    # Candle Pattern: padrão de vela do último candle bate com a direção
+    # do sinal (Engolfo/Martelo pra alta, Engolfo/Estrela Cadente pra baixa)
+    padrao = indicadores.get('candle_pattern')
+    padroes_alta = ('Engolfo de Alta', 'Martelo (Hammer)')
+    padroes_baixa = ('Engolfo de Baixa', 'Estrela Cadente (Shooting Star)')
+    if padrao:
+        if direcao == 'alta' and padrao in padroes_alta:
+            score += 6
+            detalhes.append(('candle_pattern_favoravel', 6))
+        elif direcao == 'baixa' and padrao in padroes_baixa:
+            score += 6
+            detalhes.append(('candle_pattern_favoravel', 6))
+
     return min(score, 100), detalhes
 
 
@@ -528,7 +1076,20 @@ def process_pair_scalp(db_file, pair, d1_candles, exec_candles, exec_tf_label, s
         'entry_zone_top': None,
         'entry_zone_bottom': None,
         'entry_zone_tipo': None,
+        'indicadores': None,
+        'em_cooldown': False,
     }
+
+    # ── Indicadores técnicos calculados SEMPRE, independente de ter zona/
+    # sweep/CHoCH ou não — igual o Vortex mostra a lista de indicadores
+    # já na tela desde o início do "ANALISANDO...", antes de qualquer
+    # confluência ter sido encontrada. Envolvido em try/except pra nunca
+    # derrubar o ciclo por causa de dado insuficiente (par novo, poucos
+    # candles, etc.) — nesse caso só fica None. ──
+    try:
+        resultado['indicadores'] = compute_technical_indicators(exec_candles)
+    except Exception as e:
+        print(f"[scalp_engine] erro ao calcular indicadores de {pair}: {e}")
 
     if not zona:
         # ── preço saiu da zona, mas isso NÃO apaga a memória salva.
@@ -605,7 +1166,7 @@ def process_pair_scalp(db_file, pair, d1_candles, exec_candles, exec_tf_label, s
         _save_zone_state(db_file, pair, zona, 'aguardando_retorno', now, sweep=sweep, choch=choch)
         return resultado
 
-    score, detalhes = compute_score(zona, sweep, choch, entry_zone, exec_candles, na_killzone)
+    score, detalhes = compute_score(zona, sweep, choch, entry_zone, exec_candles, na_killzone, indicadores=resultado.get('indicadores'))
     resultado['score'] = score
     resultado['detalhes'] = detalhes
     resultado['direcao'] = choch['direcao']
@@ -619,20 +1180,36 @@ def process_pair_scalp(db_file, pair, d1_candles, exec_candles, exec_tf_label, s
     resultado['tp'] = round(tp, 6)
 
     if score >= SCORE_THRESHOLD_SINAL:
-        resultado['motivo'] = 'entrada'
-        _save_zone_state(db_file, pair, zona, 'entrada', now, sweep=sweep, choch=choch)
-        _save_signal(db_file, pair, exec_tf_label, resultado, alerted=True)
-        if send_telegram_fn:
-            arrow = '📈' if choch['direcao'] == 'alta' else '📉'
-            kz_txt = f" | Killzone: {killzone_nome}" if na_killzone else " | fora da killzone"
-            msg = f"⚡ <b>Sinal Scalp Ao Vivo — {pair}</b>\n\n"
-            msg += f"{arrow} <b>{'LONG' if choch['direcao']=='alta' else 'SHORT'}</b> | TF execução: {exec_tf_label}{kz_txt}\n"
-            msg += f"📍 Entrada: {resultado['entry']}\n"
-            msg += f"🛑 Stop: {resultado['sl']}\n"
-            msg += f"✅ TP: {resultado['tp']}\n"
-            msg += f"🎯 Score: {score}/100\n"
-            msg += f"\n💡 Zona D1 → Sweep → CHoCH → retorno {entry_zone['tipo']}"
-            send_telegram_fn(msg)
+        # ── Filtro de Cooldown: mesmo com score válido, não reenvia
+        # Telegram se já alertou esse par há menos de 45min. Evita spam
+        # quando o score fica alto por vários ciclos seguidos (a mesma
+        # zona/sweep/CHoCH ainda em vigor). O resultado continua sendo
+        # devolvido normalmente pra tela do app — só o Telegram é
+        # segurado. ──
+        segundos_desde = _segundos_desde_ultimo_alerta(db_file, 'scalp_signal_state', pair)
+        em_cooldown = segundos_desde is not None and segundos_desde < COOLDOWN_SECONDS
+        resultado['em_cooldown'] = em_cooldown
+
+        if em_cooldown:
+            restante_min = (COOLDOWN_SECONDS - segundos_desde) // 60
+            resultado['motivo'] = f'score {score} válido, mas em cooldown ({restante_min}min restantes)'
+            _save_zone_state(db_file, pair, zona, 'cooldown', now, sweep=sweep, choch=choch)
+            _save_signal(db_file, pair, exec_tf_label, resultado, alerted=False)
+        else:
+            resultado['motivo'] = 'entrada'
+            _save_zone_state(db_file, pair, zona, 'entrada', now, sweep=sweep, choch=choch)
+            _save_signal(db_file, pair, exec_tf_label, resultado, alerted=True)
+            if send_telegram_fn:
+                arrow = '📈' if choch['direcao'] == 'alta' else '📉'
+                kz_txt = f" | Killzone: {killzone_nome}" if na_killzone else " | fora da killzone"
+                msg = f"⚡ <b>Sinal Scalp Ao Vivo — {pair}</b>\n\n"
+                msg += f"{arrow} <b>{'LONG' if choch['direcao']=='alta' else 'SHORT'}</b> | TF execução: {exec_tf_label}{kz_txt}\n"
+                msg += f"📍 Entrada: {resultado['entry']}\n"
+                msg += f"🛑 Stop: {resultado['sl']}\n"
+                msg += f"✅ TP: {resultado['tp']}\n"
+                msg += f"🎯 Score: {score}/100\n"
+                msg += f"\n💡 Zona D1 → Sweep → CHoCH → retorno {entry_zone['tipo']}"
+                send_telegram_fn(msg)
     else:
         resultado['motivo'] = f'score {score} abaixo de {SCORE_THRESHOLD_SINAL} — sem entrada'
         _save_zone_state(db_file, pair, zona, 'score_insuficiente', now, sweep=sweep, choch=choch)
@@ -662,6 +1239,28 @@ def _save_zone_state(db_file, pair, zona, fase, now, sweep=None, choch=None):
             conn.commit()
     except Exception as e:
         print(f"[scalp_engine] erro ao salvar zone_state de {pair}: {e}")
+
+
+def _segundos_desde_ultimo_alerta(db_file, table, pair):
+    """Lê o timestamp do último sinal REALMENTE alertado (alerted=1) pra
+    esse par nessa tabela, e devolve quantos segundos se passaram desde
+    então. None se nunca alertou. Usado pelo filtro de Cooldown, pra
+    evitar spam de Telegram quando a condição continua batendo ciclo
+    após ciclo (ex: score fica em 78 por 3 ciclos seguidos)."""
+    try:
+        with sqlite3.connect(db_file) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f'SELECT created_at FROM {table} WHERE pair=? AND alerted=1 ORDER BY created_at DESC LIMIT 1',
+                (pair,)
+            )
+            row = cursor.fetchone()
+        if not row:
+            return None
+        return int(time.time()) - row[0]
+    except Exception as e:
+        print(f"[scalp_engine] erro ao checar cooldown ({table}, {pair}): {e}")
+        return None
 
 
 def _save_signal(db_file, pair, exec_tf_label, resultado, alerted):
@@ -912,8 +1511,14 @@ def process_pair_scalp_antecipado_v2(db_file, pair, d1_candles, exec_candles, ex
         'pair': pair, 'exec_tf': exec_tf_label, 'modo': 'antecipado_v2',
         'sinal': False, 'direcao': None, 'entry': None, 'sl': None, 'tp': None,
         'rsi': None, 'liquidez_varrida': None, 'divergencia_rsi': False,
-        'bias_d1': None, 'bias_h4': None, 'motivo': None,
+        'bias_d1': None, 'bias_h4': None, 'motivo': None, 'indicadores': None,
+        'em_cooldown': False,
     }
+
+    try:
+        resultado['indicadores'] = compute_technical_indicators(exec_candles)
+    except Exception as e:
+        print(f"[scalp_engine] erro ao calcular indicadores (antecipado) de {pair}: {e}")
 
     if not zona:
         resultado['motivo'] = 'preço fora de qualquer banda D1 válida'
@@ -976,8 +1581,9 @@ def process_pair_scalp_antecipado_v2(db_file, pair, d1_candles, exec_candles, ex
         'motivo': 'entrada_confirmada',
     })
 
-    # dedup simples: não repete o mesmo sinal (mesma direção+entry) seguido
-    ja_alertado = False
+    # dedup por preço (já existia): não repete o mesmo sinal (mesma
+    # direção+entry quase idêntico) seguido.
+    ja_alertado_preco = False
     try:
         with sqlite3.connect(db_file) as conn:
             cursor = conn.cursor()
@@ -987,13 +1593,21 @@ def process_pair_scalp_antecipado_v2(db_file, pair, d1_candles, exec_candles, ex
             ''', (pair,))
             row = cursor.fetchone()
             if row and row[0] == direcao and abs((row[1] or 0) - entry) / entry < 0.001:
-                ja_alertado = True
+                ja_alertado_preco = True
     except Exception:
         pass
 
-    _save_antecipado_signal(db_file, pair, exec_tf_label, resultado, alerted=not ja_alertado)
+    # ── NOVO: Cooldown por tempo (45min), igual ao modo normal — cobre
+    # o caso de preço oscilar um pouco (passa no teste de "preço quase
+    # idêntico") mas ainda ser essencialmente o mesmo sinal repetindo. ──
+    segundos_desde = _segundos_desde_ultimo_alerta(db_file, 'scalp_antecipado_signal_state', pair)
+    em_cooldown = segundos_desde is not None and segundos_desde < COOLDOWN_SECONDS
+    resultado['em_cooldown'] = em_cooldown
 
-    if send_telegram_fn and not ja_alertado:
+    bloqueado = ja_alertado_preco or em_cooldown
+    _save_antecipado_signal(db_file, pair, exec_tf_label, resultado, alerted=not bloqueado)
+
+    if send_telegram_fn and not bloqueado:
         arrow = '📈' if direcao == 'alta' else '📉'
         label = 'LONG' if direcao == 'alta' else 'SHORT'
         msg = f"⚠️ <b>Rejeição de Liquidez Antiga — {pair}</b>\n\n"
@@ -1005,5 +1619,8 @@ def process_pair_scalp_antecipado_v2(db_file, pair, d1_candles, exec_candles, ex
         msg += f"📍 Entrada: {resultado['entry']}\n🛑 Stop: {resultado['sl']}\n✅ TP (RR 2:1): {resultado['tp']}\n\n"
         msg += "<b>Sem CHoCH confirmado — entrada agressiva, posição menor recomendada.</b>"
         send_telegram_fn(msg)
+    elif em_cooldown and not ja_alertado_preco:
+        restante_min = (COOLDOWN_SECONDS - segundos_desde) // 60
+        resultado['motivo'] = f'entrada_confirmada, mas em cooldown ({restante_min}min restantes)'
 
     return resultado

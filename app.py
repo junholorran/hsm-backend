@@ -37,6 +37,11 @@ SCALP_STATUS = {}  # pair -> {'result': {...}, 'updated_at': int}
 # o SCALP_STATUS do modo com confirmação. ──
 SCALP_ANTECIPADO_STATUS = {}  # pair -> {'result': {...}, 'updated_at': int}
 
+# ── NOVO: status do modo "Confluência de Indicadores" — busca setup
+# contínua baseada só nos indicadores técnicos, sem depender de zona
+# D1/sweep/CHoCH. Separado dos outros dois modos. ──
+SCALP_INDICADORES_STATUS = {}  # pair -> {'result': {...}, 'updated_at': int}
+
 CACHE_WINDOW_SECONDS = 15 * 60  # 15 minutos
 
 RE_SCORE = re.compile(r'SCORE\s*OPERACIONAL\s*:[^\d]*(\d{1,3})\s*/\s*100', re.IGNORECASE)
@@ -1361,6 +1366,20 @@ def run_live_cycle(pair, interval_min):
                     SCALP_ANTECIPADO_STATUS[pair] = {'result': antecipado_result, 'updated_at': int(time.time())}
                 except Exception as e:
                     print(f"[scalp_engine antecipado] erro no ciclo de {pair}: {e}")
+
+                # ── Modo "Confluência de Indicadores" — busca setup SEM
+                # depender de zona D1/sweep/CHoCH, só na votação entre os
+                # indicadores técnicos. Roda em paralelo, mesmos candles. ──
+                try:
+                    indicadores_result = scalp_engine.process_pair_scalp_indicadores(
+                        DB_FILE, pair,
+                        exec_candles,
+                        exec_tf,
+                        send_telegram,
+                    )
+                    SCALP_INDICADORES_STATUS[pair] = {'result': indicadores_result, 'updated_at': int(time.time())}
+                except Exception as e:
+                    print(f"[scalp_engine indicadores] erro no ciclo de {pair}: {e}")
     except Exception as e:
         print(f"[scalp_engine] erro no ciclo de {pair}: {e}")
 
@@ -2054,6 +2073,21 @@ def scalp_antecipado_status():
         if pair:
             return jsonify(SCALP_ANTECIPADO_STATUS.get(pair, {}))
         return jsonify(SCALP_ANTECIPADO_STATUS)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+# ── NOVO: status do modo Confluência de Indicadores — busca setup sem
+# depender da sequência ICT completa, só na votação entre os indicadores
+# técnicos (MACD, ADX, EMAs, Stochastic, RSI, Bollinger, VWAP, Ichimoku,
+# Monte Carlo, Candle Pattern). ──
+@app.route('/scalp_indicadores/status', methods=['GET'])
+def scalp_indicadores_status():
+    try:
+        pair = request.args.get('pair')
+        if pair:
+            return jsonify(SCALP_INDICADORES_STATUS.get(pair, {}))
+        return jsonify(SCALP_INDICADORES_STATUS)
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 

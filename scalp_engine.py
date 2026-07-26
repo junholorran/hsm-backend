@@ -29,6 +29,8 @@
 # real (fundo/topo estabelecido) na borda da zona D1 E o RSI está extremo
 # (<=20 ou >=80) naquele candle. Regra fechada (tudo ou nada, não é score
 # gradual): zona + liquidez antiga + RSI extremo, os 3 juntos, ou nada.
+# Divergência de RSI (Camada 16 do prompt principal) é BÔNUS de confiança,
+# não obrigatória — soma ao texto/score da mensagem, não bloqueia sinal.
 # ─────────────────────────────────────────────────────────────────────────
 
 import sqlite3
@@ -111,6 +113,14 @@ def init_scalp_db(db_file):
             )
         ''')
         conn.commit()
+        # ── MODO SOMBRA-like: coluna nova pra registar se houve divergência
+        # de RSI confirmada no sinal antecipado. Aditivo via ALTER TABLE,
+        # idempotente (ignora erro se já existir). ──
+        try:
+            cursor.execute("ALTER TABLE scalp_antecipado_signal_state ADD COLUMN divergencia_rsi INTEGER DEFAULT 0")
+            conn.commit()
+        except Exception:
+            pass
 
 
 def is_in_killzone(now_utc=None):
@@ -692,17 +702,26 @@ def find_liquidez_antiga(exec_candles, ate_index, tipo, lookback=LIQUIDEZ_LOOKBA
     ou topo (tipo='high') estabelecido — não o candle vizinho, um nível
     que já tinha sido tocado antes e ficou como referência de liquidez.
 
-    Retorna o valor desse nível antigo, ou None se não achar nada claro.
+    Retorna (valor, index) desse nível antigo, ou (None, None) se não
+    achar nada claro. O índice é devolvido agora (antes só o valor) pra
+    dar pra comparar o RSI daquele candle antigo com o RSI do candle de
+    sweep atual — é isso que permite checar divergência de verdade,
+    e não só "RSI tá baixo agora".
     """
     inicio = max(0, ate_index - lookback)
     janela = exec_candles[inicio:ate_index - 2]  # exclui os 2 candles mais próximos do sweep
     if len(janela) < 5:
-        return None
+        return None, None
 
     if tipo == 'low':
-        return min(c['l'] for c in janela)
+        idx_relativo = min(range(len(janela)), key=lambda k: janela[k]['l'])
+        valor = janela[idx_relativo]['l']
     else:
-        return max(c['h'] for c in janela)
+        idx_relativo = max(range(len(janela)), key=lambda k: janela[k]['h'])
+        valor = janela[idx_relativo]['h']
+
+    idx_absoluto = inicio + idx_relativo
+    return valor, idx_absoluto
 
 
 def detect_sweep_liquidez_antiga(exec_candles, zona, lookback=ANTECIPADO_SWEEP_LOOKBACK):
@@ -713,7 +732,7 @@ def detect_sweep_liquidez_antiga(exec_candles, zona, lookback=ANTECIPADO_SWEEP_L
     para dentro dele (rejeição confirmada).
 
     Retorna dict {'index', 'lado', 'nivel_pavio' (mínima/máxima exata do
-    candle, pro stop), 'liquidez_varrida'} ou None.
+    candle, pro stop), 'liquidez_varrida', 'liquidez_index'} ou None.
     """
     recentes_idx = range(max(0, len(exec_candles) - lookback), len(exec_candles))
 
@@ -722,27 +741,57 @@ def detect_sweep_liquidez_antiga(exec_candles, zona, lookback=ANTECIPADO_SWEEP_L
 
         # rejeição no topo (short) — varreu um topo antigo E fechou abaixo dele
         if c['h'] >= zona['top']:
-            liq_antiga = find_liquidez_antiga(exec_candles, i, 'high')
+            liq_antiga, liq_index = find_liquidez_antiga(exec_candles, i, 'high')
             if liq_antiga and c['h'] > liq_antiga and c['c'] < liq_antiga:
                 return {
                     'index': i, 'lado': 'baixa',
                     'nivel_pavio': c['h'],  # stop vai ACIMA disso
                     'liquidez_varrida': liq_antiga,
+                    'liquidez_index': liq_index,
                     't': c['t'],
                 }
 
         # rejeição no fundo (long) — varreu um fundo antigo E fechou acima dele
         if c['l'] <= zona['bottom']:
-            liq_antiga = find_liquidez_antiga(exec_candles, i, 'low')
+            liq_antiga, liq_index = find_liquidez_antiga(exec_candles, i, 'low')
             if liq_antiga and c['l'] < liq_antiga and c['c'] > liq_antiga:
                 return {
                     'index': i, 'lado': 'alta',
                     'nivel_pavio': c['l'],  # stop vai ABAIXO disso
                     'liquidez_varrida': liq_antiga,
+                    'liquidez_index': liq_index,
                     't': c['t'],
                 }
 
     return None
+
+
+def compute_bias_from_swings(candles, lookback=SWING_LOOKBACK):
+    """
+    Bias estrutural de um timeframe qualquer (D1, H4, etc.), reaproveitando
+    a mesma lógica de swing high/low já usada no TF de execução — nada de
+    indicador novo, é a leitura de estrutura ICT padrão:
+      - últimos 2 topos SUBINDO e últimos 2 fundos SUBINDO -> 'alta'
+      - últimos 2 topos DESCENDO e últimos 2 fundos DESCENDO -> 'baixa'
+      - qualquer outra combinação (topos e fundos não concordam, ou não
+        há swings suficientes ainda) -> 'neutro', o padrão seguro que
+        NÃO bloqueia sinal nenhum.
+    """
+    if not candles or len(candles) < (lookback * 2 + 5):
+        return 'neutro'
+    swings = detect_exec_swings(candles, lookback=lookback)
+    highs = [s for s in swings if s['tipo'] == 'high'][-2:]
+    lows = [s for s in swings if s['tipo'] == 'low'][-2:]
+    if len(highs) == 2 and len(lows) == 2:
+        topos_sobem = highs[1]['valor'] > highs[0]['valor']
+        fundos_sobem = lows[1]['valor'] > lows[0]['valor']
+        topos_descem = highs[1]['valor'] < highs[0]['valor']
+        fundos_descem = lows[1]['valor'] < lows[0]['valor']
+        if topos_sobem and fundos_sobem:
+            return 'alta'
+        if topos_descem and fundos_descem:
+            return 'baixa'
+    return 'neutro'
 
 
 def rsi_extremo_no_candle(exec_candles, idx):
@@ -754,6 +803,61 @@ def rsi_extremo_no_candle(exec_candles, idx):
     return rsi_series[-1]
 
 
+def rsi_no_candle(exec_candles, idx):
+    """RSI em qualquer candle específico (não só o mais recente) — usado
+    pra comparar o RSI do sweep atual com o RSI do fundo/topo antigo,
+    na checagem de divergência."""
+    if idx is None or idx < 0:
+        return None
+    closes = [c['c'] for c in exec_candles[:idx + 1]]
+    if len(closes) < 15:
+        return None
+    rsi_series = compute_rsi(closes)
+    return rsi_series[-1]
+
+
+def check_rsi_divergence(exec_candles, sweep):
+    """
+    Divergência de RSI real (mesma regra rígida da Camada 16 do prompt
+    principal do Claude): compara o candle do sweep atual com o candle
+    da liquidez antiga (fundo/topo) que foi varrida.
+
+    Bullish (sweep['lado']=='alta', varreu fundo antigo pra baixo):
+      preço faz fundo IGUAL ou MAIS BAIXO que o antigo, mas RSI do sweep
+      atual é MAIOR que o RSI do fundo antigo -> divergência de alta.
+
+    Bearish (sweep['lado']=='baixa', varreu topo antigo pra cima):
+      preço faz topo IGUAL ou MAIS ALTO que o antigo, mas RSI do sweep
+      atual é MENOR que o RSI do topo antigo -> divergência de baixa.
+
+    Retorna True/False. Se não der pra calcular (RSI None de algum lado),
+    retorna False — sem divergência confirmada é o padrão seguro, nunca
+    assume a favor sem dado real.
+    """
+    liq_index = sweep.get('liquidez_index')
+    if liq_index is None:
+        return False
+
+    rsi_liquidez_antiga = rsi_no_candle(exec_candles, liq_index)
+    rsi_sweep_atual = rsi_no_candle(exec_candles, sweep['index'])
+    if rsi_liquidez_antiga is None or rsi_sweep_atual is None:
+        return False
+
+    if sweep['lado'] == 'alta':
+        # varreu fundo antigo -> preço igual/mais baixo, RSI mais alto = divergência de alta
+        preco_igual_ou_mais_baixo = sweep['nivel_pavio'] <= sweep['liquidez_varrida']
+        rsi_mais_alto = rsi_sweep_atual > rsi_liquidez_antiga
+        return preco_igual_ou_mais_baixo and rsi_mais_alto
+
+    if sweep['lado'] == 'baixa':
+        # varreu topo antigo -> preço igual/mais alto, RSI mais baixo = divergência de baixa
+        preco_igual_ou_mais_alto = sweep['nivel_pavio'] >= sweep['liquidez_varrida']
+        rsi_mais_baixo = rsi_sweep_atual < rsi_liquidez_antiga
+        return preco_igual_ou_mais_alto and rsi_mais_baixo
+
+    return False
+
+
 def _save_antecipado_signal(db_file, pair, exec_tf_label, resultado, alerted):
     try:
         signal_id = f"antecip_{pair}_{int(time.time()*1000)}"
@@ -761,26 +865,44 @@ def _save_antecipado_signal(db_file, pair, exec_tf_label, resultado, alerted):
             cursor = conn.cursor()
             cursor.execute('''
                 INSERT INTO scalp_antecipado_signal_state
-                    (id, pair, created_at, exec_tf, direcao, rsi, liquidez_varrida, entry, sl, tp, alerted)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (id, pair, created_at, exec_tf, direcao, rsi, liquidez_varrida, entry, sl, tp, alerted, divergencia_rsi)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 signal_id, pair, int(time.time()), exec_tf_label,
                 resultado['direcao'], resultado['rsi'], resultado['liquidez_varrida'],
                 resultado['entry'], resultado['sl'], resultado['tp'], 1 if alerted else 0,
+                1 if resultado.get('divergencia_rsi') else 0,
             ))
             conn.commit()
     except Exception as e:
         print(f"[scalp_engine] erro ao salvar signal antecipado de {pair}: {e}")
 
 
-def process_pair_scalp_antecipado_v2(db_file, pair, d1_candles, exec_candles, exec_tf_label, send_telegram_fn=None):
+def process_pair_scalp_antecipado_v2(db_file, pair, d1_candles, exec_candles, exec_tf_label,
+                                      send_telegram_fn=None, h4_candles=None):
     """
-    Regra fechada (tudo ou nada, não é score gradual):
+    Regra fechada (tudo ou nada, não é score gradual) pras 4 condições
+    OBRIGATÓRIAS:
     1. Zona D1 (suporte ou resistência)
     2. Pavio varre liquidez ANTIGA real (não só a borda da zona)
     3. RSI extremo no candle do sweep (<=20 ou >=80)
-    Se as 3 baterem juntas: Entrada = preço atual, Stop = mínima/máxima
-    exata do pavio, TP = RR 2:1. Sem os 3 juntos, não há sinal.
+    4. Timeframes maiores (D1 e H4, quando disponível) não estão em
+       estrutura clara CONTRA a direção do sinal — evita comprar suporte
+       no meio de uma tendência de baixa forte no D1/H4 (ou vender
+       resistência numa tendência de alta forte). 'neutro' passa sempre;
+       só bloqueia se o bias maior estiver realmente na direção oposta.
+    Se as 4 baterem juntas: Entrada = preço atual, Stop = mínima/máxima
+    exata do pavio, TP = RR 2:1. Sem as 4 juntas, não há sinal.
+
+    h4_candles é opcional — se não vier (chamada antiga sem esse
+    parâmetro), a checagem de alinhamento usa só o D1 e não quebra nada
+    que já estava funcionando.
+
+    Divergência de RSI (comparando o sweep atual com o fundo/topo antigo
+    varrido) é BÔNUS — não é obrigatória pra disparar o sinal, mas quando
+    presente é reportada no resultado e destacada na mensagem do Telegram
+    como reforço extra de confiança, igual pedido: "se tiver divergência,
+    melhor ainda".
     """
     preco_atual = exec_candles[-1]['c']
     bandas = compute_d1_zones(d1_candles)
@@ -789,7 +911,8 @@ def process_pair_scalp_antecipado_v2(db_file, pair, d1_candles, exec_candles, ex
     resultado = {
         'pair': pair, 'exec_tf': exec_tf_label, 'modo': 'antecipado_v2',
         'sinal': False, 'direcao': None, 'entry': None, 'sl': None, 'tp': None,
-        'rsi': None, 'liquidez_varrida': None, 'motivo': None,
+        'rsi': None, 'liquidez_varrida': None, 'divergencia_rsi': False,
+        'bias_d1': None, 'bias_h4': None, 'motivo': None,
     }
 
     if not zona:
@@ -815,7 +938,27 @@ def process_pair_scalp_antecipado_v2(db_file, pair, d1_candles, exec_candles, ex
         resultado['rsi'] = round(rsi_val, 1)
         return resultado
 
-    # todas as 3 condições bateram — monta a entrada
+    # ── 4ª condição obrigatória: alinhamento com D1/H4 ──
+    bias_d1 = compute_bias_from_swings(d1_candles)
+    bias_h4 = compute_bias_from_swings(h4_candles) if h4_candles else 'neutro'
+    resultado['bias_d1'] = bias_d1
+    resultado['bias_h4'] = bias_h4
+
+    contra_alta = direcao == 'alta' and (bias_d1 == 'baixa' or bias_h4 == 'baixa')
+    contra_baixa = direcao == 'baixa' and (bias_d1 == 'alta' or bias_h4 == 'alta')
+    if contra_alta or contra_baixa:
+        resultado['rsi'] = round(rsi_val, 1)
+        resultado['motivo'] = (
+            f"sweep+RSI ok, mas timeframes maiores contra a direção "
+            f"(D1={bias_d1}, H4={bias_h4}) — sinal descartado"
+        )
+        return resultado
+
+    # ── as 4 condições obrigatórias bateram — checa divergência como
+    # bônus (não bloqueia, só reforça) ──
+    tem_divergencia = check_rsi_divergence(exec_candles, sweep)
+
+    # todas as condições obrigatórias bateram — monta a entrada
     entry = preco_atual
     sl = sweep['nivel_pavio']
     risco = abs(entry - sl)
@@ -829,6 +972,7 @@ def process_pair_scalp_antecipado_v2(db_file, pair, d1_candles, exec_candles, ex
         'tp': round(tp, 6),
         'rsi': round(rsi_val, 1),
         'liquidez_varrida': round(sweep['liquidez_varrida'], 6),
+        'divergencia_rsi': tem_divergencia,
         'motivo': 'entrada_confirmada',
     })
 
@@ -854,6 +998,9 @@ def process_pair_scalp_antecipado_v2(db_file, pair, d1_candles, exec_candles, ex
         label = 'LONG' if direcao == 'alta' else 'SHORT'
         msg = f"⚠️ <b>Rejeição de Liquidez Antiga — {pair}</b>\n\n"
         msg += f"{arrow} <b>{label}</b> | TF execução: {exec_tf_label} | RSI extremo: {resultado['rsi']}\n"
+        msg += f"📊 Alinhamento: D1={bias_d1} | H4={bias_h4}\n"
+        if tem_divergencia:
+            msg += "🔺 <b>Divergência de RSI confirmada</b> — reforço extra de confiança\n"
         msg += f"💧 Liquidez antiga varrida: {resultado['liquidez_varrida']}\n"
         msg += f"📍 Entrada: {resultado['entry']}\n🛑 Stop: {resultado['sl']}\n✅ TP (RR 2:1): {resultado['tp']}\n\n"
         msg += "<b>Sem CHoCH confirmado — entrada agressiva, posição menor recomendada.</b>"

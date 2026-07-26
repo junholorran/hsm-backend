@@ -54,6 +54,20 @@ RE_TP1_FINAL = re.compile(r'TP1_FINAL\s*:\s*\$?\s*([\d,.]+)', re.IGNORECASE)
 RE_TP2_FINAL = re.compile(r'TP2_FINAL\s*:\s*\$?\s*([\d,.]+)', re.IGNORECASE)
 RE_TP3_FINAL = re.compile(r'TP3_FINAL\s*:\s*\$?\s*([\d,.]+)', re.IGNORECASE)
 
+# ── Regras de Ouro de Gestão de Risco — bloco fixo, sempre igual, anexado
+# no final de toda análise (manual e Live Trade). Não mexe no prompt do
+# Claude nem na extração de BLOCO_DADOS — é só texto Python append depois
+# que o raw_text já foi gerado e o display_text já foi cortado. ──
+GOLDEN_RULES_BLOCK = (
+    "\n\n---\n\n"
+    "<b>🛡️ Regras de Ouro de Gestão de Risco</b>\n"
+    "• Nunca arrisque mais de 1-2% do capital numa única operação\n"
+    "• Sempre use Stop Loss — entre já sabendo exatamente quanto pode perder\n"
+    "• Realize parcial no TP1 (50-70% da posição) e deixe o resto correr com trailing stop\n"
+    "• Não opere contra a tendência principal a menos que haja sinais claros de reversão com alta confluência\n"
+    "• Nunca persiga o preço — espere confirmação real antes de entrar"
+)
+
 
 def extract_trade_info(analysis, timeframes_str):
     if not analysis:
@@ -1004,6 +1018,11 @@ def analyze_single_pair(pair, images_by_tf, category='ict', holding=None):
     if "BLOCO_DADOS_INICIO" in raw_text:
         display_text = raw_text.split("BLOCO_DADOS_INICIO")[0].rstrip()
         display_text = display_text.rstrip("-").rstrip()
+
+    # ── Regras de Ouro sempre no final, tanto na análise manual quanto
+    # no ciclo automático do Live Trade — reforça disciplina de risco
+    # em toda resposta, sem depender do Claude lembrar de incluir. ──
+    display_text = display_text + GOLDEN_RULES_BLOCK
 
     save_cache(cache_key, pair, raw_text, display_text)
 

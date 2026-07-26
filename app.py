@@ -1059,7 +1059,7 @@ def compute_sma(values, period):
     return out
 
 
-def render_live_chart_png_base64(candles, pair_label, tf_label):
+def render_live_chart_png_base64(candles, pair_label, tf_label, scalp_result=None):
     W, H = 900, 570
     padL, padR, padT, padB = 60, 20, 40, 30
     priceH = 400
@@ -1094,6 +1094,25 @@ def render_live_chart_png_base64(candles, pair_label, tf_label):
         price_at_y = max_p - (rng / 4) * i
         draw.text((4, yy - 5), f"{price_at_y:.2f}", fill=(110, 118, 129), font=font)
 
+    # ── NOVO: fundo dividido verde/vermelho pelo preço ATUAL — visão
+    # instantânea de "zona de compra" (abaixo do preço, verde) vs "zona de
+    # venda" (acima do preço, vermelho). Desenhado ANTES dos candles, bem
+    # sutil, só pra dar contexto visual de fundo sem atrapalhar leitura.
+    # Só desenha quando tem scalp_result (contexto de Scalp Ao Vivo ativo)
+    # — em análises normais sem par monitorado isso não aparece. ──
+    if scalp_result:
+        preco_atual_fundo = closes[-1]
+        y_preco = y_for(preco_atual_fundo)
+        fundo_overlay = Image.new('RGBA', (W, H), (0, 0, 0, 0))
+        fundo_draw = ImageDraw.Draw(fundo_overlay)
+        # abaixo do preço atual = verde (zona de compra)
+        fundo_draw.rectangle([padL, y_preco, W - padR, padT + priceH], fill=(63, 185, 80, 22))
+        # acima do preço atual = vermelho (zona de venda)
+        fundo_draw.rectangle([padL, padT, W - padR, y_preco], fill=(248, 81, 73, 22))
+        # linha de referência exatamente no preço atual
+        fundo_draw.line([(padL, y_preco), (W - padR, y_preco)], fill=(240, 192, 64, 160), width=1)
+        img.paste(fundo_overlay, (0, 0), fundo_overlay)
+
     for i, c in enumerate(candles):
         x = x_for(i)
         up = c['c'] >= c['o']
@@ -1110,6 +1129,12 @@ def render_live_chart_png_base64(candles, pair_label, tf_label):
         pts = [(x_for(i), y_for(v)) for i, v in enumerate(ma) if v is not None]
         if len(pts) >= 2:
             draw.line(pts, fill=color, width=2)
+
+    # ── NOVO: overlays do Scalp Ao Vivo (banda D1, sweep, CHoCH, entrada) ──
+    # Desenhado ANTES do volume/título pra ficar atrás visualmente das
+    # informações de topo, mas por cima dos candles/MAs.
+    if scalp_result:
+        _draw_scalp_overlays(img, draw, scalp_result, y_for, W, H, padR, font, preco_atual=closes[-1])
 
     max_vol = max(volumes) if volumes and max(volumes) > 0 else 1
     avg_vol = (sum(volumes) / len(volumes)) if volumes else 0
@@ -1139,19 +1164,100 @@ def render_live_chart_png_base64(candles, pair_label, tf_label):
     return base64.b64encode(buf.getvalue()).decode('utf-8')
 
 
+def _draw_scalp_overlays(img, draw, resultado, y_for, W, H, padR, font, preco_atual=None):
+    """
+    Desenha por cima do chart já pronto (candles + MAs), usando os campos
+    reais devolvidos por scalp_engine.process_pair_scalp():
+      zona_top, zona_bottom, zona_ativa, sweep_nivel, sweep_lado,
+      choch_nivel, choch_direcao, entry_zone_top, entry_zone_bottom,
+      entry_zone_tipo
+
+    `preco_atual` vem de fora (candles[-1]['c'], já calculado no render
+    principal como `last_close`) — não existe no dict de scalp_engine,
+    então é passado explicitamente em vez de tentar ler de resultado.
+
+    Recebe `img` (a imagem RGB original) além de `draw`, porque o
+    preenchimento translúcido da banda D1 precisa de uma camada RGBA
+    separada composta por cima — não dá pra fazer fill semi-transparente
+    direto num ImageDraw de imagem RGB (rectangle com alpha simplesmente
+    ignora o canal alpha nesse modo). O `draw` continua sendo usado
+    normalmente pros elementos sólidos (linhas, texto, retângulos de
+    tag) que não precisam de transparência.
+    """
+    x_end = W - padR
+
+    # ── 1. Banda D1 — retângulo PREENCHIDO e translúcido, cor conforme
+    # PREÇO ATUAL em relação à banda (não o lado do sweep — o sweep só diz
+    # de que lado a liquidez foi varrida, não onde o preço está agora) ───
+    if resultado.get('zona_top') is not None and resultado.get('zona_bottom') is not None:
+        zona_top = resultado['zona_top']
+        zona_bottom = resultado['zona_bottom']
+        y_top = y_for(zona_top)
+        y_bottom = y_for(zona_bottom)
+
+        if resultado.get('zona_ativa') or preco_atual is None:
+            cor_rgb = (227, 179, 65)   # amarelo — preço dentro da banda agora (ou sem preço pra comparar)
+            label_papel = "ZONA D1 (ativa)"
+        elif preco_atual > zona_top:
+            cor_rgb = (63, 185, 80)    # verde — preço ACIMA da banda -> ela age como suporte
+            label_papel = "ZONA D1 (suporte)"
+        elif preco_atual < zona_bottom:
+            cor_rgb = (248, 81, 73)    # vermelho — preço ABAIXO da banda -> ela age como resistência
+            label_papel = "ZONA D1 (resistência)"
+        else:
+            cor_rgb = (150, 150, 160)  # cinza — caso raro de arredondamento na borda
+            label_papel = "ZONA D1"
+
+        # camada RGBA separada só pra esse retângulo translúcido
+        overlay = Image.new('RGBA', (W, H), (0, 0, 0, 0))
+        overlay_draw = ImageDraw.Draw(overlay)
+        overlay_draw.rectangle(
+            [0, min(y_top, y_bottom), x_end, max(y_top, y_bottom)],
+            fill=(*cor_rgb, 45),        # 45/255 de opacidade — sutil, não cobre os candles
+            outline=(*cor_rgb, 255),    # borda sólida por cima, pra continuar bem visível
+            width=1,
+        )
+        img.paste(overlay, (0, 0), overlay)  # compõe a camada translúcida sobre a imagem base
+        draw.text((6, min(y_top, y_bottom) - 12), label_papel, fill=cor_rgb, font=font)
+
+    # ── 2. Sweep — linha pontilhada + tag ────────────────────────────
+    if resultado.get('sweep_nivel') is not None:
+        y_sweep = y_for(resultado['sweep_nivel'])
+        cor = (248, 81, 73) if resultado.get('sweep_lado') == 'alta' else (63, 185, 80)
+        for x in range(0, x_end, 8):
+            draw.line([(x, y_sweep), (x + 4, y_sweep)], fill=cor, width=1)
+        label = f"Sweep {resultado.get('sweep_lado', '')} {resultado['sweep_nivel']:.2f}"
+        draw.rectangle([x_end - 160, y_sweep - 10, x_end, y_sweep + 10], fill=cor)
+        draw.text((x_end - 156, y_sweep - 6), label[:24], fill=(10, 10, 15), font=font)
+
+    # ── 3. CHoCH — linha sólida + tag ────────────────────────────────
+    if resultado.get('choch_nivel') is not None:
+        y_choch = y_for(resultado['choch_nivel'])
+        cor = (63, 185, 80) if resultado.get('choch_direcao') == 'alta' else (248, 81, 73)
+        draw.line([(0, y_choch), (x_end, y_choch)], fill=cor, width=2)
+        label = f"CHoCH {resultado.get('choch_direcao', '')}"
+        draw.rectangle([x_end - 150, y_choch - 22, x_end, y_choch - 2], fill=cor)
+        draw.text((x_end - 146, y_choch - 18), label, fill=(10, 10, 15), font=font)
+
+    # ── 4. Zona de entrada (FVG/OB/iFVG/Breaker) ─────────────────────
+    if resultado.get('entry_zone_top') is not None and resultado.get('entry_zone_bottom') is not None:
+        y_top = y_for(resultado['entry_zone_top'])
+        y_bottom = y_for(resultado['entry_zone_bottom'])
+        cor = (240, 192, 64)
+        draw.rectangle([0, min(y_top, y_bottom), x_end, max(y_top, y_bottom)], outline=cor, width=2)
+        tipo = resultado.get('entry_zone_tipo', 'Entrada')
+        draw.text((6, min(y_top, y_bottom) - 12), f"Entrada ({tipo})", fill=cor, font=font)
+
+
 def run_live_cycle(pair, interval_min):
     symbol = LIVE_SYMBOL_MAP.get(pair, pair.replace('USD', 'USDT'))
     pair_label = pair.replace('USD', '')
 
-    images_by_tf = {}
     candles_por_tf_cache = {}
     for tf_label, interval in LIVE_TF_INTERVALS.items():
         candles = fetch_bybit_klines(symbol, interval, 200)
         candles_por_tf_cache[tf_label] = candles
-        base64_png = render_live_chart_png_base64(candles, pair_label, tf_label)
-        images_by_tf[tf_label] = {'base64': base64_png, 'mimeType': 'image/png'}
 
-    # ── CORTE ATIVO: o gate agora REALMENTE pula a chamada cara ao
     # ── MODO SOMBRA (revertido do corte real): o gate NÃO pula mais a
     # chamada ao Claude — descobrimos um caso (BTCUSD, score Claude 85)
     # onde o cascade_engine disse "sem zona D1" mas o Claude achou um
@@ -1180,7 +1286,12 @@ def run_live_cycle(pair, interval_min):
 
     # ── Scalp Ao Vivo (zona D1 → killzone → sweep → CHoCH no TF de
     # execução escolhido → FVG/OB → score), só se o par estiver marcado
-    # em scalp_watch. Reaproveita candles já buscados acima. ──
+    # em scalp_watch. Reaproveita candles já buscados acima.
+    #
+    # Roda ANTES do render das imagens, pra scalp_result ficar disponível
+    # na hora de desenhar o overlay no chart do exec_tf. ──
+    scalp_result = None
+    exec_tf = None
     try:
         with sqlite3.connect(DB_FILE) as conn:
             cursor = conn.cursor()
@@ -1192,6 +1303,16 @@ def run_live_cycle(pair, interval_min):
                 exec_candles = candles_por_tf_cache[exec_tf]
             elif exec_tf == 'M1':
                 exec_candles = fetch_bybit_klines(symbol, '1', 200)
+                # NÃO adicionar a candles_por_tf_cache aqui — isso injetaria uma
+                # 6ª chave no loop de render abaixo, mandando uma imagem extra
+                # (M1) pro Claude em todo ciclo com exec_tf=M1, inflando custo
+                # de API. M1 fica só local, usado pelo scalp_engine, nunca vira
+                # imagem pro Claude (igual sempre foi no código original).
+                #
+                # CONSEQUÊNCIA CONHECIDA: como M1 não está em LIVE_TF_INTERVALS,
+                # quando exec_tf='M1' o overlay do scalp (banda D1/sweep/CHoCH)
+                # não aparece em NENHUMA das 5 imagens renderizadas — só funciona
+                # quando exec_tf é M5 ou M15 (que já fazem parte das 5 padrão).
             else:
                 exec_candles = None
             if exec_candles:
@@ -1204,11 +1325,9 @@ def run_live_cycle(pair, interval_min):
                 )
                 SCALP_STATUS[pair] = {'result': scalp_result, 'updated_at': int(time.time())}
 
-                # ── NOVO: Modo "Rejeição Antecipada v2" — roda em
-                # paralelo ao Scalp normal, mesmos candles, sem custo
-                # extra de IA nem de Bybit. Regra fechada: zona D1 +
-                # sweep de liquidez antiga + RSI extremo (<=20/>=80),
-                # sem esperar CHoCH. ──
+                # ── Modo "Rejeição Antecipada v2" — roda em paralelo ao
+                # Scalp normal, mesmos candles, sem custo extra de IA nem
+                # de Bybit. Sem mudança nenhuma aqui. ──
                 try:
                     antecipado_result = scalp_engine.process_pair_scalp_antecipado_v2(
                         DB_FILE, pair,
@@ -1222,6 +1341,15 @@ def run_live_cycle(pair, interval_min):
                     print(f"[scalp_engine antecipado] erro no ciclo de {pair}: {e}")
     except Exception as e:
         print(f"[scalp_engine] erro no ciclo de {pair}: {e}")
+
+    # ── AGORA SIM renderiza as 5 imagens — só a do exec_tf recebe o
+    # scalp_result (overlay de banda D1/sweep/CHoCH/entrada). As outras
+    # 4 timeframes continuam limpas, só de contexto pro Claude. ──
+    images_by_tf = {}
+    for tf_label, candles in candles_por_tf_cache.items():
+        passar_scalp = scalp_result if (tf_label == exec_tf) else None
+        base64_png = render_live_chart_png_base64(candles, pair_label, tf_label, scalp_result=passar_scalp)
+        images_by_tf[tf_label] = {'base64': base64_png, 'mimeType': 'image/png'}
 
     raw_text, display_text, error = analyze_single_pair(pair, images_by_tf, category='ict')
     if error:

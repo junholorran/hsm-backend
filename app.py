@@ -1019,6 +1019,11 @@ def analyze_single_pair(pair, images_by_tf, category='ict', holding=None):
         display_text = raw_text.split("BLOCO_DADOS_INICIO")[0].rstrip()
         display_text = display_text.rstrip("-").rstrip()
 
+    # ── Notícias reais + sentimento agregado, direto no corpo da análise
+    # (antes só existia no endpoint /news separado, sem conexão com a
+    # análise principal). Cache de 15min evita bater no RSS toda hora. ──
+    display_text = display_text + build_news_block(limit=4)
+
     # ── Regras de Ouro sempre no final, tanto na análise manual quanto
     # no ciclo automático do Live Trade — reforça disciplina de risco
     # em toda resposta, sem depender do Claude lembrar de incluir. ──
@@ -1346,7 +1351,11 @@ def run_live_cycle(pair, interval_min):
 
                 # ── Modo "Rejeição Antecipada v2" — roda em paralelo ao
                 # Scalp normal, mesmos candles, sem custo extra de IA nem
-                # de Bybit. Sem mudança nenhuma aqui. ──
+                # de Bybit. Agora passa também o H4 (já buscado no cache
+                # deste ciclo, sem chamada extra à Bybit) pra checagem de
+                # alinhamento multi-timeframe (4ª condição obrigatória do
+                # motor: D1/H4 não podem estar em estrutura clara contra
+                # a direção do sinal). ──
                 try:
                     antecipado_result = scalp_engine.process_pair_scalp_antecipado_v2(
                         DB_FILE, pair,
@@ -1354,6 +1363,7 @@ def run_live_cycle(pair, interval_min):
                         exec_candles,
                         exec_tf,
                         send_telegram,
+                        h4_candles=candles_por_tf_cache.get('H4'),
                     )
                     SCALP_ANTECIPADO_STATUS[pair] = {'result': antecipado_result, 'updated_at': int(time.time())}
                 except Exception as e:
@@ -1873,6 +1883,56 @@ def get_news():
         return jsonify({'news': items})
     except Exception as e:
         return jsonify({'error': str(e), 'news': []}), 500
+
+
+# ── Cache simples de notícias em memória. O Live Trade roda ciclos a cada
+# 5-15min por par, e sem isso cada ciclo bateria de novo nos 4 feeds RSS
+# à toa (notícia não muda a cada 5min). TTL de 15min é suficiente. ──
+_NEWS_CACHE = {'items': [], 'updated_at': 0}
+NEWS_CACHE_TTL_SEC = 15 * 60
+
+
+def get_cached_news(limit=6):
+    now = time.time()
+    if (now - _NEWS_CACHE['updated_at']) > NEWS_CACHE_TTL_SEC or not _NEWS_CACHE['items']:
+        try:
+            _NEWS_CACHE['items'] = fetch_crypto_news(limit=8)
+            _NEWS_CACHE['updated_at'] = now
+        except Exception as e:
+            print(f"[news_cache] erro ao atualizar: {e}")
+    return _NEWS_CACHE['items'][:limit]
+
+
+SENTIMENT_LABEL_PT = {
+    'bullish': '🟢 Otimista',
+    'bearish': '🔴 Pessimista',
+    'neutral': '⚪ Neutro',
+}
+
+
+def build_news_block(limit=4):
+    try:
+        items = get_cached_news(limit=limit)
+        if not items:
+            return ""
+        bull = sum(1 for i in items if i['sentiment'] == 'bullish')
+        bear = sum(1 for i in items if i['sentiment'] == 'bearish')
+        if bull > bear:
+            score_geral = SENTIMENT_LABEL_PT['bullish']
+        elif bear > bull:
+            score_geral = SENTIMENT_LABEL_PT['bearish']
+        else:
+            score_geral = SENTIMENT_LABEL_PT['neutral']
+
+        lines = ["\n\n---\n\n<b>📰 Notícias e Sentimento de Mercado</b>"]
+        lines.append(f"Score Geral: {score_geral} ({bull} otimista / {bear} pessimista / {len(items) - bull - bear} neutro)")
+        for it in items:
+            tag = SENTIMENT_LABEL_PT.get(it['sentiment'], '⚪ Neutro')
+            lines.append(f"• {tag} — {it['title']}")
+        return "\n".join(lines)
+    except Exception as e:
+        print(f"[build_news_block] erro: {e}")
+        return ""
 
 
 @app.route('/live/status', methods=['GET'])

@@ -114,6 +114,28 @@ def init_scalp_db(db_file):
                 alerted INTEGER DEFAULT 0
             )
         ''')
+        # ── NOVO: tabela pro modo "Confluência de Indicadores" — sinal
+        # baseado só nos indicadores técnicos (MACD, ADX, EMAs, Stochastic,
+        # RSI, Bollinger, VWAP, Ichimoku, Monte Carlo, Candle Pattern),
+        # SEM depender da sequência ICT (zona→sweep→CHoCH) estar completa.
+        # Roda em paralelo aos outros 2 modos, procurando setup o tempo
+        # todo baseado só na confluência entre os indicadores. ──
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS scalp_indicadores_signal_state (
+                id TEXT PRIMARY KEY,
+                pair TEXT,
+                created_at INTEGER,
+                exec_tf TEXT,
+                direcao TEXT,
+                score INTEGER,
+                votos_favor INTEGER,
+                votos_total INTEGER,
+                entry REAL,
+                sl REAL,
+                tp REAL,
+                alerted INTEGER DEFAULT 0
+            )
+        ''')
         conn.commit()
         # ── MODO SOMBRA-like: coluna nova pra registar se houve divergência
         # de RSI confirmada no sinal antecipado. Aditivo via ALTER TABLE,
@@ -1622,5 +1644,215 @@ def process_pair_scalp_antecipado_v2(db_file, pair, d1_candles, exec_candles, ex
     elif em_cooldown and not ja_alertado_preco:
         restante_min = (COOLDOWN_SECONDS - segundos_desde) // 60
         resultado['motivo'] = f'entrada_confirmada, mas em cooldown ({restante_min}min restantes)'
+
+    return resultado
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# MODO "CONFLUÊNCIA DE INDICADORES" — pedido explícito: "quero que ele
+# fique procurando TODOS os setups de acordo com esses indicadores", não
+# só depois que a sequência ICT completa (zona→sweep→CHoCH→entrada) já
+# fechou. Esse modo NÃO espera CHoCH nenhum — roda em cima dos mesmos
+# indicadores técnicos já calculados (MACD, ADX, EMAs, Stochastic, RSI,
+# Bollinger, VWAP, Ichimoku, Monte Carlo, Candle Pattern) e conta quantos
+# estão VOTANDO pro mesmo lado. Bate um mínimo de votos concordando =
+# sinal, mesmo sem zona D1/sweep/CHoCH confirmados.
+#
+# É um tipo de setup DIFERENTE dos outros 2 modos — mais rápido de achar,
+# mas também mais solto (não exige a estrutura ICT toda). Por isso o
+# Stop é calculado via ATR (não via nível de sweep, que esse modo nem
+# usa), e o threshold de votos é propositalmente alto (7 de 10) pra não
+# virar ruído.
+# ═══════════════════════════════════════════════════════════════════════
+
+VOTOS_MINIMOS_SINAL = 7   # de um total de 10 indicadores votantes
+ATR_MULT_STOP = 1.5       # stop = 1.5x ATR de distância da entrada
+RR_INDICADORES = 2.0      # TP = 2x o risco, mesmo padrão dos outros modos
+
+
+def _votos_indicadores(indicadores, preco_atual):
+    """
+    Cada indicador vota 'alta', 'baixa' ou None (sem opinião clara).
+    Retorna (voto_alta, voto_baixa, total_votantes, detalhes[(nome, voto)]).
+    Só conta como "votante" quem realmente teve dado suficiente pra opinar
+    — indicador sem dado (None) não entra no total, não distorce a conta.
+    """
+    votos = []
+
+    macd_hist = indicadores.get('macd_hist')
+    if macd_hist is not None:
+        votos.append(('macd', 'alta' if macd_hist > 0 else 'baixa'))
+
+    ema9, ema21, ema50 = indicadores.get('ema9'), indicadores.get('ema21'), indicadores.get('ema50')
+    if ema9 is not None and ema21 is not None and ema50 is not None:
+        if ema9 > ema21 > ema50:
+            votos.append(('emas', 'alta'))
+        elif ema9 < ema21 < ema50:
+            votos.append(('emas', 'baixa'))
+        # EMAs desalinhadas (sem stack claro) = sem voto, fica de fora
+
+    rsi = indicadores.get('rsi14')
+    if rsi is not None:
+        if rsi <= 35:
+            votos.append(('rsi', 'alta'))   # sobrevendido -> favorece reversão pra cima
+        elif rsi >= 65:
+            votos.append(('rsi', 'baixa'))  # sobrecomprado -> favorece reversão pra baixo
+
+    stoch_k, stoch_d = indicadores.get('stoch_k'), indicadores.get('stoch_d')
+    if stoch_k is not None and stoch_d is not None:
+        if stoch_k <= 30 and stoch_d <= 30:
+            votos.append(('stochastic', 'alta'))
+        elif stoch_k >= 70 and stoch_d >= 70:
+            votos.append(('stochastic', 'baixa'))
+
+    bb_lower, bb_upper = indicadores.get('bollinger_lower'), indicadores.get('bollinger_upper')
+    if bb_lower is not None and bb_upper is not None:
+        if preco_atual <= bb_lower:
+            votos.append(('bollinger', 'alta'))
+        elif preco_atual >= bb_upper:
+            votos.append(('bollinger', 'baixa'))
+
+    vwap = indicadores.get('vwap')
+    if vwap is not None:
+        votos.append(('vwap', 'alta' if preco_atual > vwap else 'baixa'))
+
+    ichimoku = indicadores.get('ichimoku') or {}
+    senkou_a, senkou_b = ichimoku.get('senkou_a'), ichimoku.get('senkou_b')
+    if senkou_a is not None and senkou_b is not None:
+        topo_nuvem, fundo_nuvem = max(senkou_a, senkou_b), min(senkou_a, senkou_b)
+        if preco_atual > topo_nuvem:
+            votos.append(('ichimoku', 'alta'))
+        elif preco_atual < fundo_nuvem:
+            votos.append(('ichimoku', 'baixa'))
+        # preço DENTRO da nuvem = indecisão, sem voto
+
+    mc = indicadores.get('monte_carlo') or {}
+    prob_alta, prob_baixa = mc.get('prob_alta_pct'), mc.get('prob_baixa_pct')
+    if prob_alta is not None and prob_baixa is not None:
+        if prob_alta >= 55:
+            votos.append(('monte_carlo', 'alta'))
+        elif prob_baixa >= 55:
+            votos.append(('monte_carlo', 'baixa'))
+
+    padrao = indicadores.get('candle_pattern')
+    if padrao in ('Engolfo de Alta', 'Martelo (Hammer)'):
+        votos.append(('candle_pattern', 'alta'))
+    elif padrao in ('Engolfo de Baixa', 'Estrela Cadente (Shooting Star)'):
+        votos.append(('candle_pattern', 'baixa'))
+
+    # ADX não vota direção (só mede força) — entra separado como
+    # confirmação de qualidade, não como voto de lado
+    adx = indicadores.get('adx14')
+    tendencia_forte = adx is not None and adx >= 25
+
+    votos_alta = sum(1 for _, v in votos if v == 'alta')
+    votos_baixa = sum(1 for _, v in votos if v == 'baixa')
+    return votos_alta, votos_baixa, len(votos), votos, tendencia_forte
+
+
+def process_pair_scalp_indicadores(db_file, pair, exec_candles, exec_tf_label, send_telegram_fn=None):
+    """
+    Modo independente da sequência ICT — fica procurando setup TODO ciclo,
+    baseado só em quantos indicadores técnicos concordam na mesma direção.
+    Não precisa de zona D1, sweep nem CHoCH confirmados.
+
+    Regra: precisa de pelo menos VOTOS_MINIMOS_SINAL (7 de ~10) indicadores
+    votando pro mesmo lado. Sem isso, sem sinal — não dispara com maioria
+    fraca só porque "a maioria" já é alguma coisa.
+
+    Stop calculado via ATR (não via estrutura, esse modo não usa nível de
+    sweep/zona) — 1.5x ATR de distância. TP = RR 2:1 fixo, mesmo padrão
+    dos outros 2 modos.
+    """
+    preco_atual = exec_candles[-1]['c']
+    indicadores = compute_technical_indicators(exec_candles)
+
+    resultado = {
+        'pair': pair, 'exec_tf': exec_tf_label, 'modo': 'confluencia_indicadores',
+        'sinal': False, 'direcao': None, 'entry': None, 'sl': None, 'tp': None,
+        'score': 0, 'votos_favor': 0, 'votos_total': 0, 'votos_detalhe': [],
+        'tendencia_forte': False, 'indicadores': indicadores, 'em_cooldown': False,
+        'motivo': None,
+    }
+
+    votos_alta, votos_baixa, total, detalhe_votos, tendencia_forte = _votos_indicadores(indicadores, preco_atual)
+    resultado['votos_total'] = total
+    resultado['votos_detalhe'] = detalhe_votos
+    resultado['tendencia_forte'] = tendencia_forte
+
+    if total == 0:
+        resultado['motivo'] = 'dados insuficientes pra votar (par muito novo ou poucos candles)'
+        return resultado
+
+    if votos_alta >= VOTOS_MINIMOS_SINAL and votos_alta > votos_baixa:
+        direcao = 'alta'
+        votos_favor = votos_alta
+    elif votos_baixa >= VOTOS_MINIMOS_SINAL and votos_baixa > votos_alta:
+        direcao = 'baixa'
+        votos_favor = votos_baixa
+    else:
+        resultado['motivo'] = f'sem maioria suficiente ainda (alta={votos_alta}, baixa={votos_baixa}, mínimo={VOTOS_MINIMOS_SINAL})'
+        resultado['votos_favor'] = max(votos_alta, votos_baixa)
+        return resultado
+
+    atr = indicadores.get('atr14')
+    if not atr or atr <= 0:
+        resultado['motivo'] = 'votos suficientes, mas ATR indisponível pra calcular stop'
+        return resultado
+
+    resultado['votos_favor'] = votos_favor
+    resultado['score'] = round(100 * votos_favor / total)
+    resultado['direcao'] = direcao
+
+    entry = preco_atual
+    stop_dist = atr * ATR_MULT_STOP
+    sl = entry - stop_dist if direcao == 'alta' else entry + stop_dist
+    tp = entry + stop_dist * RR_INDICADORES if direcao == 'alta' else entry - stop_dist * RR_INDICADORES
+
+    resultado.update({
+        'sinal': True,
+        'entry': round(entry, 6),
+        'sl': round(sl, 6),
+        'tp': round(tp, 6),
+        'motivo': f'{votos_favor}/{total} indicadores concordando em {direcao}' + (' + tendência forte (ADX≥25)' if tendencia_forte else ''),
+    })
+
+    # dedup por tempo — mesmo Cooldown de 45min dos outros modos
+    segundos_desde = _segundos_desde_ultimo_alerta(db_file, 'scalp_indicadores_signal_state', pair)
+    em_cooldown = segundos_desde is not None and segundos_desde < COOLDOWN_SECONDS
+    resultado['em_cooldown'] = em_cooldown
+
+    try:
+        signal_id = f"ind_{pair}_{int(time.time()*1000)}"
+        with sqlite3.connect(db_file) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO scalp_indicadores_signal_state
+                    (id, pair, created_at, exec_tf, direcao, score, votos_favor, votos_total, entry, sl, tp, alerted)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                signal_id, pair, int(time.time()), exec_tf_label, direcao, resultado['score'],
+                votos_favor, total, resultado['entry'], resultado['sl'], resultado['tp'],
+                0 if em_cooldown else 1,
+            ))
+            conn.commit()
+    except Exception as e:
+        print(f"[scalp_engine] erro ao salvar signal de indicadores de {pair}: {e}")
+
+    if send_telegram_fn and not em_cooldown:
+        arrow = '📈' if direcao == 'alta' else '📉'
+        label = 'LONG' if direcao == 'alta' else 'SHORT'
+        msg = f"📊 <b>Confluência de Indicadores — {pair}</b>\n\n"
+        msg += f"{arrow} <b>{label}</b> | TF execução: {exec_tf_label}\n"
+        msg += f"🗳️ {votos_favor}/{total} indicadores concordando"
+        if tendencia_forte:
+            msg += " | ADX confirma tendência forte"
+        msg += "\n"
+        msg += f"📍 Entrada: {resultado['entry']}\n🛑 Stop (1.5x ATR): {resultado['sl']}\n✅ TP (RR 2:1): {resultado['tp']}\n\n"
+        msg += "<b>Sem zona D1/sweep/CHoCH — setup baseado só em indicadores técnicos, posição menor recomendada.</b>"
+        send_telegram_fn(msg)
+    elif em_cooldown:
+        restante_min = (COOLDOWN_SECONDS - segundos_desde) // 60
+        resultado['motivo'] += f' (em cooldown, {restante_min}min restantes)'
 
     return resultado

@@ -1002,12 +1002,22 @@ def analyze_single_pair(pair, images_by_tf, category='ict', holding=None):
 
     response = client.messages.create(
         model="claude-sonnet-4-6",
-        max_tokens=16000,
+        max_tokens=6000,
         temperature=0,
         system=[{
             "type": "text",
             "text": system_prompt,
-            "cache_control": {"type": "ephemeral"}
+            # ── Cache de 1h em vez do padrão de 5min. O prompt do sistema
+            # (16 camadas ICT, regras de score, etc.) é enorme e reusado
+            # em TODO ciclo do Live Trade — com cache de 5min e ciclos a
+            # cada 15min, o cache SEMPRE expirava antes do próximo ciclo
+            # usar, pagando preço cheio quase toda chamada. Com 1h, o
+            # cache aguenta até 4 ciclos de 15min (ou 12 de 5min) sem
+            # expirar — leitura de cache custa ~10% do preço normal.
+            # Escrita do cache de 1h custa um pouco mais (2x vs 1.25x do
+            # de 5min), mas se paga rápido com o volume de reuso. Não
+            # precisa de beta header — suportado nativamente. ──
+            "cache_control": {"type": "ephemeral", "ttl": "1h"}
         }],
         messages=[{"role": "user", "content": content}]
     )
@@ -1274,24 +1284,31 @@ def _draw_scalp_overlays(img, draw, resultado, y_for, W, H, padR, font, preco_at
 
 
 def run_live_cycle(pair, interval_min):
+    """
+    ── MUDANÇA IMPORTANTE: esse ciclo automático NÃO chama mais o Claude.
+    Antes, todo ciclo (a cada 5-15min, por par) mandava 5 imagens + prompt
+    de 16 camadas pro Claude — isso era o maior custo de API do sistema,
+    rodando sozinho 24h sem o utilizador pedir. Agora o ciclo automático
+    usa SÓ os motores determinísticos e gratuitos:
+      - cascade_engine: zona D1 → sweep → CHoCH → score (zero custo de IA)
+      - scalp_engine (normal + Antecipado v2): mesma coisa, focado em scalp
+    Os dois já mandam Telegram sozinhos quando o score bate o threshold
+    deles — a cobertura de alerta automático continua, só que de graça.
+
+    O Claude (as 16 camadas completas) fica reservado EXCLUSIVAMENTE pra
+    quando o utilizador aperta "Nova Análise" manual no app (rotas /analyze
+    e /analyze_multi, que não mudaram em nada) — é aí que faz sentido
+    gastar API de verdade, pra tentar perceber o viés real do mercado com
+    o motor mais forte, não em ciclo automático rodando sem parar.
+    """
     symbol = LIVE_SYMBOL_MAP.get(pair, pair.replace('USD', 'USDT'))
-    pair_label = pair.replace('USD', '')
 
     candles_por_tf_cache = {}
     for tf_label, interval in LIVE_TF_INTERVALS.items():
         candles = fetch_bybit_klines(symbol, interval, 200)
         candles_por_tf_cache[tf_label] = candles
 
-    # ── MODO SOMBRA (revertido do corte real): o gate NÃO pula mais a
-    # chamada ao Claude — descobrimos um caso (BTCUSD, score Claude 85)
-    # onde o cascade_engine disse "sem zona D1" mas o Claude achou um
-    # sinal forte de verdade. Corte de 9% de economia não compensava o
-    # risco de perder sinais bons silenciosamente. Continua gravando
-    # gate_teria_pulado / cascade_score / cascade_motivo em live_signals
-    # pra seguir monitorando, mas SEMPRE chama o Claude. ──
-    gate_teria_pulado = 0
-    cascade_score_log = None
-    cascade_motivo_log = None
+    cascade_result = None
     if 'D1' in candles_por_tf_cache and 'M15' in candles_por_tf_cache:
         try:
             cascade_result = cascade_engine.process_pair_full(
@@ -1301,19 +1318,12 @@ def run_live_cycle(pair, interval_min):
                 send_telegram,
             )
             CASCADE_STATUS[pair] = {'result': cascade_result, 'updated_at': int(time.time())}
-            cascade_score_log = cascade_result.get('score')
-            cascade_motivo_log = cascade_result.get('motivo')
-            if cascade_score_log == 0:
-                gate_teria_pulado = 1
         except Exception as e:
             print(f"[cascade_engine] erro no ciclo de {pair}: {e}")
 
     # ── Scalp Ao Vivo (zona D1 → killzone → sweep → CHoCH no TF de
     # execução escolhido → FVG/OB → score), só se o par estiver marcado
-    # em scalp_watch. Reaproveita candles já buscados acima.
-    #
-    # Roda ANTES do render das imagens, pra scalp_result ficar disponível
-    # na hora de desenhar o overlay no chart do exec_tf. ──
+    # em scalp_watch. Reaproveita candles já buscados acima. ──
     scalp_result = None
     exec_tf = None
     try:
@@ -1327,16 +1337,6 @@ def run_live_cycle(pair, interval_min):
                 exec_candles = candles_por_tf_cache[exec_tf]
             elif exec_tf == 'M1':
                 exec_candles = fetch_bybit_klines(symbol, '1', 200)
-                # NÃO adicionar a candles_por_tf_cache aqui — isso injetaria uma
-                # 6ª chave no loop de render abaixo, mandando uma imagem extra
-                # (M1) pro Claude em todo ciclo com exec_tf=M1, inflando custo
-                # de API. M1 fica só local, usado pelo scalp_engine, nunca vira
-                # imagem pro Claude (igual sempre foi no código original).
-                #
-                # CONSEQUÊNCIA CONHECIDA: como M1 não está em LIVE_TF_INTERVALS,
-                # quando exec_tf='M1' o overlay do scalp (banda D1/sweep/CHoCH)
-                # não aparece em NENHUMA das 5 imagens renderizadas — só funciona
-                # quando exec_tf é M5 ou M15 (que já fazem parte das 5 padrão).
             else:
                 exec_candles = None
             if exec_candles:
@@ -1349,13 +1349,6 @@ def run_live_cycle(pair, interval_min):
                 )
                 SCALP_STATUS[pair] = {'result': scalp_result, 'updated_at': int(time.time())}
 
-                # ── Modo "Rejeição Antecipada v2" — roda em paralelo ao
-                # Scalp normal, mesmos candles, sem custo extra de IA nem
-                # de Bybit. Agora passa também o H4 (já buscado no cache
-                # deste ciclo, sem chamada extra à Bybit) pra checagem de
-                # alinhamento multi-timeframe (4ª condição obrigatória do
-                # motor: D1/H4 não podem estar em estrutura clara contra
-                # a direção do sinal). ──
                 try:
                     antecipado_result = scalp_engine.process_pair_scalp_antecipado_v2(
                         DB_FILE, pair,
@@ -1371,81 +1364,27 @@ def run_live_cycle(pair, interval_min):
     except Exception as e:
         print(f"[scalp_engine] erro no ciclo de {pair}: {e}")
 
-    # ── AGORA SIM renderiza as 5 imagens — só a do exec_tf recebe o
-    # scalp_result (overlay de banda D1/sweep/CHoCH/entrada). As outras
-    # 4 timeframes continuam limpas, só de contexto pro Claude. ──
-    images_by_tf = {}
-    for tf_label, candles in candles_por_tf_cache.items():
-        passar_scalp = scalp_result if (tf_label == exec_tf) else None
-        base64_png = render_live_chart_png_base64(candles, pair_label, tf_label, scalp_result=passar_scalp)
-        images_by_tf[tf_label] = {'base64': base64_png, 'mimeType': 'image/png'}
-
-    raw_text, display_text, error = analyze_single_pair(pair, images_by_tf, category='ict')
-    if error:
-        raise Exception(error)
-
-    direction, score, sl, tps, tf_label_full, entry = extract_trade_info(raw_text, ','.join(LIVE_TF_INTERVALS.keys()))
-    tp1 = tps[0] if len(tps) > 0 else ''
-    tp2 = tps[1] if len(tps) > 1 else ''
-
+    # ── Atualiza live_watch com um resumo LEVE (motivo/score dos motores
+    # grátis), só pra tela do app continuar mostrando algo útil sobre o
+    # ciclo mais recente — sem nenhum campo vindo do Claude. ──
     now = int(time.time())
-    signal_id = None
+    resumo_motivo = None
+    resumo_score = 0
+    if cascade_result:
+        resumo_motivo = cascade_result.get('motivo')
+        resumo_score = cascade_result.get('score') or 0
+    if scalp_result and scalp_result.get('motivo'):
+        resumo_motivo = scalp_result['motivo']
+        resumo_score = max(resumo_score, scalp_result.get('score') or 0)
+
     with sqlite3.connect(DB_FILE) as conn:
         cursor = conn.cursor()
         cursor.execute('''
-            UPDATE live_watch SET last_run=?, last_direction=?, last_score=?, last_entry=?,
-            last_sl=?, last_tp1=?, last_tp2=?, last_result=?, updated_at=? WHERE pair=?
-        ''', (now, direction, score, entry, sl, tp1, tp2, display_text, now, pair))
+            UPDATE live_watch SET last_run=?, last_score=?, last_result=?, updated_at=? WHERE pair=?
+        ''', (now, resumo_score, resumo_motivo, now, pair))
         conn.commit()
 
-        journal_id = f"{pair}_{int(time.time() * 1000)}"
-        cursor.execute('''
-            INSERT INTO journal (id, pair, created_at, direction, score, entry, sl, tp1, tp2, tp3, timeframes, analysis, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (journal_id, pair, now, direction, score, entry, sl, tp1, tp2,
-              tps[2] if len(tps) > 2 else '', ','.join(LIVE_TF_INTERVALS.keys()), raw_text, 'pending'))
-        conn.commit()
-
-        # ── MODO SOMBRA: grava também gate_teria_pulado/cascade_score/
-        # cascade_motivo junto de cada ciclo, pra comparar depois no
-        # endpoint /gate_shadow_report. ──
-        signal_id = f"sig_{pair}_{int(time.time() * 1000)}"
-        cursor.execute('''
-            INSERT INTO live_signals
-                (id, pair, created_at, direction, score, entry, sl, tp1, tp2,
-                 gate_teria_pulado, cascade_score, cascade_motivo)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (signal_id, pair, now, direction, score, entry, sl, tp1, tp2,
-              gate_teria_pulado, cascade_score_log, cascade_motivo_log))
-        conn.commit()
-
-    if direction and direction != 'NEUTRO' and score >= AUTO_ALERT_SCORE_THRESHOLD and entry:
-        signature = f"{direction}|{entry}"
-        with sqlite3.connect(DB_FILE) as conn:
-            cursor = conn.cursor()
-            cursor.execute('SELECT last_alerted_signature FROM live_watch WHERE pair=?', (pair,))
-            row = cursor.fetchone()
-            already = row[0] if row else None
-            if already != signature:
-                arrow = "📈" if direction == "LONG" else "📉"
-                msg = f"🔴 <b>Trade Ao Vivo (servidor) — {pair}</b>\n\n"
-                msg += f"{arrow} <b>{direction}</b> | Score {score}/100\n"
-                if entry:
-                    msg += f"📍 <b>Entrada:</b> ${entry}\n"
-                if sl:
-                    msg += f"🛑 <b>Stop:</b> ${sl}\n"
-                if tp1:
-                    msg += f"✅ <b>TP1:</b> ${tp1}\n"
-                if tp2:
-                    msg += f"✅ <b>TP2:</b> ${tp2}\n"
-                msg += f"\n💡 <i>Vigiando sozinho no servidor, a cada {interval_min}min.</i>"
-                send_telegram(msg)
-                cursor.execute('UPDATE live_watch SET last_alerted_signature=? WHERE pair=?', (signature, pair))
-                if signal_id:
-                    cursor.execute('UPDATE live_signals SET alerted=1 WHERE id=?', (signal_id,))
-                conn.commit()
-
-    return {'pair': pair, 'direction': direction, 'score': score, 'entry': entry, 'sl': sl, 'tp1': tp1, 'tp2': tp2}
+    return {'pair': pair, 'cascade': cascade_result, 'scalp': scalp_result}
 
 
 def live_scheduler_loop():
@@ -2042,6 +1981,13 @@ def scalp_watch_start():
         data = request.json or {}
         pair = data.get('pair')
         exec_tf = data.get('exec_tf', 'M5')
+        # ── Intervalo do ciclo (minutos). Voltou pra 5min — o motivo do
+        # 15min era economizar chamadas caras ao Claude, mas o ciclo
+        # automático não chama mais o Claude (só cascade_engine +
+        # scalp_engine, ambos grátis). O único limite real agora é a API
+        # pública da Bybit, que aguenta tranquilo 5min pra poucos pares.
+        # Ainda dá pra escolher outro valor mandando interval_min. ──
+        interval_min = int(data.get('interval_min', 5))
         if not pair:
             return jsonify({'error': 'pair obrigatório'}), 400
         if exec_tf not in ('M1', 'M5', 'M15'):
@@ -2061,13 +2007,13 @@ def scalp_watch_start():
             live_row = cursor.fetchone()
             if not live_row:
                 cursor.execute(
-                    'INSERT INTO live_watch (pair, interval_min, enabled, last_run) VALUES (?, 5, 1, 0)',
-                    (pair,)
+                    'INSERT INTO live_watch (pair, interval_min, enabled, last_run) VALUES (?, ?, 1, 0)',
+                    (pair, interval_min)
                 )
             elif live_row[1] == 0:
                 cursor.execute('UPDATE live_watch SET enabled=1 WHERE pair=?', (pair,))
             conn.commit()
-        return jsonify({'ok': True, 'pair': pair, 'exec_tf': exec_tf})
+        return jsonify({'ok': True, 'pair': pair, 'exec_tf': exec_tf, 'interval_min': interval_min})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 

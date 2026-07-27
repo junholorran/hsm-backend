@@ -32,15 +32,21 @@ CASCADE_STATUS = {}  # pair -> {'result': {...}, 'updated_at': int}
 # sweep → CHoCH no TF de execução → FVG/OB → score). ──
 SCALP_STATUS = {}  # pair -> {'result': {...}, 'updated_at': int}
 
-# ── NOVO: status do modo "Rejeição Antecipada v2" — roda em paralelo
+# ── status do modo "Rejeição Antecipada v2" — roda em paralelo
 # ao Scalp normal, sem esperar CHoCH. Separado pra não misturar com
 # o SCALP_STATUS do modo com confirmação. ──
 SCALP_ANTECIPADO_STATUS = {}  # pair -> {'result': {...}, 'updated_at': int}
 
-# ── NOVO: status do modo "Confluência de Indicadores" — busca setup
+# ── status do modo "Confluência de Indicadores" — busca setup
 # contínua baseada só nos indicadores técnicos, sem depender de zona
 # D1/sweep/CHoCH. Separado dos outros dois modos. ──
 SCALP_INDICADORES_STATUS = {}  # pair -> {'result': {...}, 'updated_at': int}
+
+# ── NOVO: status do modo "Continuação (BOS)" — sweep na zona D1, mas em
+# vez de esperar reversão (CHoCH), espera o preço ROMPER na MESMA
+# direção do sweep (BOS de continuação) e entra a favor dela no retorno
+# da FVG/OB. Separado de todos os outros modos. ──
+SCALP_CONTINUACAO_STATUS = {}  # pair -> {'result': {...}, 'updated_at': int}
 
 CACHE_WINDOW_SECONDS = 15 * 60  # 15 minutos
 
@@ -1133,7 +1139,7 @@ def render_live_chart_png_base64(candles, pair_label, tf_label, scalp_result=Non
         price_at_y = max_p - (rng / 4) * i
         draw.text((4, yy - 5), f"{price_at_y:.2f}", fill=(110, 118, 129), font=font)
 
-    # ── NOVO: fundo dividido verde/vermelho pelo preço ATUAL — visão
+    # ── fundo dividido verde/vermelho pelo preço ATUAL — visão
     # instantânea de "zona de compra" (abaixo do preço, verde) vs "zona de
     # venda" (acima do preço, vermelho). Desenhado ANTES dos candles, bem
     # sutil, só pra dar contexto visual de fundo sem atrapalhar leitura.
@@ -1169,7 +1175,7 @@ def render_live_chart_png_base64(candles, pair_label, tf_label, scalp_result=Non
         if len(pts) >= 2:
             draw.line(pts, fill=color, width=2)
 
-    # ── NOVO: overlays do Scalp Ao Vivo (banda D1, sweep, CHoCH, entrada) ──
+    # ── overlays do Scalp Ao Vivo (banda D1, sweep, CHoCH, entrada) ──
     # Desenhado ANTES do volume/título pra ficar atrás visualmente das
     # informações de topo, mas por cima dos candles/MAs.
     if scalp_result:
@@ -1269,7 +1275,7 @@ def _draw_scalp_overlays(img, draw, resultado, y_for, W, H, padR, font, preco_at
         draw.rectangle([x_end - 160, y_sweep - 10, x_end, y_sweep + 10], fill=cor)
         draw.text((x_end - 156, y_sweep - 6), label[:24], fill=(10, 10, 15), font=font)
 
-    # ── 3. CHoCH — linha sólida + tag ────────────────────────────────
+    # ── 3. CHoCH/BOS — linha sólida + tag ────────────────────────────
     if resultado.get('choch_nivel') is not None:
         y_choch = y_for(resultado['choch_nivel'])
         cor = (63, 185, 80) if resultado.get('choch_direcao') == 'alta' else (248, 81, 73)
@@ -1296,8 +1302,9 @@ def run_live_cycle(pair, interval_min):
     rodando sozinho 24h sem o utilizador pedir. Agora o ciclo automático
     usa SÓ os motores determinísticos e gratuitos:
       - cascade_engine: zona D1 → sweep → CHoCH → score (zero custo de IA)
-      - scalp_engine (normal + Antecipado v2): mesma coisa, focado em scalp
-    Os dois já mandam Telegram sozinhos quando o score bate o threshold
+      - scalp_engine (normal + Antecipado v2 + Indicadores + Continuação):
+        mesma coisa, focado em scalp
+    Todos já mandam Telegram sozinhos quando o score bate o threshold
     deles — a cobertura de alerta automático continua, só que de graça.
 
     O Claude (as 16 camadas completas) fica reservado EXCLUSIVAMENTE pra
@@ -1351,6 +1358,7 @@ def run_live_cycle(pair, interval_min):
                     exec_candles,
                     exec_tf,
                     send_telegram,
+                    h4_candles=candles_por_tf_cache.get('H4'),
                 )
                 SCALP_STATUS[pair] = {'result': scalp_result, 'updated_at': int(time.time())}
 
@@ -1380,6 +1388,41 @@ def run_live_cycle(pair, interval_min):
                     SCALP_INDICADORES_STATUS[pair] = {'result': indicadores_result, 'updated_at': int(time.time())}
                 except Exception as e:
                     print(f"[scalp_engine indicadores] erro no ciclo de {pair}: {e}")
+
+                # ── NOVO: Modo "Continuação (BOS)" — sweep na zona D1,
+                # mas em vez de esperar reversão (CHoCH), espera o preço
+                # ROMPER na mesma direção do sweep (BOS de continuação) e
+                # entra a favor dela no retorno da FVG/OB. Roda em
+                # paralelo, mesmos candles, tabelas próprias. ──
+                try:
+                    continuacao_result = scalp_engine.process_pair_scalp_continuacao(
+                        DB_FILE, pair,
+                        candles_por_tf_cache['D1'],
+                        exec_candles,
+                        exec_tf,
+                        send_telegram,
+                        h4_candles=candles_por_tf_cache.get('H4'),
+                    )
+                    SCALP_CONTINUACAO_STATUS[pair] = {'result': continuacao_result, 'updated_at': int(time.time())}
+                except Exception as e:
+                    print(f"[scalp_engine continuacao] erro no ciclo de {pair}: {e}")
+
+                # ── NOVO: MODO SOMBRA DOS FILTROS — roda em paralelo,
+                # SEM Telegram, só grava quando a versão sem os filtros
+                # novos (candle decisivo, alinhamento D1/H4, FVG mínima,
+                # janela 45 dias) teria dado sinal válido que a versão
+                # real bloqueou. Puramente observação, zero custo extra
+                # de API — só reaproveita os mesmos candles. ──
+                try:
+                    scalp_engine.process_pair_scalp_filtros_shadow(
+                        DB_FILE, pair,
+                        candles_por_tf_cache['D1'],
+                        exec_candles,
+                        exec_tf,
+                        h4_candles=candles_por_tf_cache.get('H4'),
+                    )
+                except Exception as e:
+                    print(f"[scalp_engine filtros_shadow] erro no ciclo de {pair}: {e}")
     except Exception as e:
         print(f"[scalp_engine] erro no ciclo de {pair}: {e}")
 
@@ -2003,7 +2046,7 @@ def scalp_watch_start():
         # ── Intervalo do ciclo (minutos). Voltou pra 5min — o motivo do
         # 15min era economizar chamadas caras ao Claude, mas o ciclo
         # automático não chama mais o Claude (só cascade_engine +
-        # scalp_engine, ambos grátis). O único limite real agora é a API
+        # scalp_engine, todos grátis). O único limite real agora é a API
         # pública da Bybit, que aguenta tranquilo 5min pra poucos pares.
         # Ainda dá pra escolher outro valor mandando interval_min. ──
         interval_min = int(data.get('interval_min', 5))
@@ -2064,7 +2107,7 @@ def scalp_status():
         return jsonify({'error': str(e)}), 500
 
 
-# ── NOVO: status do modo Rejeição Antecipada v2 — separado do Scalp
+# ── status do modo Rejeição Antecipada v2 — separado do Scalp
 # normal, pra você acompanhar sinais sem CHoCH confirmado. ──
 @app.route('/scalp_antecipado/status', methods=['GET'])
 def scalp_antecipado_status():
@@ -2077,7 +2120,7 @@ def scalp_antecipado_status():
         return jsonify({'error': str(e)}), 500
 
 
-# ── NOVO: status do modo Confluência de Indicadores — busca setup sem
+# ── status do modo Confluência de Indicadores — busca setup sem
 # depender da sequência ICT completa, só na votação entre os indicadores
 # técnicos (MACD, ADX, EMAs, Stochastic, RSI, Bollinger, VWAP, Ichimoku,
 # Monte Carlo, Candle Pattern). ──
@@ -2088,6 +2131,35 @@ def scalp_indicadores_status():
         if pair:
             return jsonify(SCALP_INDICADORES_STATUS.get(pair, {}))
         return jsonify(SCALP_INDICADORES_STATUS)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+# ── NOVO: status do modo Continuação (BOS) — sweep na zona D1 seguido de
+# BOS na MESMA direção do sweep (não reversão), entrada no retorno da
+# FVG/OB a favor da continuação. ──
+@app.route('/scalp_continuacao/status', methods=['GET'])
+def scalp_continuacao_status():
+    try:
+        pair = request.args.get('pair')
+        if pair:
+            return jsonify(SCALP_CONTINUACAO_STATUS.get(pair, {}))
+        return jsonify(SCALP_CONTINUACAO_STATUS)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+# ── NOVO: relatório do MODO SOMBRA DOS FILTROS — mostra todos os casos
+# em que os filtros adicionados (candle decisivo, alinhamento D1/H4,
+# FVG mínima, janela de 45 dias) teriam bloqueado um sinal que, sem
+# eles, teria pontuado score >= 75. Inclui contagem por tipo de filtro,
+# pra ver rápido qual filtro está cortando mais sinal. ──
+@app.route('/scalp_filtros_shadow/report', methods=['GET'])
+def scalp_filtros_shadow_report_route():
+    try:
+        pair = request.args.get('pair')
+        limit = int(request.args.get('limit', 50))
+        return jsonify(scalp_engine.filtros_shadow_report(DB_FILE, pair=pair, limit=limit))
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 

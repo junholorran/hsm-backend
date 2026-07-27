@@ -199,7 +199,10 @@ def init_scalp_db(db_file):
         # (score>=75) que a versão COM filtro bloqueou. Não manda
         # Telegram, não conta cooldown, é só observação pra comparar
         # depois de alguns dias se os filtros estão cortando sinal bom
-        # junto com o ruído ou não. ──
+        # junto com o ruído ou não. Coluna `resultado` (pendente/win/
+        # loss/expirado) é preenchida depois, ciclo a ciclo, conferindo
+        # se o preço bateu TP ou SL primeiro — é isso que transforma
+        # "quantas vezes bloqueou" em "bloqueou sinal bom ou ruim". ──
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS scalp_filtros_shadow (
                 id TEXT PRIMARY KEY,
@@ -211,7 +214,8 @@ def init_scalp_db(db_file):
                 entry REAL,
                 sl REAL,
                 tp REAL,
-                filtros_que_bloqueariam TEXT
+                filtros_que_bloqueariam TEXT,
+                resultado TEXT DEFAULT 'pendente'
             )
         ''')
         conn.commit()
@@ -220,6 +224,13 @@ def init_scalp_db(db_file):
         # idempotente (ignora erro se já existir). ──
         try:
             cursor.execute("ALTER TABLE scalp_antecipado_signal_state ADD COLUMN divergencia_rsi INTEGER DEFAULT 0")
+            conn.commit()
+        except Exception:
+            pass
+        # ── idempotente: se a tabela scalp_filtros_shadow já existia de
+        # antes (deploy anterior sem essa coluna), adiciona agora. ──
+        try:
+            cursor.execute("ALTER TABLE scalp_filtros_shadow ADD COLUMN resultado TEXT DEFAULT 'pendente'")
             conn.commit()
         except Exception:
             pass
@@ -1495,8 +1506,8 @@ def _save_filtro_shadow(db_file, pair, exec_tf_label, direcao, score, entry, sl,
         with sqlite3.connect(db_file) as conn:
             cursor = conn.cursor()
             cursor.execute('''
-                INSERT INTO scalp_filtros_shadow (id, pair, created_at, exec_tf, direcao, score, entry, sl, tp, filtros_que_bloqueariam)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO scalp_filtros_shadow (id, pair, created_at, exec_tf, direcao, score, entry, sl, tp, filtros_que_bloqueariam, resultado)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pendente')
             ''', (
                 shadow_id, pair, int(time.time()), exec_tf_label,
                 direcao, score, entry, sl, tp, ','.join(filtros_bloqueados),
@@ -1504,6 +1515,80 @@ def _save_filtro_shadow(db_file, pair, exec_tf_label, direcao, score, entry, sl,
             conn.commit()
     except Exception as e:
         print(f"[scalp_engine] erro ao salvar filtro shadow de {pair}: {e}")
+
+
+SHADOW_RESOLVE_MAX_AGE_HOURS = 24  # sinal shadow pendente há mais de 24h sem bater TP/SL vira 'expirado'
+
+
+def _resolver_filtros_shadow_pendentes(db_file, pair, exec_candles):
+    """
+    NOVO — pra cada sinal do modo sombra ainda 'pendente' desse par,
+    olha os candles do TF de execução DEPOIS do momento em que o sinal
+    foi criado e checa se o preço bateu TP ou SL primeiro. Atualiza
+    `resultado` pra 'win' ou 'loss'. Se passar de
+    SHADOW_RESOLVE_MAX_AGE_HOURS sem bater nenhum dos dois, marca como
+    'expirado' (não fica pendente pra sempre, e não conta nem como win
+    nem como loss no relatório).
+
+    Isso é o que transforma "esse filtro bloqueou 12 sinais" em
+    "esse filtro bloqueou 12 sinais, dos quais 8 teriam dado WIN" —
+    dado concreto em vez de só contagem.
+
+    Limitação honesta: só enxerga candles dentro da janela de
+    `exec_candles` recebida nesse ciclo (tipicamente ~200 candles do TF
+    de execução). Se um sinal shadow for muito antigo e os candles dele
+    já saíram da janela, ele fica pendente até expirar por tempo — não
+    é perdido, só não resolve mais cedo.
+    """
+    try:
+        with sqlite3.connect(db_file) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT id, created_at, direcao, entry, sl, tp FROM scalp_filtros_shadow
+                WHERE pair=? AND (resultado IS NULL OR resultado='pendente')
+            ''', (pair,))
+            pendentes = cursor.fetchall()
+
+        if not pendentes:
+            return
+
+        now = int(time.time())
+        for shadow_id, created_at, direcao, entry, sl, tp in pendentes:
+            if sl is None or tp is None:
+                continue
+            candles_apos = [c for c in exec_candles if c['t'] >= created_at]
+            resultado = None
+            for c in candles_apos:
+                if direcao == 'alta':
+                    if c['l'] <= sl:
+                        resultado = 'loss'
+                        break
+                    if c['h'] >= tp:
+                        resultado = 'win'
+                        break
+                else:
+                    if c['h'] >= sl:
+                        resultado = 'loss'
+                        break
+                    if c['l'] <= tp:
+                        resultado = 'win'
+                        break
+
+            if resultado is None and (now - created_at) > SHADOW_RESOLVE_MAX_AGE_HOURS * 3600:
+                resultado = 'expirado'
+
+            if resultado:
+                try:
+                    with sqlite3.connect(db_file) as conn:
+                        conn.execute(
+                            'UPDATE scalp_filtros_shadow SET resultado=? WHERE id=?',
+                            (resultado, shadow_id)
+                        )
+                        conn.commit()
+                except Exception as e:
+                    print(f"[scalp_engine] erro ao resolver shadow {shadow_id}: {e}")
+    except Exception as e:
+        print(f"[scalp_engine] erro ao checar pendentes shadow de {pair}: {e}")
 
 
 def process_pair_scalp_filtros_shadow(db_file, pair, d1_candles, exec_candles, exec_tf_label, h4_candles=None):
@@ -1523,11 +1608,16 @@ def process_pair_scalp_filtros_shadow(db_file, pair, d1_candles, exec_candles, e
     qual(is) filtro(s) foi(ram) o responsável. Não manda Telegram, não
     conta pra cooldown de sinal real — é só dado pra comparação depois.
 
+    Antes de gerar sinal novo, resolve os pendentes de ciclos anteriores
+    (confere se bateram TP/SL) — ver `_resolver_filtros_shadow_pendentes`.
+
     Retorna o dict salvo (ou None se não havia nada relevante a
     registrar nesse ciclo — ou porque não chegou nem a formar sinal sem
     filtro, ou porque chegou e NENHUM filtro teria bloqueado, ou seja,
     os filtros não fizeram diferença nesse caso específico).
     """
+    _resolver_filtros_shadow_pendentes(db_file, pair, exec_candles)
+
     preco_atual = exec_candles[-1]['c']
 
     # zona SEM limitar a 45 dias — janela completa, "como era antes"
@@ -1621,38 +1711,61 @@ def filtros_shadow_report(db_file, pair=None, limit=50):
     """
     Devolve o histórico de casos em que os filtros novos teriam
     bloqueado um sinal que, sem eles, teria pontuado score >= 75 — pra
-    consulta via endpoint. Agrupa também uma contagem por tipo de
-    filtro, pra dar visão rápida de qual filtro tá cortando mais.
+    consulta via endpoint. Agrupa também:
+      - contagem por tipo de filtro (quantas vezes cada um bloqueou)
+      - win rate por tipo de filtro (dos casos já resolvidos, quantos
+        teriam dado WIN se o sinal tivesse passado) — é isso que
+        responde "o filtro tá cortando sinal bom ou ruim?" com dado
+        real, não só contagem.
     """
     try:
         with sqlite3.connect(db_file) as conn:
             cursor = conn.cursor()
             if pair:
                 cursor.execute('''
-                    SELECT pair, created_at, exec_tf, direcao, score, entry, sl, tp, filtros_que_bloqueariam
+                    SELECT pair, created_at, exec_tf, direcao, score, entry, sl, tp, filtros_que_bloqueariam, resultado
                     FROM scalp_filtros_shadow WHERE pair=? ORDER BY created_at DESC LIMIT ?
                 ''', (pair, limit))
             else:
                 cursor.execute('''
-                    SELECT pair, created_at, exec_tf, direcao, score, entry, sl, tp, filtros_que_bloqueariam
+                    SELECT pair, created_at, exec_tf, direcao, score, entry, sl, tp, filtros_que_bloqueariam, resultado
                     FROM scalp_filtros_shadow ORDER BY created_at DESC LIMIT ?
                 ''', (limit,))
             rows = cursor.fetchall()
 
         casos = []
         contagem = {}
+        stats_por_filtro = {}  # nome_filtro -> {'win': n, 'loss': n, 'pendente': n, 'expirado': n}
         for r in rows:
             filtros = r[8].split(',') if r[8] else []
+            resultado = r[9] or 'pendente'
             for f in filtros:
                 nome_base = f.split('(')[0]
                 contagem[nome_base] = contagem.get(nome_base, 0) + 1
+                if nome_base not in stats_por_filtro:
+                    stats_por_filtro[nome_base] = {'win': 0, 'loss': 0, 'pendente': 0, 'expirado': 0}
+                stats_por_filtro[nome_base][resultado] = stats_por_filtro[nome_base].get(resultado, 0) + 1
             casos.append({
                 'pair': r[0], 'created_at': r[1], 'exec_tf': r[2], 'direcao': r[3],
                 'score': r[4], 'entry': r[5], 'sl': r[6], 'tp': r[7],
-                'filtros_que_bloqueariam': filtros,
+                'filtros_que_bloqueariam': filtros, 'resultado': resultado,
             })
 
-        return {'total_casos': len(casos), 'contagem_por_filtro': contagem, 'casos': casos}
+        # ── calcula win rate por filtro só sobre os casos JÁ resolvidos
+        # (win+loss) — pendente/expirado não entram na conta pra não
+        # distorcer a % com sinais que ainda nem tiveram tempo de bater
+        # TP ou SL. ──
+        for nome, s in stats_por_filtro.items():
+            resolvidos = s['win'] + s['loss']
+            s['resolvidos'] = resolvidos
+            s['win_rate_pct'] = round(100 * s['win'] / resolvidos, 1) if resolvidos > 0 else None
+
+        return {
+            'total_casos': len(casos),
+            'contagem_por_filtro': contagem,
+            'win_rate_por_filtro': stats_por_filtro,
+            'casos': casos,
+        }
     except Exception as e:
         print(f"[scalp_engine] erro ao gerar filtros_shadow_report: {e}")
         return {'total_casos': 0, 'contagem_por_filtro': {}, 'casos': [], 'error': str(e)}

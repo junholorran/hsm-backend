@@ -23,7 +23,7 @@
 # Tudo isolado em tabelas próprias (scalp_zone_state, scalp_signal_state),
 # nunca toca nas tabelas do cascade_engine ou do app.py.
 #
-# ── MODO "REJEIÇÃO ANTECIPADA v2" (aditivo, seção no final do arquivo) ──
+# ── MODO "REJEIÇÃO ANTECIPADA v2" (aditivo, seção mais abaixo) ──
 # Segundo modo, mais agressivo, que roda em PARALELO ao modo acima. Não
 # espera CHoCH confirmar — dispara quando um pavio varre LIQUIDEZ ANTIGA
 # real (fundo/topo estabelecido) na borda da zona D1 E o RSI está extremo
@@ -31,6 +31,26 @@
 # gradual): zona + liquidez antiga + RSI extremo, os 3 juntos, ou nada.
 # Divergência de RSI (Camada 16 do prompt principal) é BÔNUS de confiança,
 # não obrigatória — soma ao texto/score da mensagem, não bloqueia sinal.
+#
+# ── MODO "CONFLUÊNCIA DE INDICADORES" (aditivo, seção mais abaixo) ──
+# Terceiro modo, roda em paralelo, SEM depender de zona D1/sweep/CHoCH.
+# Vota entre 10 indicadores técnicos e dispara com maioria qualificada.
+#
+# ── MODO "CONTINUAÇÃO (BOS)" — NOVO, aditivo, seção mais abaixo ──
+# Quarto modo. Os três modos acima só entram em REVERSÃO (contra a
+# direção do sweep). Esse modo cobre o caso oposto, pedido pelo Juninho
+# depois de ver um caso real no gráfico: preço varre liquidez na borda
+# da zona D1, mas em vez de virar (CHoCH), ROMPE ainda mais na MESMA
+# direção do sweep — fechamento além do próprio nível varrido, o que é
+# um BOS de continuação (Break of Structure), não uma mudança de caráter.
+# Isso indica que a tese de reversão falhou e o movimento vai continuar.
+# A entrada é no retorno (retest) da FVG/OB/iFVG/Breaker deixado por esse
+# BOS, sempre A FAVOR da direção original do sweep (nunca contra).
+# Reaproveita a mesma detecção de zona D1, mesmo cálculo de score e
+# indicadores técnicos, mesma lógica de FVG/OB/iFVG/Breaker e mesmo
+# cooldown — só troca "espera reversão" por "espera continuação".
+# Tabelas próprias (scalp_zone_state_continuacao, scalp_signal_state_
+# continuacao), nunca mistura com os outros 3 modos.
 # ─────────────────────────────────────────────────────────────────────────
 
 import sqlite3
@@ -42,8 +62,12 @@ SCORE_THRESHOLD_SINAL = 75
 COOLDOWN_SECONDS = 45 * 60  # 45min — meio-termo da faixa 30-60min do Vortex
 TOLERANCIA_CLUSTER_PCT = 0.006   # 0.6% — mesma tolerância usada no cascade pra clusterizar toques
 MIN_EVENTOS_BANDA = 2            # mínimo de toques pra uma banda D1 ser considerada válida
+MIN_FVG_GAP_PCT = 0.0005         # 0.05% do preço — FVG menor que isso é ruído, não conta como zona de entrada
+MIN_CANDLE_BODY_RATIO = 0.5      # candle de confirmação precisa ter corpo >= 50% do range total (senão é pavio/indecisão)
+STOP_BUFFER_PCT = 0.001          # 0.1% de folga além do nível estrutural — stop nunca fica colado no pavio exato
+D1_LOOKBACK_DIAS = 45            # bandas D1 do Scalp olham só os últimos 45 dias — estrutura recente, não swing de meses atrás
 SWING_LOOKBACK = 5               # candles de cada lado pra confirmar swing high/low no TF de execução
-SWEEP_MEMORY_MAX_AGE_SECONDS = 12 * 3600  # sweep salvo expira depois de 12h sem confirmar CHoCH
+SWEEP_MEMORY_MAX_AGE_SECONDS = 12 * 3600  # sweep salvo expira depois de 12h sem confirmar CHoCH/BOS
 
 # Portugal (Europe/Lisbon) — horário local aproximado, sem lib de timezone externa.
 # UTC+0 no inverno, UTC+1 no verão (DST). Pra simplificar e evitar dependência
@@ -118,7 +142,7 @@ def init_scalp_db(db_file):
         # baseado só nos indicadores técnicos (MACD, ADX, EMAs, Stochastic,
         # RSI, Bollinger, VWAP, Ichimoku, Monte Carlo, Candle Pattern),
         # SEM depender da sequência ICT (zona→sweep→CHoCH) estar completa.
-        # Roda em paralelo aos outros 2 modos, procurando setup o tempo
+        # Roda em paralelo aos outros modos, procurando setup o tempo
         # todo baseado só na confluência entre os indicadores. ──
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS scalp_indicadores_signal_state (
@@ -134,6 +158,60 @@ def init_scalp_db(db_file):
                 sl REAL,
                 tp REAL,
                 alerted INTEGER DEFAULT 0
+            )
+        ''')
+        # ── NOVO: tabelas do modo "Continuação (BOS)" — mesmo shape das
+        # tabelas do modo normal (scalp_zone_state / scalp_signal_state),
+        # só que isoladas, pra nunca misturar estado de reversão com
+        # estado de continuação do mesmo par. ──
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS scalp_zone_state_continuacao (
+                pair TEXT PRIMARY KEY,
+                zona_top REAL,
+                zona_bottom REAL,
+                fase TEXT,
+                sweep_ts INTEGER,
+                sweep_nivel REAL,
+                sweep_lado TEXT,
+                choch_ts INTEGER,
+                choch_nivel REAL,
+                updated_at INTEGER
+            )
+        ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS scalp_signal_state_continuacao (
+                id TEXT PRIMARY KEY,
+                pair TEXT,
+                created_at INTEGER,
+                exec_tf TEXT,
+                direcao TEXT,
+                score INTEGER,
+                entry REAL,
+                sl REAL,
+                tp REAL,
+                na_killzone INTEGER,
+                alerted INTEGER DEFAULT 0
+            )
+        ''')
+        # ── NOVO: tabela do MODO SOMBRA DOS FILTROS — registra quando a
+        # versão SEM os filtros novos (candle decisivo, alinhamento D1/H4,
+        # FVG mínima, janela de 45 dias) chegaria a um sinal válido
+        # (score>=75) que a versão COM filtro bloqueou. Não manda
+        # Telegram, não conta cooldown, é só observação pra comparar
+        # depois de alguns dias se os filtros estão cortando sinal bom
+        # junto com o ruído ou não. ──
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS scalp_filtros_shadow (
+                id TEXT PRIMARY KEY,
+                pair TEXT,
+                created_at INTEGER,
+                exec_tf TEXT,
+                direcao TEXT,
+                score INTEGER,
+                entry REAL,
+                sl REAL,
+                tp REAL,
+                filtros_que_bloqueariam TEXT
             )
         ''')
         conn.commit()
@@ -158,9 +236,21 @@ def is_in_killzone(now_utc=None):
 
 
 # ── ZONA D1 (cluster de S/R) ────────────────────────────────────────────
-def compute_d1_zones(d1_candles):
-    """Agrupa highs/lows do D1 em bandas (cluster), igual à lógica do
-    cascade_engine: tolerância percentual, mínimo de toques pra validar."""
+def compute_d1_zones(d1_candles, lookback_dias=D1_LOOKBACK_DIAS):
+    """Agrupa highs/lows do D1 em bandas (cluster), tolerância percentual,
+    mínimo de toques pra validar.
+
+    ── NOVO: `lookback_dias` limita a busca de swings aos últimos N dias
+    (padrão 45) — pra scalp, uma banda formada por um swing de 3-4 meses
+    atrás não tem muita relevância pro que o preço está fazendo agora.
+    Isso faz a zona "acompanhar" o mercado: conforme dias antigos saem
+    da janela, bandas baseadas só neles deixam de aparecer, e o cluster
+    se reforma em cima da estrutura mais recente. Se `d1_candles` tiver
+    menos candles que a janela (par novo, poucos dados), usa tudo o que
+    tiver — não quebra por falta de histórico. ──"""
+    if lookback_dias and len(d1_candles) > lookback_dias:
+        d1_candles = d1_candles[-lookback_dias:]
+
     swings = []
     lb = 2
     for i in range(lb, len(d1_candles) - lb):
@@ -230,8 +320,8 @@ def detect_sweep_in_zone(exec_candles, zona):
 
 
 def detect_choch_after_sweep(exec_candles, sweep):
-    """Depois do sweep, procura quebra de estrutura na direção oposta
-    (CHoCH real, confirmado por fechamento, não só pavio).
+    """Depois do sweep, procura quebra de estrutura na direção OPOSTA
+    (CHoCH real de reversão, confirmado por fechamento, não só pavio).
 
     Usa TIMESTAMP do sweep (sweep['t']), não a posição/index dele — isso
     é essencial pra funcionar mesmo quando o sweep foi detectado em um
@@ -264,9 +354,62 @@ def detect_choch_after_sweep(exec_candles, sweep):
     return None
 
 
-def find_fvg_ob_after_choch(exec_candles, choch):
+def detect_bos_continuation_after_sweep(exec_candles, sweep):
+    """
+    NOVO — contraparte do `detect_choch_after_sweep`, mas pra CONTINUAÇÃO
+    em vez de reversão.
+
+    Depois do sweep, em vez de esperar o preço virar (CHoCH), procura o
+    preço ROMPER de vez, por FECHAMENTO, além do próprio nível do sweep,
+    na MESMA direção que ele já estava indo antes do sweep acontecer.
+
+    Isso é um BOS (Break of Structure) de continuação: a liquidez que foi
+    varrida na borda da zona D1 não segurou o preço — ele engoliu aquela
+    liquidez e seguiu no mesmo sentido, o que invalida a tese de reversão
+    e confirma que o movimento anterior continua.
+
+    - sweep['lado'] == 'baixa' (pavio varreu abaixo da zona, fechou
+      de volta acima — parecia setup de reversão pra alta) -> BOS de
+      continuação = um candle POSTERIOR fecha ABAIXO do próprio nível
+      do sweep (sweep['nivel']), ou seja, o preço voltou a cair além de
+      onde tinha varrido, sem nunca ter confirmado a reversão.
+    - sweep['lado'] == 'alta' (pavio varreu acima da zona, fechou de
+      volta abaixo — parecia setup de reversão pra baixa) -> BOS de
+      continuação = um candle POSTERIOR fecha ACIMA do próprio nível
+      do sweep, o preço continuou subindo além de onde tinha varrido.
+
+    Retorna dict no mesmo formato do CHoCH ({'index','direcao','nivel','t'})
+    pra poder reaproveitar direto as mesmas funções de FVG/OB/iFVG/Breaker
+    e o mesmo compute_score — só muda o SENTIDO da direção resultante,
+    que aqui é a MESMA do sweep, não a oposta.
+    """
+    for i, c in enumerate(exec_candles):
+        if c['t'] <= sweep['t']:
+            continue
+        if sweep['lado'] == 'baixa' and c['c'] < sweep['nivel']:
+            return {'index': i, 'direcao': 'baixa', 'nivel': sweep['nivel'], 't': c['t']}
+        if sweep['lado'] == 'alta' and c['c'] > sweep['nivel']:
+            return {'index': i, 'direcao': 'alta', 'nivel': sweep['nivel'], 't': c['t']}
+    return None
+
+
+def find_fvg_ob_after_choch(exec_candles, choch, min_gap_pct=MIN_FVG_GAP_PCT):
     """Procura FVG (3 candles) ou Order Block (última vela contrária antes
-    do impulso) formado pelo próprio movimento do CHoCH."""
+    do impulso) formado pelo próprio movimento do CHoCH/BOS.
+
+    Nome mantido `choch` por compatibilidade — na prática recebe qualquer
+    evento estrutural com o formato {'index','direcao'}, seja CHoCH
+    (reversão) ou BOS de continuação; a lógica de achar FVG/OB é idêntica
+    nos dois casos, só muda o que gerou o evento.
+
+    ── FILTRO DE QUALIDADE (min_gap_pct, padrão MIN_FVG_GAP_PCT): gaps
+    menores que isso são ruído/arredondamento, não uma FVG real
+    negociável. Em vez de aceitar o primeiro gap que aparecer (por menor
+    que seja), pula os pequenos demais e continua procurando um gap com
+    tamanho relevante dentro da mesma janela — só cai pro fallback de
+    Order Block se NENHUM gap na janela passar do tamanho mínimo.
+    `min_gap_pct=0` desliga o filtro (usado pelo modo sombra, pra
+    comparar com/sem essa trava). ──"""
     start = max(0, choch['index'] - 1)
     end = min(len(exec_candles) - 1, choch['index'] + 4)
 
@@ -275,11 +418,15 @@ def find_fvg_ob_after_choch(exec_candles, choch):
             break
         prev, nxt = exec_candles[i - 1], exec_candles[i + 1]
         if choch['direcao'] == 'alta' and nxt['l'] > prev['h']:
-            return {'tipo': 'FVG', 'top': nxt['l'], 'bottom': prev['h']}
+            gap_pct = (nxt['l'] - prev['h']) / prev['h'] if prev['h'] else 0
+            if gap_pct >= min_gap_pct:
+                return {'tipo': 'FVG', 'top': nxt['l'], 'bottom': prev['h']}
         if choch['direcao'] == 'baixa' and nxt['h'] < prev['l']:
-            return {'tipo': 'FVG', 'top': prev['l'], 'bottom': nxt['h']}
+            gap_pct = (prev['l'] - nxt['h']) / prev['l'] if prev['l'] else 0
+            if gap_pct >= min_gap_pct:
+                return {'tipo': 'FVG', 'top': prev['l'], 'bottom': nxt['h']}
 
-    # fallback: Order Block = última vela contrária antes do candle de CHoCH
+    # fallback: Order Block = última vela contrária antes do candle do evento
     for i in range(choch['index'], max(0, choch['index'] - 6), -1):
         c = exec_candles[i]
         up = c['c'] >= c['o']
@@ -292,13 +439,12 @@ def find_fvg_ob_after_choch(exec_candles, choch):
 
 def find_ifvg_after_choch(exec_candles, choch):
     """iFVG (Inversion Fair Value Gap): se o FVG formado pelo movimento do
-    CHoCH for ROMPIDO de vez (preço fecha totalmente do outro lado dele,
-    não só toca) e depois volta e REJEITA naquele mesmo nível, o gap
-    inverte de papel — vira zona de entrada com sentido invertido do que
-    era antes, mas SEMPRE na mesma direção do CHoCH (funciona tanto pra
-    suporte quanto resistência, dependendo de qual lado o preço vem).
-    É um fallback do FVG/OB normal — só entra em ação se aquele não
-    servir mais (rompido de vez)."""
+    evento estrutural (CHoCH ou BOS) for ROMPIDO de vez (preço fecha
+    totalmente do outro lado dele, não só toca) e depois volta e REJEITA
+    naquele mesmo nível, o gap inverte de papel — vira zona de entrada
+    com sentido invertido do que era antes, mas SEMPRE na mesma direção
+    do evento que o originou. É um fallback do FVG/OB normal — só entra
+    em ação se aquele não servir mais (rompido de vez)."""
     start = max(0, choch['index'] - 1)
     end = min(len(exec_candles) - 1, choch['index'] + 4)
 
@@ -329,7 +475,7 @@ def find_ifvg_after_choch(exec_candles, choch):
             continue
 
         # depois do rompimento, procura o preço voltar a tocar o gap e
-        # REJEITAR na direção original do CHoCH — isso confirma o iFVG
+        # REJEITAR na direção original do evento — isso confirma o iFVG
         for k in range(violado_idx + 1, len(exec_candles)):
             c = exec_candles[k]
             tocou = c['l'] <= gap_top and c['h'] >= gap_bottom
@@ -344,13 +490,12 @@ def find_ifvg_after_choch(exec_candles, choch):
 
 def find_breaker_block_after_choch(exec_candles, choch):
     """Breaker Block: um Order Block que foi ROMPIDO de vez pelo próprio
-    movimento do CHoCH e depois o preço volta e RESPEITA aquele nível na
-    direção do CHoCH — sequência ICT clássica de 3 passos: (1) OB
-    original (cor oposta à direção do CHoCH), (2) rompimento total desse
-    OB (fechamento do outro lado, não só pavio), (3) retorno respeitando
-    o nível na nova direção. Funciona tanto pra suporte quanto
-    resistência, dependendo de que lado o preço vem. Fallback final —
-    só entra em ação depois de FVG/iFVG/OB simples não servirem."""
+    movimento do evento estrutural (CHoCH ou BOS) e depois o preço volta
+    e RESPEITA aquele nível na direção do evento — sequência ICT clássica
+    de 3 passos: (1) OB original (cor oposta à direção do evento), (2)
+    rompimento total desse OB (fechamento do outro lado, não só pavio),
+    (3) retorno respeitando o nível na nova direção. Fallback final — só
+    entra em ação depois de FVG/iFVG/OB simples não servirem."""
     start = max(0, choch['index'] - 12)
     for i in range(choch['index'] - 1, start, -1):
         c = exec_candles[i]
@@ -365,7 +510,7 @@ def find_breaker_block_after_choch(exec_candles, choch):
             continue
 
         # esse OB precisa ter sido rompido DE VEZ (fechamento, não pavio)
-        # por um candle entre ele e o CHoCH
+        # por um candle entre ele e o evento estrutural
         violado_idx = None
         for k in range(i + 1, choch['index'] + 1):
             cc = exec_candles[k]
@@ -379,7 +524,7 @@ def find_breaker_block_after_choch(exec_candles, choch):
             continue
 
         # e depois disso, o preço precisa voltar e REJEITAR na direção
-        # do CHoCH — isso confirma o breaker block
+        # do evento — isso confirma o breaker block
         for k in range(violado_idx + 1, len(exec_candles)):
             cc = exec_candles[k]
             tocou = cc['l'] <= ob_top and cc['h'] >= ob_bottom
@@ -396,15 +541,61 @@ def price_in_zone(entry_zone, preco):
     return entry_zone['bottom'] <= preco <= entry_zone['top']
 
 
-def _load_saved_state(db_file, pair):
-    """Lê o último estado salvo desse par (zona/sweep/CHoCH), pra decidir
-    se dá pra reaproveitar um sweep já detectado em ciclo anterior."""
+def candle_e_decisivo(candle, min_body_ratio=MIN_CANDLE_BODY_RATIO):
+    """
+    NOVO — filtro de qualidade do candle de confirmação (o candle atual,
+    no momento em que o preço já está dentro da zona de entrada).
+
+    Um candle com pavio enorme e corpo pequeno é indecisão do mercado —
+    "deixou dúvida", não confirmação. Só considera o retorno à FVG/OB
+    válido se o candle atual tiver corpo real: pelo menos
+    `min_body_ratio` (padrão 50%) do range total (high-low) dele.
+
+    Candle de range zero (high == low, caso raríssimo/erro de dado) não
+    é bloqueado — não dá pra avaliar decisão nele, então passa direto
+    pra não travar o sistema por causa de um dado degenerado.
+    """
+    range_total = candle['h'] - candle['l']
+    if range_total <= 0:
+        return True
+    corpo = abs(candle['c'] - candle['o'])
+    return (corpo / range_total) >= min_body_ratio
+
+
+def aplicar_buffer_stop(nivel, direcao, buffer_pct=STOP_BUFFER_PCT):
+    """
+    NOVO — regra fixa de segurança pro stop: nunca fica exatamente
+    colado no nível estrutural (pavio do sweep ou swing), sempre com uma
+    folga extra na direção que dá mais espaço:
+
+    - LONG (direcao='alta'): o nível de referência é um fundo (sweep de
+      baixa ou swing low) — stop fica um pouco ABAIXO dele, dá mais
+      espaço pro preço respirar sem ser varrido por ruído/spread no
+      exato pavio.
+    - SHORT (direcao='baixa'): o nível de referência é um topo (sweep de
+      alta ou swing high) — stop fica um pouco ACIMA dele, mesmo
+      raciocínio invertido.
+
+    `buffer_pct` é uma fração do preço (0.001 = 0.1%). Aplicado em cima
+    do NÍVEL, não da entrada — o stop sempre respeita a estrutura real,
+    só com uma margem extra além dela.
+    """
+    if direcao == 'alta':
+        return nivel * (1 - buffer_pct)
+    return nivel * (1 + buffer_pct)
+
+
+def _load_saved_state(db_file, pair, table='scalp_zone_state'):
+    """Lê o último estado salvo desse par (zona/sweep/CHoCH ou BOS), pra
+    decidir se dá pra reaproveitar um sweep já detectado em ciclo
+    anterior. `table` permite reaproveitar essa mesma função pros modos
+    normal e continuação, que guardam estado em tabelas separadas."""
     try:
         with sqlite3.connect(db_file) as conn:
             cursor = conn.cursor()
-            cursor.execute('''
+            cursor.execute(f'''
                 SELECT zona_top, zona_bottom, sweep_ts, sweep_nivel, sweep_lado, updated_at
-                FROM scalp_zone_state WHERE pair=?
+                FROM {table} WHERE pair=?
             ''', (pair,))
             row = cursor.fetchone()
         if not row:
@@ -415,13 +606,13 @@ def _load_saved_state(db_file, pair):
             'updated_at': row[5],
         }
     except Exception as e:
-        print(f"[scalp_engine] erro ao carregar estado salvo de {pair}: {e}")
+        print(f"[scalp_engine] erro ao carregar estado salvo de {pair} ({table}): {e}")
         return None
 
 
 def _sweep_ainda_valido(saved, zona, now):
     """Um sweep salvo continua valendo se: a zona D1 não mudou de forma
-    relevante desde que foi salvo, e não passou tempo demais sem CHoCH
+    relevante desde que foi salvo, e não passou tempo demais sem CHoCH/BOS
     confirmar. Isso é o que evita o sweep 'sumir' só porque o candle
     saiu da janela recente de exec_candles."""
     if not saved or saved.get('sweep_nivel') is None or not saved.get('sweep_lado'):
@@ -873,6 +1064,12 @@ def compute_score(zona, sweep, choch, entry_zone, exec_candles, na_killzone, ind
     não é gate) — soma pontos se bateu dentro da janela, mas a ausência
     dela não impede o score de chegar em 75.
 
+    O parâmetro `choch` é genérico: aceita tanto um evento de CHoCH
+    (reversão, modo normal) quanto um evento de BOS (continuação, modo
+    novo) — o formato do dict é o mesmo ({'index','direcao',...}), e o
+    cálculo de score não precisa saber qual dos dois é, só usa a direção
+    e o índice do candle que confirmou a estrutura.
+
     `indicadores` é o dict já calculado por compute_technical_indicators()
     (reaproveitado do início do ciclo, pra não recalcular tudo de novo).
     Se vier None (chamada antiga/isolada), calcula na hora como fallback.
@@ -886,12 +1083,12 @@ def compute_score(zona, sweep, choch, entry_zone, exec_candles, na_killzone, ind
     score += pts_zona
     detalhes.append(('banda_d1', pts_zona))
 
-    # killzone — só soma se o sweep+CHoCH aconteceram dentro da killzone
+    # killzone — só soma se o sweep+estrutura aconteceram dentro da killzone
     if na_killzone:
         score += 10
         detalhes.append(('dentro_killzone', 10))
 
-    # sweep + CHoCH confirmados
+    # sweep + confirmação estrutural (CHoCH ou BOS)
     score += 25
     detalhes.append(('sweep_choch', 25))
 
@@ -919,7 +1116,7 @@ def compute_score(zona, sweep, choch, entry_zone, exec_candles, na_killzone, ind
             score += pts_rsi
             detalhes.append(('rsi_favoravel', pts_rsi))
 
-    # volume do candle de CHoCH acima da média recente = confirma força real
+    # volume do candle de CHoCH/BOS acima da média recente = confirma força real
     vols = [c.get('v', 0) for c in exec_candles[-20:]]
     if vols:
         media_vol = sum(vols) / len(vols)
@@ -928,7 +1125,7 @@ def compute_score(zona, sweep, choch, entry_zone, exec_candles, na_killzone, ind
             score += 8
             detalhes.append(('volume_choch_forte', 8))
 
-    # ── NOVO: indicadores técnicos pesando de verdade no score, não só
+    # ── indicadores técnicos pesando de verdade no score, não só
     # aparecendo como dado solto. Reaproveita `indicadores` já calculado
     # no início do ciclo (compute_technical_indicators) — se não vier
     # (chamada isolada/antiga), calcula na hora como fallback. ──
@@ -973,10 +1170,9 @@ def compute_score(zona, sweep, choch, entry_zone, exec_candles, na_killzone, ind
             score += 6
             detalhes.append(('stochastic_favoravel', 6))
 
-    # Bollinger: preço no candle de CHoCH tocou/passou a banda oposta à
-    # direção (ex: CHoCH de alta com o sweep tendo tocado a banda inferior)
-    # = movimento esticado o suficiente pra justificar reversão real, não
-    # só ruído dentro do canal
+    # Bollinger: preço no candle do sweep tocou/passou a banda oposta à
+    # direção = movimento esticado o suficiente pra justificar entrada
+    # real, não só ruído dentro do canal
     bb_lower, bb_upper = indicadores.get('bollinger_lower'), indicadores.get('bollinger_upper')
     if bb_lower is not None and bb_upper is not None and sweep.get('nivel') is not None:
         if direcao == 'alta' and sweep['nivel'] <= bb_lower:
@@ -1065,10 +1261,16 @@ def compute_score(zona, sweep, choch, entry_zone, exec_candles, na_killzone, ind
     return min(score, 100), detalhes
 
 
-def process_pair_scalp(db_file, pair, d1_candles, exec_candles, exec_tf_label, send_telegram_fn=None):
-    """Orquestrador do ciclo de Scalp Ao Vivo pra 1 par. Aditivo, roda em
-    cima dos mesmos candles já buscados no ciclo do Trade Ao Vivo — não
-    faz nenhuma call extra à Bybit."""
+def process_pair_scalp(db_file, pair, d1_candles, exec_candles, exec_tf_label, send_telegram_fn=None, h4_candles=None):
+    """Orquestrador do ciclo de Scalp Ao Vivo (modo NORMAL — reversão via
+    CHoCH) pra 1 par. Aditivo, roda em cima dos mesmos candles já
+    buscados no ciclo do Trade Ao Vivo — não faz nenhuma call extra à
+    Bybit.
+
+    `h4_candles` é opcional — usado pro FILTRO DE ALINHAMENTO COM
+    TIMEFRAMES MAIORES (ver mais abaixo, logo após o CHoCH confirmar).
+    Se não vier (chamada antiga sem esse parâmetro), o filtro usa só o
+    D1 e não quebra nada que já estava funcionando."""
     now = int(time.time())
     na_killzone, killzone_nome = is_in_killzone()
     preco_atual = exec_candles[-1]['c']
@@ -1095,6 +1297,8 @@ def process_pair_scalp(db_file, pair, d1_candles, exec_candles, exec_tf_label, s
         'sweep_lado': None,
         'choch_nivel': None,
         'choch_direcao': None,
+        'bias_d1': None,
+        'bias_h4': None,
         'entry_zone_top': None,
         'entry_zone_bottom': None,
         'entry_zone_tipo': None,
@@ -1115,12 +1319,9 @@ def process_pair_scalp(db_file, pair, d1_candles, exec_candles, exec_tf_label, s
 
     if not zona:
         # ── preço saiu da zona, mas isso NÃO apaga a memória salva.
-        # Antes disso, o ciclo salvava fase='idle' com zona/sweep=None,
-        # o que zerava tudo no banco — perdia o sweep mesmo que a zona
-        # continuasse válida. Agora só mostra a ÚLTIMA zona/sweep/CHoCH
-        # conhecidos (marcados como não-ativos), e só deixa expirar pelo
-        # mesmo critério de sempre (12h sem confirmar, ou zona mudou de
-        # verdade — ver _sweep_ainda_valido). ──
+        # Só mostra a ÚLTIMA zona/sweep/CHoCH conhecidos (marcados como
+        # não-ativos), e só deixa expirar pelo mesmo critério de sempre
+        # (12h sem confirmar, ou zona mudou de verdade). ──
         saved = _load_saved_state(db_file, pair)
         if saved and saved.get('zona_top') is not None:
             resultado['zona_top'] = round(saved['zona_top'], 6)
@@ -1166,8 +1367,47 @@ def process_pair_scalp(db_file, pair, d1_candles, exec_candles, exec_tf_label, s
         _save_zone_state(db_file, pair, zona, 'sweep', now, sweep=sweep)
         return resultado
 
+    # ── NOVO: o candle que FORMA o CHoCH também precisa ser decisivo
+    # (corpo real, sem pavio grande de rejeição). Isso pega o caso onde
+    # a quebra de estrutura já nasce com dúvida — ex: candle fecha acima
+    # do nível de referência (confirma CHoCH de alta), mas deixa um
+    # pavio grande em cima, sinal de que vendedores já estavam
+    # defendendo aquele preço no mesmo movimento que deveria confirmar
+    # força compradora. Isso é DIFERENTE do filtro no candle de retorno
+    # (mais abaixo) — aqui é o candle que CRIA o evento estrutural,
+    # antes de sequer procurar a FVG/OB. Se não for decisivo, trata como
+    # se o CHoCH ainda não tivesse confirmado — próximo ciclo tenta de
+    # novo com candles novos. ──
+    if choch['index'] < len(exec_candles) and not candle_e_decisivo(exec_candles[choch['index']]):
+        resultado['motivo'] = 'candle da quebra de estrutura (CHoCH) tem pavio grande — aguardando quebra mais decisiva'
+        _save_zone_state(db_file, pair, zona, 'sweep', now, sweep=sweep)
+        return resultado
+
     resultado['choch_nivel'] = round(choch['nivel'], 6)
     resultado['choch_direcao'] = choch['direcao']
+
+    # ── NOVO: FILTRO DE ALINHAMENTO COM TIMEFRAMES MAIORES — não é
+    # "qualquer quebra de estrutura" no M5/M15 que vale. O CHoCH só é
+    # considerado válido se o bias do D1 (e do H4, quando disponível)
+    # não estiver claramente CONTRA a direção dele. Reaproveita a mesma
+    # `compute_bias_from_swings` já usada no modo Antecipado v2 — 'neutro'
+    # sempre passa (não bloqueia), só bloqueia se o bias maior for
+    # oposto de verdade. Isso pega exatamente o caso de CHoCH local que
+    # não tem apoio nenhum da estrutura maior — ruído de curto prazo. ──
+    bias_d1 = compute_bias_from_swings(d1_candles)
+    bias_h4 = compute_bias_from_swings(h4_candles) if h4_candles else 'neutro'
+    resultado['bias_d1'] = bias_d1
+    resultado['bias_h4'] = bias_h4
+
+    contra_alta = choch['direcao'] == 'alta' and (bias_d1 == 'baixa' or bias_h4 == 'baixa')
+    contra_baixa = choch['direcao'] == 'baixa' and (bias_d1 == 'alta' or bias_h4 == 'alta')
+    if contra_alta or contra_baixa:
+        resultado['motivo'] = (
+            f"CHoCH confirmado, mas contra o bias dos timeframes maiores "
+            f"(D1={bias_d1}, H4={bias_h4}) — descartado"
+        )
+        _save_zone_state(db_file, pair, zona, 'choch_contra_bias_maior', now, sweep=sweep, choch=choch)
+        return resultado
 
     entry_zone = find_fvg_ob_after_choch(exec_candles, choch)
     if not entry_zone:
@@ -1188,12 +1428,22 @@ def process_pair_scalp(db_file, pair, d1_candles, exec_candles, exec_tf_label, s
         _save_zone_state(db_file, pair, zona, 'aguardando_retorno', now, sweep=sweep, choch=choch)
         return resultado
 
+    # ── NOVO: preço já está na zona, mas o candle atual precisa ser
+    # DECISIVO (corpo real, não pavio grande) — senão é indecisão do
+    # mercado bem no momento da confirmação, não sinal claro. Não perde
+    # a zona (ela continua salva/válida), só segura o disparo até um
+    # candle com corpo confirmar de verdade. ──
+    if not candle_e_decisivo(exec_candles[-1]):
+        resultado['motivo'] = 'preço na zona de entrada, mas candle de confirmação indeciso (pavio grande) — aguardando'
+        _save_zone_state(db_file, pair, zona, 'aguardando_candle_decisivo', now, sweep=sweep, choch=choch)
+        return resultado
+
     score, detalhes = compute_score(zona, sweep, choch, entry_zone, exec_candles, na_killzone, indicadores=resultado.get('indicadores'))
     resultado['score'] = score
     resultado['detalhes'] = detalhes
     resultado['direcao'] = choch['direcao']
 
-    sl = sweep['nivel']
+    sl = aplicar_buffer_stop(sweep['nivel'], choch['direcao'])
     entry = preco_atual
     risco = abs(entry - sl)
     tp = entry + risco * 2 if choch['direcao'] == 'alta' else entry - risco * 2
@@ -1239,12 +1489,388 @@ def process_pair_scalp(db_file, pair, d1_candles, exec_candles, exec_tf_label, s
     return resultado
 
 
-def _save_zone_state(db_file, pair, zona, fase, now, sweep=None, choch=None):
+def _save_filtro_shadow(db_file, pair, exec_tf_label, direcao, score, entry, sl, tp, filtros_bloqueados):
     try:
+        shadow_id = f"shadow_{pair}_{int(time.time()*1000)}"
         with sqlite3.connect(db_file) as conn:
             cursor = conn.cursor()
             cursor.execute('''
-                INSERT INTO scalp_zone_state (pair, zona_top, zona_bottom, fase, sweep_ts, sweep_nivel, sweep_lado, choch_ts, choch_nivel, updated_at)
+                INSERT INTO scalp_filtros_shadow (id, pair, created_at, exec_tf, direcao, score, entry, sl, tp, filtros_que_bloqueariam)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                shadow_id, pair, int(time.time()), exec_tf_label,
+                direcao, score, entry, sl, tp, ','.join(filtros_bloqueados),
+            ))
+            conn.commit()
+    except Exception as e:
+        print(f"[scalp_engine] erro ao salvar filtro shadow de {pair}: {e}")
+
+
+def process_pair_scalp_filtros_shadow(db_file, pair, d1_candles, exec_candles, exec_tf_label, h4_candles=None):
+    """
+    NOVO — MODO SOMBRA DOS FILTROS (modo normal/reversão). Roda a MESMA
+    sequência do process_pair_scalp, mas SEM aplicar os filtros
+    adicionados hoje:
+      - janela de 45 dias na zona D1 (usa histórico completo aqui)
+      - candle decisivo no candle que forma o CHoCH
+      - FVG mínima (0.05%)
+      - candle decisivo no candle de retorno/confirmação
+      - alinhamento com bias D1/H4
+
+    Se a versão SEM filtro chegar a um sinal válido (score >= 75) e pelo
+    menos UM desses filtros teria bloqueado esse mesmo sinal na versão
+    real, salva um registro em scalp_filtros_shadow dizendo exatamente
+    qual(is) filtro(s) foi(ram) o responsável. Não manda Telegram, não
+    conta pra cooldown de sinal real — é só dado pra comparação depois.
+
+    Retorna o dict salvo (ou None se não havia nada relevante a
+    registrar nesse ciclo — ou porque não chegou nem a formar sinal sem
+    filtro, ou porque chegou e NENHUM filtro teria bloqueado, ou seja,
+    os filtros não fizeram diferença nesse caso específico).
+    """
+    preco_atual = exec_candles[-1]['c']
+
+    # zona SEM limitar a 45 dias — janela completa, "como era antes"
+    bandas = compute_d1_zones(d1_candles, lookback_dias=None)
+    zona = find_active_zone(bandas, preco_atual)
+    if not zona:
+        return None
+
+    sweep = detect_sweep_in_zone(exec_candles, zona)
+    if not sweep:
+        return None
+
+    choch = detect_choch_after_sweep(exec_candles, sweep)
+    if not choch:
+        return None
+
+    # entry_zone SEM filtro de tamanho mínimo de FVG
+    entry_zone = find_fvg_ob_after_choch(exec_candles, choch, min_gap_pct=0)
+    if not entry_zone:
+        entry_zone = find_ifvg_after_choch(exec_candles, choch)
+    if not entry_zone:
+        entry_zone = find_breaker_block_after_choch(exec_candles, choch)
+    if not entry_zone:
+        return None
+
+    if not price_in_zone(entry_zone, preco_atual):
+        return None
+
+    # score calculado igual (indicadores não são "filtro", continuam iguais)
+    na_killzone, _ = is_in_killzone()
+    indicadores = compute_technical_indicators(exec_candles)
+    score, _ = compute_score(zona, sweep, choch, entry_zone, exec_candles, na_killzone, indicadores=indicadores)
+
+    if score < SCORE_THRESHOLD_SINAL:
+        return None
+
+    # ── chegou a um sinal válido SEM filtro — agora checa quais filtros
+    # da versão REAL teriam bloqueado esse mesmo sinal ──
+    filtros_bloqueados = []
+
+    if choch['index'] < len(exec_candles) and not candle_e_decisivo(exec_candles[choch['index']]):
+        filtros_bloqueados.append('candle_choch_indeciso')
+
+    bias_d1 = compute_bias_from_swings(d1_candles)
+    bias_h4 = compute_bias_from_swings(h4_candles) if h4_candles else 'neutro'
+    contra_alta = choch['direcao'] == 'alta' and (bias_d1 == 'baixa' or bias_h4 == 'baixa')
+    contra_baixa = choch['direcao'] == 'baixa' and (bias_d1 == 'alta' or bias_h4 == 'alta')
+    if contra_alta or contra_baixa:
+        filtros_bloqueados.append(f'bias_maior_contra(D1={bias_d1},H4={bias_h4})')
+
+    entry_zone_com_filtro = find_fvg_ob_after_choch(exec_candles, choch, min_gap_pct=MIN_FVG_GAP_PCT)
+    if not entry_zone_com_filtro:
+        entry_zone_com_filtro = find_ifvg_after_choch(exec_candles, choch)
+    if not entry_zone_com_filtro:
+        entry_zone_com_filtro = find_breaker_block_after_choch(exec_candles, choch)
+    if not entry_zone_com_filtro or (
+        round(entry_zone_com_filtro['top'], 6) != round(entry_zone['top'], 6)
+        or round(entry_zone_com_filtro['bottom'], 6) != round(entry_zone['bottom'], 6)
+    ):
+        filtros_bloqueados.append('fvg_pequena_demais')
+
+    if not candle_e_decisivo(exec_candles[-1]):
+        filtros_bloqueados.append('candle_retorno_indeciso')
+
+    bandas_45 = compute_d1_zones(d1_candles, lookback_dias=D1_LOOKBACK_DIAS)
+    zona_45 = find_active_zone(bandas_45, preco_atual)
+    if not zona_45:
+        filtros_bloqueados.append('fora_da_janela_45_dias')
+
+    if not filtros_bloqueados:
+        # sinal já passaria com os filtros também — nada de diferença
+        # relevante pra registrar nesse ciclo
+        return None
+
+    entry = preco_atual
+    sl = aplicar_buffer_stop(sweep['nivel'], choch['direcao'])
+    risco = abs(entry - sl)
+    tp = entry + risco * 2 if choch['direcao'] == 'alta' else entry - risco * 2
+
+    resultado = {
+        'pair': pair, 'exec_tf': exec_tf_label, 'modo': 'filtros_shadow',
+        'direcao': choch['direcao'], 'score': score,
+        'entry': round(entry, 6), 'sl': round(sl, 6), 'tp': round(tp, 6),
+        'filtros_que_bloqueariam': filtros_bloqueados,
+    }
+    _save_filtro_shadow(db_file, pair, exec_tf_label, choch['direcao'], score, resultado['entry'], resultado['sl'], resultado['tp'], filtros_bloqueados)
+    return resultado
+
+
+def filtros_shadow_report(db_file, pair=None, limit=50):
+    """
+    Devolve o histórico de casos em que os filtros novos teriam
+    bloqueado um sinal que, sem eles, teria pontuado score >= 75 — pra
+    consulta via endpoint. Agrupa também uma contagem por tipo de
+    filtro, pra dar visão rápida de qual filtro tá cortando mais.
+    """
+    try:
+        with sqlite3.connect(db_file) as conn:
+            cursor = conn.cursor()
+            if pair:
+                cursor.execute('''
+                    SELECT pair, created_at, exec_tf, direcao, score, entry, sl, tp, filtros_que_bloqueariam
+                    FROM scalp_filtros_shadow WHERE pair=? ORDER BY created_at DESC LIMIT ?
+                ''', (pair, limit))
+            else:
+                cursor.execute('''
+                    SELECT pair, created_at, exec_tf, direcao, score, entry, sl, tp, filtros_que_bloqueariam
+                    FROM scalp_filtros_shadow ORDER BY created_at DESC LIMIT ?
+                ''', (limit,))
+            rows = cursor.fetchall()
+
+        casos = []
+        contagem = {}
+        for r in rows:
+            filtros = r[8].split(',') if r[8] else []
+            for f in filtros:
+                nome_base = f.split('(')[0]
+                contagem[nome_base] = contagem.get(nome_base, 0) + 1
+            casos.append({
+                'pair': r[0], 'created_at': r[1], 'exec_tf': r[2], 'direcao': r[3],
+                'score': r[4], 'entry': r[5], 'sl': r[6], 'tp': r[7],
+                'filtros_que_bloqueariam': filtros,
+            })
+
+        return {'total_casos': len(casos), 'contagem_por_filtro': contagem, 'casos': casos}
+    except Exception as e:
+        print(f"[scalp_engine] erro ao gerar filtros_shadow_report: {e}")
+        return {'total_casos': 0, 'contagem_por_filtro': {}, 'casos': [], 'error': str(e)}
+
+
+def process_pair_scalp_continuacao(db_file, pair, d1_candles, exec_candles, exec_tf_label, send_telegram_fn=None, h4_candles=None):
+    """
+    NOVO — modo "Continuação (BOS)". Mesma estrutura do
+    `process_pair_scalp` (modo normal), mas em vez de esperar CHoCH
+    (reversão), espera BOS (a favor da direção do sweep — continuação).
+
+    Isso cobre o caso que o Juninho identificou no gráfico: preço varre
+    liquidez na borda da zona D1, volta a testar a FVG/OB deixado por
+    aquele movimento, mas em vez de reverter, CONTINUA na mesma direção
+    de antes — o que o modo normal nunca conseguiria capturar, porque
+    ele só entra contra a direção do sweep.
+
+    `h4_candles` é opcional — usado pro mesmo FILTRO DE ALINHAMENTO COM
+    TIMEFRAMES MAIORES do modo normal (ver logo após o BOS confirmar).
+
+    Guarda estado em tabelas próprias (scalp_zone_state_continuacao,
+    scalp_signal_state_continuacao) — nunca mistura com o modo normal,
+    mesmo rodando no mesmo par ao mesmo tempo.
+    """
+    now = int(time.time())
+    na_killzone, killzone_nome = is_in_killzone()
+    preco_atual = exec_candles[-1]['c']
+
+    bandas = compute_d1_zones(d1_candles)
+    zona = find_active_zone(bandas, preco_atual)
+
+    resultado = {
+        'pair': pair,
+        'exec_tf': exec_tf_label,
+        'modo': 'continuacao',
+        'na_killzone': na_killzone,
+        'killzone_nome': killzone_nome,
+        'score': 0,
+        'direcao': None,
+        'entry': None,
+        'sl': None,
+        'tp': None,
+        'motivo': None,
+        'detalhes': [],
+        'zona_top': None,
+        'zona_bottom': None,
+        'zona_ativa': False,
+        'sweep_nivel': None,
+        'sweep_lado': None,
+        'bos_nivel': None,
+        'bos_direcao': None,
+        'bias_d1': None,
+        'bias_h4': None,
+        'entry_zone_top': None,
+        'entry_zone_bottom': None,
+        'entry_zone_tipo': None,
+        'indicadores': None,
+        'em_cooldown': False,
+    }
+
+    try:
+        resultado['indicadores'] = compute_technical_indicators(exec_candles)
+    except Exception as e:
+        print(f"[scalp_engine] erro ao calcular indicadores (continuacao) de {pair}: {e}")
+
+    if not zona:
+        saved = _load_saved_state(db_file, pair, table='scalp_zone_state_continuacao')
+        if saved and saved.get('zona_top') is not None:
+            resultado['zona_top'] = round(saved['zona_top'], 6)
+            resultado['zona_bottom'] = round(saved['zona_bottom'], 6)
+            resultado['zona_ativa'] = False
+            if saved.get('sweep_nivel') is not None:
+                resultado['sweep_nivel'] = round(saved['sweep_nivel'], 6)
+                resultado['sweep_lado'] = saved['sweep_lado']
+            resultado['motivo'] = 'preço fora da zona D1 (última zona mapeada mantida)'
+        else:
+            resultado['motivo'] = 'preço fora de qualquer banda D1 válida'
+        return resultado
+
+    resultado['zona_top'] = round(zona['top'], 6)
+    resultado['zona_bottom'] = round(zona['bottom'], 6)
+    resultado['zona_ativa'] = True
+
+    fresh_sweep = detect_sweep_in_zone(exec_candles, zona)
+    saved = _load_saved_state(db_file, pair, table='scalp_zone_state_continuacao')
+    saved_valido = _sweep_ainda_valido(saved, zona, now)
+
+    sweep = None
+    if fresh_sweep and (not saved_valido or fresh_sweep['t'] >= saved['sweep_ts']):
+        sweep = fresh_sweep
+    elif saved_valido:
+        sweep = {'t': saved['sweep_ts'], 'nivel': saved['sweep_nivel'], 'lado': saved['sweep_lado']}
+
+    if not sweep:
+        resultado['motivo'] = 'sem sweep detectado ainda'
+        _save_zone_state(db_file, pair, zona, 'zona', now, table='scalp_zone_state_continuacao')
+        return resultado
+
+    resultado['sweep_nivel'] = round(sweep['nivel'], 6)
+    resultado['sweep_lado'] = sweep['lado']
+
+    bos = detect_bos_continuation_after_sweep(exec_candles, sweep)
+    if not bos:
+        resultado['motivo'] = 'sweep ok, mas BOS de continuação ainda não confirmou'
+        _save_zone_state(db_file, pair, zona, 'sweep', now, sweep=sweep, table='scalp_zone_state_continuacao')
+        return resultado
+
+    # ── NOVO: mesmo cuidado do modo normal — o candle que FORMA o BOS
+    # também precisa ser decisivo (corpo real, sem pavio grande). Pega
+    # o caso de um rompimento de continuação que já nasce com dúvida. ──
+    if bos['index'] < len(exec_candles) and not candle_e_decisivo(exec_candles[bos['index']]):
+        resultado['motivo'] = 'candle da quebra de estrutura (BOS) tem pavio grande — aguardando quebra mais decisiva'
+        _save_zone_state(db_file, pair, zona, 'sweep', now, sweep=sweep, table='scalp_zone_state_continuacao')
+        return resultado
+
+    resultado['bos_nivel'] = round(bos['nivel'], 6)
+    resultado['bos_direcao'] = bos['direcao']
+
+    # ── NOVO: mesmo FILTRO DE ALINHAMENTO COM TIMEFRAMES MAIORES do
+    # modo normal. Continuação também precisa de apoio da estrutura
+    # maior — não é "qualquer BOS local" que vale, tem que fazer sentido
+    # dentro do bias de D1/H4 (ou pelo menos não estar claramente
+    # contra ele). ──
+    bias_d1 = compute_bias_from_swings(d1_candles)
+    bias_h4 = compute_bias_from_swings(h4_candles) if h4_candles else 'neutro'
+    resultado['bias_d1'] = bias_d1
+    resultado['bias_h4'] = bias_h4
+
+    contra_alta = bos['direcao'] == 'alta' and (bias_d1 == 'baixa' or bias_h4 == 'baixa')
+    contra_baixa = bos['direcao'] == 'baixa' and (bias_d1 == 'alta' or bias_h4 == 'alta')
+    if contra_alta or contra_baixa:
+        resultado['motivo'] = (
+            f"BOS confirmado, mas contra o bias dos timeframes maiores "
+            f"(D1={bias_d1}, H4={bias_h4}) — descartado"
+        )
+        _save_zone_state(db_file, pair, zona, 'bos_contra_bias_maior', now, sweep=sweep, choch=bos, table='scalp_zone_state_continuacao')
+        return resultado
+
+    entry_zone = find_fvg_ob_after_choch(exec_candles, bos)
+    if not entry_zone:
+        entry_zone = find_ifvg_after_choch(exec_candles, bos)
+    if not entry_zone:
+        entry_zone = find_breaker_block_after_choch(exec_candles, bos)
+    if not entry_zone:
+        resultado['motivo'] = 'BOS confirmado, mas sem FVG/OB/iFVG/Breaker de retorno ainda'
+        _save_zone_state(db_file, pair, zona, 'bos', now, sweep=sweep, choch=bos, table='scalp_zone_state_continuacao')
+        return resultado
+
+    resultado['entry_zone_top'] = round(entry_zone['top'], 6)
+    resultado['entry_zone_bottom'] = round(entry_zone['bottom'], 6)
+    resultado['entry_zone_tipo'] = entry_zone['tipo']
+
+    if not price_in_zone(entry_zone, preco_atual):
+        resultado['motivo'] = 'preço ainda fora da zona de entrada (FVG/OB/iFVG/Breaker) — aguardando retorno'
+        _save_zone_state(db_file, pair, zona, 'aguardando_retorno', now, sweep=sweep, choch=bos, table='scalp_zone_state_continuacao')
+        return resultado
+
+    # ── NOVO: mesmo filtro do modo normal — candle atual precisa ser
+    # DECISIVO (corpo real, não pavio grande) antes de liberar o score. ──
+    if not candle_e_decisivo(exec_candles[-1]):
+        resultado['motivo'] = 'preço na zona de entrada, mas candle de confirmação indeciso (pavio grande) — aguardando'
+        _save_zone_state(db_file, pair, zona, 'aguardando_candle_decisivo', now, sweep=sweep, choch=bos, table='scalp_zone_state_continuacao')
+        return resultado
+
+    score, detalhes = compute_score(zona, sweep, bos, entry_zone, exec_candles, na_killzone, indicadores=resultado.get('indicadores'))
+    resultado['score'] = score
+    resultado['detalhes'] = detalhes
+    resultado['direcao'] = bos['direcao']
+
+    sl = aplicar_buffer_stop(sweep['nivel'], bos['direcao'])
+    entry = preco_atual
+    risco = abs(entry - sl)
+    tp = entry + risco * 2 if bos['direcao'] == 'alta' else entry - risco * 2
+    resultado['entry'] = round(entry, 6)
+    resultado['sl'] = round(sl, 6)
+    resultado['tp'] = round(tp, 6)
+
+    if score >= SCORE_THRESHOLD_SINAL:
+        segundos_desde = _segundos_desde_ultimo_alerta(db_file, 'scalp_signal_state_continuacao', pair)
+        em_cooldown = segundos_desde is not None and segundos_desde < COOLDOWN_SECONDS
+        resultado['em_cooldown'] = em_cooldown
+
+        if em_cooldown:
+            restante_min = (COOLDOWN_SECONDS - segundos_desde) // 60
+            resultado['motivo'] = f'score {score} válido, mas em cooldown ({restante_min}min restantes)'
+            _save_zone_state(db_file, pair, zona, 'cooldown', now, sweep=sweep, choch=bos, table='scalp_zone_state_continuacao')
+            _save_signal(db_file, pair, exec_tf_label, resultado, alerted=False, table='scalp_signal_state_continuacao')
+        else:
+            resultado['motivo'] = 'entrada'
+            _save_zone_state(db_file, pair, zona, 'entrada', now, sweep=sweep, choch=bos, table='scalp_zone_state_continuacao')
+            _save_signal(db_file, pair, exec_tf_label, resultado, alerted=True, table='scalp_signal_state_continuacao')
+            if send_telegram_fn:
+                arrow = '📈' if bos['direcao'] == 'alta' else '📉'
+                kz_txt = f" | Killzone: {killzone_nome}" if na_killzone else " | fora da killzone"
+                msg = f"🔁 <b>Sinal Scalp Continuação — {pair}</b>\n\n"
+                msg += f"{arrow} <b>{'LONG' if bos['direcao']=='alta' else 'SHORT'}</b> | TF execução: {exec_tf_label}{kz_txt}\n"
+                msg += f"📍 Entrada: {resultado['entry']}\n"
+                msg += f"🛑 Stop: {resultado['sl']}\n"
+                msg += f"✅ TP: {resultado['tp']}\n"
+                msg += f"🎯 Score: {score}/100\n"
+                msg += f"\n💡 Zona D1 → Sweep → BOS (continuação, a favor do sweep) → retorno {entry_zone['tipo']}"
+                send_telegram_fn(msg)
+    else:
+        resultado['motivo'] = f'score {score} abaixo de {SCORE_THRESHOLD_SINAL} — sem entrada'
+        _save_zone_state(db_file, pair, zona, 'score_insuficiente', now, sweep=sweep, choch=bos, table='scalp_zone_state_continuacao')
+
+    return resultado
+
+
+def _save_zone_state(db_file, pair, zona, fase, now, sweep=None, choch=None, table='scalp_zone_state'):
+    """`table` permite reaproveitar essa função pros modos normal e
+    continuação, que guardam estado em tabelas separadas mas com o
+    mesmo schema."""
+    try:
+        with sqlite3.connect(db_file) as conn:
+            cursor = conn.cursor()
+            cursor.execute(f'''
+                INSERT INTO {table} (pair, zona_top, zona_bottom, fase, sweep_ts, sweep_nivel, sweep_lado, choch_ts, choch_nivel, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(pair) DO UPDATE SET
                     zona_top=excluded.zona_top, zona_bottom=excluded.zona_bottom, fase=excluded.fase,
@@ -1260,7 +1886,7 @@ def _save_zone_state(db_file, pair, zona, fase, now, sweep=None, choch=None):
             ))
             conn.commit()
     except Exception as e:
-        print(f"[scalp_engine] erro ao salvar zone_state de {pair}: {e}")
+        print(f"[scalp_engine] erro ao salvar zone_state de {pair} ({table}): {e}")
 
 
 def _segundos_desde_ultimo_alerta(db_file, table, pair):
@@ -1285,13 +1911,17 @@ def _segundos_desde_ultimo_alerta(db_file, table, pair):
         return None
 
 
-def _save_signal(db_file, pair, exec_tf_label, resultado, alerted):
+def _save_signal(db_file, pair, exec_tf_label, resultado, alerted, table='scalp_signal_state'):
+    """`table` permite reaproveitar essa função pros modos normal e
+    continuação, que guardam sinais em tabelas separadas mas com o
+    mesmo schema."""
     try:
-        signal_id = f"scalp_{pair}_{int(time.time()*1000)}"
+        prefixo = 'cont' if table == 'scalp_signal_state_continuacao' else 'scalp'
+        signal_id = f"{prefixo}_{pair}_{int(time.time()*1000)}"
         with sqlite3.connect(db_file) as conn:
             cursor = conn.cursor()
-            cursor.execute('''
-                INSERT INTO scalp_signal_state (id, pair, created_at, exec_tf, direcao, score, entry, sl, tp, na_killzone, alerted)
+            cursor.execute(f'''
+                INSERT INTO {table} (id, pair, created_at, exec_tf, direcao, score, entry, sl, tp, na_killzone, alerted)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 signal_id, pair, int(time.time()), exec_tf_label,
@@ -1300,7 +1930,7 @@ def _save_signal(db_file, pair, exec_tf_label, resultado, alerted):
             ))
             conn.commit()
     except Exception as e:
-        print(f"[scalp_engine] erro ao salvar signal de {pair}: {e}")
+        print(f"[scalp_engine] erro ao salvar signal de {pair} ({table}): {e}")
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -1587,7 +2217,7 @@ def process_pair_scalp_antecipado_v2(db_file, pair, d1_candles, exec_candles, ex
 
     # todas as condições obrigatórias bateram — monta a entrada
     entry = preco_atual
-    sl = sweep['nivel_pavio']
+    sl = aplicar_buffer_stop(sweep['nivel_pavio'], direcao)
     risco = abs(entry - sl)
     tp = entry - risco * RR_FIXO_ANTECIPADO if direcao == 'baixa' else entry + risco * RR_FIXO_ANTECIPADO
 
@@ -1619,8 +2249,8 @@ def process_pair_scalp_antecipado_v2(db_file, pair, d1_candles, exec_candles, ex
     except Exception:
         pass
 
-    # ── NOVO: Cooldown por tempo (45min), igual ao modo normal — cobre
-    # o caso de preço oscilar um pouco (passa no teste de "preço quase
+    # ── Cooldown por tempo (45min), igual ao modo normal — cobre o caso
+    # de preço oscilar um pouco (passa no teste de "preço quase
     # idêntico") mas ainda ser essencialmente o mesmo sinal repetindo. ──
     segundos_desde = _segundos_desde_ultimo_alerta(db_file, 'scalp_antecipado_signal_state', pair)
     em_cooldown = segundos_desde is not None and segundos_desde < COOLDOWN_SECONDS
@@ -1658,14 +2288,14 @@ def process_pair_scalp_antecipado_v2(db_file, pair, d1_candles, exec_candles, ex
 # estão VOTANDO pro mesmo lado. Bate um mínimo de votos concordando =
 # sinal, mesmo sem zona D1/sweep/CHoCH confirmados.
 #
-# É um tipo de setup DIFERENTE dos outros 2 modos — mais rápido de achar,
+# É um tipo de setup DIFERENTE dos outros modos — mais rápido de achar,
 # mas também mais solto (não exige a estrutura ICT toda). Por isso o
 # Stop é calculado via ATR (não via nível de sweep, que esse modo nem
 # usa), e o threshold de votos é propositalmente alto (7 de 10) pra não
 # virar ruído.
 # ═══════════════════════════════════════════════════════════════════════
 
-VOTOS_MINIMOS_SINAL = 7   # de um total de 10 indicadores votantes
+VOTOS_MINIMOS_SINAL = 7   # de um total de 11 indicadores votantes (agora com Volume Profile POC)
 ATR_MULT_STOP = 1.5       # stop = 1.5x ATR de distância da entrada
 RR_INDICADORES = 2.0      # TP = 2x o risco, mesmo padrão dos outros modos
 
@@ -1716,6 +2346,17 @@ def _votos_indicadores(indicadores, preco_atual):
     if vwap is not None:
         votos.append(('vwap', 'alta' if preco_atual > vwap else 'baixa'))
 
+    # ── NOVO: Volume Profile POC — preço ACIMA do nível de maior volume
+    # trocado recentemente (POC) indica que compradores já defenderam
+    # esse nível como suporte (viés de alta); preço ABAIXO indica que
+    # ele age como resistência (viés de baixa). Não é o mesmo voto do
+    # VWAP (VWAP é média ponderada por volume da sessão inteira; POC é
+    # o preço ESPECÍFICO onde mais volume trocou de mãos) — cada um
+    # reforça o outro sem duplicar exatamente a mesma informação. ──
+    poc = indicadores.get('volume_profile_poc')
+    if poc is not None and poc > 0:
+        votos.append(('volume_profile_poc', 'alta' if preco_atual > poc else 'baixa'))
+
     ichimoku = indicadores.get('ichimoku') or {}
     senkou_a, senkou_b = ichimoku.get('senkou_a'), ichimoku.get('senkou_b')
     if senkou_a is not None and senkou_b is not None:
@@ -1750,19 +2391,53 @@ def _votos_indicadores(indicadores, preco_atual):
     return votos_alta, votos_baixa, len(votos), votos, tendencia_forte
 
 
+def _stop_via_ultimo_swing(exec_candles, direcao, lookback=SWING_LOOKBACK):
+    """
+    NOVO — stop baseado em ESTRUTURA REAL, não em ATR. Mesmo espírito
+    dos outros modos (stop sempre no nível do último sweep): aqui, como
+    o Modo Confluência de Indicadores não calcula sweep (não depende de
+    zona D1), usa o ÚLTIMO SWING relevante como proxy de estrutura —
+    o último fundo (LONG) ou o último topo (SHORT) marcado nos candles
+    de execução, que é exatamente onde ficaria o nível de liquidez que
+    o preço "não pode" romper sem invalidar a tese.
+
+    - LONG: stop = último swing LOW (abaixo dele, sem suporte)
+    - SHORT: stop = último swing HIGH (acima dele, sem resistência)
+
+    Retorna None se não houver swing suficiente ainda (par muito novo/
+    poucos candles) — nesse caso o chamador decide o fallback.
+    """
+    swings = detect_exec_swings(exec_candles, lookback=lookback)
+    if direcao == 'alta':
+        lows = [s for s in swings if s['tipo'] == 'low']
+        if lows:
+            return lows[-1]['valor']
+    else:
+        highs = [s for s in swings if s['tipo'] == 'high']
+        if highs:
+            return highs[-1]['valor']
+    return None
+
+
 def process_pair_scalp_indicadores(db_file, pair, exec_candles, exec_tf_label, send_telegram_fn=None):
     """
     Modo independente da sequência ICT — fica procurando setup TODO ciclo,
     baseado só em quantos indicadores técnicos concordam na mesma direção.
     Não precisa de zona D1, sweep nem CHoCH confirmados.
 
-    Regra: precisa de pelo menos VOTOS_MINIMOS_SINAL (7 de ~10) indicadores
+    Regra: precisa de pelo menos VOTOS_MINIMOS_SINAL (7 de ~11) indicadores
     votando pro mesmo lado. Sem isso, sem sinal — não dispara com maioria
     fraca só porque "a maioria" já é alguma coisa.
 
-    Stop calculado via ATR (não via estrutura, esse modo não usa nível de
-    sweep/zona) — 1.5x ATR de distância. TP = RR 2:1 fixo, mesmo padrão
-    dos outros 2 modos.
+    Stop SEMPRE via ESTRUTURA REAL (último swing high/low nos candles de
+    execução — o proxy mais próximo de "abaixo/acima do último sweep"
+    que esse modo tem, já que ele não calcula sweep de verdade). ATR só
+    entra como FALLBACK, e só no caso raríssimo de não haver swing
+    suficiente ainda (par muito novo) — nesse caso o stop via ATR é
+    melhor que travar o modo inteiro, mas fica marcado explicitamente no
+    resultado (`stop_via='atr_fallback'`) pra nunca confundir com stop
+    estrutural de verdade. TP = RR 2:1 fixo, mesmo padrão dos outros
+    modos, calculado em cima do MESMO risco (distância entrada→stop).
     """
     preco_atual = exec_candles[-1]['c']
     indicadores = compute_technical_indicators(exec_candles)
@@ -1770,6 +2445,7 @@ def process_pair_scalp_indicadores(db_file, pair, exec_candles, exec_tf_label, s
     resultado = {
         'pair': pair, 'exec_tf': exec_tf_label, 'modo': 'confluencia_indicadores',
         'sinal': False, 'direcao': None, 'entry': None, 'sl': None, 'tp': None,
+        'stop_via': None,
         'score': 0, 'votos_favor': 0, 'votos_total': 0, 'votos_detalhe': [],
         'tendencia_forte': False, 'indicadores': indicadores, 'em_cooldown': False,
         'motivo': None,
@@ -1795,19 +2471,48 @@ def process_pair_scalp_indicadores(db_file, pair, exec_candles, exec_tf_label, s
         resultado['votos_favor'] = max(votos_alta, votos_baixa)
         return resultado
 
-    atr = indicadores.get('atr14')
-    if not atr or atr <= 0:
-        resultado['motivo'] = 'votos suficientes, mas ATR indisponível pra calcular stop'
-        return resultado
+    entry = preco_atual
+
+    # ── Stop SEMPRE via estrutura (último swing) — ATR só é usado se não
+    # houver swing algum disponível ainda, e nesse caso fica marcado.
+    # Aplica o mesmo buffer de segurança dos outros modos (0.1% além do
+    # nível), já que o ATR fallback já tem margem própria embutida no
+    # multiplicador e não precisa do buffer extra. ──
+    sl_bruto = _stop_via_ultimo_swing(exec_candles, direcao)
+    stop_via = 'estrutura'
+    if sl_bruto is None:
+        atr = indicadores.get('atr14')
+        if not atr or atr <= 0:
+            resultado['motivo'] = 'votos suficientes, mas sem estrutura nem ATR disponível pra calcular stop'
+            return resultado
+        stop_dist = atr * ATR_MULT_STOP
+        sl = entry - stop_dist if direcao == 'alta' else entry + stop_dist
+        stop_via = 'atr_fallback'
+    else:
+        sl = aplicar_buffer_stop(sl_bruto, direcao)
+
+    # ── Validação de sanidade: o swing tem que estar do lado CORRETO do
+    # preço atual (fundo abaixo da entrada pra LONG, topo acima pra
+    # SHORT) — senão o "último swing" pode ser um remanescente de outro
+    # movimento e não faz sentido como stop. Se isso acontecer, cai pro
+    # fallback de ATR em vez de usar um nível sem lógica. ──
+    swing_invalido = (direcao == 'alta' and sl >= entry) or (direcao == 'baixa' and sl <= entry)
+    if swing_invalido:
+        atr = indicadores.get('atr14')
+        if not atr or atr <= 0:
+            resultado['motivo'] = 'último swing do lado errado do preço e ATR indisponível — sem stop confiável'
+            return resultado
+        stop_dist = atr * ATR_MULT_STOP
+        sl = entry - stop_dist if direcao == 'alta' else entry + stop_dist
+        stop_via = 'atr_fallback'
+
+    risco = abs(entry - sl)
+    tp = entry + risco * RR_INDICADORES if direcao == 'alta' else entry - risco * RR_INDICADORES
 
     resultado['votos_favor'] = votos_favor
     resultado['score'] = round(100 * votos_favor / total)
     resultado['direcao'] = direcao
-
-    entry = preco_atual
-    stop_dist = atr * ATR_MULT_STOP
-    sl = entry - stop_dist if direcao == 'alta' else entry + stop_dist
-    tp = entry + stop_dist * RR_INDICADORES if direcao == 'alta' else entry - stop_dist * RR_INDICADORES
+    resultado['stop_via'] = stop_via
 
     resultado.update({
         'sinal': True,
@@ -1842,13 +2547,14 @@ def process_pair_scalp_indicadores(db_file, pair, exec_candles, exec_tf_label, s
     if send_telegram_fn and not em_cooldown:
         arrow = '📈' if direcao == 'alta' else '📉'
         label = 'LONG' if direcao == 'alta' else 'SHORT'
+        stop_label = 'Stop (último swing)' if resultado.get('stop_via') == 'estrutura' else 'Stop (1.5x ATR — fallback, sem swing disponível)'
         msg = f"📊 <b>Confluência de Indicadores — {pair}</b>\n\n"
         msg += f"{arrow} <b>{label}</b> | TF execução: {exec_tf_label}\n"
         msg += f"🗳️ {votos_favor}/{total} indicadores concordando"
         if tendencia_forte:
             msg += " | ADX confirma tendência forte"
         msg += "\n"
-        msg += f"📍 Entrada: {resultado['entry']}\n🛑 Stop (1.5x ATR): {resultado['sl']}\n✅ TP (RR 2:1): {resultado['tp']}\n\n"
+        msg += f"📍 Entrada: {resultado['entry']}\n🛑 {stop_label}: {resultado['sl']}\n✅ TP (RR 2:1): {resultado['tp']}\n\n"
         msg += "<b>Sem zona D1/sweep/CHoCH — setup baseado só em indicadores técnicos, posição menor recomendada.</b>"
         send_telegram_fn(msg)
     elif em_cooldown:

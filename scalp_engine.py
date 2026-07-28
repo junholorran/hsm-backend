@@ -2046,8 +2046,49 @@ def _save_signal(db_file, pair, exec_tf_label, resultado, alerted, table='scalp_
         print(f"[scalp_engine] erro ao salvar signal de {pair} ({table}): {e}")
 
 
-# ═══════════════════════════════════════════════════════════════════════
-# MODO "REJEIÇÃO ANTECIPADA v2" — sem CHoCH, baseado em pavio varrendo
+def scalp_signal_history(db_file, pair=None, limit=30, table='scalp_signal_state'):
+    """
+    NOVO — histórico de sinais REAIS do Scalp Ao Vivo (modo Normal por
+    padrão; passar table='scalp_signal_state_continuacao' pro histórico
+    do modo Continuação). Diferente do /live/history do app.py (que lê
+    a tabela `live_signals`, alimentada pelo cascade_engine) — essa
+    função lê a tabela certa onde o scalp_engine de fato salva cada vez
+    que `score >= SCORE_THRESHOLD_SINAL`, alertado ou não (cooldown).
+
+    Cada linha tem: id, pair, created_at, exec_tf, direcao, score,
+    entry, sl, tp, na_killzone, alerted. Não calcula resultado (win/
+    loss) — só devolve o que foi salvo no momento do sinal. Pra saber
+    se bateu TP ou SL depois, é preciso cruzar com o preço histórico.
+    """
+    try:
+        with sqlite3.connect(db_file) as conn:
+            cursor = conn.cursor()
+            if pair:
+                cursor.execute(f'''
+                    SELECT id, pair, created_at, exec_tf, direcao, score, entry, sl, tp, na_killzone, alerted
+                    FROM {table} WHERE pair=? ORDER BY created_at DESC LIMIT ?
+                ''', (pair, limit))
+            else:
+                cursor.execute(f'''
+                    SELECT id, pair, created_at, exec_tf, direcao, score, entry, sl, tp, na_killzone, alerted
+                    FROM {table} ORDER BY created_at DESC LIMIT ?
+                ''', (limit,))
+            rows = cursor.fetchall()
+
+        signals = []
+        for r in rows:
+            signals.append({
+                'id': r[0], 'pair': r[1], 'created_at': r[2], 'exec_tf': r[3],
+                'direcao': r[4], 'score': r[5], 'entry': r[6], 'sl': r[7], 'tp': r[8],
+                'na_killzone': bool(r[9]), 'alerted': bool(r[10]),
+            })
+        return {'signals': signals}
+    except Exception as e:
+        print(f"[scalp_engine] erro ao gerar histórico de {pair} ({table}): {e}")
+        return {'signals': [], 'error': str(e)}
+
+
+
 # liquidez antiga real + RSI extremo. Regra fechada (tudo ou nada).
 # Roda em PARALELO ao process_pair_scalp() normal, chamado à parte no
 # run_live_cycle() do app.py, reaproveitando os mesmos candles.

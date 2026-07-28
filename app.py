@@ -2107,6 +2107,23 @@ def scalp_status():
         return jsonify({'error': str(e)}), 500
 
 
+# ── NOVO: histórico REAL dos sinais do Scalp Ao Vivo (modo Normal —
+# tabela scalp_signal_state). Diferente do /live/history (esse é do
+# cascade_engine, tabela live_signals — não tem nada a ver com o Scalp).
+# Passa ?modo=continuacao pra ver o histórico do modo Continuação (BOS)
+# em vez do Normal. ──
+@app.route('/scalp/history', methods=['GET'])
+def scalp_history_route():
+    try:
+        pair = request.args.get('pair')
+        limit = int(request.args.get('limit', 30))
+        modo = request.args.get('modo', 'normal')
+        table = 'scalp_signal_state_continuacao' if modo == 'continuacao' else 'scalp_signal_state'
+        return jsonify(scalp_engine.scalp_signal_history(DB_FILE, pair=pair, limit=limit, table=table))
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
 # ── status do modo Rejeição Antecipada v2 — separado do Scalp
 # normal, pra você acompanhar sinais sem CHoCH confirmado. ──
 @app.route('/scalp_antecipado/status', methods=['GET'])

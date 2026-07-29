@@ -66,6 +66,11 @@ MIN_FVG_GAP_PCT = 0.0005         # 0.05% do preço — FVG menor que isso é ru�
 MIN_CANDLE_BODY_RATIO = 0.5      # candle de confirmação precisa ter corpo >= 50% do range total (senão é pavio/indecisão)
 STOP_BUFFER_PCT = 0.001          # 0.1% de folga além do nível estrutural — stop nunca fica colado no pavio exato
 D1_LOOKBACK_DIAS = 45            # bandas D1 do Scalp olham só os últimos 45 dias — estrutura recente, não swing de meses atrás
+ZONA_FORTE_TOLERANCIA_PCT = 0.0015  # 0.15% — bem mais apertada que a zona D1 (0.6%), pro modo Scalp Rápido
+ZONA_FORTE_MIN_TOQUES = 3           # "liquidez forte" de verdade — mais rigoroso que o mínimo de 2 dos outros modos
+SCALP_RAPIDO_COOLDOWN_SECONDS = 5 * 60  # 5min — bem mais curto, permite reentrada rápida se tomar stop
+ZONA_MOVEL_LOOKBACK = 20                # candles recentes (TF de execução) pra formar a região móvel
+ZONA_MOVEL_MAX_LARGURA_PCT = 0.01       # 1% — região precisa estar "apertada" (lateralizada) pra disparar
 SWING_LOOKBACK = 5               # candles de cada lado pra confirmar swing high/low no TF de execução
 SWEEP_MEMORY_MAX_AGE_SECONDS = 12 * 3600  # sweep salvo expira depois de 12h sem confirmar CHoCH/BOS
 
@@ -218,6 +223,28 @@ def init_scalp_db(db_file):
                 resultado TEXT DEFAULT 'pendente'
             )
         ''')
+        # ── NOVO: tabela do modo "Scalp Rápido — Liquidez Forte". Sem
+        # CHoCH, sem zona D1 por cluster — usa a zona diária MÓVEL
+        # (réplica exata do indicador Pine Script do Juninho: pavio
+        # superior/inferior do candle D1 anterior). Regra fechada:
+        # zona diária + sweep + candle decisivo + lateralização
+        # confirmada = dispara na hora. Cooldown bem mais curto (5min),
+        # pensado pra reentrar rápido se tomar stop, já que o stop é
+        # sempre curto (no pavio do sweep). ──
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS scalp_rapido_signal_state (
+                id TEXT PRIMARY KEY,
+                pair TEXT,
+                created_at INTEGER,
+                exec_tf TEXT,
+                direcao TEXT,
+                entry REAL,
+                sl REAL,
+                tp REAL,
+                zona_tipo TEXT,
+                alerted INTEGER DEFAULT 0
+            )
+        ''')
         conn.commit()
         # ── MODO SOMBRA-like: coluna nova pra registar se houve divergência
         # de RSI confirmada no sinal antecipado. Aditivo via ALTER TABLE,
@@ -251,14 +278,21 @@ def compute_d1_zones(d1_candles, lookback_dias=D1_LOOKBACK_DIAS):
     """Agrupa highs/lows do D1 em bandas (cluster), tolerância percentual,
     mínimo de toques pra validar.
 
-    ── NOVO: `lookback_dias` limita a busca de swings aos últimos N dias
-    (padrão 45) — pra scalp, uma banda formada por um swing de 3-4 meses
-    atrás não tem muita relevância pro que o preço está fazendo agora.
-    Isso faz a zona "acompanhar" o mercado: conforme dias antigos saem
-    da janela, bandas baseadas só neles deixam de aparecer, e o cluster
-    se reforma em cima da estrutura mais recente. Se `d1_candles` tiver
-    menos candles que a janela (par novo, poucos dados), usa tudo o que
-    tiver — não quebra por falta de histórico. ──"""
+    ── janela de 45 dias limita a busca de swings — pra scalp, uma banda
+    formada por um swing de 3-4 meses atrás não tem muita relevância pro
+    que o preço está fazendo agora. Isso faz a zona "acompanhar" o
+    mercado: conforme dias antigos saem da janela, bandas baseadas só
+    neles deixam de aparecer. Se `d1_candles` tiver menos candles que a
+    janela (par novo, poucos dados), usa tudo o que tiver — não quebra
+    por falta de histórico.
+
+    ── NOVO: cada banda agora carrega `ultimo_toque_ts` — o timestamp do
+    swing mais recente que formou aquele cluster. Isso é o que permite
+    `find_active_zone` priorizar a banda mais RECENTE quando o preço
+    está dentro de mais de uma zona sobreposta, em vez de pegar a
+    primeira que aparecer (que podia ser um suporte de 3 semanas atrás
+    ainda "válido" tecnicamente, mas bem menos relevante que um formado
+    ontem ou hoje). ──"""
     if lookback_dias and len(d1_candles) > lookback_dias:
         d1_candles = d1_candles[-lookback_dias:]
 
@@ -269,9 +303,9 @@ def compute_d1_zones(d1_candles, lookback_dias=D1_LOOKBACK_DIAS):
         is_high = all(c['h'] >= d1_candles[j]['h'] for j in range(i - lb, i + lb + 1) if j != i)
         is_low = all(c['l'] <= d1_candles[j]['l'] for j in range(i - lb, i + lb + 1) if j != i)
         if is_high:
-            swings.append({'valor': c['h'], 'tipo': 'high'})
+            swings.append({'valor': c['h'], 'tipo': 'high', 't': c['t']})
         if is_low:
-            swings.append({'valor': c['l'], 'tipo': 'low'})
+            swings.append({'valor': c['l'], 'tipo': 'low', 't': c['t']})
 
     grupos = []
     for s in swings:
@@ -281,10 +315,11 @@ def compute_d1_zones(d1_candles, lookback_dias=D1_LOOKBACK_DIAS):
             if diff_pct <= TOLERANCIA_CLUSTER_PCT:
                 g['pontos'].append(s['valor'])
                 g['nivel'] = sum(g['pontos']) / len(g['pontos'])
+                g['timestamps'].append(s['t'])
                 colocado = True
                 break
         if not colocado:
-            grupos.append({'nivel': s['valor'], 'pontos': [s['valor']]})
+            grupos.append({'nivel': s['valor'], 'pontos': [s['valor']], 'timestamps': [s['t']]})
 
     bandas = []
     for g in grupos:
@@ -294,15 +329,166 @@ def compute_d1_zones(d1_candles, lookback_dias=D1_LOOKBACK_DIAS):
                 'top': g['nivel'] + largura,
                 'bottom': g['nivel'] - largura,
                 'toques': len(g['pontos']),
+                'ultimo_toque_ts': max(g['timestamps']),
             })
     return bandas
 
 
 def find_active_zone(bandas, preco_atual):
-    for b in bandas:
-        if b['bottom'] <= preco_atual <= b['top']:
-            return b
-    return None
+    """
+    Devolve a banda D1 que contém o preço atual. Se mais de uma banda
+    sobreposta contiver o preço (raro, mas possível perto de bordas
+    próximas), prioriza a com `ultimo_toque_ts` mais RECENTE — suporte/
+    resistência recente pesa mais que um antigo ainda tecnicamente
+    dentro da janela de 45 dias.
+    """
+    candidatas = [b for b in bandas if b['bottom'] <= preco_atual <= b['top']]
+    if not candidatas:
+        return None
+    return max(candidatas, key=lambda b: b.get('ultimo_toque_ts', 0))
+
+
+def compute_zona_diaria_movel(d1_candles):
+    """
+    NOVO — réplica EXATA do indicador Pine Script do Juninho ("Zonas
+    Diarias Moveis (1D para 15m)"). Não usa cluster nem tolerância
+    nenhuma — é geometria pura do candle D1 anterior (o último dia já
+    fechado):
+
+    - RESISTÊNCIA = zona entre o topo do CORPO (max(open,close)) e a
+      MÁXIMA (high) — ou seja, o pavio superior do candle de ontem.
+    - SUPORTE = zona entre a MÍNIMA (low) e o fundo do CORPO
+      (min(open,close)) — o pavio inferior do candle de ontem.
+
+    É "móvel" porque, conforme cada novo dia fecha, o candle de
+    referência muda — sem precisar de cluster de toques repetidos, sem
+    tolerância em %, sem chute nenhum. É a mesma lógica do
+    `request.security(..., "D", [high[1], low[1], open[1], close[1]])`
+    do Pine: pega o candle D1 já fechado (não o que ainda está se
+    formando).
+
+    `d1_candles[-1]` é tratado como o candle D1 do dia ATUAL (ainda em
+    formação, incompleto) — por isso usamos `d1_candles[-2]` como "o
+    candle de ontem", equivalente ao offset [1] do Pine Script.
+    Retorna None se não houver candles suficientes.
+    """
+    if len(d1_candles) < 2:
+        return None
+
+    candle_ontem = d1_candles[-2]
+    corpo_top = max(candle_ontem['o'], candle_ontem['c'])
+    corpo_bottom = min(candle_ontem['o'], candle_ontem['c'])
+
+    return {
+        'resistencia': {'top': candle_ontem['h'], 'bottom': corpo_top},
+        'suporte': {'top': corpo_bottom, 'bottom': candle_ontem['l']},
+        'candle_ts': candle_ontem['t'],
+    }
+
+
+def compute_zona_forte(d1_candles, tolerancia_pct=ZONA_FORTE_TOLERANCIA_PCT, min_toques=ZONA_FORTE_MIN_TOQUES, lookback_dias=D1_LOOKBACK_DIAS):
+    """
+    NOVO — pro modo "Scalp Rápido — Liquidez Forte". Mesma lógica de
+    cluster do `compute_d1_zones` (swing highs/lows do D1, mesma janela
+    de 45 dias), mas com duas diferenças propositais:
+
+    1. Tolerância bem mais apertada (0.15% padrão, vs 0.6% da zona D1
+       normal) e exige pelo menos 3 toques (vs 2 dos outros modos) —
+       "liquidez forte" de verdade, não qualquer nível que bateu duas
+       vezes por coincidência.
+    2. A zona continua sendo calculada no D1 — igual os outros modos —
+       só o GATILHO (sweep) é procurado depois no TF de execução
+       (M5/M15), não a zona em si. "A região é sempre no diário, desce
+       pro 15min só pra procurar o gatilho", como o Juninho definiu.
+
+    Estrutura idêntica ao `compute_d1_zones`, só muda tolerância e
+    mínimo de toques — mantida como função separada (não um parâmetro
+    a mais em compute_d1_zones) pra deixar claro que são conceitos
+    diferentes: zona D1 "normal" pros modos 1-4, zona D1 "forte" só
+    pro Scalp Rápido.
+    """
+    if lookback_dias and len(d1_candles) > lookback_dias:
+        d1_candles = d1_candles[-lookback_dias:]
+
+    swings = []
+    lb = 2
+    for i in range(lb, len(d1_candles) - lb):
+        c = d1_candles[i]
+        is_high = all(c['h'] >= d1_candles[j]['h'] for j in range(i - lb, i + lb + 1) if j != i)
+        is_low = all(c['l'] <= d1_candles[j]['l'] for j in range(i - lb, i + lb + 1) if j != i)
+        if is_high:
+            swings.append({'valor': c['h'], 'tipo': 'high', 't': c['t']})
+        if is_low:
+            swings.append({'valor': c['l'], 'tipo': 'low', 't': c['t']})
+
+    grupos = []
+    for s in swings:
+        colocado = False
+        for g in grupos:
+            diff_pct = abs(s['valor'] - g['nivel']) / g['nivel']
+            if diff_pct <= tolerancia_pct:
+                g['pontos'].append(s['valor'])
+                g['nivel'] = sum(g['pontos']) / len(g['pontos'])
+                g['timestamps'].append(s['t'])
+                colocado = True
+                break
+        if not colocado:
+            grupos.append({'nivel': s['valor'], 'pontos': [s['valor']], 'timestamps': [s['t']]})
+
+    zonas = []
+    for g in grupos:
+        if len(g['pontos']) >= min_toques:
+            largura = g['nivel'] * tolerancia_pct
+            zonas.append({
+                'top': g['nivel'] + largura,
+                'bottom': g['nivel'] - largura,
+                'toques': len(g['pontos']),
+                'ultimo_toque_ts': max(g['timestamps']),
+            })
+    return zonas
+
+
+def compute_zona_movel(candles, lookback=ZONA_MOVEL_LOOKBACK):
+    """
+    NOVO — "região móvel" (estilo Canal Donchian): pega os últimos
+    `lookback` candles (do TF de execução) e usa a máxima e a mínima
+    deles como topo/fundo da zona. Recalculada em TODO ciclo, o que faz
+    ela se mover sozinha:
+
+    - Se um candle novo deixa um pavio além do que já existia, a zona
+      AUMENTA na hora pra incluir esse novo extremo.
+    - Conforme candles antigos (que tinham os extremos atuais) saem da
+      janela de `lookback`, e ninguém mais repete aquele nível, a zona
+      DIMINUI — fica mais apertada.
+
+    Isso é exatamente o comportamento visto no exemplo do AAVE: a
+    região vai se ajustando sozinha à consolidação real, sem depender
+    de "toques repetidos dentro de tolerância" feito no cluster D1 —
+    aqui é simplesmente onde o preço andou nos últimos N candles.
+
+    Diferente da zona por cluster, essa SEMPRE existe (nunca fica sem
+    zona, mesmo que o preço não tenha repetido nível nenhum) — resolve
+    o problema de o sistema "ficar cego" quando o preço sai de
+    qualquer zona conhecida.
+
+    Retorna também `largura_pct` — a largura da zona como % do ponto
+    médio, que serve pra medir se o preço está de fato "lateralizado
+    apertado" (zona estreita) ou "andando largo" (zona ampla, sem
+    consolidação real).
+    """
+    janela = candles[-lookback:] if len(candles) > lookback else candles
+    if not janela:
+        return None
+    top = max(c['h'] for c in janela)
+    bottom = min(c['l'] for c in janela)
+    meio = (top + bottom) / 2
+    largura_pct = (top - bottom) / meio if meio else 0
+    return {
+        'top': top,
+        'bottom': bottom,
+        'largura_pct': largura_pct,
+        'ultimo_candle_ts': janela[-1]['t'],
+    }
 
 
 # ── SWEEP + CHoCH no timeframe de execução ──────────────────────────────
@@ -1304,6 +1490,7 @@ def process_pair_scalp(db_file, pair, d1_candles, exec_candles, exec_tf_label, s
         'zona_top': None,
         'zona_bottom': None,
         'zona_ativa': False,
+        'zona_ultimo_toque_ts': None,
         'sweep_nivel': None,
         'sweep_lado': None,
         'choch_nivel': None,
@@ -1349,6 +1536,7 @@ def process_pair_scalp(db_file, pair, d1_candles, exec_candles, exec_tf_label, s
     resultado['zona_top'] = round(zona['top'], 6)
     resultado['zona_bottom'] = round(zona['bottom'], 6)
     resultado['zona_ativa'] = True
+    resultado['zona_ultimo_toque_ts'] = zona.get('ultimo_toque_ts')
 
     # ── Sweep: tenta achar um NOVO nos candles recentes; se não achar,
     # reaproveita o sweep salvo do ciclo anterior (se ainda válido). Se
@@ -1813,6 +2001,7 @@ def process_pair_scalp_continuacao(db_file, pair, d1_candles, exec_candles, exec
         'zona_top': None,
         'zona_bottom': None,
         'zona_ativa': False,
+        'zona_ultimo_toque_ts': None,
         'sweep_nivel': None,
         'sweep_lado': None,
         'bos_nivel': None,
@@ -1848,6 +2037,7 @@ def process_pair_scalp_continuacao(db_file, pair, d1_candles, exec_candles, exec
     resultado['zona_top'] = round(zona['top'], 6)
     resultado['zona_bottom'] = round(zona['bottom'], 6)
     resultado['zona_ativa'] = True
+    resultado['zona_ultimo_toque_ts'] = zona.get('ultimo_toque_ts')
 
     fresh_sweep = detect_sweep_in_zone(exec_candles, zona)
     saved = _load_saved_state(db_file, pair, table='scalp_zone_state_continuacao')
@@ -2088,7 +2278,222 @@ def scalp_signal_history(db_file, pair=None, limit=30, table='scalp_signal_state
         return {'signals': [], 'error': str(e)}
 
 
+def _save_rapido_signal(db_file, pair, exec_tf_label, resultado, alerted):
+    try:
+        signal_id = f"rapido_{pair}_{int(time.time()*1000)}"
+        with sqlite3.connect(db_file) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO scalp_rapido_signal_state (id, pair, created_at, exec_tf, direcao, entry, sl, tp, zona_tipo, alerted)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                signal_id, pair, int(time.time()), exec_tf_label,
+                resultado['direcao'], resultado['entry'], resultado['sl'], resultado['tp'],
+                resultado.get('zona_tipo'), 1 if alerted else 0,
+            ))
+            conn.commit()
+    except Exception as e:
+        print(f"[scalp_engine] erro ao salvar signal rápido de {pair}: {e}")
 
+
+def detect_sweep_zona_diaria_movel(exec_candles, zona_diaria, lookback=10):
+    """
+    NOVO — sweep específico pras zonas do `compute_zona_diaria_movel`.
+
+    Diferente do `detect_sweep_in_zone` genérico (que checa os dois
+    lados de uma zona só), aqui são DUAS zonas distintas com papéis
+    fixos, então cada uma só é testada no lado que faz sentido:
+
+    - RESISTÊNCIA (pavio de cima de ontem): sweep = candle varre ACIMA
+      da máxima de ontem (zona['top']) mas fecha de volta ABAIXO dela —
+      rejeição na máxima de ontem. Isso indica reversão pra BAIXA.
+    - SUPORTE (pavio de baixo de ontem): sweep = candle varre ABAIXO da
+      mínima de ontem (zona['bottom']) mas fecha de volta ACIMA dela —
+      rejeição na mínima de ontem. Isso indica reversão pra ALTA.
+
+    Retorna o sweep mais recente entre os dois tipos, ou None.
+    """
+    resistencia = zona_diaria['resistencia']
+    suporte = zona_diaria['suporte']
+    sweep_resistencia = None
+    sweep_suporte = None
+
+    for i in range(len(exec_candles) - 1, max(0, len(exec_candles) - lookback), -1):
+        c = exec_candles[i]
+        if sweep_resistencia is None and c['h'] > resistencia['top'] and c['c'] < resistencia['top']:
+            sweep_resistencia = {'index': i, 'lado': 'alta', 'nivel': c['h'], 't': c['t'], 'tipo_zona': 'resistencia'}
+        if sweep_suporte is None and c['l'] < suporte['bottom'] and c['c'] > suporte['bottom']:
+            sweep_suporte = {'index': i, 'lado': 'baixa', 'nivel': c['l'], 't': c['t'], 'tipo_zona': 'suporte'}
+        if sweep_resistencia and sweep_suporte:
+            break
+
+    candidatos = [s for s in (sweep_resistencia, sweep_suporte) if s]
+    if not candidatos:
+        return None
+    return max(candidatos, key=lambda s: s['t'])
+
+
+def process_pair_scalp_rapido(db_file, pair, d1_candles, exec_candles, exec_tf_label, send_telegram_fn=None):
+    """
+    NOVO — modo "Scalp Rápido — Liquidez Forte". Réplica do indicador
+    Pine Script do Juninho ("Zonas Diarias Moveis (1D para 15m)"): a
+    zona não é mais cluster de toques com tolerância chutada — é
+    geometria exata do candle D1 ANTERIOR (o último dia já fechado):
+
+    - RESISTÊNCIA = pavio superior de ontem (entre o topo do corpo e a
+      máxima)
+    - SUPORTE = pavio inferior de ontem (entre a mínima e o fundo do
+      corpo)
+
+    Entrada sem esperar CHoCH — dispara direto quando o preço varre
+    (sweep) a máxima ou a mínima de ontem e rejeita de volta. Regra
+    fechada, tudo ou nada:
+    - Zona diária (resistência ou suporte) precisa existir (candle de
+      ontem disponível)
+    - Sweep detectado no TF de execução
+    - Candle do sweep precisa ser DECISIVO (reaproveita `candle_e_decisivo`)
+    - Região móvel (Donchian, ver compute_zona_movel) precisa estar
+      apertada — confirma lateralização real antes de disparar
+    - RSI precisa estar EXTREMO no candle do sweep (<=RSI_EXTREMO_BAIXA
+      pra long, >=RSI_EXTREMO_ALTA pra short) — réplica do processo
+      manual descrito: "RSI no talo, zona sendo defendida"
+
+    Stop = pavio exato do candle do sweep + buffer de segurança. TP =
+    RR 2:1. Cooldown curto (SCALP_RAPIDO_COOLDOWN_SECONDS, 5min) —
+    permite reentrada rápida se o trade tomar stop.
+    """
+    preco_atual = exec_candles[-1]['c']
+
+    resultado = {
+        'pair': pair, 'exec_tf': exec_tf_label, 'modo': 'scalp_rapido',
+        'sinal': False, 'direcao': None, 'entry': None, 'sl': None, 'tp': None,
+        'zona_tipo': None, 'motivo': None, 'em_cooldown': False, 'rsi': None,
+        'resistencia_top': None, 'resistencia_bottom': None,
+        'suporte_top': None, 'suporte_bottom': None,
+        'zona_movel_top': None, 'zona_movel_bottom': None, 'zona_movel_largura_pct': None,
+    }
+
+    zona_diaria = compute_zona_diaria_movel(d1_candles)
+    if not zona_diaria:
+        resultado['motivo'] = 'sem candle D1 anterior disponível ainda'
+        return resultado
+
+    resultado['resistencia_top'] = round(zona_diaria['resistencia']['top'], 6)
+    resultado['resistencia_bottom'] = round(zona_diaria['resistencia']['bottom'], 6)
+    resultado['suporte_top'] = round(zona_diaria['suporte']['top'], 6)
+    resultado['suporte_bottom'] = round(zona_diaria['suporte']['bottom'], 6)
+
+    # ── região MÓVEL (Donchian, ver compute_zona_movel) — sempre
+    # calculada e exposta, pra acompanhar ela se ajustando sozinha.
+    # Só EXIGE que esteja "apertada" como confirmação extra de
+    # lateralização real antes de disparar. ──
+    zona_movel = compute_zona_movel(exec_candles)
+    if zona_movel:
+        resultado['zona_movel_top'] = round(zona_movel['top'], 6)
+        resultado['zona_movel_bottom'] = round(zona_movel['bottom'], 6)
+        resultado['zona_movel_largura_pct'] = round(zona_movel['largura_pct'] * 100, 4)
+
+    sweep = detect_sweep_zona_diaria_movel(exec_candles, zona_diaria)
+    if not sweep:
+        resultado['motivo'] = 'sem sweep na resistência ou suporte de ontem ainda'
+        return resultado
+
+    resultado['zona_tipo'] = sweep['tipo_zona']
+
+    if not candle_e_decisivo(exec_candles[sweep['index']]):
+        resultado['motivo'] = f"sweep na {sweep['tipo_zona']}, mas candle indeciso (pavio grande) — aguardando"
+        return resultado
+
+    # ── checa lateralização usando os candles ANTES do sweep, sem
+    # incluir o próprio candle do sweep — ele naturalmente tem pavio
+    # maior que o resto (é o que causa o sweep), então incluí-lo na
+    # conta da região móvel alargaria ela artificialmente bem na hora
+    # que mais importa checar se HAVIA consolidação real antes. ──
+    candles_pre_sweep = exec_candles[:sweep['index']]
+    zona_movel_pre_sweep = compute_zona_movel(candles_pre_sweep) if candles_pre_sweep else None
+    if zona_movel_pre_sweep and zona_movel_pre_sweep['largura_pct'] > ZONA_MOVEL_MAX_LARGURA_PCT:
+        resultado['motivo'] = (
+            f"sweep e candle ok, mas região móvel (antes do sweep) larga demais "
+            f"({round(zona_movel_pre_sweep['largura_pct']*100, 2)}% > {ZONA_MOVEL_MAX_LARGURA_PCT*100}%) "
+            f"— preço não estava lateralizado o suficiente antes do sweep"
+        )
+        return resultado
+
+    # ── NOVO: RSI extremo obrigatório — pedido explícito, réplica do
+    # processo manual do Juninho: "RSI no talo pra baixo" no suporte
+    # (long) ou "RSI no talo pra cima" na resistência (short).
+    #
+    # IMPORTANTE (achado em teste): o RSI é checado no candle
+    # IMEDIATAMENTE ANTERIOR ao sweep, não no próprio candle da
+    # rejeição. Motivo: o candle do sweep, por definição, tem um
+    # movimento de reversão forte (é exigido por `candle_e_decisivo`) —
+    # e esse mesmo movimento já "esfria" o RSI na hora que ele acontece.
+    # Testado com dado sintético: RSI chegou a 100 três candles antes da
+    # rejeição, e caiu pra 45 NO candle da rejeição — checar no candle
+    # errado faria esse filtro quase nunca passar. "RSI no talo" é o
+    # estado de ANTES da rejeição, não durante ela.
+    #
+    # Reaproveita as mesmas constantes e a mesma função
+    # (`rsi_extremo_no_candle`) já usadas no modo Antecipado v2, pra
+    # manter o critério consistente no projeto todo. ──
+    direcao_provisoria = 'alta' if sweep['lado'] == 'baixa' else 'baixa'
+    idx_rsi = max(sweep['index'] - 1, 0)
+    rsi_val = rsi_extremo_no_candle(exec_candles, idx_rsi)
+    if rsi_val is None:
+        resultado['motivo'] = f"sweep na {sweep['tipo_zona']} ok, mas RSI indisponível"
+        return resultado
+
+    resultado['rsi'] = round(rsi_val, 1)
+    rsi_ok = (direcao_provisoria == 'alta' and rsi_val <= RSI_EXTREMO_BAIXA) or \
+             (direcao_provisoria == 'baixa' and rsi_val >= RSI_EXTREMO_ALTA)
+    if not rsi_ok:
+        resultado['motivo'] = (
+            f"sweep na {sweep['tipo_zona']} ok, mas RSI não está no talo "
+            f"(RSI={round(rsi_val,1)}, precisa <={RSI_EXTREMO_BAIXA} pra long ou >={RSI_EXTREMO_ALTA} pra short)"
+        )
+        return resultado
+
+    direcao = direcao_provisoria
+    entry = preco_atual
+    sl = aplicar_buffer_stop(sweep['nivel'], direcao)
+    risco = abs(entry - sl)
+    tp = entry + risco * 2 if direcao == 'alta' else entry - risco * 2
+
+    resultado.update({
+        'sinal': True,
+        'direcao': direcao,
+        'entry': round(entry, 6),
+        'sl': round(sl, 6),
+        'tp': round(tp, 6),
+        'motivo': 'entrada_confirmada',
+    })
+
+    segundos_desde = _segundos_desde_ultimo_alerta(db_file, 'scalp_rapido_signal_state', pair)
+    em_cooldown = segundos_desde is not None and segundos_desde < SCALP_RAPIDO_COOLDOWN_SECONDS
+    resultado['em_cooldown'] = em_cooldown
+
+    _save_rapido_signal(db_file, pair, exec_tf_label, resultado, alerted=not em_cooldown)
+
+    if send_telegram_fn and not em_cooldown:
+        arrow = '📈' if direcao == 'alta' else '📉'
+        label = 'LONG' if direcao == 'alta' else 'SHORT'
+        zona_nome = 'Resistência de ontem' if sweep['tipo_zona'] == 'resistencia' else 'Suporte de ontem'
+        msg = f"⚡ <b>Scalp Rápido — Liquidez Forte — {pair}</b>\n\n"
+        msg += f"{arrow} <b>{label}</b> | TF execução: {exec_tf_label}\n"
+        msg += f"🧱 Sweep na {zona_nome} (zona diária móvel)\n"
+        msg += f"📊 RSI no talo: {resultado['rsi']}\n"
+        msg += f"📍 Entrada: {resultado['entry']}\n🛑 Stop (curto): {resultado['sl']}\n✅ TP (RR 2:1): {resultado['tp']}\n\n"
+        msg += "<b>Sem CHoCH — entrada rápida no sweep + RSI extremo, stop curto, reentrada permitida em 5min.</b>"
+        send_telegram_fn(msg)
+    elif em_cooldown:
+        restante_min = (SCALP_RAPIDO_COOLDOWN_SECONDS - segundos_desde) // 60
+        resultado['motivo'] = f'entrada_confirmada, mas em cooldown ({restante_min}min restantes)'
+
+    return resultado
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# MODO "REJEIÇÃO ANTECIPADA v2" — sem CHoCH, baseado em pavio varrendo
 # liquidez antiga real + RSI extremo. Regra fechada (tudo ou nada).
 # Roda em PARALELO ao process_pair_scalp() normal, chamado à parte no
 # run_live_cycle() do app.py, reaproveitando os mesmos candles.

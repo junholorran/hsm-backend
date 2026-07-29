@@ -1290,13 +1290,20 @@ def compute_vwap(exec_candles):
     """VWAP institucional, ancorado na sessão (dia UTC atual) — mesma
     lógica que mesas institucionais usam: preço médio ponderado por
     volume, resetado a cada novo dia. Usa apenas os candles do dia UTC
-    corrente dentro da janela de exec_candles disponível."""
+    corrente dentro da janela de exec_candles disponível.
+
+    ── FIX: os timestamps `t` que vêm da Bybit (via fetch_bybit_klines)
+    estão em MILISSEGUNDOS, não segundos. `datetime.fromtimestamp`
+    espera segundos — sem dividir por 1000, o timestamp era interpretado
+    como um valor absurdamente distante no futuro (ano ~58544), o que
+    disparava "year XXXXX is out of range" e o VWAP nunca era calculado.
+    Corrigido dividindo por 1000 antes de converter. ──"""
     if not exec_candles:
         return None
-    dia_atual = datetime.fromtimestamp(exec_candles[-1]['t'], tz=timezone.utc).date()
+    dia_atual = datetime.fromtimestamp(exec_candles[-1]['t'] / 1000, tz=timezone.utc).date()
     cum_pv, cum_vol = 0.0, 0.0
     for c in exec_candles:
-        if datetime.fromtimestamp(c['t'], tz=timezone.utc).date() != dia_atual:
+        if datetime.fromtimestamp(c['t'] / 1000, tz=timezone.utc).date() != dia_atual:
             continue
         typical = (c['h'] + c['l'] + c['c']) / 3
         vol = c.get('v', 0)

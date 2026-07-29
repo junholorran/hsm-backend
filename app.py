@@ -24,29 +24,25 @@ DB_FILE = '/data/alerts.db'
 
 PRECOS_TICKER = {}
 
-# ── guarda o último resultado da cascata (zona/sweep/CHoCH/score)
-# por par, em memória, pra expor no /cascade/status pro frontend ler. ──
 CASCADE_STATUS = {}  # pair -> {'result': {...}, 'updated_at': int}
-
-# ── mesmo padrão, mas pro Scalp Ao Vivo (zona D1 → killzone →
-# sweep → CHoCH no TF de execução → FVG/OB → score). ──
 SCALP_STATUS = {}  # pair -> {'result': {...}, 'updated_at': int}
-
-# ── status do modo "Rejeição Antecipada v2" — roda em paralelo
-# ao Scalp normal, sem esperar CHoCH. Separado pra não misturar com
-# o SCALP_STATUS do modo com confirmação. ──
 SCALP_ANTECIPADO_STATUS = {}  # pair -> {'result': {...}, 'updated_at': int}
-
-# ── status do modo "Confluência de Indicadores" — busca setup
-# contínua baseada só nos indicadores técnicos, sem depender de zona
-# D1/sweep/CHoCH. Separado dos outros dois modos. ──
 SCALP_INDICADORES_STATUS = {}  # pair -> {'result': {...}, 'updated_at': int}
-
-# ── NOVO: status do modo "Continuação (BOS)" — sweep na zona D1, mas em
-# vez de esperar reversão (CHoCH), espera o preço ROMPER na MESMA
-# direção do sweep (BOS de continuação) e entra a favor dela no retorno
-# da FVG/OB. Separado de todos os outros modos. ──
 SCALP_CONTINUACAO_STATUS = {}  # pair -> {'result': {...}, 'updated_at': int}
+
+# ── NOVO: status do modo "Scalp Rápido — Liquidez Forte". Sem CHoCH —
+# entra direto no sweep da zona diária móvel (resistência/suporte do
+# candle D1 anterior, réplica do Pine Script do Juninho). Stop curto,
+# cooldown curto (5min), pensado pra reentrada rápida. ──
+SCALP_RAPIDO_STATUS = {}  # pair -> {'result': {...}, 'updated_at': int}
+
+# ── NOVO: status do modo "Cascata SMC" — Semanal→D1→4H→1H todos
+# alinhados (bias via lógica real do LuxAlgo) → sweep na zona diária →
+# CHoCH ou BOS → Discount/Premium. SUBSTITUI os Modos 1 (Normal) e 2
+# (Continuação) no ciclo automático, por pedido explícito — os dois
+# continuam definidos no scalp_engine.py, só não são mais chamados
+# aqui. ──
+SCALP_CASCATA_STATUS = {}  # pair -> {'result': {...}, 'updated_at': int}
 
 CACHE_WINDOW_SECONDS = 15 * 60  # 15 minutos
 
@@ -65,10 +61,6 @@ RE_TP1_FINAL = re.compile(r'TP1_FINAL\s*:\s*\$?\s*([\d,.]+)', re.IGNORECASE)
 RE_TP2_FINAL = re.compile(r'TP2_FINAL\s*:\s*\$?\s*([\d,.]+)', re.IGNORECASE)
 RE_TP3_FINAL = re.compile(r'TP3_FINAL\s*:\s*\$?\s*([\d,.]+)', re.IGNORECASE)
 
-# ── Regras de Ouro de Gestão de Risco — bloco fixo, sempre igual, anexado
-# no final de toda análise (manual e Live Trade). Não mexe no prompt do
-# Claude nem na extração de BLOCO_DADOS — é só texto Python append depois
-# que o raw_text já foi gerado e o display_text já foi cortado. ──
 GOLDEN_RULES_BLOCK = (
     "\n\n---\n\n"
     "<b>🛡️ Regras de Ouro de Gestão de Risco</b>\n"
@@ -202,9 +194,6 @@ def init_db():
                     updated_at INTEGER DEFAULT 0
                 )
             ''')
-            # ── MODO SOMBRA: 3 colunas novas no fim (gate_teria_pulado,
-            # cascade_score, cascade_motivo). Aditivo — não mexe em
-            # nenhuma coluna existente. ──
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS live_signals (
                     id TEXT PRIMARY KEY,
@@ -224,10 +213,6 @@ def init_db():
             ''')
             conn.commit()
 
-            # ── MODO SOMBRA: se a tabela já existia de antes (sem essas
-            # colunas), o CREATE TABLE IF NOT EXISTS acima não adiciona
-            # nada — então tenta o ALTER TABLE aqui, ignorando erro se
-            # a coluna já existir (idempotente, seguro rodar sempre). ──
             for alter_sql in [
                 "ALTER TABLE live_signals ADD COLUMN gate_teria_pulado INTEGER DEFAULT 0",
                 "ALTER TABLE live_signals ADD COLUMN cascade_score INTEGER",
@@ -237,7 +222,7 @@ def init_db():
                     cursor.execute(alter_sql)
                     conn.commit()
                 except Exception:
-                    pass  # coluna já existe, tudo bem
+                    pass
 
         print("Base de dados SQLite inicializada com sucesso!")
     except Exception as e:
@@ -306,7 +291,6 @@ cascade_engine.init_cascade_db(DB_FILE)
 cascade_engine.init_cascade_signal_db(DB_FILE)
 scalp_engine.init_scalp_db(DB_FILE)
 
-# ─── PROMPT ICT CACHEADO ─────────────────────────────────────────────────────
 ICT_SYSTEM_PROMPT = (
     "Es um mentor institucional ICT (Inner Circle Trader) e SMC de elite, com "
     "os olhos e o raciocinio dos melhores traders profissionais do mundo. "
@@ -1018,16 +1002,6 @@ def analyze_single_pair(pair, images_by_tf, category='ict', holding=None):
         system=[{
             "type": "text",
             "text": system_prompt,
-            # ── Cache de 1h em vez do padrão de 5min. O prompt do sistema
-            # (16 camadas ICT, regras de score, etc.) é enorme e reusado
-            # em TODO ciclo do Live Trade — com cache de 5min e ciclos a
-            # cada 15min, o cache SEMPRE expirava antes do próximo ciclo
-            # usar, pagando preço cheio quase toda chamada. Com 1h, o
-            # cache aguenta até 4 ciclos de 15min (ou 12 de 5min) sem
-            # expirar — leitura de cache custa ~10% do preço normal.
-            # Escrita do cache de 1h custa um pouco mais (2x vs 1.25x do
-            # de 5min), mas se paga rápido com o volume de reuso. Não
-            # precisa de beta header — suportado nativamente. ──
             "cache_control": {"type": "ephemeral", "ttl": "1h"}
         }],
         messages=[{"role": "user", "content": content}]
@@ -1040,14 +1014,8 @@ def analyze_single_pair(pair, images_by_tf, category='ict', holding=None):
         display_text = raw_text.split("BLOCO_DADOS_INICIO")[0].rstrip()
         display_text = display_text.rstrip("-").rstrip()
 
-    # ── Notícias reais + sentimento agregado, direto no corpo da análise
-    # (antes só existia no endpoint /news separado, sem conexão com a
-    # análise principal). Cache de 15min evita bater no RSS toda hora. ──
     display_text = display_text + build_news_block(limit=4)
 
-    # ── Regras de Ouro sempre no final, tanto na análise manual quanto
-    # no ciclo automático do Live Trade — reforça disciplina de risco
-    # em toda resposta, sem depender do Claude lembrar de incluir. ──
     display_text = display_text + GOLDEN_RULES_BLOCK
 
     save_cache(cache_key, pair, raw_text, display_text)
@@ -1061,13 +1029,12 @@ LIVE_SYMBOL_MAP = {
     'AAVEUSD': 'AAVEUSDT', 'ONDOUSD': 'ONDOUSDT', 'INJUSD': 'INJUSDT', 'NEARUSD': 'NEARUSDT',
     'PENDLEUSD': 'PENDLEUSDT', 'SUIUSD': 'SUIUSDT', 'JTOUSD': 'JTOUSDT', 'ETHFIUSD': 'ETHFIUSDT',
     'JUPUSD': 'JUPUSDT', 'ENAUSD': 'ENAUSDT',
-    # ── NOVO: pares adicionais pedidos (lista da MEXC) ──
     'OPUSD': 'OPUSDT', 'RENDERUSD': 'RENDERUSDT', 'RUNEUSD': 'RUNEUSDT',
     'TAOUSD': 'TAOUSDT', 'TIAUSD': 'TIAUSDT', 'VIRTUALUSD': 'VIRTUALUSDT',
     'FILUSD': 'FILUSDT', 'HBARUSD': 'HBARUSDT', 'ICPUSD': 'ICPUSDT',
     'LTCUSD': 'LTCUSDT', 'ATOMUSD': 'ATOMUSDT', 'ENSUSD': 'ENSUSDT', 'FETUSD': 'FETUSDT',
 }
-LIVE_TF_INTERVALS = {'D1': 'D', 'H4': '240', 'H1': '60', 'M15': '15', 'M5': '5'}
+LIVE_TF_INTERVALS = {'W': 'W', 'D1': 'D', 'H4': '240', 'H1': '60', 'M15': '15', 'M5': '5'}
 AUTO_ALERT_SCORE_THRESHOLD = 65
 
 
@@ -1139,22 +1106,13 @@ def render_live_chart_png_base64(candles, pair_label, tf_label, scalp_result=Non
         price_at_y = max_p - (rng / 4) * i
         draw.text((4, yy - 5), f"{price_at_y:.2f}", fill=(110, 118, 129), font=font)
 
-    # ── fundo dividido verde/vermelho pelo preço ATUAL — visão
-    # instantânea de "zona de compra" (abaixo do preço, verde) vs "zona de
-    # venda" (acima do preço, vermelho). Desenhado ANTES dos candles, bem
-    # sutil, só pra dar contexto visual de fundo sem atrapalhar leitura.
-    # Só desenha quando tem scalp_result (contexto de Scalp Ao Vivo ativo)
-    # — em análises normais sem par monitorado isso não aparece. ──
     if scalp_result:
         preco_atual_fundo = closes[-1]
         y_preco = y_for(preco_atual_fundo)
         fundo_overlay = Image.new('RGBA', (W, H), (0, 0, 0, 0))
         fundo_draw = ImageDraw.Draw(fundo_overlay)
-        # abaixo do preço atual = verde (zona de compra)
         fundo_draw.rectangle([padL, y_preco, W - padR, padT + priceH], fill=(63, 185, 80, 22))
-        # acima do preço atual = vermelho (zona de venda)
         fundo_draw.rectangle([padL, padT, W - padR, y_preco], fill=(248, 81, 73, 22))
-        # linha de referência exatamente no preço atual
         fundo_draw.line([(padL, y_preco), (W - padR, y_preco)], fill=(240, 192, 64, 160), width=1)
         img.paste(fundo_overlay, (0, 0), fundo_overlay)
 
@@ -1175,9 +1133,6 @@ def render_live_chart_png_base64(candles, pair_label, tf_label, scalp_result=Non
         if len(pts) >= 2:
             draw.line(pts, fill=color, width=2)
 
-    # ── overlays do Scalp Ao Vivo (banda D1, sweep, CHoCH, entrada) ──
-    # Desenhado ANTES do volume/título pra ficar atrás visualmente das
-    # informações de topo, mas por cima dos candles/MAs.
     if scalp_result:
         _draw_scalp_overlays(img, draw, scalp_result, y_for, W, H, padR, font, preco_atual=closes[-1])
 
@@ -1210,30 +1165,8 @@ def render_live_chart_png_base64(candles, pair_label, tf_label, scalp_result=Non
 
 
 def _draw_scalp_overlays(img, draw, resultado, y_for, W, H, padR, font, preco_atual=None):
-    """
-    Desenha por cima do chart já pronto (candles + MAs), usando os campos
-    reais devolvidos por scalp_engine.process_pair_scalp():
-      zona_top, zona_bottom, zona_ativa, sweep_nivel, sweep_lado,
-      choch_nivel, choch_direcao, entry_zone_top, entry_zone_bottom,
-      entry_zone_tipo
-
-    `preco_atual` vem de fora (candles[-1]['c'], já calculado no render
-    principal como `last_close`) — não existe no dict de scalp_engine,
-    então é passado explicitamente em vez de tentar ler de resultado.
-
-    Recebe `img` (a imagem RGB original) além de `draw`, porque o
-    preenchimento translúcido da banda D1 precisa de uma camada RGBA
-    separada composta por cima — não dá pra fazer fill semi-transparente
-    direto num ImageDraw de imagem RGB (rectangle com alpha simplesmente
-    ignora o canal alpha nesse modo). O `draw` continua sendo usado
-    normalmente pros elementos sólidos (linhas, texto, retângulos de
-    tag) que não precisam de transparência.
-    """
     x_end = W - padR
 
-    # ── 1. Banda D1 — retângulo PREENCHIDO e translúcido, cor conforme
-    # PREÇO ATUAL em relação à banda (não o lado do sweep — o sweep só diz
-    # de que lado a liquidez foi varrida, não onde o preço está agora) ───
     if resultado.get('zona_top') is not None and resultado.get('zona_bottom') is not None:
         zona_top = resultado['zona_top']
         zona_bottom = resultado['zona_bottom']
@@ -1241,31 +1174,29 @@ def _draw_scalp_overlays(img, draw, resultado, y_for, W, H, padR, font, preco_at
         y_bottom = y_for(zona_bottom)
 
         if resultado.get('zona_ativa') or preco_atual is None:
-            cor_rgb = (227, 179, 65)   # amarelo — preço dentro da banda agora (ou sem preço pra comparar)
+            cor_rgb = (227, 179, 65)
             label_papel = "ZONA D1 (ativa)"
         elif preco_atual > zona_top:
-            cor_rgb = (63, 185, 80)    # verde — preço ACIMA da banda -> ela age como suporte
+            cor_rgb = (63, 185, 80)
             label_papel = "ZONA D1 (suporte)"
         elif preco_atual < zona_bottom:
-            cor_rgb = (248, 81, 73)    # vermelho — preço ABAIXO da banda -> ela age como resistência
+            cor_rgb = (248, 81, 73)
             label_papel = "ZONA D1 (resistência)"
         else:
-            cor_rgb = (150, 150, 160)  # cinza — caso raro de arredondamento na borda
+            cor_rgb = (150, 150, 160)
             label_papel = "ZONA D1"
 
-        # camada RGBA separada só pra esse retângulo translúcido
         overlay = Image.new('RGBA', (W, H), (0, 0, 0, 0))
         overlay_draw = ImageDraw.Draw(overlay)
         overlay_draw.rectangle(
             [0, min(y_top, y_bottom), x_end, max(y_top, y_bottom)],
-            fill=(*cor_rgb, 45),        # 45/255 de opacidade — sutil, não cobre os candles
-            outline=(*cor_rgb, 255),    # borda sólida por cima, pra continuar bem visível
+            fill=(*cor_rgb, 45),
+            outline=(*cor_rgb, 255),
             width=1,
         )
-        img.paste(overlay, (0, 0), overlay)  # compõe a camada translúcida sobre a imagem base
+        img.paste(overlay, (0, 0), overlay)
         draw.text((6, min(y_top, y_bottom) - 12), label_papel, fill=cor_rgb, font=font)
 
-    # ── 2. Sweep — linha pontilhada + tag ────────────────────────────
     if resultado.get('sweep_nivel') is not None:
         y_sweep = y_for(resultado['sweep_nivel'])
         cor = (248, 81, 73) if resultado.get('sweep_lado') == 'alta' else (63, 185, 80)
@@ -1275,7 +1206,6 @@ def _draw_scalp_overlays(img, draw, resultado, y_for, W, H, padR, font, preco_at
         draw.rectangle([x_end - 160, y_sweep - 10, x_end, y_sweep + 10], fill=cor)
         draw.text((x_end - 156, y_sweep - 6), label[:24], fill=(10, 10, 15), font=font)
 
-    # ── 3. CHoCH/BOS — linha sólida + tag ────────────────────────────
     if resultado.get('choch_nivel') is not None:
         y_choch = y_for(resultado['choch_nivel'])
         cor = (63, 185, 80) if resultado.get('choch_direcao') == 'alta' else (248, 81, 73)
@@ -1284,7 +1214,6 @@ def _draw_scalp_overlays(img, draw, resultado, y_for, W, H, padR, font, preco_at
         draw.rectangle([x_end - 150, y_choch - 22, x_end, y_choch - 2], fill=cor)
         draw.text((x_end - 146, y_choch - 18), label, fill=(10, 10, 15), font=font)
 
-    # ── 4. Zona de entrada (FVG/OB/iFVG/Breaker) ─────────────────────
     if resultado.get('entry_zone_top') is not None and resultado.get('entry_zone_bottom') is not None:
         y_top = y_for(resultado['entry_zone_top'])
         y_bottom = y_for(resultado['entry_zone_bottom'])
@@ -1295,24 +1224,6 @@ def _draw_scalp_overlays(img, draw, resultado, y_for, W, H, padR, font, preco_at
 
 
 def run_live_cycle(pair, interval_min):
-    """
-    ── MUDANÇA IMPORTANTE: esse ciclo automático NÃO chama mais o Claude.
-    Antes, todo ciclo (a cada 5-15min, por par) mandava 5 imagens + prompt
-    de 16 camadas pro Claude — isso era o maior custo de API do sistema,
-    rodando sozinho 24h sem o utilizador pedir. Agora o ciclo automático
-    usa SÓ os motores determinísticos e gratuitos:
-      - cascade_engine: zona D1 → sweep → CHoCH → score (zero custo de IA)
-      - scalp_engine (normal + Antecipado v2 + Indicadores + Continuação):
-        mesma coisa, focado em scalp
-    Todos já mandam Telegram sozinhos quando o score bate o threshold
-    deles — a cobertura de alerta automático continua, só que de graça.
-
-    O Claude (as 16 camadas completas) fica reservado EXCLUSIVAMENTE pra
-    quando o utilizador aperta "Nova Análise" manual no app (rotas /analyze
-    e /analyze_multi, que não mudaram em nada) — é aí que faz sentido
-    gastar API de verdade, pra tentar perceber o viés real do mercado com
-    o motor mais forte, não em ciclo automático rodando sem parar.
-    """
     symbol = LIVE_SYMBOL_MAP.get(pair, pair.replace('USD', 'USDT'))
 
     candles_por_tf_cache = {}
@@ -1333,9 +1244,6 @@ def run_live_cycle(pair, interval_min):
         except Exception as e:
             print(f"[cascade_engine] erro no ciclo de {pair}: {e}")
 
-    # ── Scalp Ao Vivo (zona D1 → killzone → sweep → CHoCH no TF de
-    # execução escolhido → FVG/OB → score), só se o par estiver marcado
-    # em scalp_watch. Reaproveita candles já buscados acima. ──
     scalp_result = None
     exec_tf = None
     try:
@@ -1352,15 +1260,29 @@ def run_live_cycle(pair, interval_min):
             else:
                 exec_candles = None
             if exec_candles:
-                scalp_result = scalp_engine.process_pair_scalp(
-                    DB_FILE, pair,
-                    candles_por_tf_cache['D1'],
-                    exec_candles,
-                    exec_tf,
-                    send_telegram,
-                    h4_candles=candles_por_tf_cache.get('H4'),
-                )
-                SCALP_STATUS[pair] = {'result': scalp_result, 'updated_at': int(time.time())}
+                # ── NOVO: Modo "Cascata SMC" — SUBSTITUI os Modos 1
+                # (Normal/Reversão) e 2 (Continuação) no ciclo
+                # automático, por pedido explícito. Semanal→D1→4H→1H
+                # todos alinhados (bias via lógica real do LuxAlgo) →
+                # sweep na zona diária móvel → CHoCH ou BOS (o que vier
+                # primeiro) → Discount/Premium (nunca compra topo, nunca
+                # vende fundo). Os Modos 1 e 2 continuam definidos no
+                # scalp_engine.py, só não são mais chamados aqui. ──
+                try:
+                    cascata_result = scalp_engine.process_pair_cascata_smc(
+                        DB_FILE, pair,
+                        candles_por_tf_cache.get('W'),
+                        candles_por_tf_cache['D1'],
+                        candles_por_tf_cache.get('H4'),
+                        candles_por_tf_cache.get('H1'),
+                        exec_candles,
+                        exec_tf,
+                        send_telegram,
+                    )
+                    SCALP_CASCATA_STATUS[pair] = {'result': cascata_result, 'updated_at': int(time.time())}
+                    scalp_result = cascata_result  # mantém compatível com o resumo/return mais abaixo
+                except Exception as e:
+                    print(f"[scalp_engine cascata] erro no ciclo de {pair}: {e}")
 
                 try:
                     antecipado_result = scalp_engine.process_pair_scalp_antecipado_v2(
@@ -1375,9 +1297,6 @@ def run_live_cycle(pair, interval_min):
                 except Exception as e:
                     print(f"[scalp_engine antecipado] erro no ciclo de {pair}: {e}")
 
-                # ── Modo "Confluência de Indicadores" — busca setup SEM
-                # depender de zona D1/sweep/CHoCH, só na votação entre os
-                # indicadores técnicos. Roda em paralelo, mesmos candles. ──
                 try:
                     indicadores_result = scalp_engine.process_pair_scalp_indicadores(
                         DB_FILE, pair,
@@ -1389,30 +1308,23 @@ def run_live_cycle(pair, interval_min):
                 except Exception as e:
                     print(f"[scalp_engine indicadores] erro no ciclo de {pair}: {e}")
 
-                # ── NOVO: Modo "Continuação (BOS)" — sweep na zona D1,
-                # mas em vez de esperar reversão (CHoCH), espera o preço
-                # ROMPER na mesma direção do sweep (BOS de continuação) e
-                # entra a favor dela no retorno da FVG/OB. Roda em
-                # paralelo, mesmos candles, tabelas próprias. ──
+                # ── NOVO: Modo "Scalp Rápido — Liquidez Forte" — sem
+                # CHoCH, entra direto no sweep da zona diária móvel
+                # (resistência/suporte do candle D1 anterior, réplica
+                # exata do Pine Script "Zonas Diarias Moveis" do
+                # Juninho). Stop curto, cooldown de 5min. ──
                 try:
-                    continuacao_result = scalp_engine.process_pair_scalp_continuacao(
+                    rapido_result = scalp_engine.process_pair_scalp_rapido(
                         DB_FILE, pair,
                         candles_por_tf_cache['D1'],
                         exec_candles,
                         exec_tf,
                         send_telegram,
-                        h4_candles=candles_por_tf_cache.get('H4'),
                     )
-                    SCALP_CONTINUACAO_STATUS[pair] = {'result': continuacao_result, 'updated_at': int(time.time())}
+                    SCALP_RAPIDO_STATUS[pair] = {'result': rapido_result, 'updated_at': int(time.time())}
                 except Exception as e:
-                    print(f"[scalp_engine continuacao] erro no ciclo de {pair}: {e}")
+                    print(f"[scalp_engine rapido] erro no ciclo de {pair}: {e}")
 
-                # ── NOVO: MODO SOMBRA DOS FILTROS — roda em paralelo,
-                # SEM Telegram, só grava quando a versão sem os filtros
-                # novos (candle decisivo, alinhamento D1/H4, FVG mínima,
-                # janela 45 dias) teria dado sinal válido que a versão
-                # real bloqueou. Puramente observação, zero custo extra
-                # de API — só reaproveita os mesmos candles. ──
                 try:
                     scalp_engine.process_pair_scalp_filtros_shadow(
                         DB_FILE, pair,
@@ -1426,9 +1338,6 @@ def run_live_cycle(pair, interval_min):
     except Exception as e:
         print(f"[scalp_engine] erro no ciclo de {pair}: {e}")
 
-    # ── Atualiza live_watch com um resumo LEVE (motivo/score dos motores
-    # grátis), só pra tela do app continuar mostrando algo útil sobre o
-    # ciclo mais recente — sem nenhum campo vindo do Claude. ──
     now = int(time.time())
     resumo_motivo = None
     resumo_score = 0
@@ -1886,9 +1795,6 @@ def get_news():
         return jsonify({'error': str(e), 'news': []}), 500
 
 
-# ── Cache simples de notícias em memória. O Live Trade roda ciclos a cada
-# 5-15min por par, e sem isso cada ciclo bateria de novo nos 4 feeds RSS
-# à toa (notícia não muda a cada 5min). TTL de 15min é suficiente. ──
 _NEWS_CACHE = {'items': [], 'updated_at': 0}
 NEWS_CACHE_TTL_SEC = 15 * 60
 
@@ -2000,10 +1906,6 @@ def cascade_status():
         return jsonify({'error': str(e)}), 500
 
 
-# ── MODO SOMBRA: relatório pra comparar, depois de 2-3 dias rodando,
-# se o gate (baseado no cascade_engine) teria descartado algum caso que
-# na real deu score alto no Claude. Se 'casos_suspeitos' vier vazio,
-# é seguro ligar o corte de verdade. ──
 @app.route('/gate_shadow_report', methods=['GET'])
 def gate_shadow_report():
     try:
@@ -2043,12 +1945,6 @@ def scalp_watch_start():
         data = request.json or {}
         pair = data.get('pair')
         exec_tf = data.get('exec_tf', 'M5')
-        # ── Intervalo do ciclo (minutos). Voltou pra 5min — o motivo do
-        # 15min era economizar chamadas caras ao Claude, mas o ciclo
-        # automático não chama mais o Claude (só cascade_engine +
-        # scalp_engine, todos grátis). O único limite real agora é a API
-        # pública da Bybit, que aguenta tranquilo 5min pra poucos pares.
-        # Ainda dá pra escolher outro valor mandando interval_min. ──
         interval_min = int(data.get('interval_min', 5))
         if not pair:
             return jsonify({'error': 'pair obrigatório'}), 400
@@ -2107,11 +2003,6 @@ def scalp_status():
         return jsonify({'error': str(e)}), 500
 
 
-# ── NOVO: histórico REAL dos sinais do Scalp Ao Vivo (modo Normal —
-# tabela scalp_signal_state). Diferente do /live/history (esse é do
-# cascade_engine, tabela live_signals — não tem nada a ver com o Scalp).
-# Passa ?modo=continuacao pra ver o histórico do modo Continuação (BOS)
-# em vez do Normal. ──
 @app.route('/scalp/history', methods=['GET'])
 def scalp_history_route():
     try:
@@ -2124,8 +2015,6 @@ def scalp_history_route():
         return jsonify({'error': str(e)}), 500
 
 
-# ── status do modo Rejeição Antecipada v2 — separado do Scalp
-# normal, pra você acompanhar sinais sem CHoCH confirmado. ──
 @app.route('/scalp_antecipado/status', methods=['GET'])
 def scalp_antecipado_status():
     try:
@@ -2137,10 +2026,6 @@ def scalp_antecipado_status():
         return jsonify({'error': str(e)}), 500
 
 
-# ── status do modo Confluência de Indicadores — busca setup sem
-# depender da sequência ICT completa, só na votação entre os indicadores
-# técnicos (MACD, ADX, EMAs, Stochastic, RSI, Bollinger, VWAP, Ichimoku,
-# Monte Carlo, Candle Pattern). ──
 @app.route('/scalp_indicadores/status', methods=['GET'])
 def scalp_indicadores_status():
     try:
@@ -2152,9 +2037,6 @@ def scalp_indicadores_status():
         return jsonify({'error': str(e)}), 500
 
 
-# ── NOVO: status do modo Continuação (BOS) — sweep na zona D1 seguido de
-# BOS na MESMA direção do sweep (não reversão), entrada no retorno da
-# FVG/OB a favor da continuação. ──
 @app.route('/scalp_continuacao/status', methods=['GET'])
 def scalp_continuacao_status():
     try:
@@ -2166,11 +2048,35 @@ def scalp_continuacao_status():
         return jsonify({'error': str(e)}), 500
 
 
-# ── NOVO: relatório do MODO SOMBRA DOS FILTROS — mostra todos os casos
-# em que os filtros adicionados (candle decisivo, alinhamento D1/H4,
-# FVG mínima, janela de 45 dias) teriam bloqueado um sinal que, sem
-# eles, teria pontuado score >= 75. Inclui contagem por tipo de filtro,
-# pra ver rápido qual filtro está cortando mais sinal. ──
+# ── NOVO: status do modo Scalp Rápido — Liquidez Forte. Sem CHoCH,
+# entra direto no sweep da zona diária móvel (resistência/suporte do
+# candle D1 anterior). Stop curto, cooldown de 5min. ──
+@app.route('/scalp_rapido/status', methods=['GET'])
+def scalp_rapido_status():
+    try:
+        pair = request.args.get('pair')
+        if pair:
+            return jsonify(SCALP_RAPIDO_STATUS.get(pair, {}))
+        return jsonify(SCALP_RAPIDO_STATUS)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+# ── NOVO: status do modo Cascata SMC — Semanal→D1→4H→1H todos
+# alinhados (bias via lógica real do LuxAlgo) → sweep na zona diária →
+# CHoCH ou BOS → Discount/Premium. Substituiu os Modos 1 e 2 no ciclo
+# automático. ──
+@app.route('/scalp_cascata/status', methods=['GET'])
+def scalp_cascata_status():
+    try:
+        pair = request.args.get('pair')
+        if pair:
+            return jsonify(SCALP_CASCATA_STATUS.get(pair, {}))
+        return jsonify(SCALP_CASCATA_STATUS)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/scalp_filtros_shadow/report', methods=['GET'])
 def scalp_filtros_shadow_report_route():
     try:

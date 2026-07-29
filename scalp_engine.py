@@ -63,7 +63,7 @@ COOLDOWN_SECONDS = 45 * 60  # 45min — meio-termo da faixa 30-60min do Vortex
 TOLERANCIA_CLUSTER_PCT = 0.006   # 0.6% — mesma tolerância usada no cascade pra clusterizar toques
 MIN_EVENTOS_BANDA = 2            # mínimo de toques pra uma banda D1 ser considerada válida
 MIN_FVG_GAP_PCT = 0.0005         # 0.05% do preço — FVG menor que isso é ruído, não conta como zona de entrada
-MIN_CANDLE_BODY_RATIO = 0.5      # candle de confirmação precisa ter corpo >= 50% do range total (senão é pavio/indecisão)
+MIN_CANDLE_BODY_RATIO = 0.35     # candle de confirmação precisa ter corpo >= 35% do range total (afrouxado de 50% — pedido explícito pra disparar mais fácil, depois de ver setup real de score 92 ser bloqueado por esse filtro)
 STOP_BUFFER_PCT = 0.001          # 0.1% de folga além do nível estrutural — stop nunca fica colado no pavio exato
 D1_LOOKBACK_DIAS = 45            # bandas D1 do Scalp olham só os últimos 45 dias — estrutura recente, não swing de meses atrás
 ZONA_FORTE_TOLERANCIA_PCT = 0.0015  # 0.15% — bem mais apertada que a zona D1 (0.6%), pro modo Scalp Rápido
@@ -243,6 +243,50 @@ def init_scalp_db(db_file):
                 tp REAL,
                 zona_tipo TEXT,
                 alerted INTEGER DEFAULT 0
+            )
+        ''')
+        # ── NOVO: tabela do modo "Cascata SMC" — Semanal→Diário→4H→1H
+        # todos alinhados (bias calculado via lógica real do LuxAlgo,
+        # não pivô centrado) → sweep na zona diária → confirmação por
+        # CHoCH ou BOS (o que vier primeiro) → preço em Discount (long)
+        # ou Premium (short), nunca comprando topo/vendendo fundo. ──
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS scalp_cascata_signal_state (
+                id TEXT PRIMARY KEY,
+                pair TEXT,
+                created_at INTEGER,
+                exec_tf TEXT,
+                direcao TEXT,
+                entry REAL,
+                sl REAL,
+                tp REAL,
+                bias_semanal TEXT,
+                bias_d1 TEXT,
+                bias_h4 TEXT,
+                bias_h1 TEXT,
+                evento_tipo TEXT,
+                alerted INTEGER DEFAULT 0
+            )
+        ''')
+        # ── NOVO: tabela de ESTADO da cascata (memória de sweep) — mesmo
+        # schema de scalp_zone_state, reaproveitando _load_saved_state e
+        # _save_zone_state (que já aceitam `table` customizada). Sem
+        # isso, achado em teste: o sweep "some" assim que os candles de
+        # confirmação empurram ele pra fora da janela de 10 candles do
+        # detect_sweep_zona_diaria_movel — exatamente o mesmo problema
+        # que os Modos 1/2 já resolveram há mais tempo. ──
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS scalp_cascata_zone_state (
+                pair TEXT PRIMARY KEY,
+                zona_top REAL,
+                zona_bottom REAL,
+                fase TEXT,
+                sweep_ts INTEGER,
+                sweep_nivel REAL,
+                sweep_lado TEXT,
+                choch_ts INTEGER,
+                choch_nivel REAL,
+                updated_at INTEGER
             )
         ''')
         conn.commit()
@@ -492,6 +536,95 @@ def compute_zona_movel(candles, lookback=ZONA_MOVEL_LOOKBACK):
 
 
 # ── SWEEP + CHoCH no timeframe de execução ──────────────────────────────
+def compute_lux_structure_bias(candles, swing_size=50):
+    """
+    NOVO — réplica da lógica REAL de estrutura do LuxAlgo (função
+    `leg()` + swing pivot + cruzamento, direto do Pine Script que o
+    Juninho mandou). Usada na Cascata SMC pra calcular o bias de
+    qualquer timeframe (Semanal, D1, H4, H1).
+
+    Diferente do `compute_bias_from_swings` (que usa pivô centrado, mais
+    lento pra confirmar — foi a causa do CHoCH do BTC ficar "preso"
+    antes), essa versão usa a mesma lógica de "leg" do LuxAlgo:
+
+    1. `leg`: a cada candle, compara a máxima/mínima de `swing_size`
+       candles atrás com a máxima/mínima da janela recente. Se a máxima
+       de trás for MAIOR que a máxima recente, a perna vira "bearish"
+       (formando um topo); se a mínima de trás for MENOR que a mínima
+       recente, a perna vira "bullish" (formando um fundo).
+    2. Toda vez que a perna muda, isso confirma um pivô (high quando
+       virou bearish, low quando virou bullish) `swing_size` candles
+       atrás.
+    3. O bias muda pra 'alta' quando o fechamento cruza ACIMA do último
+       pivô de topo confirmado, e pra 'baixa' quando cruza ABAIXO do
+       último pivô de fundo confirmado — exatamente o `displayStructure()`
+       do LuxAlgo (CHoCH/BOS via crossover/crossunder do close).
+
+    Retorna 'alta', 'baixa' ou 'neutro' (sem dado suficiente ou sem
+    nenhum cruzamento ainda).
+    """
+    n = len(candles)
+    if n < swing_size + 5:
+        return 'neutro'
+
+    legs = [0] * n
+    current_leg = 0
+    for i in range(swing_size, n):
+        window = candles[i - swing_size + 1:i + 1]
+        highest = max(c['h'] for c in window)
+        lowest = min(c['l'] for c in window)
+        high_back = candles[i - swing_size]['h']
+        low_back = candles[i - swing_size]['l']
+        if high_back > highest:
+            current_leg = 0  # BEARISH_LEG — formando topo
+        elif low_back < lowest:
+            current_leg = 1  # BULLISH_LEG — formando fundo
+        legs[i] = current_leg
+
+    swing_high_level = None
+    swing_low_level = None
+    swing_high_crossed = False
+    swing_low_crossed = False
+    bias = 'neutro'
+
+    for i in range(swing_size + 1, n):
+        if legs[i] != legs[i - 1]:
+            idx_pivot = i - swing_size
+            if idx_pivot < 0:
+                continue
+            if legs[i] == 1:
+                swing_low_level = candles[idx_pivot]['l']
+                swing_low_crossed = False
+            else:
+                swing_high_level = candles[idx_pivot]['h']
+                swing_high_crossed = False
+
+        c = candles[i]
+        if swing_high_level is not None and not swing_high_crossed and c['c'] > swing_high_level:
+            bias = 'alta'
+            swing_high_crossed = True
+        if swing_low_level is not None and not swing_low_crossed and c['c'] < swing_low_level:
+            bias = 'baixa'
+            swing_low_crossed = True
+
+    return bias
+
+
+def compute_premium_discount(exec_candles, lookback=ZONA_MOVEL_LOOKBACK):
+    """
+    NOVO — réplica simplificada do `drawPremiumDiscountZones` do
+    LuxAlgo: usa o range recente (mesma janela Donchian do
+    `compute_zona_movel`) e divide ao meio (Equilibrium). Acima do
+    meio = Premium (zona de venda), abaixo = Discount (zona de compra).
+    Regra de ouro: nunca compra em Premium, nunca vende em Discount.
+    """
+    donch = compute_zona_movel(exec_candles, lookback)
+    if not donch:
+        return None
+    equilibrium = (donch['top'] + donch['bottom']) / 2
+    return {'top': donch['top'], 'bottom': donch['bottom'], 'equilibrium': equilibrium}
+
+
 def detect_exec_swings(exec_candles, lookback=SWING_LOOKBACK):
     swings = []
     for i in range(lookback, len(exec_candles) - lookback):
@@ -1598,8 +1731,8 @@ def process_pair_scalp(db_file, pair, d1_candles, exec_candles, exec_tf_label, s
     resultado['bias_d1'] = bias_d1
     resultado['bias_h4'] = bias_h4
 
-    contra_alta = choch['direcao'] == 'alta' and (bias_d1 == 'baixa' or bias_h4 == 'baixa')
-    contra_baixa = choch['direcao'] == 'baixa' and (bias_d1 == 'alta' or bias_h4 == 'alta')
+    contra_alta = choch['direcao'] == 'alta' and (bias_d1 == 'baixa' and bias_h4 == 'baixa')  # afrouxado: só bloqueia se D1 E H4 concordarem contra
+    contra_baixa = choch['direcao'] == 'baixa' and (bias_d1 == 'alta' and bias_h4 == 'alta')  # afrouxado: só bloqueia se D1 E H4 concordarem contra
     if contra_alta or contra_baixa:
         resultado['motivo'] = (
             f"CHoCH confirmado, mas contra o bias dos timeframes maiores "
@@ -1851,8 +1984,8 @@ def process_pair_scalp_filtros_shadow(db_file, pair, d1_candles, exec_candles, e
 
     bias_d1 = compute_bias_from_swings(d1_candles)
     bias_h4 = compute_bias_from_swings(h4_candles) if h4_candles else 'neutro'
-    contra_alta = choch['direcao'] == 'alta' and (bias_d1 == 'baixa' or bias_h4 == 'baixa')
-    contra_baixa = choch['direcao'] == 'baixa' and (bias_d1 == 'alta' or bias_h4 == 'alta')
+    contra_alta = choch['direcao'] == 'alta' and (bias_d1 == 'baixa' and bias_h4 == 'baixa')  # afrouxado: só bloqueia se D1 E H4 concordarem contra
+    contra_baixa = choch['direcao'] == 'baixa' and (bias_d1 == 'alta' and bias_h4 == 'alta')  # afrouxado: só bloqueia se D1 E H4 concordarem contra
     if contra_alta or contra_baixa:
         filtros_bloqueados.append(f'bias_maior_contra(D1={bias_d1},H4={bias_h4})')
 
@@ -2084,8 +2217,8 @@ def process_pair_scalp_continuacao(db_file, pair, d1_candles, exec_candles, exec
     resultado['bias_d1'] = bias_d1
     resultado['bias_h4'] = bias_h4
 
-    contra_alta = bos['direcao'] == 'alta' and (bias_d1 == 'baixa' or bias_h4 == 'baixa')
-    contra_baixa = bos['direcao'] == 'baixa' and (bias_d1 == 'alta' or bias_h4 == 'alta')
+    contra_alta = bos['direcao'] == 'alta' and (bias_d1 == 'baixa' and bias_h4 == 'baixa')  # afrouxado: só bloqueia se D1 E H4 concordarem contra
+    contra_baixa = bos['direcao'] == 'baixa' and (bias_d1 == 'alta' and bias_h4 == 'alta')  # afrouxado: só bloqueia se D1 E H4 concordarem contra
     if contra_alta or contra_baixa:
         resultado['motivo'] = (
             f"BOS confirmado, mas contra o bias dos timeframes maiores "
@@ -2492,6 +2625,238 @@ def process_pair_scalp_rapido(db_file, pair, d1_candles, exec_candles, exec_tf_l
     return resultado
 
 
+CASCATA_COOLDOWN_SECONDS = 30 * 60  # 30min — meio-termo entre o Normal (45min) e o Rápido (5min)
+
+
+def _save_cascata_signal(db_file, pair, exec_tf_label, resultado, alerted):
+    try:
+        signal_id = f"cascata_{pair}_{int(time.time()*1000)}"
+        with sqlite3.connect(db_file) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO scalp_cascata_signal_state
+                    (id, pair, created_at, exec_tf, direcao, entry, sl, tp,
+                     bias_semanal, bias_d1, bias_h4, bias_h1, evento_tipo, alerted)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                signal_id, pair, int(time.time()), exec_tf_label,
+                resultado['direcao'], resultado['entry'], resultado['sl'], resultado['tp'],
+                resultado.get('bias_semanal'), resultado.get('bias_d1'),
+                resultado.get('bias_h4'), resultado.get('bias_h1'),
+                resultado.get('evento_tipo'), 1 if alerted else 0,
+            ))
+            conn.commit()
+    except Exception as e:
+        print(f"[scalp_engine] erro ao salvar signal cascata de {pair}: {e}")
+
+
+def process_pair_cascata_smc(db_file, pair, w_candles, d1_candles, h4_candles, h1_candles,
+                              exec_candles, exec_tf_label, send_telegram_fn=None):
+    """
+    NOVO — CASCATA SMC COMPLETA. Pedido explícito do Juninho, desenhado
+    junto ao longo da conversa, usando a lógica REAL de estrutura do
+    LuxAlgo (código-fonte real, não aproximação) pro cálculo de bias:
+
+    1. Bias de Semanal, D1, H4 e H1 — calculados via
+       `compute_lux_structure_bias` (réplica da função leg() +
+       swing pivot + cruzamento do LuxAlgo). Só prossegue se os 4
+       baterem na MESMA direção — nenhum neutro conta como "alinhado",
+       e um único timeframe discordando já descarta o ciclo inteiro.
+    2. Sweep na zona diária móvel (`compute_zona_diaria_movel` — mesma
+       lógica exata do Pine Script "Zonas Diarias Moveis" do Juninho:
+       pavio de cima/baixo do candle D1 anterior) — só conta se a
+       direção do sweep bater com o macro já validado no passo 1.
+    3. Confirmação = CHoCH OU BOS no TF de execução, o que vier
+       PRIMEIRO (a mesma pergunta que o Juninho fez: "ou continua a
+       subida ou reverte o preço, a confirmação vem da quebra de
+       estrutura, seja ela qual for") — mas só conta se a direção dessa
+       quebra também bater com o macro.
+    4. Regra de ouro: preço tem que estar em DISCOUNT pra comprar ou em
+       PREMIUM pra vender (`compute_premium_discount`) — nunca compra
+       no topo, nunca vende no fundo, mesmo com tudo mais alinhado.
+
+    Diferente do Modo 5 (Scalp Rápido), que pode furar esse alinhamento
+    de timeframes maiores desde que alinhe com os TFs MENORES (já
+    validado antes) — a Cascata exige o alinhamento macro completo,
+    sem exceção.
+
+    `w_candles` = candles Semanais. Se vier None (API ainda não busca
+    Semanal), o bias semanal vira 'neutro' automaticamente e a cascata
+    nunca vai alinhar — funciona, só nunca dispara até isso ser
+    resolvido no lado do app.py (busca de candles Semanais).
+    """
+    resultado = {
+        'pair': pair, 'exec_tf': exec_tf_label, 'modo': 'cascata_smc',
+        'sinal': False, 'direcao': None, 'entry': None, 'sl': None, 'tp': None,
+        'bias_semanal': None, 'bias_d1': None, 'bias_h4': None, 'bias_h1': None,
+        'evento_tipo': None, 'motivo': None, 'em_cooldown': False,
+    }
+
+    bias_w = compute_lux_structure_bias(w_candles) if w_candles else 'neutro'
+    bias_d1 = compute_lux_structure_bias(d1_candles)
+    bias_h4 = compute_lux_structure_bias(h4_candles) if h4_candles else 'neutro'
+    bias_h1 = compute_lux_structure_bias(h1_candles) if h1_candles else 'neutro'
+    resultado.update({
+        'bias_semanal': bias_w, 'bias_d1': bias_d1, 'bias_h4': bias_h4, 'bias_h1': bias_h1,
+    })
+
+    biases = [bias_w, bias_d1, bias_h4, bias_h1]
+    if 'neutro' in biases or len(set(biases)) != 1:
+        resultado['motivo'] = (
+            f"timeframes maiores não alinhados "
+            f"(Semanal={bias_w}, D1={bias_d1}, H4={bias_h4}, H1={bias_h1})"
+        )
+        return resultado
+
+    direcao_macro = biases[0]
+
+    zona_diaria = compute_zona_diaria_movel(d1_candles)
+    if not zona_diaria:
+        resultado['motivo'] = 'timeframes alinhados, mas sem candle D1 anterior disponível'
+        return resultado
+
+    now = int(time.time())
+
+    # ── NOVO: memória de sweep, mesmo padrão dos Modos 1/2 (achado em
+    # teste: sem isso, o sweep "some" assim que os candles de
+    # confirmação empurram ele pra fora da janela de 10 candles do
+    # detect_sweep_zona_diaria_movel). Tenta achar um sweep FRESCO nos
+    # candles recentes; se não achar, reaproveita o salvo do ciclo
+    # anterior (se a zona ainda for a mesma e não tiver passado tempo
+    # demais sem confirmar CHoCH/BOS). ──
+    fresh_sweep = detect_sweep_zona_diaria_movel(exec_candles, zona_diaria)
+
+    # zona "genérica" pra comparação de validade — usa a zona do lado
+    # que o sweep fresco indicou, ou (se não achou fresco) qualquer uma
+    # das duas zonas salvas — a checagem de validade compara contra o
+    # que estiver salvo mesmo.
+    zona_para_validar = None
+    if fresh_sweep:
+        zona_para_validar = (
+            zona_diaria['resistencia'] if fresh_sweep['tipo_zona'] == 'resistencia' else zona_diaria['suporte']
+        )
+    else:
+        zona_para_validar = zona_diaria['suporte']  # fallback neutro só pra checar validade do salvo
+
+    saved = _load_saved_state(db_file, pair, table='scalp_cascata_zone_state')
+    saved_valido = _sweep_ainda_valido(saved, zona_para_validar, now)
+
+    sweep = None
+    if fresh_sweep and (not saved_valido or fresh_sweep['t'] >= saved.get('sweep_ts', 0)):
+        sweep = {
+            'index': fresh_sweep['index'], 'lado': fresh_sweep['lado'],
+            'nivel': fresh_sweep['nivel'], 't': fresh_sweep['t'],
+            'tipo_zona': fresh_sweep['tipo_zona'],
+        }
+    elif saved_valido:
+        sweep = {
+            't': saved['sweep_ts'], 'nivel': saved['sweep_nivel'], 'lado': saved['sweep_lado'],
+            'tipo_zona': 'resistencia' if saved['sweep_lado'] == 'alta' else 'suporte',
+            'index': len(exec_candles) - 1,  # aproximação — usado só como referência de tempo pro CHoCH/BOS
+        }
+
+    if not sweep:
+        resultado['motivo'] = f'timeframes alinhados em {direcao_macro}, mas sem sweep na zona diária ainda'
+        # salva a zona mesmo sem sweep, pra manter rastro do ciclo
+        _save_zone_state(db_file, pair, {'top': zona_para_validar['top'], 'bottom': zona_para_validar['bottom']},
+                          'zona', now, table='scalp_cascata_zone_state')
+        return resultado
+
+    # salva o sweep (fresco ou reaproveitado) pro próximo ciclo poder
+    # reencontrar mesmo se ele sair da janela de candles recentes
+    zona_do_sweep = zona_diaria['resistencia'] if sweep['tipo_zona'] == 'resistencia' else zona_diaria['suporte']
+    _save_zone_state(
+        db_file, pair, {'top': zona_do_sweep['top'], 'bottom': zona_do_sweep['bottom']},
+        'sweep', now, sweep=sweep, table='scalp_cascata_zone_state',
+    )
+
+    sweep_direcao = 'alta' if sweep['lado'] == 'baixa' else 'baixa'
+    if sweep_direcao != direcao_macro:
+        resultado['motivo'] = (
+            f"sweep aponta {sweep_direcao}, mas o macro alinhado é {direcao_macro} "
+            f"— descartado (sweep contra o bias maior)"
+        )
+        return resultado
+
+    choch = detect_choch_after_sweep(exec_candles, sweep)
+    bos = detect_bos_continuation_after_sweep(exec_candles, sweep)
+    evento = None
+    evento_tipo = None
+    if choch and bos:
+        if choch['t'] <= bos['t']:
+            evento, evento_tipo = choch, 'CHoCH'
+        else:
+            evento, evento_tipo = bos, 'BOS'
+    elif choch:
+        evento, evento_tipo = choch, 'CHoCH'
+    elif bos:
+        evento, evento_tipo = bos, 'BOS'
+
+    if not evento:
+        resultado['motivo'] = f'sweep alinhado com o macro ({direcao_macro}), mas sem CHoCH nem BOS confirmado ainda'
+        return resultado
+
+    if evento['direcao'] != direcao_macro:
+        resultado['motivo'] = (
+            f"{evento_tipo} confirmou {evento['direcao']}, contra o macro {direcao_macro} — descartado"
+        )
+        return resultado
+
+    resultado['evento_tipo'] = evento_tipo
+
+    preco_atual = exec_candles[-1]['c']
+    pd_zone = compute_premium_discount(exec_candles)
+    if pd_zone:
+        if direcao_macro == 'alta' and preco_atual > pd_zone['equilibrium']:
+            resultado['motivo'] = (
+                f"{evento_tipo} ok e alinhado, mas preço está em PREMIUM "
+                f"({round(preco_atual,6)} > equilíbrio {round(pd_zone['equilibrium'],6)}) — não compra no topo"
+            )
+            return resultado
+        if direcao_macro == 'baixa' and preco_atual < pd_zone['equilibrium']:
+            resultado['motivo'] = (
+                f"{evento_tipo} ok e alinhado, mas preço está em DISCOUNT "
+                f"({round(preco_atual,6)} < equilíbrio {round(pd_zone['equilibrium'],6)}) — não vende no fundo"
+            )
+            return resultado
+
+    entry = preco_atual
+    sl = aplicar_buffer_stop(sweep['nivel'], direcao_macro)
+    risco = abs(entry - sl)
+    tp = entry + risco * 2 if direcao_macro == 'alta' else entry - risco * 2
+
+    resultado.update({
+        'sinal': True,
+        'direcao': direcao_macro,
+        'entry': round(entry, 6),
+        'sl': round(sl, 6),
+        'tp': round(tp, 6),
+        'motivo': 'entrada_confirmada',
+    })
+
+    segundos_desde = _segundos_desde_ultimo_alerta(db_file, 'scalp_cascata_signal_state', pair)
+    em_cooldown = segundos_desde is not None and segundos_desde < CASCATA_COOLDOWN_SECONDS
+    resultado['em_cooldown'] = em_cooldown
+
+    _save_cascata_signal(db_file, pair, exec_tf_label, resultado, alerted=not em_cooldown)
+
+    if send_telegram_fn and not em_cooldown:
+        arrow = '📈' if direcao_macro == 'alta' else '📉'
+        label = 'LONG' if direcao_macro == 'alta' else 'SHORT'
+        msg = f"🌊 <b>Cascata SMC — {pair}</b>\n\n"
+        msg += f"{arrow} <b>{label}</b> | TF execução: {exec_tf_label}\n"
+        msg += f"📊 Alinhamento: Semanal={bias_w} | D1={bias_d1} | H4={bias_h4} | H1={bias_h1}\n"
+        msg += f"🔨 Confirmação: {evento_tipo}\n"
+        msg += f"📍 Entrada: {resultado['entry']}\n🛑 Stop: {resultado['sl']}\n✅ TP (RR 2:1): {resultado['tp']}\n\n"
+        msg += "<b>Todos os timeframes maiores alinhados — sweep na zona diária + confirmação de estrutura.</b>"
+        send_telegram_fn(msg)
+    elif em_cooldown:
+        restante_min = (CASCATA_COOLDOWN_SECONDS - segundos_desde) // 60
+        resultado['motivo'] = f'entrada_confirmada, mas em cooldown ({restante_min}min restantes)'
+
+    return resultado
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # MODO "REJEIÇÃO ANTECIPADA v2" — sem CHoCH, baseado em pavio varrendo
 # liquidez antiga real + RSI extremo. Regra fechada (tudo ou nada).
@@ -2760,8 +3125,8 @@ def process_pair_scalp_antecipado_v2(db_file, pair, d1_candles, exec_candles, ex
     resultado['bias_d1'] = bias_d1
     resultado['bias_h4'] = bias_h4
 
-    contra_alta = direcao == 'alta' and (bias_d1 == 'baixa' or bias_h4 == 'baixa')
-    contra_baixa = direcao == 'baixa' and (bias_d1 == 'alta' or bias_h4 == 'alta')
+    contra_alta = direcao == 'alta' and (bias_d1 == 'baixa' and bias_h4 == 'baixa')  # afrouxado: só bloqueia se D1 E H4 concordarem contra
+    contra_baixa = direcao == 'baixa' and (bias_d1 == 'alta' and bias_h4 == 'alta')  # afrouxado: só bloqueia se D1 E H4 concordarem contra
     if contra_alta or contra_baixa:
         resultado['rsi'] = round(rsi_val, 1)
         resultado['motivo'] = (

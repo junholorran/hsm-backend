@@ -625,6 +625,126 @@ def compute_premium_discount(exec_candles, lookback=ZONA_MOVEL_LOOKBACK):
     return {'top': donch['top'], 'bottom': donch['bottom'], 'equilibrium': equilibrium}
 
 
+# ═══════════════════════════════════════════════════════════════════════
+# FUNÇÕES DE DEBUG — pedido explícito: "onde está FVG, OB, liquidez,
+# escrito numa tabela à parte pra ver se bate certo". Diferente das
+# funções de FVG/OB usadas nos outros modos (que só procuram FVG/OB
+# formado por UM evento específico de CHoCH/BOS), essas aqui varrem
+# TODOS os candles recentes e listam TUDO que está aberto/ativo agora,
+# pra comparação visual direta com o TradingView. Não são usadas em
+# nenhum modo de sinal — são só pra conferência manual.
+# ═══════════════════════════════════════════════════════════════════════
+
+def find_open_fvgs(exec_candles, lookback=100, min_gap_pct=MIN_FVG_GAP_PCT):
+    """
+    Varre os últimos `lookback` candles procurando TODAS as FVGs
+    (Fair Value Gaps) — bullish e bearish — que ainda NÃO foram
+    preenchidas até agora. Mesma lógica geométrica de 3 candles do
+    LuxAlgo (`drawFairValueGaps`), mas sem o threshold automático
+    completo deles — usa `MIN_FVG_GAP_PCT` (0.05%) como filtro de
+    tamanho mínimo, igual os outros modos já usam.
+    """
+    candles = exec_candles[-lookback:] if len(exec_candles) > lookback else exec_candles
+    abertas = []
+    n = len(candles)
+    for i in range(1, n - 1):
+        prev, nxt = candles[i - 1], candles[i + 1]
+        if nxt['l'] > prev['h']:
+            gap_pct = (nxt['l'] - prev['h']) / prev['h'] if prev['h'] else 0
+            if gap_pct >= min_gap_pct:
+                top, bottom = nxt['l'], prev['h']
+                preenchida = any(c['l'] <= bottom for c in candles[i + 2:])
+                if not preenchida:
+                    abertas.append({
+                        'tipo': 'FVG_bullish', 'top': round(top, 6), 'bottom': round(bottom, 6),
+                        't': candles[i]['t'], 'gap_pct': round(gap_pct * 100, 4),
+                    })
+        if nxt['h'] < prev['l']:
+            gap_pct = (prev['l'] - nxt['h']) / prev['l'] if prev['l'] else 0
+            if gap_pct >= min_gap_pct:
+                top, bottom = prev['l'], nxt['h']
+                preenchida = any(c['h'] >= top for c in candles[i + 2:])
+                if not preenchida:
+                    abertas.append({
+                        'tipo': 'FVG_bearish', 'top': round(top, 6), 'bottom': round(bottom, 6),
+                        't': candles[i]['t'], 'gap_pct': round(gap_pct * 100, 4),
+                    })
+    return abertas
+
+
+def find_order_blocks(exec_candles, lookback=100):
+    """
+    Varre os últimos `lookback` candles procurando Order Blocks: a
+    última vela de cor OPOSTA antes de um candle de impulso (corpo
+    pelo menos 1.5x maior que a média recente) — mesmo conceito do
+    LuxAlgo, simplificado (sem separar interno/swing, sem filtro de
+    volatilidade por ATR). Retorna só os 10 mais recentes.
+    """
+    candles = exec_candles[-lookback:] if len(exec_candles) > lookback else exec_candles
+    obs = []
+    corpos = [abs(c['c'] - c['o']) for c in candles]
+    media_corpo = sum(corpos) / len(corpos) if corpos else 0
+    for i in range(len(candles) - 1):
+        c, nxt = candles[i], candles[i + 1]
+        corpo_nxt = abs(nxt['c'] - nxt['o'])
+        if media_corpo == 0 or corpo_nxt < media_corpo * 1.5:
+            continue
+        up_c = c['c'] >= c['o']
+        up_nxt = nxt['c'] >= nxt['o']
+        if up_nxt and not up_c:
+            obs.append({'tipo': 'OB_bullish', 'top': round(c['o'], 6), 'bottom': round(c['c'], 6), 't': c['t']})
+        elif not up_nxt and up_c:
+            obs.append({'tipo': 'OB_bearish', 'top': round(c['c'], 6), 'bottom': round(c['o'], 6), 't': c['t']})
+    return obs[-10:]
+
+
+def find_equal_highs_lows(candles, length=3, atr_mult=0.1):
+    """
+    Réplica da lógica EQH/EQL real do LuxAlgo: pivôs confirmados com
+    `length` candles (padrão 3, igual o valor real do LuxAlgo visto
+    nas configurações), agrupados como "iguais" se a diferença entre
+    eles for menor que `atr_mult` (0.1, também valor real do LuxAlgo)
+    vezes o ATR atual — não é % fixo, é proporcional à volatilidade
+    real do momento.
+    """
+    atr_series = compute_atr(candles, 14)
+    atr_atual = next((v for v in reversed(atr_series) if v is not None), None)
+    if not atr_atual:
+        return []
+    swings = detect_exec_swings(candles, lookback=length)
+    grupos = []
+    for s in swings:
+        colocado = False
+        for g in grupos:
+            if s['tipo'] == g['tipo'] and abs(s['valor'] - g['nivel']) < atr_mult * atr_atual:
+                g['pontos'].append(s['valor'])
+                g['nivel'] = sum(g['pontos']) / len(g['pontos'])
+                colocado = True
+                break
+        if not colocado:
+            grupos.append({'tipo': s['tipo'], 'nivel': s['valor'], 'pontos': [s['valor']]})
+    return [
+        {'tipo': 'EQH' if g['tipo'] == 'high' else 'EQL', 'nivel': round(g['nivel'], 6), 'toques': len(g['pontos'])}
+        for g in grupos if len(g['pontos']) >= 2
+    ]
+
+
+def debug_zonas_completo(d1_candles, exec_candles):
+    """
+    NOVO — pedido explícito: tudo numa tabela só, pra comparar com o
+    TradingView. Junta zona diária (suporte/resistência), Premium/
+    Discount, FVGs abertas, Order Blocks recentes e Liquidez (EQH/EQL)
+    num único dict. Não participa de nenhum sinal — é só conferência.
+    """
+    return {
+        'zona_diaria': compute_zona_diaria_movel(d1_candles),
+        'premium_discount': compute_premium_discount(exec_candles),
+        'fvgs_abertas': find_open_fvgs(exec_candles),
+        'order_blocks_recentes': find_order_blocks(exec_candles),
+        'liquidez_eqh_eql': find_equal_highs_lows(exec_candles),
+    }
+
+
 def detect_exec_swings(exec_candles, lookback=SWING_LOOKBACK):
     swings = []
     for i in range(lookback, len(exec_candles) - lookback):
@@ -2690,7 +2810,26 @@ def process_pair_cascata_smc(db_file, pair, w_candles, d1_candles, h4_candles, h
         'sinal': False, 'direcao': None, 'entry': None, 'sl': None, 'tp': None,
         'bias_semanal': None, 'bias_d1': None, 'bias_h4': None, 'bias_h1': None,
         'evento_tipo': None, 'motivo': None, 'em_cooldown': False,
+        # ── NOVO: campos no MESMO formato visual do Modo 1 antigo, pra
+        # o gráfico do app (que lê esses nomes de campo específicos)
+        # continuar funcionando sem precisar mexer no frontend. Achado
+        # depois de tirar o Modo 1 do ciclo: sem esses campos, o
+        # gráfico ficava sem dado nenhum pra desenhar. ──
+        'zona_top': None, 'zona_bottom': None, 'zona_ativa': False,
+        'sweep_nivel': None, 'sweep_lado': None,
+        'choch_nivel': None, 'choch_direcao': None,
+        'entry_zone_top': None, 'entry_zone_bottom': None, 'entry_zone_tipo': None,
+        'score': 0, 'na_killzone': False, 'killzone_nome': None, 'indicadores': None,
     }
+
+    try:
+        resultado['indicadores'] = compute_technical_indicators(exec_candles)
+    except Exception as e:
+        print(f"[scalp_engine] erro ao calcular indicadores (cascata) de {pair}: {e}")
+
+    na_killzone, killzone_nome = is_in_killzone()
+    resultado['na_killzone'] = na_killzone
+    resultado['killzone_nome'] = killzone_nome
 
     bias_w = compute_lux_structure_bias(w_candles) if w_candles else 'neutro'
     bias_d1 = compute_lux_structure_bias(d1_candles)
@@ -2714,6 +2853,15 @@ def process_pair_cascata_smc(db_file, pair, w_candles, d1_candles, h4_candles, h
     if not zona_diaria:
         resultado['motivo'] = 'timeframes alinhados, mas sem candle D1 anterior disponível'
         return resultado
+
+    # ── zona visual: mostra a zona relevante pro lado que o macro
+    # espera (suporte se a expectativa é comprar/'alta', resistência se
+    # a expectativa é vender/'baixa') — assim o gráfico já mostra ALGO
+    # assim que os 4 timeframes alinharem, mesmo antes do sweep. ──
+    zona_visual = zona_diaria['suporte'] if direcao_macro == 'alta' else zona_diaria['resistencia']
+    resultado['zona_top'] = round(zona_visual['top'], 6)
+    resultado['zona_bottom'] = round(zona_visual['bottom'], 6)
+    resultado['zona_ativa'] = True
 
     now = int(time.time())
 
@@ -2770,6 +2918,12 @@ def process_pair_cascata_smc(db_file, pair, w_candles, d1_candles, h4_candles, h
         'sweep', now, sweep=sweep, table='scalp_cascata_zone_state',
     )
 
+    # ── preenche o sweep visual assim que achado, independente de bater
+    # ou não com o macro (assim o gráfico mostra o sweep real que
+    # aconteceu, mesmo quando descartado por não alinhar) ──
+    resultado['sweep_nivel'] = round(sweep['nivel'], 6)
+    resultado['sweep_lado'] = sweep['lado']
+
     sweep_direcao = 'alta' if sweep['lado'] == 'baixa' else 'baixa'
     if sweep_direcao != direcao_macro:
         resultado['motivo'] = (
@@ -2803,6 +2957,11 @@ def process_pair_cascata_smc(db_file, pair, w_candles, d1_candles, h4_candles, h
         return resultado
 
     resultado['evento_tipo'] = evento_tipo
+    # ── campo visual (mesmo nome que os outros modos usam, mesmo sendo
+    # CHoCH ou BOS aqui — o gráfico só desenha uma linha de "quebra de
+    # estrutura", não precisa saber qual dos dois tipos foi) ──
+    resultado['choch_nivel'] = round(evento['nivel'], 6)
+    resultado['choch_direcao'] = evento['direcao']
 
     preco_atual = exec_candles[-1]['c']
     pd_zone = compute_premium_discount(exec_candles)
@@ -2832,6 +2991,7 @@ def process_pair_cascata_smc(db_file, pair, w_candles, d1_candles, h4_candles, h
         'sl': round(sl, 6),
         'tp': round(tp, 6),
         'motivo': 'entrada_confirmada',
+        'score': 100,  # cascata é tudo-ou-nada (igual Modo 5) — score só existe pra manter formato visual compatível
     })
 
     segundos_desde = _segundos_desde_ultimo_alerta(db_file, 'scalp_cascata_signal_state', pair)

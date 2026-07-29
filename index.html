@@ -562,6 +562,93 @@ body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-h
   <div id="scalpFeedList"><div class="signals-empty">A carregar...</div></div>
 </div>
 
+<!-- NOVO: card com gráfico REAL do modo Rejeição Antecipada v2 —
+     candle real (TF de execução), com liquidez antiga varrida + RSI
+     extremo + entrada/SL/TP desenhados a partir do que o
+     /scalp_antecipado/status devolve de verdade. -->
+<div class="section">
+  <div class="section-title">⚠️ Rejeição Antecipada v2</div>
+  <div class="result-summary-card" id="antecipadoChartCard" style="margin-bottom:12px;">
+    <div class="rsc-header">
+      <div>
+        <div class="rsc-pair" id="antecipadoChartPairLabel">BTCUSDT</div>
+        <div class="rsc-tfs" id="antecipadoChartSub">A carregar...</div>
+      </div>
+      <div class="rsc-right">
+        <div class="rsc-score score-mid" id="antecipadoChartRsi">RSI —</div>
+      </div>
+    </div>
+    <div class="rsc-body">
+      <div style="background:#0a0a0f;border-radius:8px;overflow:hidden;margin-bottom:10px;">
+        <canvas id="antecipadoChartCanvas" width="900" height="360" style="width:100%;display:block;"></canvas>
+      </div>
+      <div class="rsc-levels">
+        <div class="rsc-level"><div class="rsc-level-label">ENTRADA</div><div class="rsc-level-val" id="antecipadoChartEntry">—</div></div>
+        <div class="rsc-level"><div class="rsc-level-label">STOP</div><div class="rsc-level-val red" id="antecipadoChartSl">—</div></div>
+        <div class="rsc-level"><div class="rsc-level-label">TP</div><div class="rsc-level-val green" id="antecipadoChartTp">—</div></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- NOVO: card com gráfico REAL do modo Confluência de Indicadores —
+     candle real (TF de execução), votos dos ~11 indicadores técnicos
+     e entrada/SL/TP desenhados a partir do /scalp_indicadores/status. -->
+<div class="section">
+  <div class="section-title">📊 Confluência de Indicadores</div>
+  <div class="result-summary-card" id="indicadoresChartCard" style="margin-bottom:12px;">
+    <div class="rsc-header">
+      <div>
+        <div class="rsc-pair" id="indicadoresChartPairLabel">BTCUSDT</div>
+        <div class="rsc-tfs" id="indicadoresChartSub">A carregar...</div>
+      </div>
+      <div class="rsc-right">
+        <div class="rsc-score score-mid" id="indicadoresChartScore">0/100</div>
+      </div>
+    </div>
+    <div class="rsc-body">
+      <div style="background:#0a0a0f;border-radius:8px;overflow:hidden;margin-bottom:10px;">
+        <canvas id="indicadoresChartCanvas" width="900" height="360" style="width:100%;display:block;"></canvas>
+      </div>
+      <div class="rsc-levels">
+        <div class="rsc-level"><div class="rsc-level-label">ENTRADA</div><div class="rsc-level-val" id="indicadoresChartEntry">—</div></div>
+        <div class="rsc-level"><div class="rsc-level-label">STOP</div><div class="rsc-level-val red" id="indicadoresChartSl">—</div></div>
+        <div class="rsc-level"><div class="rsc-level-label">TP</div><div class="rsc-level-val green" id="indicadoresChartTp">—</div></div>
+      </div>
+      <div class="pair-selector-label" style="margin-top:8px;margin-bottom:0;" id="indicadoresChartVotos"></div>
+    </div>
+  </div>
+</div>
+
+<!-- NOVO: card com gráfico REAL do modo Scalp Rápido — Liquidez Forte —
+     candle real (TF de execução), com resistência/suporte de ontem
+     (zona diária móvel) + região móvel Donchian + entrada/SL/TP
+     desenhados a partir do /scalp_rapido/status. -->
+<div class="section">
+  <div class="section-title">⚡ Scalp Rápido — Liquidez Forte</div>
+  <div class="result-summary-card" id="rapidoChartCard" style="margin-bottom:12px;">
+    <div class="rsc-header">
+      <div>
+        <div class="rsc-pair" id="rapidoChartPairLabel">BTCUSDT</div>
+        <div class="rsc-tfs" id="rapidoChartSub">A carregar...</div>
+      </div>
+      <div class="rsc-right">
+        <div class="rsc-score score-mid" id="rapidoChartRsi">RSI —</div>
+      </div>
+    </div>
+    <div class="rsc-body">
+      <div style="background:#0a0a0f;border-radius:8px;overflow:hidden;margin-bottom:10px;">
+        <canvas id="rapidoChartCanvas" width="900" height="360" style="width:100%;display:block;"></canvas>
+      </div>
+      <div class="rsc-levels">
+        <div class="rsc-level"><div class="rsc-level-label">ENTRADA</div><div class="rsc-level-val" id="rapidoChartEntry">—</div></div>
+        <div class="rsc-level"><div class="rsc-level-label">STOP</div><div class="rsc-level-val red" id="rapidoChartSl">—</div></div>
+        <div class="rsc-level"><div class="rsc-level-label">TP</div><div class="rsc-level-val green" id="rapidoChartTp">—</div></div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- NOVO: Feed de Ciclos — todo ciclo do scheduler, mesmo os fracos,
      separado do journal, pra ver histórico completo e debugar Telegram -->
 <div class="section">
@@ -3802,6 +3889,286 @@ async function loadScalpDetailCard(){
 
 setTimeout(loadScalpDetailCard, 1600);
 setInterval(loadScalpDetailCard, 15000);
+
+// ═══════════════════════════════════════════════════════════════════
+// NOVO: cards dos outros 3 modos ativos (Antecipado v2, Confluência de
+// Indicadores, Scalp Rápido) — mesmo padrão visual do card da Cascata
+// (candle real + zonas/níveis desenhados a partir do que o backend
+// devolve de verdade), só trocando os campos que cada modo usa.
+// ═══════════════════════════════════════════════════════════════════
+
+function derivarFaseAntecipado(result){
+  if(!result || !result.motivo) return {texto:'Sem ciclo ainda', cor:'var(--muted)'};
+  const r = result;
+  const m = r.motivo;
+  if(m === 'preço fora de qualquer banda D1 válida')
+    return {texto:'Fora de zona D1', cor:'var(--muted)'};
+  if(m === 'sem sweep de liquidez antiga confirmado')
+    return {texto:'Na zona D1 — aguardando sweep de liquidez antiga real', cor:'#f0c040'};
+  if(m === 'RSI indisponível')
+    return {texto:'Sweep ok, mas RSI indisponível', cor:'var(--muted)'};
+  if(m.indexOf('sweep ok mas RSI não extremo') === 0)
+    return {texto:m, cor:'#f0c040'};
+  if(m.indexOf('sinal descartado') >= 0)
+    return {texto:m, cor:'var(--muted)'};
+  if(m.indexOf('entrada_confirmada, mas em cooldown') === 0)
+    return {texto:'🔥 Sinal confirmado — '+(r.direcao==='alta'?'LONG':'SHORT')+' — aguardando cooldown', cor:'#58a6ff'};
+  if(m === 'entrada_confirmada')
+    return {texto:'🔥 SINAL ATIVO — '+(r.direcao==='alta'?'LONG':'SHORT')+(r.divergencia_rsi?' + divergência RSI':''), cor:'#3fb950'};
+  return {texto:m, cor:'var(--muted)'};
+}
+
+function derivarFaseIndicadores(result){
+  if(!result || !result.motivo) return {texto:'Sem ciclo ainda', cor:'var(--muted)'};
+  const m = result.motivo;
+  if(m.indexOf('dados insuficientes') === 0) return {texto:m, cor:'var(--muted)'};
+  if(m.indexOf('sem maioria suficiente') === 0) return {texto:m, cor:'var(--muted)'};
+  if(m.indexOf('sem estrutura nem ATR') >= 0 || m.indexOf('sem stop confiável') >= 0) return {texto:m, cor:'var(--muted)'};
+  if(m.indexOf('em cooldown') >= 0) return {texto:'🔥 '+m, cor:'#58a6ff'};
+  if(m.indexOf('indicadores concordando') >= 0) return {texto:'🔥 SINAL ATIVO — '+m, cor:'#3fb950'};
+  return {texto:m, cor:'var(--muted)'};
+}
+
+function derivarFaseRapido(result){
+  if(!result || !result.motivo) return {texto:'Sem ciclo ainda', cor:'var(--muted)'};
+  const m = result.motivo;
+  if(m === 'sem candle D1 anterior disponível ainda') return {texto:m, cor:'var(--muted)'};
+  if(m === 'sem sweep na resistência ou suporte de ontem ainda') return {texto:'Aguardando sweep na zona diária móvel', cor:'#f0c040'};
+  if(m.indexOf('candle indeciso') >= 0) return {texto:m, cor:'#f0c040'};
+  if(m.indexOf('lateralizado o suficiente') >= 0) return {texto:m, cor:'var(--muted)'};
+  if(m.indexOf('RSI não está no talo') >= 0) return {texto:m, cor:'#f0c040'};
+  if(m.indexOf('em cooldown') >= 0) return {texto:'🔥 Sinal confirmado — aguardando cooldown', cor:'#58a6ff'};
+  if(m === 'entrada_confirmada') return {texto:'🔥 SINAL ATIVO — '+(result.direcao==='alta'?'LONG':'SHORT'), cor:'#3fb950'};
+  return {texto:m, cor:'var(--muted)'};
+}
+
+// desenho genérico: candle real + linhas de entrada/stop/tp + até 2
+// zonas retangulares opcionais (usado pelos 3 modos, cada um passa as
+// zonas que fizer sentido pro seu conceito)
+function drawGenericLevelsChart(canvasId, candles, levels, zonas){
+  const canvas = document.getElementById(canvasId);
+  if(!canvas || !candles || candles.length < 5) return;
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+  ctx.clearRect(0,0,W,H);
+  ctx.fillStyle = '#0a0a0f'; ctx.fillRect(0,0,W,H);
+
+  const highs = candles.map(c=>c.h), lows = candles.map(c=>c.l);
+  let maxP = Math.max(...highs), minP = Math.min(...lows);
+  (zonas||[]).forEach(z=>{
+    if(z && z.top!=null) maxP = Math.max(maxP, z.top);
+    if(z && z.bottom!=null) minP = Math.min(minP, z.bottom);
+  });
+  (levels||[]).forEach(l=>{ if(l && l.v!=null){ maxP=Math.max(maxP,l.v); minP=Math.min(minP,l.v); } });
+  const pad = (maxP - minP) * 0.08 || 1;
+  maxP += pad; minP -= pad;
+  const range = (maxP - minP) || 1;
+
+  const padL = 8, padR = 66, padT = 10, padB = 10;
+  const plotW = W - padL - padR;
+  const cw = plotW / candles.length;
+  const xFor = i => padL + i*cw + cw/2;
+  const yFor = p => padT + (H-padT-padB) - ((p - minP) / range) * (H-padT-padB);
+
+  ctx.strokeStyle = 'rgba(255,255,255,0.045)';
+  for(let i=1;i<5;i++){ const gy = padT + ((H-padT-padB)/5)*i; ctx.beginPath(); ctx.moveTo(padL,gy); ctx.lineTo(W-padR,gy); ctx.stroke(); }
+
+  (zonas||[]).forEach(z=>{
+    if(!z || z.top==null || z.bottom==null) return;
+    ctx.fillStyle = z.fill || 'rgba(240,192,64,0.12)';
+    ctx.fillRect(padL, yFor(z.top), plotW, yFor(z.bottom)-yFor(z.top));
+    ctx.strokeStyle = z.stroke || 'rgba(240,192,64,0.45)';
+    ctx.setLineDash(z.dash || [5,4]);
+    ctx.beginPath(); ctx.moveTo(padL,yFor(z.top)); ctx.lineTo(W-padR,yFor(z.top)); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(padL,yFor(z.bottom)); ctx.lineTo(W-padR,yFor(z.bottom)); ctx.stroke();
+    ctx.setLineDash([]);
+    if(z.label){
+      ctx.fillStyle = z.labelColor || (z.stroke || '#f0c040'); ctx.font = 'bold 10px monospace';
+      ctx.fillText(z.label, padL+4, yFor(z.top)-4);
+    }
+  });
+
+  candles.forEach((c,i)=>{
+    const x = xFor(i);
+    const up = c.c >= c.o;
+    ctx.strokeStyle = up ? '#3fb950' : '#f85149';
+    ctx.fillStyle = up ? '#3fb950' : '#f85149';
+    ctx.beginPath(); ctx.moveTo(x, yFor(c.h)); ctx.lineTo(x, yFor(c.l)); ctx.stroke();
+    const bodyTop = yFor(Math.max(c.o,c.c));
+    const bodyH = Math.max(1, Math.abs(yFor(c.o)-yFor(c.c)));
+    ctx.fillRect(x - cw*0.35, bodyTop, cw*0.7, bodyH);
+  });
+
+  (levels||[]).forEach(l=>{
+    if(!l || l.v==null) return;
+    const y = yFor(l.v);
+    ctx.strokeStyle = l.color; ctx.lineWidth = 1.3; ctx.setLineDash([6,4]);
+    ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(W-padR, y); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = l.color; ctx.font = 'bold 10px monospace';
+    ctx.fillText(l.label, W-padR+4, y+3);
+  });
+}
+
+// ── Rejeição Antecipada v2 ──
+async function loadAntecipadoDetailCard(){
+  const pairLabelEl = document.getElementById('antecipadoChartPairLabel');
+  if(!pairLabelEl) return;
+  const subEl = document.getElementById('antecipadoChartSub');
+  const rsiEl = document.getElementById('antecipadoChartRsi');
+  const entryEl = document.getElementById('antecipadoChartEntry');
+  const slEl = document.getElementById('antecipadoChartSl');
+  const tpEl = document.getElementById('antecipadoChartTp');
+  pairLabelEl.textContent = activePair.replace('USD','USDT');
+
+  try{
+    const res = await fetch('/scalp_antecipado/status?pair='+activePair);
+    const data = await res.json();
+    const result = data.result || null;
+    if(!result){
+      subEl.textContent = 'Sem ciclo ainda — liga o Scalp neste par';
+      rsiEl.textContent = 'RSI —';
+      entryEl.textContent = slEl.textContent = tpEl.textContent = '—';
+      return;
+    }
+    const info = derivarFaseAntecipado(result);
+    subEl.textContent = info.texto;
+    subEl.style.color = info.cor;
+    rsiEl.textContent = 'RSI ' + (result.rsi!=null ? result.rsi : '—');
+    entryEl.textContent = result.entry ? '$'+result.entry : '—';
+    slEl.textContent = result.sl ? '$'+result.sl : '—';
+    tpEl.textContent = result.tp ? '$'+result.tp : '—';
+
+    const symbol = LIVE_SYMBOL_MAP[activePair] || 'BTCUSDT';
+    const execTf = result.exec_tf || scalpExecTf;
+    const interval = LIVE_CHART_TF_MAP[execTf] || '5';
+    const candles = await fetchLiveKlines(symbol, interval, 150);
+    const levels = [
+      result.entry ? {v:result.entry, label:'ENTRADA', color:'#f0c040'} : null,
+      result.sl ? {v:result.sl, label:'STOP', color:'#f85149'} : null,
+      result.tp ? {v:result.tp, label:'TP', color:'#3fb950'} : null,
+      result.liquidez_varrida ? {v:result.liquidez_varrida, label:'LIQ. ANTIGA', color:'#bc8cff'} : null,
+    ];
+    drawGenericLevelsChart('antecipadoChartCanvas', candles, levels, []);
+  }catch(e){
+    subEl.textContent = 'Erro ao carregar gráfico';
+  }
+}
+setTimeout(loadAntecipadoDetailCard, 1700);
+setInterval(loadAntecipadoDetailCard, 15000);
+
+// ── Confluência de Indicadores ──
+async function loadIndicadoresDetailCard(){
+  const pairLabelEl = document.getElementById('indicadoresChartPairLabel');
+  if(!pairLabelEl) return;
+  const subEl = document.getElementById('indicadoresChartSub');
+  const scoreEl = document.getElementById('indicadoresChartScore');
+  const entryEl = document.getElementById('indicadoresChartEntry');
+  const slEl = document.getElementById('indicadoresChartSl');
+  const tpEl = document.getElementById('indicadoresChartTp');
+  const votosEl = document.getElementById('indicadoresChartVotos');
+  pairLabelEl.textContent = activePair.replace('USD','USDT');
+
+  try{
+    const res = await fetch('/scalp_indicadores/status?pair='+activePair);
+    const data = await res.json();
+    const result = data.result || null;
+    if(!result){
+      subEl.textContent = 'Sem ciclo ainda — liga o Scalp neste par';
+      scoreEl.textContent = '0/100';
+      entryEl.textContent = slEl.textContent = tpEl.textContent = '—';
+      votosEl.textContent = '';
+      return;
+    }
+    const info = derivarFaseIndicadores(result);
+    subEl.textContent = info.texto;
+    subEl.style.color = info.cor;
+    scoreEl.textContent = (result.score||0) + '/100';
+    scoreEl.className = 'rsc-score ' + (result.score>=75?'score-high':result.score>=50?'score-mid':'score-low');
+    entryEl.textContent = result.entry ? '$'+result.entry : '—';
+    slEl.textContent = result.sl ? '$'+result.sl : '—';
+    tpEl.textContent = result.tp ? '$'+result.tp : '—';
+    votosEl.textContent = result.votos_total ? ('Votos: ' + (result.votos_favor||0) + '/' + result.votos_total + (result.stop_via==='atr_fallback' ? ' · stop via ATR (sem swing)' : '')) : '';
+
+    const symbol = LIVE_SYMBOL_MAP[activePair] || 'BTCUSDT';
+    const execTf = result.exec_tf || scalpExecTf;
+    const interval = LIVE_CHART_TF_MAP[execTf] || '5';
+    const candles = await fetchLiveKlines(symbol, interval, 150);
+    const levels = [
+      result.entry ? {v:result.entry, label:'ENTRADA', color:'#f0c040'} : null,
+      result.sl ? {v:result.sl, label:'STOP', color:'#f85149'} : null,
+      result.tp ? {v:result.tp, label:'TP', color:'#3fb950'} : null,
+    ];
+    drawGenericLevelsChart('indicadoresChartCanvas', candles, levels, []);
+  }catch(e){
+    subEl.textContent = 'Erro ao carregar gráfico';
+  }
+}
+setTimeout(loadIndicadoresDetailCard, 1800);
+setInterval(loadIndicadoresDetailCard, 15000);
+
+// ── Scalp Rápido — Liquidez Forte ──
+async function loadRapidoDetailCard(){
+  const pairLabelEl = document.getElementById('rapidoChartPairLabel');
+  if(!pairLabelEl) return;
+  const subEl = document.getElementById('rapidoChartSub');
+  const rsiEl = document.getElementById('rapidoChartRsi');
+  const entryEl = document.getElementById('rapidoChartEntry');
+  const slEl = document.getElementById('rapidoChartSl');
+  const tpEl = document.getElementById('rapidoChartTp');
+  pairLabelEl.textContent = activePair.replace('USD','USDT');
+
+  try{
+    const res = await fetch('/scalp_rapido/status?pair='+activePair);
+    const data = await res.json();
+    const result = data.result || null;
+    if(!result){
+      subEl.textContent = 'Sem ciclo ainda — liga o Scalp neste par';
+      rsiEl.textContent = 'RSI —';
+      entryEl.textContent = slEl.textContent = tpEl.textContent = '—';
+      return;
+    }
+    const info = derivarFaseRapido(result);
+    subEl.textContent = info.texto;
+    subEl.style.color = info.cor;
+    rsiEl.textContent = 'RSI ' + (result.rsi!=null ? result.rsi : '—');
+    entryEl.textContent = result.entry ? '$'+result.entry : '—';
+    slEl.textContent = result.sl ? '$'+result.sl : '—';
+    tpEl.textContent = result.tp ? '$'+result.tp : '—';
+
+    const symbol = LIVE_SYMBOL_MAP[activePair] || 'BTCUSDT';
+    const execTf = result.exec_tf || scalpExecTf;
+    const interval = LIVE_CHART_TF_MAP[execTf] || '5';
+    const candles = await fetchLiveKlines(symbol, interval, 150);
+    const levels = [
+      result.entry ? {v:result.entry, label:'ENTRADA', color:'#f0c040'} : null,
+      result.sl ? {v:result.sl, label:'STOP', color:'#f85149'} : null,
+      result.tp ? {v:result.tp, label:'TP', color:'#3fb950'} : null,
+    ];
+    const zonas = [
+      (result.resistencia_top!=null && result.resistencia_bottom!=null) ? {
+        top: result.resistencia_top, bottom: result.resistencia_bottom,
+        fill: 'rgba(248,81,73,0.10)', stroke: 'rgba(248,81,73,0.4)', dash:[5,4],
+        label: 'RESISTÊNCIA (ontem)', labelColor: '#f85149',
+      } : null,
+      (result.suporte_top!=null && result.suporte_bottom!=null) ? {
+        top: result.suporte_top, bottom: result.suporte_bottom,
+        fill: 'rgba(63,185,80,0.10)', stroke: 'rgba(63,185,80,0.4)', dash:[5,4],
+        label: 'SUPORTE (ontem)', labelColor: '#3fb950',
+      } : null,
+      (result.zona_movel_top!=null && result.zona_movel_bottom!=null) ? {
+        top: result.zona_movel_top, bottom: result.zona_movel_bottom,
+        fill: 'rgba(188,140,255,0.06)', stroke: 'rgba(188,140,255,0.3)', dash:[2,3],
+        label: 'Região móvel (' + (result.zona_movel_largura_pct||0) + '%)', labelColor: '#bc8cff',
+      } : null,
+    ];
+    drawGenericLevelsChart('rapidoChartCanvas', candles, levels, zonas);
+  }catch(e){
+    subEl.textContent = 'Erro ao carregar gráfico';
+  }
+}
+setTimeout(loadRapidoDetailCard, 1900);
+setInterval(loadRapidoDetailCard, 15000);
 
 // ── NOVO: Feed de Ciclos — busca /live/history e desenha todo ciclo do
 // scheduler (mesmo os fracos), separado dos Sinais Ativos/Recentes. ──

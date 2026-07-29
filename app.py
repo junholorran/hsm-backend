@@ -1280,6 +1280,15 @@ def run_live_cycle(pair, interval_min):
                         send_telegram,
                     )
                     SCALP_CASCATA_STATUS[pair] = {'result': cascata_result, 'updated_at': int(time.time())}
+                    # ── NOVO: também popula SCALP_STATUS (endpoint
+                    # /scalp/status antigo) — a Cascata agora traz os
+                    # mesmos campos visuais que o Modo 1 trazia
+                    # (zona_top/bottom, sweep_nivel, choch_nivel, etc.),
+                    # então o gráfico do app volta a funcionar sem
+                    # precisar mexer no frontend. Achado depois de
+                    # tirar o Modo 1: o gráfico tinha sumido porque
+                    # ninguém mais preenchia esse endpoint. ──
+                    SCALP_STATUS[pair] = {'result': cascata_result, 'updated_at': int(time.time())}
                     scalp_result = cascata_result  # mantém compatível com o resumo/return mais abaixo
                 except Exception as e:
                     print(f"[scalp_engine cascata] erro no ciclo de {pair}: {e}")
@@ -2073,6 +2082,30 @@ def scalp_cascata_status():
         if pair:
             return jsonify(SCALP_CASCATA_STATUS.get(pair, {}))
         return jsonify(SCALP_CASCATA_STATUS)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+# ── NOVO: endpoint de DEBUG — pedido explícito: "onde está FVG, OB,
+# liquidez, escrito numa tabela à parte pra ver se bate certo". Busca
+# candles frescos direto da Bybit (não usa cache do ciclo automático,
+# já que pode ser chamado a qualquer momento) e devolve zona diária,
+# Premium/Discount, FVGs abertas, Order Blocks recentes e Liquidez
+# (EQH/EQL) — tudo com números exatos, pra comparar com o TradingView.
+# Não participa de nenhum sinal, é só conferência manual. ──
+@app.route('/scalp_cascata/debug_zonas', methods=['GET'])
+def scalp_cascata_debug_zonas():
+    try:
+        pair = request.args.get('pair')
+        if not pair:
+            return jsonify({'error': 'pair obrigatório'}), 400
+        exec_tf = request.args.get('exec_tf', 'M15')
+        symbol = LIVE_SYMBOL_MAP.get(pair, pair.replace('USD', 'USDT'))
+        interval = LIVE_TF_INTERVALS.get(exec_tf, '15')
+        d1_candles = fetch_bybit_klines(symbol, 'D', 200)
+        exec_candles = fetch_bybit_klines(symbol, interval, 200)
+        debug = scalp_engine.debug_zonas_completo(d1_candles, exec_candles)
+        return jsonify(debug)
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 

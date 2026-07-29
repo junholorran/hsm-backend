@@ -3557,25 +3557,67 @@ function derivarFaseScalp(r){
   if(!r || !r.result) return {texto:'Sem ciclo ainda', cor:'var(--muted)', dot:'⚪', fase:0};
   const res = r.result;
   const kzTag = res.na_killzone ? ' 🟢KZ' : ' 🔴fora-KZ';
-  if(res.motivo === 'preço fora da zona D1 (última zona mapeada mantida)'){
+  const motivo = res.motivo || '';
+
+  // Cascata SMC: timeframes maiores ainda não alinhados
+  if(motivo.indexOf('timeframes maiores não alinhados') === 0)
+    return {texto:'Aguardando alinhamento macro (Sem→D1→H4→H1)', cor:'var(--muted)', dot:'⚪', fase:1};
+
+  // Cascata: alinhado, mas sem candle D1 anterior ainda
+  if(motivo.indexOf('sem candle D1 anterior disponível') >= 0)
+    return {texto:'Timeframes alinhados — aguardando dado D1', cor:'#f0c040', dot:'🟡', fase:2};
+
+  // Cascata: alinhado, mas sem sweep na zona diária ainda
+  if(motivo.indexOf('sem sweep na zona diária ainda') >= 0)
+    return {texto:'Macro alinhado — aguardando sweep na zona diária'+kzTag, cor:'#f0c040', dot:'🟡', fase:2};
+
+  // Cascata: sweep contra o bias maior (descartado)
+  if(motivo.indexOf('descartado (sweep contra o bias maior)') >= 0)
+    return {texto:'Sweep encontrado, mas contra o macro — descartado', cor:'var(--muted)', dot:'⚪', fase:1};
+
+  // Cascata: sweep alinhado, aguardando CHoCH/BOS
+  if(motivo.indexOf('sem CHoCH nem BOS confirmado ainda') >= 0)
+    return {texto:'Sweep alinhado — aguardando CHoCH ou BOS ('+res.exec_tf+')'+kzTag, cor:'#f85149', dot:'🟠', fase:3};
+
+  // Cascata: CHoCH/BOS confirmou, mas contra o macro
+  if(motivo.indexOf('contra o macro') >= 0 && motivo.indexOf('descartado') >= 0)
+    return {texto:motivo, cor:'var(--muted)', dot:'⚪', fase:1};
+
+  // Cascata: confirmou tudo, mas preço em Premium/Discount errado
+  if(motivo.indexOf('não compra no topo') >= 0 || motivo.indexOf('não vende no fundo') >= 0)
+    return {texto:(res.evento_tipo||'Estrutura')+' confirmado — aguardando preço sair de '+(motivo.indexOf('PREMIUM')>=0?'Premium':'Discount')+kzTag, cor:'#a685f2', dot:'🟣', fase:5};
+
+  // Cascata: sinal confirmado, mas em cooldown
+  if(motivo.indexOf('entrada_confirmada, mas em cooldown') === 0)
+    return {texto:'🔥 Setup confirmado — aguardando cooldown ('+(res.evento_tipo||'')+', '+(res.direcao==='alta'?'LONG':'SHORT')+')', cor:'#58a6ff', dot:'🔵', fase:6};
+
+  // Cascata: sinal ativo de verdade
+  if(motivo === 'entrada_confirmada')
+    return {texto:'🔥 SETUP ATIVO (Cascata) — '+(res.direcao==='alta'?'LONG':'SHORT')+' via '+(res.evento_tipo||'')+' ('+res.exec_tf+')', cor:'#3fb950', dot:'🟢', fase:7};
+
+  // ── modos antigos (Modo 1/2), mantidos por compatibilidade caso
+  // algum dia voltem a ser chamados no ciclo ──
+  if(motivo === 'preço fora da zona D1 (última zona mapeada mantida)'){
     const sweepTxt = res.sweep_nivel ? ' — sweep anterior ('+res.sweep_lado+') ainda guardado' : '';
     return {texto:'Fora da zona agora (última zona mantida)'+sweepTxt, cor:'var(--muted)', dot:'⚪', fase:1};
   }
-  if(res.motivo === 'preço fora de qualquer banda D1 válida')
+  if(motivo === 'preço fora de qualquer banda D1 válida')
     return {texto:'Fora de zona D1', cor:'var(--muted)', dot:'⚪', fase:1};
-  if(res.motivo === 'sem sweep detectado ainda')
+  if(motivo === 'sem sweep detectado ainda')
     return {texto:'Na zona D1 — aguardando sweep'+kzTag, cor:'#f0c040', dot:'🟡', fase:2};
-  if(res.motivo === 'sweep ok, mas CHoCH ainda não confirmou')
+  if(motivo === 'sweep ok, mas CHoCH ainda não confirmou')
     return {texto:'Sweep — aguardando CHoCH ('+res.exec_tf+')'+kzTag, cor:'#f85149', dot:'🟠', fase:3};
-  if(res.motivo === 'CHoCH confirmado, mas sem FVG/OB/iFVG/Breaker de retorno ainda')
+  if(motivo === 'CHoCH confirmado, mas sem FVG/OB/iFVG/Breaker de retorno ainda')
     return {texto:'CHoCH confirmado — aguardando FVG/OB/iFVG/Breaker'+kzTag, cor:'#58a6ff', dot:'🔵', fase:4};
-  if(res.motivo === 'preço ainda fora da zona de entrada (FVG/OB/iFVG/Breaker) — aguardando retorno')
+  if(motivo === 'preço ainda fora da zona de entrada (FVG/OB/iFVG/Breaker) — aguardando retorno')
     return {texto:'Zona de entrada pronta ('+(res.entry_zone_tipo||'FVG/OB')+') — aguardando retorno'+kzTag, cor:'#a685f2', dot:'🟣', fase:5};
-  if(res.motivo === 'entrada')
+  if(motivo === 'entrada')
     return {texto:'🔥 SETUP ATIVO — score '+res.score+' — '+(res.direcao==='alta'?'LONG':'SHORT')+' ('+res.exec_tf+')', cor:'#3fb950', dot:'🟢', fase:7};
-  if(res.motivo && res.motivo.indexOf('score') >= 0)
+  if(motivo && motivo.indexOf('score') >= 0)
     return {texto:'Score '+res.score+' (falta pra 75)'+kzTag, cor:'#58a6ff', dot:'🔵', fase:6};
-  return {texto:'Sem ciclo ainda', cor:'var(--muted)', dot:'⚪', fase:0};
+
+  // fallback: mostra o motivo cru em vez de mentir "Sem ciclo ainda"
+  return {texto: motivo || 'Sem ciclo ainda', cor:'var(--muted)', dot:'⚪', fase:0};
 }
 
 async function loadScalpFeed(){

@@ -1223,6 +1223,136 @@ def _draw_scalp_overlays(img, draw, resultado, y_for, W, H, padR, font, preco_at
         draw.text((6, min(y_top, y_bottom) - 12), f"Entrada ({tipo})", fill=cor, font=font)
 
 
+# ═══════════════════════════════════════════════════════════════════════
+# NOVO — Journal também alimentado pelos 4 modos de Scalp Ao Vivo
+# (Cascata SMC, Rejeição Antecipada v2, Confluência de Indicadores,
+# Scalp Rápido), não só pelo Trade Ao Vivo (ICT completo via Claude).
+# Reaproveita a MESMA tabela `journal` já usada pelo Trade Ao Vivo — o
+# app (Journal/Stats) passa a enxergar os 4 modos sem precisar mexer
+# no index.html.
+# ═══════════════════════════════════════════════════════════════════════
+
+def save_scalp_signal_to_journal(pair, modo_label, exec_tf, direcao, score, entry, sl, tp, motivo):
+    """
+    Grava no Journal um sinal real vindo de um dos 4 modos de Scalp.
+    Chamada só quando result['sinal'] é True e result['em_cooldown'] é
+    False — a MESMA condição que já decide se manda Telegram — então
+    isso nunca duplica o mesmo sinal a cada ciclo de 30s enquanto ele
+    continuar confirmado (o próprio cooldown do modo evita repetição,
+    sem precisar de nenhuma tabela de dedup nova aqui).
+
+    Os 3 modos "tudo ou nada" (Cascata, Antecipado v2, Rápido) não têm
+    um score gradual de verdade — gravam 100 (confirmou tudo) pra não
+    inventar um número. Confluência de Indicadores usa o score real
+    (votos_favor/votos_total).
+    """
+    if entry is None or sl is None or tp is None or not direcao:
+        return
+    try:
+        journal_id = f"scalp_{modo_label}_{pair}_{int(time.time()*1000)}"
+        direction_label = 'LONG' if direcao == 'alta' else 'SHORT'
+        with sqlite3.connect(DB_FILE) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO journal (id, pair, created_at, direction, score, entry, sl, tp1, tp2, tp3, timeframes, analysis, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                journal_id, pair, int(time.time()),
+                direction_label, int(score or 0),
+                str(entry), str(sl), str(tp), '', '',
+                exec_tf or '', f"[Scalp — {modo_label}] {motivo or ''}", 'pending'
+            ))
+            conn.commit()
+    except Exception as e:
+        print(f"[journal] erro ao salvar sinal de scalp ({modo_label}, {pair}): {e}")
+
+
+def resolve_pending_journal_trades(pair, candles):
+    """
+    NOVO — resolve automaticamente trades 'pending' no Journal (de
+    QUALQUER origem: Trade Ao Vivo ou os 4 modos de Scalp) comparando
+    o preço real (high/low dos candles) desde a criação do trade até
+    agora, contra o SL e o TP1 salvos. Antes disso, o Journal só saía
+    de "ABERTO" se alguém clicasse manualmente TP/SL — por isso os 100
+    trades acumulados sempre em aberto que você viu.
+
+    IMPORTANTE — o que o pnl salvo aqui representa: como o Journal
+    nunca teve tamanho de posição/alavancagem informados, o pnl
+    resolvido automaticamente aqui é a VARIAÇÃO PERCENTUAL do preço
+    (não um valor em dólares de verdade), positiva em win e negativa
+    (mostrada como número absoluto, igual ao resto do Journal) em
+    loss. A tela do app ainda exibe isso com prefixo "$" — se quiser,
+    dá pra eu trocar esse texto pra "%" depois, é só pedir.
+
+    Limitação honesta: só enxerga candles dentro da janela que já
+    tiver em mãos nesse ciclo (tipicamente ~200 candles do TF de
+    execução daquele par). Um trade muito antigo cujos candles já
+    saíram da janela fica pendente até um ciclo que tenha candles mais
+    recentes — não é perdido, só não resolve mais cedo.
+    """
+    if not candles:
+        return
+    try:
+        with sqlite3.connect(DB_FILE) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT id, direction, entry, sl, tp1, created_at FROM journal WHERE pair=? AND status='pending'",
+                (pair,)
+            )
+            pendentes = cursor.fetchall()
+        if not pendentes:
+            return
+
+        for trade_id, direction, entry_s, sl_s, tp1_s, created_at in pendentes:
+            try:
+                entry = float(str(entry_s).replace(',', '.'))
+                sl = float(str(sl_s).replace(',', '.'))
+                tp1 = float(str(tp1_s).replace(',', '.'))
+            except (TypeError, ValueError):
+                continue
+            if not entry or not sl or not tp1:
+                continue
+
+            created_at_ms = (created_at or 0) * 1000
+            candles_apos = [c for c in candles if c['t'] >= created_at_ms]
+            if not candles_apos:
+                continue
+
+            resultado = None
+            is_long = (direction or '').upper() == 'LONG'
+            for c in candles_apos:
+                if is_long:
+                    if c['l'] <= sl:
+                        resultado = 'loss'
+                        break
+                    if c['h'] >= tp1:
+                        resultado = 'win'
+                        break
+                else:
+                    if c['h'] >= sl:
+                        resultado = 'loss'
+                        break
+                    if c['l'] <= tp1:
+                        resultado = 'win'
+                        break
+
+            if resultado:
+                risco_pct = abs(entry - sl) / entry * 100 if entry else 0
+                retorno_pct = abs(entry - tp1) / entry * 100 if entry else 0
+                pnl_pct = retorno_pct if resultado == 'win' else -risco_pct
+                try:
+                    with sqlite3.connect(DB_FILE) as conn2:
+                        conn2.execute(
+                            'UPDATE journal SET status=?, pnl=? WHERE id=?',
+                            (resultado, round(pnl_pct, 2), trade_id)
+                        )
+                        conn2.commit()
+                except Exception as e:
+                    print(f"[journal] erro ao resolver trade {trade_id}: {e}")
+    except Exception as e:
+        print(f"[journal] erro ao checar pendentes de {pair}: {e}")
+
+
 def run_live_cycle(pair, interval_min):
     symbol = LIVE_SYMBOL_MAP.get(pair, pair.replace('USD', 'USDT'))
 
@@ -1260,6 +1390,15 @@ def run_live_cycle(pair, interval_min):
             else:
                 exec_candles = None
             if exec_candles:
+                # ── NOVO: resolve automaticamente qualquer trade
+                # 'pending' desse par no Journal (de qualquer origem),
+                # comparando com os candles reais que acabamos de
+                # buscar — antes disso só resolvia via clique manual. ──
+                try:
+                    resolve_pending_journal_trades(pair, exec_candles)
+                except Exception as e:
+                    print(f"[journal] erro ao resolver pendentes de {pair}: {e}")
+
                 # ── NOVO: Modo "Cascata SMC" — SUBSTITUI os Modos 1
                 # (Normal/Reversão) e 2 (Continuação) no ciclo
                 # automático, por pedido explícito. Semanal→D1→4H→1H
@@ -1290,6 +1429,19 @@ def run_live_cycle(pair, interval_min):
                     # ninguém mais preenchia esse endpoint. ──
                     SCALP_STATUS[pair] = {'result': cascata_result, 'updated_at': int(time.time())}
                     scalp_result = cascata_result  # mantém compatível com o resumo/return mais abaixo
+
+                    # ── NOVO: grava no Journal assim que a Cascata
+                    # confirma um sinal de verdade (mesma condição que
+                    # dispara o Telegram: sinal True + fora de
+                    # cooldown). ──
+                    if cascata_result.get('sinal') and not cascata_result.get('em_cooldown'):
+                        save_scalp_signal_to_journal(
+                            pair, 'Cascata', exec_tf,
+                            cascata_result.get('direcao'),
+                            cascata_result.get('score', 100),
+                            cascata_result.get('entry'), cascata_result.get('sl'), cascata_result.get('tp'),
+                            cascata_result.get('motivo'),
+                        )
                 except Exception as e:
                     print(f"[scalp_engine cascata] erro no ciclo de {pair}: {e}")
 
@@ -1303,6 +1455,15 @@ def run_live_cycle(pair, interval_min):
                         h4_candles=candles_por_tf_cache.get('H4'),
                     )
                     SCALP_ANTECIPADO_STATUS[pair] = {'result': antecipado_result, 'updated_at': int(time.time())}
+
+                    if antecipado_result.get('sinal') and not antecipado_result.get('em_cooldown'):
+                        save_scalp_signal_to_journal(
+                            pair, 'Antecipado v2', exec_tf,
+                            antecipado_result.get('direcao'),
+                            100,
+                            antecipado_result.get('entry'), antecipado_result.get('sl'), antecipado_result.get('tp'),
+                            antecipado_result.get('motivo'),
+                        )
                 except Exception as e:
                     print(f"[scalp_engine antecipado] erro no ciclo de {pair}: {e}")
 
@@ -1314,6 +1475,15 @@ def run_live_cycle(pair, interval_min):
                         send_telegram,
                     )
                     SCALP_INDICADORES_STATUS[pair] = {'result': indicadores_result, 'updated_at': int(time.time())}
+
+                    if indicadores_result.get('sinal') and not indicadores_result.get('em_cooldown'):
+                        save_scalp_signal_to_journal(
+                            pair, 'Confluência Indicadores', exec_tf,
+                            indicadores_result.get('direcao'),
+                            indicadores_result.get('score', 0),
+                            indicadores_result.get('entry'), indicadores_result.get('sl'), indicadores_result.get('tp'),
+                            indicadores_result.get('motivo'),
+                        )
                 except Exception as e:
                     print(f"[scalp_engine indicadores] erro no ciclo de {pair}: {e}")
 
@@ -1331,6 +1501,15 @@ def run_live_cycle(pair, interval_min):
                         send_telegram,
                     )
                     SCALP_RAPIDO_STATUS[pair] = {'result': rapido_result, 'updated_at': int(time.time())}
+
+                    if rapido_result.get('sinal') and not rapido_result.get('em_cooldown'):
+                        save_scalp_signal_to_journal(
+                            pair, 'Scalp Rápido', exec_tf,
+                            rapido_result.get('direcao'),
+                            100,
+                            rapido_result.get('entry'), rapido_result.get('sl'), rapido_result.get('tp'),
+                            rapido_result.get('motivo'),
+                        )
                 except Exception as e:
                     print(f"[scalp_engine rapido] erro no ciclo de {pair}: {e}")
 

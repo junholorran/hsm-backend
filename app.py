@@ -30,18 +30,12 @@ SCALP_ANTECIPADO_STATUS = {}  # pair -> {'result': {...}, 'updated_at': int}
 SCALP_INDICADORES_STATUS = {}  # pair -> {'result': {...}, 'updated_at': int}
 SCALP_CONTINUACAO_STATUS = {}  # pair -> {'result': {...}, 'updated_at': int}
 
-# ── NOVO: status do modo "Scalp Rápido — Liquidez Forte". Sem CHoCH —
-# entra direto no sweep da zona diária móvel (resistência/suporte do
-# candle D1 anterior, réplica do Pine Script do Juninho). Stop curto,
-# cooldown curto (5min), pensado pra reentrada rápida. ──
+# ── NOVO: status do modo Normal (CHoCH — reversão), religado no ciclo
+# depois de descoberto que nunca era chamado no run_live_cycle. ──
+SCALP_NORMAL_STATUS = {}  # pair -> {'result': {...}, 'updated_at': int}
+
 SCALP_RAPIDO_STATUS = {}  # pair -> {'result': {...}, 'updated_at': int}
 
-# ── NOVO: status do modo "Cascata SMC" — Semanal→D1→4H→1H todos
-# alinhados (bias via lógica real do LuxAlgo) → sweep na zona diária →
-# CHoCH ou BOS → Discount/Premium. SUBSTITUI os Modos 1 (Normal) e 2
-# (Continuação) no ciclo automático, por pedido explícito — os dois
-# continuam definidos no scalp_engine.py, só não são mais chamados
-# aqui. ──
 SCALP_CASCATA_STATUS = {}  # pair -> {'result': {...}, 'updated_at': int}
 
 CACHE_WINDOW_SECONDS = 15 * 60  # 15 minutos
@@ -290,6 +284,7 @@ init_db()
 cascade_engine.init_cascade_db(DB_FILE)
 cascade_engine.init_cascade_signal_db(DB_FILE)
 scalp_engine.init_scalp_db(DB_FILE)
+
 
 ICT_SYSTEM_PROMPT = (
     "Es um mentor institucional ICT (Inner Circle Trader) e SMC de elite, com "
@@ -1228,24 +1223,11 @@ def _draw_scalp_overlays(img, draw, resultado, y_for, W, H, padR, font, preco_at
 # (Cascata SMC, Rejeição Antecipada v2, Confluência de Indicadores,
 # Scalp Rápido), não só pelo Trade Ao Vivo (ICT completo via Claude).
 # Reaproveita a MESMA tabela `journal` já usada pelo Trade Ao Vivo — o
-# app (Journal/Stats) passa a enxergar os 4 modos sem precisar mexer
+# app (Journal/Stats) passa a enxergar os modos sem precisar mexer
 # no index.html.
 # ═══════════════════════════════════════════════════════════════════════
 
 def save_scalp_signal_to_journal(pair, modo_label, exec_tf, direcao, score, entry, sl, tp, motivo):
-    """
-    Grava no Journal um sinal real vindo de um dos 4 modos de Scalp.
-    Chamada só quando result['sinal'] é True e result['em_cooldown'] é
-    False — a MESMA condição que já decide se manda Telegram — então
-    isso nunca duplica o mesmo sinal a cada ciclo de 30s enquanto ele
-    continuar confirmado (o próprio cooldown do modo evita repetição,
-    sem precisar de nenhuma tabela de dedup nova aqui).
-
-    Os 3 modos "tudo ou nada" (Cascata, Antecipado v2, Rápido) não têm
-    um score gradual de verdade — gravam 100 (confirmou tudo) pra não
-    inventar um número. Confluência de Indicadores usa o score real
-    (votos_favor/votos_total).
-    """
     if entry is None or sl is None or tp is None or not direcao:
         return
     try:
@@ -1268,28 +1250,6 @@ def save_scalp_signal_to_journal(pair, modo_label, exec_tf, direcao, score, entr
 
 
 def resolve_pending_journal_trades(pair, candles):
-    """
-    NOVO — resolve automaticamente trades 'pending' no Journal (de
-    QUALQUER origem: Trade Ao Vivo ou os 4 modos de Scalp) comparando
-    o preço real (high/low dos candles) desde a criação do trade até
-    agora, contra o SL e o TP1 salvos. Antes disso, o Journal só saía
-    de "ABERTO" se alguém clicasse manualmente TP/SL — por isso os 100
-    trades acumulados sempre em aberto que você viu.
-
-    IMPORTANTE — o que o pnl salvo aqui representa: como o Journal
-    nunca teve tamanho de posição/alavancagem informados, o pnl
-    resolvido automaticamente aqui é a VARIAÇÃO PERCENTUAL do preço
-    (não um valor em dólares de verdade), positiva em win e negativa
-    (mostrada como número absoluto, igual ao resto do Journal) em
-    loss. A tela do app ainda exibe isso com prefixo "$" — se quiser,
-    dá pra eu trocar esse texto pra "%" depois, é só pedir.
-
-    Limitação honesta: só enxerga candles dentro da janela que já
-    tiver em mãos nesse ciclo (tipicamente ~200 candles do TF de
-    execução daquele par). Um trade muito antigo cujos candles já
-    saíram da janela fica pendente até um ciclo que tenha candles mais
-    recentes — não é perdido, só não resolve mais cedo.
-    """
     if not candles:
         return
     try:
@@ -1390,23 +1350,11 @@ def run_live_cycle(pair, interval_min):
             else:
                 exec_candles = None
             if exec_candles:
-                # ── NOVO: resolve automaticamente qualquer trade
-                # 'pending' desse par no Journal (de qualquer origem),
-                # comparando com os candles reais que acabamos de
-                # buscar — antes disso só resolvia via clique manual. ──
                 try:
                     resolve_pending_journal_trades(pair, exec_candles)
                 except Exception as e:
                     print(f"[journal] erro ao resolver pendentes de {pair}: {e}")
 
-                # ── NOVO: Modo "Cascata SMC" — SUBSTITUI os Modos 1
-                # (Normal/Reversão) e 2 (Continuação) no ciclo
-                # automático, por pedido explícito. Semanal→D1→4H→1H
-                # todos alinhados (bias via lógica real do LuxAlgo) →
-                # sweep na zona diária móvel → CHoCH ou BOS (o que vier
-                # primeiro) → Discount/Premium (nunca compra topo, nunca
-                # vende fundo). Os Modos 1 e 2 continuam definidos no
-                # scalp_engine.py, só não são mais chamados aqui. ──
                 try:
                     cascata_result = scalp_engine.process_pair_cascata_smc(
                         DB_FILE, pair,
@@ -1419,21 +1367,9 @@ def run_live_cycle(pair, interval_min):
                         send_telegram,
                     )
                     SCALP_CASCATA_STATUS[pair] = {'result': cascata_result, 'updated_at': int(time.time())}
-                    # ── NOVO: também popula SCALP_STATUS (endpoint
-                    # /scalp/status antigo) — a Cascata agora traz os
-                    # mesmos campos visuais que o Modo 1 trazia
-                    # (zona_top/bottom, sweep_nivel, choch_nivel, etc.),
-                    # então o gráfico do app volta a funcionar sem
-                    # precisar mexer no frontend. Achado depois de
-                    # tirar o Modo 1: o gráfico tinha sumido porque
-                    # ninguém mais preenchia esse endpoint. ──
                     SCALP_STATUS[pair] = {'result': cascata_result, 'updated_at': int(time.time())}
-                    scalp_result = cascata_result  # mantém compatível com o resumo/return mais abaixo
+                    scalp_result = cascata_result
 
-                    # ── NOVO: grava no Journal assim que a Cascata
-                    # confirma um sinal de verdade (mesma condição que
-                    # dispara o Telegram: sinal True + fora de
-                    # cooldown). ──
                     if cascata_result.get('sinal') and not cascata_result.get('em_cooldown'):
                         save_scalp_signal_to_journal(
                             pair, 'Cascata', exec_tf,
@@ -1444,6 +1380,62 @@ def run_live_cycle(pair, interval_min):
                         )
                 except Exception as e:
                     print(f"[scalp_engine cascata] erro no ciclo de {pair}: {e}")
+
+                # ── NOVO — RELIGADO: Modo Normal (CHoCH — reversão).
+                # Descoberto que existia completo no scalp_engine.py mas
+                # nunca era chamado aqui — por isso nunca chegava sinal
+                # nenhum desse modo. Agora já vem com o gate obrigatório
+                # de RSI (regra fixa) embutido no próprio
+                # process_pair_scalp, então não abre mais LONG com RSI
+                # sobrecomprado nem SHORT com RSI sobrevendido. ──
+                try:
+                    normal_result = scalp_engine.process_pair_scalp(
+                        DB_FILE, pair,
+                        candles_por_tf_cache['D1'],
+                        exec_candles,
+                        exec_tf,
+                        send_telegram,
+                        h4_candles=candles_por_tf_cache.get('H4'),
+                    )
+                    SCALP_NORMAL_STATUS[pair] = {'result': normal_result, 'updated_at': int(time.time())}
+
+                    if normal_result.get('motivo') == 'entrada' and not normal_result.get('em_cooldown'):
+                        save_scalp_signal_to_journal(
+                            pair, 'Normal CHoCH', exec_tf,
+                            normal_result.get('direcao'),
+                            normal_result.get('score', 0),
+                            normal_result.get('entry'), normal_result.get('sl'), normal_result.get('tp'),
+                            normal_result.get('motivo'),
+                        )
+                except Exception as e:
+                    print(f"[scalp_engine normal] erro no ciclo de {pair}: {e}")
+
+                # ── NOVO — RELIGADO: Modo Continuação (BOS). Mesmo caso
+                # do Normal — existia pronto, nunca era chamado. É o
+                # modo que cobre manipulação seguida de DISTRIBUIÇÃO na
+                # mesma direção do sweep (em vez de reversão). Também já
+                # vem com o gate obrigatório de RSI embutido. ──
+                try:
+                    continuacao_result = scalp_engine.process_pair_scalp_continuacao(
+                        DB_FILE, pair,
+                        candles_por_tf_cache['D1'],
+                        exec_candles,
+                        exec_tf,
+                        send_telegram,
+                        h4_candles=candles_por_tf_cache.get('H4'),
+                    )
+                    SCALP_CONTINUACAO_STATUS[pair] = {'result': continuacao_result, 'updated_at': int(time.time())}
+
+                    if continuacao_result.get('motivo') == 'entrada' and not continuacao_result.get('em_cooldown'):
+                        save_scalp_signal_to_journal(
+                            pair, 'Continuacao BOS', exec_tf,
+                            continuacao_result.get('direcao'),
+                            continuacao_result.get('score', 0),
+                            continuacao_result.get('entry'), continuacao_result.get('sl'), continuacao_result.get('tp'),
+                            continuacao_result.get('motivo'),
+                        )
+                except Exception as e:
+                    print(f"[scalp_engine continuacao] erro no ciclo de {pair}: {e}")
 
                 try:
                     antecipado_result = scalp_engine.process_pair_scalp_antecipado_v2(
@@ -1473,6 +1465,7 @@ def run_live_cycle(pair, interval_min):
                         exec_candles,
                         exec_tf,
                         send_telegram,
+                        d1_candles=candles_por_tf_cache.get('D1'),
                     )
                     SCALP_INDICADORES_STATUS[pair] = {'result': indicadores_result, 'updated_at': int(time.time())}
 
@@ -1487,11 +1480,6 @@ def run_live_cycle(pair, interval_min):
                 except Exception as e:
                     print(f"[scalp_engine indicadores] erro no ciclo de {pair}: {e}")
 
-                # ── NOVO: Modo "Scalp Rápido — Liquidez Forte" — sem
-                # CHoCH, entra direto no sweep da zona diária móvel
-                # (resistência/suporte do candle D1 anterior, réplica
-                # exata do Pine Script "Zonas Diarias Moveis" do
-                # Juninho). Stop curto, cooldown de 5min. ──
                 try:
                     rapido_result = scalp_engine.process_pair_scalp_rapido(
                         DB_FILE, pair,
@@ -2203,6 +2191,19 @@ def scalp_history_route():
         return jsonify({'error': str(e)}), 500
 
 
+# ── NOVO: status do modo Normal (CHoCH — reversão), religado no ciclo.
+# Espelha o mesmo padrão dos outros endpoints /scalp_*/status. ──
+@app.route('/scalp_normal/status', methods=['GET'])
+def scalp_normal_status():
+    try:
+        pair = request.args.get('pair')
+        if pair:
+            return jsonify(SCALP_NORMAL_STATUS.get(pair, {}))
+        return jsonify(SCALP_NORMAL_STATUS)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/scalp_antecipado/status', methods=['GET'])
 def scalp_antecipado_status():
     try:
@@ -2236,9 +2237,6 @@ def scalp_continuacao_status():
         return jsonify({'error': str(e)}), 500
 
 
-# ── NOVO: status do modo Scalp Rápido — Liquidez Forte. Sem CHoCH,
-# entra direto no sweep da zona diária móvel (resistência/suporte do
-# candle D1 anterior). Stop curto, cooldown de 5min. ──
 @app.route('/scalp_rapido/status', methods=['GET'])
 def scalp_rapido_status():
     try:
@@ -2250,10 +2248,6 @@ def scalp_rapido_status():
         return jsonify({'error': str(e)}), 500
 
 
-# ── NOVO: status do modo Cascata SMC — Semanal→D1→4H→1H todos
-# alinhados (bias via lógica real do LuxAlgo) → sweep na zona diária →
-# CHoCH ou BOS → Discount/Premium. Substituiu os Modos 1 e 2 no ciclo
-# automático. ──
 @app.route('/scalp_cascata/status', methods=['GET'])
 def scalp_cascata_status():
     try:
@@ -2265,13 +2259,6 @@ def scalp_cascata_status():
         return jsonify({'error': str(e)}), 500
 
 
-# ── NOVO: endpoint de DEBUG — pedido explícito: "onde está FVG, OB,
-# liquidez, escrito numa tabela à parte pra ver se bate certo". Busca
-# candles frescos direto da Bybit (não usa cache do ciclo automático,
-# já que pode ser chamado a qualquer momento) e devolve zona diária,
-# Premium/Discount, FVGs abertas, Order Blocks recentes e Liquidez
-# (EQH/EQL) — tudo com números exatos, pra comparar com o TradingView.
-# Não participa de nenhum sinal, é só conferência manual. ──
 @app.route('/scalp_cascata/debug_zonas', methods=['GET'])
 def scalp_cascata_debug_zonas():
     try:

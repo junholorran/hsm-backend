@@ -283,6 +283,7 @@ def check_alerts_inline():
 init_db()
 cascade_engine.init_cascade_db(DB_FILE)
 cascade_engine.init_cascade_signal_db(DB_FILE)
+cascade_engine.init_cascade_multi_tf_db(DB_FILE)
 scalp_engine.init_scalp_db(DB_FILE)
 
 
@@ -1333,6 +1334,22 @@ def run_live_cycle(pair, interval_min):
             CASCADE_STATUS[pair] = {'result': cascade_result, 'updated_at': int(time.time())}
         except Exception as e:
             print(f"[cascade_engine] erro no ciclo de {pair}: {e}")
+
+    # ── NOVO — S/R em D1 E H4 juntos, confirmação de sweep/CHoCH no
+    # M15. Roda em paralelo ao process_pair_full acima (que já cobre
+    # só D1), sem interferir nele — tabela própria
+    # (cascade_multi_tf_signal_state), sem custo de IA. ──
+    if 'D1' in candles_por_tf_cache and 'H4' in candles_por_tf_cache and 'M15' in candles_por_tf_cache:
+        try:
+            cascade_engine.process_pair_full_multi_tf(
+                DB_FILE, pair,
+                candles_por_tf_cache['D1'],
+                candles_por_tf_cache['H4'],
+                candles_por_tf_cache['M15'],
+                send_telegram,
+            )
+        except Exception as e:
+            print(f"[cascade_engine] erro no ciclo multi-tf de {pair}: {e}")
 
     scalp_result = None
     exec_tf = None

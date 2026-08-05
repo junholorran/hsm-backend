@@ -67,6 +67,7 @@
 import sqlite3
 import time
 import random
+import requests
 from datetime import datetime, timezone, timedelta
 
 SCORE_THRESHOLD_SINAL = 75
@@ -209,6 +210,20 @@ def aplicar_gates_entrada(direcao, entry, sl, tp, indicadores, candles_para_regi
         else:
             gates.append({'nome': 'GATE_C_MONTE_CARLO', 'passou': True, 'detalhe': 'dados insuficientes — não bloqueia'})
 
+    # ── NOVO 05/08: GATE_B_HORARIO — bloqueia entrada nas janelas de
+    # baixa liquidez conhecidas (transição Ásia-Europa, fechamento de
+    # NY), inspirado nos "Horários a Evitar" da Vortex. Diferente do
+    # bônus de killzone (que soma pontos quando o horário é bom), esse
+    # gate ativamente BLOQUEIA quando o horário é ruim. ──
+    horario_ruim, nome_janela = esta_em_horario_ruim()
+    gates.append({
+        'nome': 'GATE_B_HORARIO',
+        'passou': not horario_ruim,
+        'detalhe': f"Janela de baixa liquidez: {nome_janela}" if horario_ruim else "Horário OK",
+    })
+    if horario_ruim:
+        passou_tudo = False
+
     return passou_tudo, gates
 
 
@@ -243,6 +258,279 @@ def _formatar_motivos_principais(regime, adx_val, evento_tipo, evento_direcao, e
     gates_txt = ', '.join(f"{g['nome'].replace('GATE_', '').replace('_', ' ')} ✅" for g in gates if g['passou'])
     if gates_txt:
         linhas.append(f"• Gates aprovados: {gates_txt}")
+    return "\n".join(linhas)
+
+
+# ── NOVO 05/08: itens adicionais catalogados do "Relatório Executivo
+# Completo" da Vortex — cada um só entrou aqui porque é rastreável até
+# um cálculo real, não decoração. ──
+
+def classificar_qualidade_rr(rr):
+    """
+    Label textual de qualidade do R:R, igual ao "BAIXA. Relação de
+    1:1.0 exige alta taxa de acerto." da Vortex. Isso é INFORMATIVO —
+    roda independente do GATE_E_MIN_RR (que já bloqueia sinais com RR
+    abaixo do mínimo); aqui é só pra dar contexto de quão folgado é o
+    RR de um sinal que já passou no gate.
+    """
+    if rr is None:
+        return None
+    if rr < 1.5:
+        return f"BAIXA — Relação de 1:{rr} exige taxa de acerto alta (>{round(100/(1+rr))}%) pra ser lucrativo no longo prazo."
+    elif rr < 2.5:
+        return f"MODERADA — Relação de 1:{rr} é equilibrada, taxa de acerto de ~{round(100/(1+rr))}% já cobre o breakeven."
+    else:
+        return f"ALTA — Relação de 1:{rr} permite ser lucrativo mesmo com taxa de acerto abaixo de {round(100/(1+rr))}%."
+
+
+# ── NOVO 05/08: capital configurável — pra o position sizing entrar
+# nas mensagens automáticas, precisa saber o capital do usuário. Se
+# ficar None (padrão), o bloco de position sizing simplesmente não
+# aparece nas mensagens — nunca inventa um valor. Pra ativar, defina
+# CAPITAL_USUARIO_USD com seu capital real de trading (não a banca
+# toda, só a fatia destinada a essas operações).
+CAPITAL_USUARIO_USD = None  # ex: 10000 — mude aqui pro position sizing aparecer nos sinais
+
+# Position sizing — perfis fixos de risco por trade, igual aos 3
+# botões (Conservador/Moderado/Agressivo) que a Vortex mostra.
+PERFIS_RISCO = {
+    'conservador': 0.0075,  # 0.75% do capital por trade (meio da faixa 0.5-1%)
+    'moderado': 0.015,      # 1.5% do capital por trade (meio da faixa 1-2%)
+    'agressivo': 0.025,     # 2.5% do capital por trade (meio da faixa 2-3%)
+}
+
+
+def calcular_position_sizing(capital, entry, sl, perfil='moderado'):
+    """
+    Calcula o tamanho de posição sugerido dado o capital do usuário,
+    entry/sl do sinal, e o perfil de risco escolhido — igual à
+    calculadora "Seu Capital (Banca)" da Vortex. Retorna dict com
+    valor em risco (USD) e % do capital arriscado por unidade.
+    """
+    if not capital or not entry or not sl or entry == sl:
+        return None
+    risco_pct = PERFIS_RISCO.get(perfil, PERFIS_RISCO['moderado'])
+    valor_risco_usd = round(capital * risco_pct, 2)
+    distancia_stop = abs(entry - sl)
+    # quantidade do ativo que, se bater o stop, perde exatamente valor_risco_usd
+    quantidade_sugerida = round(valor_risco_usd / distancia_stop, 6) if distancia_stop > 0 else None
+    return {
+        'perfil': perfil,
+        'risco_pct': round(risco_pct * 100, 2),
+        'valor_em_risco_usd': valor_risco_usd,
+        'quantidade_sugerida': quantidade_sugerida,
+    }
+
+
+# ── Weak High / Strong Low — classificação de swings por qualidade de
+# liquidez (ICT real). Um swing é "Strong" quando foi respeitado por
+# múltiplos toques sem ser varrido — indica liquidez ainda intacta e
+# reação forte. É "Weak" quando já foi varrido/testado e rompido —
+# indica que a liquidez ali já foi capturada, menos confiável como
+# alvo. O Kairos já detecta EQH/EQL com toques; essa função só
+# classifica o swing mais recente de cada lado. ──
+
+def classificar_forca_swing(swing_nivel, swing_tipo, candles, tolerancia_pct=0.001):
+    """
+    swing_tipo: 'high' ou 'low'. Retorna 'strong' se o nível nunca foi
+    rompido pelos candles seguintes (ainda intacto — liquidez viva),
+    'weak' se já foi rompido em algum candle posterior (liquidez já
+    capturada).
+    """
+    if swing_nivel is None or not candles:
+        return None
+    for c in candles:
+        if swing_tipo == 'high' and c['h'] > swing_nivel * (1 + tolerancia_pct):
+            return 'weak'
+        if swing_tipo == 'low' and c['l'] < swing_nivel * (1 - tolerancia_pct):
+            return 'weak'
+    return 'strong'
+
+
+# ── Gate de horário ruim — a Vortex lista janelas explícitas a
+# EVITAR (transição Ásia-Europa e fechamento de NY), não só killzones
+# boas. Baixa liquidez nessas janelas tende a gerar fakeout/ruído.
+# Horários em UTC. ──
+HORARIOS_RUINS_UTC = [
+    {'nome': 'Transição Ásia-Europa', 'inicio_h': 5, 'fim_h': 7},
+    {'nome': 'Fechamento de NY', 'inicio_h': 21, 'fim_h': 23},
+]
+
+
+def esta_em_horario_ruim():
+    """Retorna (True, nome_da_janela) se o horário UTC atual cair
+    numa janela de baixa liquidez conhecida, senão (False, None)."""
+    import datetime
+    hora_utc = datetime.datetime.utcnow().hour
+    for janela in HORARIOS_RUINS_UTC:
+        if janela['inicio_h'] <= hora_utc < janela['fim_h']:
+            return True, janela['nome']
+    return False, None
+
+
+def compute_sazonalidade_mensal(db_file, pair, meses_historico=24):
+    """
+    Sazonalidade real, calculada em cima do próprio histórico de
+    sinais resolvidos (win/loss) do Kairos — não é dado de terceiro,
+    é o retrospecto real do par nesse mês específico ao longo dos
+    últimos meses. Precisa das colunas resultado_final (já
+    adicionadas via ALTER TABLE em init_scalp_db).
+    """
+    import datetime
+    tabelas = [
+        'scalp_signal_state', 'scalp_signal_state_continuacao',
+        'scalp_rapido_signal_state', 'scalp_cascata_signal_state',
+        'scalp_antecipado_signal_state', 'scalp_indicadores_signal_state',
+    ]
+    mes_atual = datetime.datetime.utcnow().month
+    cutoff = int(time.time()) - meses_historico * 30 * 86400
+    wins, losses = 0, 0
+    try:
+        with sqlite3.connect(db_file) as conn:
+            cursor = conn.cursor()
+            for tabela in tabelas:
+                try:
+                    cursor.execute(
+                        f"SELECT created_at, resultado_final FROM {tabela} "
+                        f"WHERE pair=? AND alerted=1 AND created_at >= ? "
+                        f"AND resultado_final IN ('win','loss')",
+                        (pair, cutoff)
+                    )
+                    for created_at, resultado in cursor.fetchall():
+                        mes_do_sinal = datetime.datetime.utcfromtimestamp(created_at).month
+                        if mes_do_sinal == mes_atual:
+                            if resultado == 'win':
+                                wins += 1
+                            else:
+                                losses += 1
+                except Exception:
+                    continue
+    except Exception as e:
+        print(f"[scalp_engine] erro ao calcular sazonalidade de {pair}: {e}")
+        return None
+
+    total = wins + losses
+    if total == 0:
+        return {'mes': mes_atual, 'amostras': 0, 'motivo': 'sem histórico suficiente ainda nesse mês'}
+    return {
+        'mes': mes_atual,
+        'amostras': total,
+        'win_rate_pct': round(100 * wins / total, 1),
+        'wins': wins,
+        'losses': losses,
+    }
+
+
+# ── NOVO 05/08: Fear & Greed Index — dado externo real (API pública
+# alternative.me, a mesma que a maioria das plataformas usa), com
+# cache em memória de 1h pra não bater na API toda vez que um dos 6
+# modos rodar um ciclo pra cada par. É crypto-wide, não por par, então
+# faz sentido cachear globalmente. ──
+_FEAR_GREED_CACHE = {'valor': None, 'classificacao': None, 'timestamp': 0}
+FEAR_GREED_CACHE_TTL = 3600  # 1 hora
+
+
+def get_fear_greed_index():
+    """
+    Retorna dict {'valor': int 0-100, 'classificacao': str} ou None se
+    a API falhar. Cacheado por 1h — não é crítico ter valor exato ao
+    segundo, o índice muda devagar.
+    """
+    agora = time.time()
+    if _FEAR_GREED_CACHE['valor'] is not None and (agora - _FEAR_GREED_CACHE['timestamp']) < FEAR_GREED_CACHE_TTL:
+        return {'valor': _FEAR_GREED_CACHE['valor'], 'classificacao': _FEAR_GREED_CACHE['classificacao']}
+
+    try:
+        resp = requests.get('https://api.alternative.me/fng/?limit=1', timeout=5)
+        resp.raise_for_status()
+        data = resp.json()
+        item = data['data'][0]
+        valor = int(item['value'])
+        classificacao_raw = item['value_classification']
+        traducao = {
+            'Extreme Fear': 'Medo Extremo', 'Fear': 'Medo', 'Neutral': 'Neutro',
+            'Greed': 'Ganância', 'Extreme Greed': 'Ganância Extrema',
+        }
+        classificacao = traducao.get(classificacao_raw, classificacao_raw)
+        _FEAR_GREED_CACHE.update({'valor': valor, 'classificacao': classificacao, 'timestamp': agora})
+        return {'valor': valor, 'classificacao': classificacao}
+    except Exception as e:
+        print(f"[scalp_engine] erro ao buscar Fear & Greed Index: {e}")
+        return None
+
+
+def montar_bloco_analise_extra(db_file, pair, direcao, entry, sl, tp, tabela_para_sazonalidade,
+                                sweep_nivel=None, sweep_tipo=None, exec_candles=None,
+                                entry_zone_tipo=None, obs_com_mitigacao=None):
+    """
+    Bloco único reaproveitado pelos 6 modos — monta em texto os itens
+    "Relatório Executivo" que fazem sentido dentro de uma mensagem de
+    sinal automático: qualidade do R:R, força do swing varrido
+    (Strong/Weak), status de mitigação do OB (se a zona de entrada for
+    OB), e sazonalidade real do par nesse mês. Cada linha só entra se
+    o dado existir — não força nada decorativo.
+
+    (Position sizing fica de fora daqui de propósito: depende do
+    capital do usuário, que o Kairos não guarda automaticamente — é
+    função separada, `calcular_position_sizing`, pra usar sob demanda.)
+    """
+    linhas = []
+
+    # R:R quality
+    if entry and sl and tp:
+        risco = abs(entry - sl)
+        retorno = abs(tp - entry)
+        if risco > 0:
+            rr = round(retorno / risco, 2)
+            qualidade = classificar_qualidade_rr(rr)
+            if qualidade:
+                linhas.append(f"📐 {qualidade}")
+
+    # Força do swing varrido (Strong = liquidez ainda intacta antes do sweep, Weak = já rompida antes)
+    if sweep_nivel is not None and sweep_tipo is not None and exec_candles:
+        swing_tipo_liquidez = 'high' if sweep_tipo == 'alta' else 'low'
+        forca = classificar_forca_swing(sweep_nivel, swing_tipo_liquidez, exec_candles)
+        if forca:
+            linhas.append(f"💧 Liquidez varrida: {'Strong (intacta até agora)' if forca=='strong' else 'Weak (já tinha sido testada antes)'}")
+
+    # Mitigação do OB, só se a zona de entrada for um Order Block
+    if entry_zone_tipo and 'OB' in entry_zone_tipo and obs_com_mitigacao:
+        ob_correspondente = next(
+            (ob for ob in obs_com_mitigacao if ob.get('bottom') is not None and ob.get('top') is not None
+             and ob['bottom'] <= (entry or 0) <= ob['top']), None
+        )
+        if ob_correspondente is not None:
+            linhas.append(f"⚠️ Order Block {'já mitigado antes' if ob_correspondente['mitigado'] else 'ainda intacto (primeira vez)'}")
+
+    # Sazonalidade real
+    try:
+        saz = compute_sazonalidade_mensal(db_file, pair)
+        if saz and saz.get('amostras', 0) > 0:
+            linhas.append(f"📅 Sazonalidade real ({pair}, esse mês): {saz['win_rate_pct']}% de acerto em {saz['amostras']} sinais resolvidos")
+    except Exception:
+        pass
+
+    # Fear & Greed Index (crypto-wide, cacheado 1h)
+    try:
+        fg = get_fear_greed_index()
+        if fg:
+            linhas.append(f"🌡️ Fear & Greed Index: {fg['valor']}/100 ({fg['classificacao']})")
+    except Exception:
+        pass
+
+    # Position sizing — só aparece se CAPITAL_USUARIO_USD estiver
+    # configurado (nunca inventa um capital)
+    if CAPITAL_USUARIO_USD and entry and sl:
+        try:
+            sizing = calcular_position_sizing(CAPITAL_USUARIO_USD, entry, sl, perfil='moderado')
+            if sizing:
+                linhas.append(
+                    f"💼 Sizing sugerido (moderado, {sizing['risco_pct']}% de ${CAPITAL_USUARIO_USD}): "
+                    f"risco de ${sizing['valor_em_risco_usd']} nesse trade"
+                )
+        except Exception:
+            pass
+
     return "\n".join(linhas)
 
 
@@ -1017,10 +1305,31 @@ def find_order_blocks(exec_candles, lookback=100):
         up_c = c['c'] >= c['o']
         up_nxt = nxt['c'] >= nxt['o']
         if up_nxt and not up_c:
-            obs.append({'tipo': 'OB_bullish', 'top': round(c['o'], 6), 'bottom': round(c['c'], 6), 't': c['t']})
+            obs.append({'tipo': 'OB_bullish', 'top': round(c['o'], 6), 'bottom': round(c['c'], 6), 't': c['t'], 'idx': i})
         elif not up_nxt and up_c:
-            obs.append({'tipo': 'OB_bearish', 'top': round(c['c'], 6), 'bottom': round(c['o'], 6), 't': c['t']})
+            obs.append({'tipo': 'OB_bearish', 'top': round(c['c'], 6), 'bottom': round(c['o'], 6), 't': c['t'], 'idx': i})
     return obs[-10:]
+
+
+def find_order_blocks_com_mitigacao(exec_candles, lookback=100):
+    """
+    Mesma detecção do find_order_blocks, mas cada OB ganha o campo
+    'mitigado': True se o preço já retornou e tocou dentro da zona
+    depois que o OB se formou (igual ao "⚠️ Já mitigado" que a Vortex
+    mostra) — indica que a zona já foi "consumida" e tem menos força
+    de reação da próxima vez.
+    """
+    candles = exec_candles[-lookback:] if len(exec_candles) > lookback else exec_candles
+    obs = find_order_blocks(exec_candles, lookback)
+    for ob in obs:
+        idx = ob.pop('idx', None)
+        if idx is None:
+            ob['mitigado'] = None
+            continue
+        candles_depois = candles[idx + 2:]  # pula o próprio candle e o de confirmação
+        mitigado = any(c['l'] <= ob['top'] and c['h'] >= ob['bottom'] for c in candles_depois)
+        ob['mitigado'] = mitigado
+    return obs
 
 
 def find_equal_highs_lows(candles, length=3, atr_mult=0.1):
@@ -1240,6 +1549,36 @@ def aplicar_buffer_stop(nivel, direcao, buffer_pct=STOP_BUFFER_PCT):
     if direcao == 'alta':
         return nivel * (1 - buffer_pct)
     return nivel * (1 + buffer_pct)
+
+
+# ── NOVO 05/08: buffer de stop via ATR — pendência antiga. O buffer
+# fixo de 0,1% ficava colado demais no nível exato do sweep; em
+# mercado lateralizado (como o SOL que gerou os stops seguidos), um
+# reteste normal já bastava pra bater o stop mesmo quando a tese do
+# trade continuava certa. Buffer via ATR se adapta à volatilidade real
+# do momento em vez de ser sempre o mesmo percentual fixo. ──
+ATR_BUFFER_MULT = 0.25  # 0.25x o ATR(14) do TF de execução como folga
+
+
+def aplicar_buffer_stop_atr(nivel, direcao, exec_candles, atr_mult=ATR_BUFFER_MULT, fallback_pct=STOP_BUFFER_PCT):
+    """
+    Versão do buffer de stop que usa ATR em vez de percentual fixo.
+    Se não conseguir calcular ATR (poucos candles), cai no buffer
+    percentual fixo antigo como fallback — nunca quebra.
+    """
+    try:
+        atr_series = compute_atr(exec_candles, 14)
+        atr_atual = next((v for v in reversed(atr_series) if v is not None), None)
+    except Exception:
+        atr_atual = None
+
+    if atr_atual is None or atr_atual <= 0:
+        return aplicar_buffer_stop(nivel, direcao, fallback_pct)
+
+    folga = atr_atual * atr_mult
+    if direcao == 'alta':
+        return nivel - folga
+    return nivel + folga
 
 
 def _load_saved_state(db_file, pair, table='scalp_zone_state'):
@@ -2019,7 +2358,7 @@ def process_pair_scalp(db_file, pair, d1_candles, exec_candles, exec_tf_label, s
     resultado['detalhes'] = detalhes
     resultado['direcao'] = choch['direcao']
 
-    sl = aplicar_buffer_stop(sweep['nivel'], choch['direcao'])
+    sl = aplicar_buffer_stop_atr(sweep['nivel'], choch['direcao'], exec_candles)
     entry = preco_atual
     risco = abs(entry - sl)
     tp = entry + risco * RR_TARGET_NORMAL if choch['direcao'] == 'alta' else entry - risco * RR_TARGET_NORMAL
@@ -2076,6 +2415,14 @@ def process_pair_scalp(db_file, pair, d1_candles, exec_candles, exec_tf_label, s
                 msg += f"\n\n🎯 RSI: {round(last_rsi,1) if last_rsi is not None else 'N/D'} | Viés Diário: {bias_d1.upper()}"
                 if rsi_contra_aviso:
                     msg += f"\n⚠️ Atenção: {rsi_contra_aviso} — entrada mesmo assim, confirme no gráfico antes"
+                bloco_extra = montar_bloco_analise_extra(
+                    db_file, pair, choch['direcao'], resultado['entry'], resultado['sl'], resultado['tp'],
+                    'scalp_signal_state', sweep_nivel=sweep['nivel'], sweep_tipo=sweep['lado'],
+                    exec_candles=exec_candles, entry_zone_tipo=entry_zone['tipo'],
+                    obs_com_mitigacao=find_order_blocks_com_mitigacao(exec_candles),
+                )
+                if bloco_extra:
+                    msg += f"\n\n{bloco_extra}"
                 send_telegram_fn(msg)
     else:
         resultado['motivo'] = f'score {score} abaixo de {SCORE_THRESHOLD_SINAL} — sem entrada'
@@ -2227,7 +2574,7 @@ def process_pair_scalp_filtros_shadow(db_file, pair, d1_candles, exec_candles, e
         return None
 
     entry = preco_atual
-    sl = aplicar_buffer_stop(sweep['nivel'], choch['direcao'])
+    sl = aplicar_buffer_stop_atr(sweep['nivel'], choch['direcao'], exec_candles)
     risco = abs(entry - sl)
     tp = entry + risco * RR_TARGET_NORMAL if choch['direcao'] == 'alta' else entry - risco * RR_TARGET_NORMAL
 
@@ -2469,7 +2816,7 @@ def process_pair_scalp_continuacao(db_file, pair, d1_candles, exec_candles, exec
     resultado['detalhes'] = detalhes
     resultado['direcao'] = bos['direcao']
 
-    sl = aplicar_buffer_stop(sweep['nivel'], bos['direcao'])
+    sl = aplicar_buffer_stop_atr(sweep['nivel'], bos['direcao'], exec_candles)
     entry = preco_atual
     risco = abs(entry - sl)
     tp = entry + risco * RR_TARGET_CONTINUACAO if bos['direcao'] == 'alta' else entry - risco * RR_TARGET_CONTINUACAO
@@ -2521,6 +2868,14 @@ def process_pair_scalp_continuacao(db_file, pair, d1_candles, exec_candles, exec
                 msg += f"\n\n🎯 RSI: {round(last_rsi,1) if last_rsi is not None else 'N/D'} | Viés Diário: {bias_d1.upper()}"
                 if rsi_contra_aviso:
                     msg += f"\n⚠️ Atenção: {rsi_contra_aviso} — entrada mesmo assim, confirme no gráfico antes"
+                bloco_extra = montar_bloco_analise_extra(
+                    db_file, pair, bos['direcao'], resultado['entry'], resultado['sl'], resultado['tp'],
+                    'scalp_signal_state_continuacao', sweep_nivel=sweep['nivel'], sweep_tipo=sweep['lado'],
+                    exec_candles=exec_candles, entry_zone_tipo=entry_zone['tipo'],
+                    obs_com_mitigacao=find_order_blocks_com_mitigacao(exec_candles),
+                )
+                if bloco_extra:
+                    msg += f"\n\n{bloco_extra}"
                 send_telegram_fn(msg)
     else:
         resultado['motivo'] = f'score {score} abaixo de {SCORE_THRESHOLD_SINAL} — sem entrada'
@@ -2860,7 +3215,7 @@ def process_pair_scalp_rapido(db_file, pair, d1_candles, exec_candles, exec_tf_l
 
     direcao = direcao_provisoria
     entry = preco_atual
-    sl = aplicar_buffer_stop(sweep['nivel'], direcao)
+    sl = aplicar_buffer_stop_atr(sweep['nivel'], direcao, exec_candles)
     risco = abs(entry - sl)
     tp = entry + risco * RR_TARGET_RAPIDO if direcao == 'alta' else entry - risco * RR_TARGET_RAPIDO
 
@@ -2900,8 +3255,15 @@ def process_pair_scalp_rapido(db_file, pair, d1_candles, exec_candles, exec_tf_l
         msg += f"{arrow} <b>{label}</b> | TF execução: {exec_tf_label}\n"
         msg += f"🧱 Sweep na {zona_nome} (zona diária móvel)\n"
         msg += f"📊 RSI no talo: {resultado['rsi']}\n"
-        msg += f"📍 Entrada: {resultado['entry']}\n🛑 Stop (curto): {resultado['sl']}\n✅ TP (RR 2:1): {resultado['tp']}\n\n"
+        msg += f"📍 Entrada: {resultado['entry']}\n🛑 Stop (curto): {resultado['sl']}\n✅ TP (RR {RR_TARGET_RAPIDO}:1): {resultado['tp']}\n\n"
         msg += "<b>Sem CHoCH — entrada rápida no sweep + RSI extremo, stop curto, reentrada permitida em 5min.</b>"
+        bloco_extra = montar_bloco_analise_extra(
+            db_file, pair, direcao, resultado['entry'], resultado['sl'], resultado['tp'],
+            'scalp_rapido_signal_state', sweep_nivel=sweep['nivel'], sweep_tipo=sweep['lado'],
+            exec_candles=exec_candles,
+        )
+        if bloco_extra:
+            msg += f"\n\n{bloco_extra}"
         send_telegram_fn(msg)
     elif em_cooldown:
         restante_min = (SCALP_RAPIDO_COOLDOWN_SECONDS - segundos_desde) // 60
@@ -3102,7 +3464,7 @@ def process_pair_cascata_smc(db_file, pair, w_candles, d1_candles, h4_candles, h
             return resultado
 
     entry = preco_atual
-    sl = aplicar_buffer_stop(sweep['nivel'], direcao_macro)
+    sl = aplicar_buffer_stop_atr(sweep['nivel'], direcao_macro, exec_candles)
     risco = abs(entry - sl)
     tp = entry + risco * RR_TARGET_CASCATA if direcao_macro == 'alta' else entry - risco * RR_TARGET_CASCATA
 
@@ -3144,6 +3506,13 @@ def process_pair_cascata_smc(db_file, pair, w_candles, d1_candles, h4_candles, h
         msg += f"🔨 Confirmação: {evento_tipo}\n"
         msg += f"📍 Entrada: {resultado['entry']}\n🛑 Stop: {resultado['sl']}\n✅ TP (RR {RR_TARGET_CASCATA}:1): {resultado['tp']}\n\n"
         msg += f"<b>{mtf_txt} — sweep na zona diária + confirmação de estrutura.</b>"
+        bloco_extra = montar_bloco_analise_extra(
+            db_file, pair, direcao_macro, resultado['entry'], resultado['sl'], resultado['tp'],
+            'scalp_cascata_signal_state', sweep_nivel=sweep['nivel'], sweep_tipo=sweep['lado'],
+            exec_candles=exec_candles,
+        )
+        if bloco_extra:
+            msg += f"\n\n{bloco_extra}"
         send_telegram_fn(msg)
     elif em_cooldown:
         restante_min = (CASCATA_COOLDOWN_SECONDS - segundos_desde) // 60
@@ -3346,7 +3715,7 @@ def process_pair_scalp_antecipado_v2(db_file, pair, d1_candles, exec_candles, ex
     tem_divergencia = check_rsi_divergence(exec_candles, sweep)
 
     entry = preco_atual
-    sl = aplicar_buffer_stop(sweep['nivel_pavio'], direcao)
+    sl = aplicar_buffer_stop_atr(sweep['nivel_pavio'], direcao, exec_candles)
     risco = abs(entry - sl)
     tp = entry - risco * RR_FIXO_ANTECIPADO if direcao == 'baixa' else entry + risco * RR_FIXO_ANTECIPADO
 
@@ -3405,8 +3774,15 @@ def process_pair_scalp_antecipado_v2(db_file, pair, d1_candles, exec_candles, ex
         if tem_divergencia:
             msg += "🔺 <b>Divergência de RSI confirmada</b> — reforço extra de confiança\n"
         msg += f"💧 Liquidez antiga varrida: {resultado['liquidez_varrida']}\n"
-        msg += f"📍 Entrada: {resultado['entry']}\n🛑 Stop: {resultado['sl']}\n✅ TP (RR 2:1): {resultado['tp']}\n\n"
+        msg += f"📍 Entrada: {resultado['entry']}\n🛑 Stop: {resultado['sl']}\n✅ TP (RR {RR_FIXO_ANTECIPADO}:1): {resultado['tp']}\n\n"
         msg += "<b>Sem CHoCH confirmado — entrada agressiva, posição menor recomendada.</b>"
+        bloco_extra = montar_bloco_analise_extra(
+            db_file, pair, direcao, resultado['entry'], resultado['sl'], resultado['tp'],
+            'scalp_antecipado_signal_state', sweep_nivel=sweep['nivel_pavio'], sweep_tipo=sweep['lado'],
+            exec_candles=exec_candles,
+        )
+        if bloco_extra:
+            msg += f"\n\n{bloco_extra}"
         send_telegram_fn(msg)
     elif em_cooldown and not ja_alertado_preco:
         restante_min = (COOLDOWN_SECONDS - segundos_desde) // 60
@@ -3582,7 +3958,7 @@ def process_pair_scalp_indicadores(db_file, pair, exec_candles, exec_tf_label, s
         sl = entry - stop_dist if direcao == 'alta' else entry + stop_dist
         stop_via = 'atr_fallback'
     else:
-        sl = aplicar_buffer_stop(sl_bruto, direcao)
+        sl = aplicar_buffer_stop_atr(sl_bruto, direcao, exec_candles)
 
     swing_invalido = (direcao == 'alta' and sl >= entry) or (direcao == 'baixa' and sl <= entry)
     if swing_invalido:
@@ -3656,8 +4032,14 @@ def process_pair_scalp_indicadores(db_file, pair, exec_candles, exec_tf_label, s
         if tendencia_forte:
             msg += " | ADX confirma tendência forte"
         msg += "\n"
-        msg += f"📍 Entrada: {resultado['entry']}\n🛑 {stop_label}: {resultado['sl']}\n✅ TP (RR 2:1): {resultado['tp']}\n\n"
+        msg += f"📍 Entrada: {resultado['entry']}\n🛑 {stop_label}: {resultado['sl']}\n✅ TP (RR {RR_INDICADORES}:1): {resultado['tp']}\n\n"
         msg += "<b>Sem zona D1/sweep/CHoCH — setup baseado só em indicadores técnicos, posição menor recomendada.</b>"
+        bloco_extra = montar_bloco_analise_extra(
+            db_file, pair, direcao, resultado['entry'], resultado['sl'], resultado['tp'],
+            'scalp_indicadores_signal_state', exec_candles=exec_candles,
+        )
+        if bloco_extra:
+            msg += f"\n\n{bloco_extra}"
         send_telegram_fn(msg)
     elif em_cooldown:
         restante_min = (COOLDOWN_SECONDS - segundos_desde) // 60

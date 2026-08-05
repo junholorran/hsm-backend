@@ -51,6 +51,17 @@
 # cooldown — só troca "espera reversão" por "espera continuação".
 # Tabelas próprias (scalp_zone_state_continuacao, scalp_signal_state_
 # continuacao), nunca mistura com os outros 3 modos.
+#
+# ── CORREÇÃO 05/08 (Juninho) ──────────────────────────────────────────
+# Zonas D1 do scalp_engine estavam saindo deslocadas em relação às zonas
+# reais vistas no TradingView (confirmado em BTCUSDT, AAVEUSDT, SOLUSDT,
+# BNBUSDT). Causa raiz: compute_d1_zones() usava janela de pivô (lb) de
+# apenas 2 candles — curta demais, qualifica qualquer oscilação de 2
+# candles como "pivô estrutural" e mistura ruído com estrutura real no
+# cluster. Corrigido pra lb=3, igual ao cascade_engine.py (que nunca
+# teve esse problema). Também passou a expor a zona (top/bottom/toques)
+# na mensagem "Manipulação detectada" do Telegram, pra dar pra conferir
+# a zona usada direto contra o gráfico, não só o nível do sweep.
 # ─────────────────────────────────────────────────────────────────────────
 
 import sqlite3
@@ -65,7 +76,7 @@ MIN_EVENTOS_BANDA = 2            # mínimo de toques pra uma banda D1 ser consid
 MIN_FVG_GAP_PCT = 0.0005         # 0.05% do preço — FVG menor que isso é ruído, não conta como zona de entrada
 MIN_CANDLE_BODY_RATIO = 0.35     # candle de confirmação precisa ter corpo >= 35% do range total (afrouxado de 50% — pedido explícito pra disparar mais fácil, depois de ver setup real de score 92 ser bloqueado por esse filtro)
 STOP_BUFFER_PCT = 0.001          # 0.1% de folga além do nível estrutural — stop nunca fica colado no pavio exato
-D1_LOOKBACK_DIAS = 45            # bandas D1 do Scalp olham só os últimos 45 dias — estrutura recente, não swing de meses atrás
+D1_LOOKBACK_DIAS = 200           # ── AJUSTADO 05/08 (v2): com o extrator de swing no padrão LuxAlgo (swing_size=50), um swing só se confirma depois de romper uma janela de 50 candles — em 45 dias praticamente não sobrava swing nenhum pra formar zona. 200 dias cobre o mesmo range que o Kairos já busca na Bybit (200 candles D1), sem cortar estrutura que o LuxAlgo ainda mostra no gráfico.
 ZONA_FORTE_TOLERANCIA_PCT = 0.0015  # 0.15% — bem mais apertada que a zona D1 (0.6%), pro modo Scalp Rápido
 ZONA_FORTE_MIN_TOQUES = 3           # "liquidez forte" de verdade — mais rigoroso que o mínimo de 2 dos outros modos
 SCALP_RAPIDO_COOLDOWN_SECONDS = 5 * 60  # 5min — bem mais curto, permite reentrada rápida se tomar stop
@@ -282,21 +293,279 @@ def is_in_killzone(now_utc=None):
     return False, None
 
 
-# ── ZONA D1 (cluster de S/R) ────────────────────────────────────────────
-def compute_d1_zones(d1_candles, lookback_dias=D1_LOOKBACK_DIAS):
-    if lookback_dias and len(d1_candles) > lookback_dias:
-        d1_candles = d1_candles[-lookback_dias:]
+# ── CORRIGIDO 05/08 (v2): extrator de swing points que replica o
+# algoritmo REAL do LuxAlgo Smart Money Concepts (não um pivô simétrico
+# simples). Confirmado com o Juninho: "Swing Points Length" = 50 nas
+# configs do indicador no TradingView. O LuxAlgo usa troca de "perna"
+# (leg) — quando o preço rompe o topo/fundo de uma janela de N candles,
+# a perna vira, e o candle que ficou exatamente N candles atrás daquela
+# virada é marcado como o swing point. É o mesmo método já usado em
+# compute_lux_structure_bias() pra calcular viés — aqui reaproveitamos
+# a mesma lógica, mas extraindo os NÍVEIS de swing, não só a direção,
+# pra alimentar o cluster de zonas D1/H4. Se o Juninho mudar o "Swing
+# Points Length" no LuxAlgo, o swing_size aqui tem que mudar junto. ──
+def _extrair_swings_lux_algo(candles, swing_size=50):
+    n = len(candles)
+    if n < swing_size + 5:
+        return []
+
+    legs = [0] * n
+    current_leg = 0
+    for i in range(swing_size, n):
+        window = candles[i - swing_size + 1:i + 1]
+        highest = max(c['h'] for c in window)
+        lowest = min(c['l'] for c in window)
+        high_back = candles[i - swing_size]['h']
+        low_back = candles[i - swing_size]['l']
+        if high_back > highest:
+            current_leg = 0
+        elif low_back < lowest:
+            current_leg = 1
+        legs[i] = current_leg
 
     swings = []
-    lb = 2
-    for i in range(lb, len(d1_candles) - lb):
+    for i in range(swing_size + 1, n):
+        if legs[i] == legs[i - 1]:
+            continue
+        idx_pivot = i - swing_size
+        if idx_pivot < 0:
+            continue
+        if legs[i] == 1:
+            swings.append({'valor': candles[idx_pivot]['l'], 'tipo': 'low', 't': candles[idx_pivot]['t']})
+        else:
+            swings.append({'valor': candles[idx_pivot]['h'], 'tipo': 'high', 't': candles[idx_pivot]['t']})
+    return swings
+
+
+# ── NOVO 05/08 (v3): Order Blocks D1 no padrão ICT/LuxAlgo — confirmado
+# com o Juninho que as caixas coloridas que ele vê no gráfico (a
+# referência real) são Order Blocks do LuxAlgo, não swing high/low.
+# Conceito ICT: um Order Block é a ÚLTIMA vela CONTRÁRIA ao movimento,
+# logo antes de um rompimento de estrutura (BOS) que confirma que
+# aquela vela realmente tinha ordens institucionais por trás. Ex: a
+# última vela vermelha antes de um impulso de alta que rompe o topo
+# anterior = Order Block de alta (zona de demanda). Usa o mesmo
+# leg-detection do LuxAlgo (swing_size=50) pra achar os rompimentos de
+# estrutura, e filtra por ATR (igual ao "Order Block Filter: Atr" nas
+# configs do indicador) pra descartar velas insignificantes que não
+# representam movimento institucional real. ──
+def find_d1_order_blocks(d1_candles, swing_size=50, atr_period=14, atr_mult=1.0, lookback_dias=D1_LOOKBACK_DIAS):
+    n = len(d1_candles)
+    if n < swing_size + atr_period + 5:
+        return []
+
+    atr_series = compute_atr(d1_candles, atr_period)
+
+    legs = [0] * n
+    current_leg = 0
+    swing_high_level = None
+    swing_low_level = None
+    swing_high_crossed = False
+    swing_low_crossed = False
+
+    obs = []
+
+    for i in range(swing_size, n):
+        window = d1_candles[i - swing_size + 1:i + 1]
+        highest = max(c['h'] for c in window)
+        lowest = min(c['l'] for c in window)
+        high_back = d1_candles[i - swing_size]['h']
+        low_back = d1_candles[i - swing_size]['l']
+        if high_back > highest:
+            current_leg = 0
+        elif low_back < lowest:
+            current_leg = 1
+        legs[i] = current_leg
+
+        if i > swing_size and legs[i] != legs[i - 1]:
+            idx_pivot = i - swing_size
+            if idx_pivot >= 0:
+                if legs[i] == 1:
+                    swing_low_level = d1_candles[idx_pivot]['l']
+                    swing_low_crossed = False
+                else:
+                    swing_high_level = d1_candles[idx_pivot]['h']
+                    swing_high_crossed = False
+
         c = d1_candles[i]
-        is_high = all(c['h'] >= d1_candles[j]['h'] for j in range(i - lb, i + lb + 1) if j != i)
-        is_low = all(c['l'] <= d1_candles[j]['l'] for j in range(i - lb, i + lb + 1) if j != i)
-        if is_high:
-            swings.append({'valor': c['h'], 'tipo': 'high', 't': c['t']})
-        if is_low:
-            swings.append({'valor': c['l'], 'tipo': 'low', 't': c['t']})
+        atr_val = atr_series[i]
+
+        # ── BOS de alta: fechamento rompe o último swing high → procura
+        # a última vela vermelha (bearish) antes desse rompimento ──
+        if swing_high_level is not None and not swing_high_crossed and c['c'] > swing_high_level:
+            swing_high_crossed = True
+            for k in range(i, max(0, i - swing_size), -1):
+                cand = d1_candles[k]
+                if cand['c'] < cand['o']:  # vela vermelha = candidata a OB de alta
+                    rng = cand['h'] - cand['l']
+                    if atr_val and rng >= atr_val * atr_mult:
+                        obs.append({
+                            'top': cand['h'], 'bottom': cand['l'],
+                            'tipo': 'demanda', 't': cand['t'],
+                        })
+                    break
+
+        # ── BOS de baixa: fechamento rompe o último swing low → procura
+        # a última vela verde (bullish) antes desse rompimento ──
+        if swing_low_level is not None and not swing_low_crossed and c['c'] < swing_low_level:
+            swing_low_crossed = True
+            for k in range(i, max(0, i - swing_size), -1):
+                cand = d1_candles[k]
+                if cand['c'] > cand['o']:  # vela verde = candidata a OB de baixa
+                    rng = cand['h'] - cand['l']
+                    if atr_val and rng >= atr_val * atr_mult:
+                        obs.append({
+                            'top': cand['h'], 'bottom': cand['l'],
+                            'tipo': 'oferta', 't': cand['t'],
+                        })
+                    break
+
+    if lookback_dias and obs:
+        cutoff_ms = d1_candles[-1]['t'] - lookback_dias * 24 * 3600 * 1000
+        obs = [o for o in obs if o['t'] >= cutoff_ms]
+
+    # dedup — mesma vela pode ter sido pega em rompimentos próximos
+    vistos = set()
+    unicos = []
+    for o in obs:
+        chave = (o['t'], o['tipo'])
+        if chave not in vistos:
+            vistos.add(chave)
+            unicos.append(o)
+
+    return unicos
+
+
+# ─── ZONA D1 — algoritmo real do indicador "SRchannel" (Support
+# Resistance Channels) que o Juninho usa no TradingView, confirmado nas
+# configs: Pivot Period=10, Maximum Channel Width%=5, Minimum Strength=1,
+# Maximum Number of S/R=6, Loopback Period=290. Esse é um script Pine
+# público conhecido — algoritmo documentado abaixo, não é chute:
+#
+#   1. Acha pivôs de topo/fundo com janela simétrica de `pivot_period`
+#      candles pra cada lado (candle é pivô se for o maior/menor high/low
+#      dessa janela).
+#   2. Define a largura máxima de canal em valor ABSOLUTO de preço:
+#      (maior high - menor low) do período de loopback inteiro, vezes
+#      `max_channel_width_pct` / 100. Não é tolerância relativa por
+#      pivô (diferente do que eu tinha implementado antes) — é uma
+#      largura fixa calculada uma vez sobre o range total.
+#   3. Agrupa pivôs: cada novo pivô entra no canal existente que
+#      resultaria na MENOR expansão de largura, desde que a largura
+#      final ainda caiba dentro do máximo calculado no passo 2. Se não
+#      couber em nenhum, vira canal novo.
+#   4. "Strength" de cada canal = quantos pivôs entraram nele.
+#   5. Descarta canais com strength < `min_strength`.
+#   6. Ordena por strength (mais forte primeiro) e mantém só os
+#      `max_number_sr` mais fortes.
+# ─────────────────────────────────────────────────────────────────────
+SR_CHANNEL_PIVOT_PERIOD = 10
+SR_CHANNEL_MAX_WIDTH_PCT = 5
+SR_CHANNEL_MIN_STRENGTH = 1
+SR_CHANNEL_MAX_NUMBER = 6
+SR_CHANNEL_LOOKBACK_PERIOD = 290
+
+
+def compute_sr_channels(
+    d1_candles,
+    pivot_period=SR_CHANNEL_PIVOT_PERIOD,
+    max_channel_width_pct=SR_CHANNEL_MAX_WIDTH_PCT,
+    min_strength=SR_CHANNEL_MIN_STRENGTH,
+    max_number_sr=SR_CHANNEL_MAX_NUMBER,
+    loopback_period=SR_CHANNEL_LOOKBACK_PERIOD,
+):
+    candles = d1_candles[-loopback_period:] if len(d1_candles) > loopback_period else d1_candles
+    n = len(candles)
+    if n < pivot_period * 2 + 1:
+        return []
+
+    highest = max(c['h'] for c in candles)
+    lowest = min(c['l'] for c in candles)
+    max_channel_width = (highest - lowest) * max_channel_width_pct / 100.0
+    if max_channel_width <= 0:
+        return []
+
+    pivos = []
+    for i in range(pivot_period, n - pivot_period):
+        c = candles[i]
+        window = candles[i - pivot_period:i + pivot_period + 1]
+        if c['h'] == max(w['h'] for w in window):
+            pivos.append({'valor': c['h'], 'tipo': 'high', 't': c['t']})
+        if c['l'] == min(w['l'] for w in window):
+            pivos.append({'valor': c['l'], 'tipo': 'low', 't': c['t']})
+
+    canais = []
+    for p in pivos:
+        val = p['valor']
+        melhor_canal = None
+        menor_expansao = None
+        for ch in canais:
+            novo_high = max(ch['high'], val)
+            novo_low = min(ch['low'], val)
+            largura = novo_high - novo_low
+            if largura <= max_channel_width:
+                expansao = largura - (ch['high'] - ch['low'])
+                if menor_expansao is None or expansao < menor_expansao:
+                    menor_expansao = expansao
+                    melhor_canal = ch
+        if melhor_canal:
+            melhor_canal['high'] = max(melhor_canal['high'], val)
+            melhor_canal['low'] = min(melhor_canal['low'], val)
+            melhor_canal['pontos'].append(val)
+            melhor_canal['timestamps'].append(p['t'])
+            melhor_canal['tipos'].append(p['tipo'])
+        else:
+            canais.append({
+                'high': val, 'low': val,
+                'pontos': [val], 'timestamps': [p['t']], 'tipos': [p['tipo']],
+            })
+
+    resultado = []
+    for ch in canais:
+        strength = len(ch['pontos'])
+        if strength < min_strength:
+            continue
+        n_low = ch['tipos'].count('low')
+        n_high = ch['tipos'].count('high')
+        if n_low > n_high:
+            tipo_predominante = 'demanda'
+        elif n_high > n_low:
+            tipo_predominante = 'oferta'
+        else:
+            tipo_predominante = 'mista'
+        resultado.append({
+            'top': ch['high'],
+            'bottom': ch['low'],
+            'toques': strength,
+            'ultimo_toque_ts': max(ch['timestamps']),
+            'tipo_predominante': tipo_predominante,
+        })
+
+    resultado.sort(key=lambda c: c['toques'], reverse=True)
+    return resultado[:max_number_sr]
+
+
+# ─── ZONA D1 (SRchannel — indicador real usado pelo Juninho no TV) ─────
+def compute_d1_zones(d1_candles, lookback_dias=None, swing_size=50):
+    # ── SUBSTITUÍDO 05/08 (v4): confirmado com print das configurações
+    # que as caixas coloridas no gráfico do Juninho vêm do indicador
+    # "SRchannel", não LuxAlgo. Troquei pra replicar o algoritmo real
+    # dele (ver compute_sr_channels acima), com os parâmetros exatos
+    # das configs. lookback_dias/swing_size ficam nos argumentos só por
+    # compatibilidade com quem já chama essa função — não são mais
+    # usados aqui. ──
+    return compute_sr_channels(d1_candles)
+
+
+# ─── ZONA D1 antiga (cluster de swing S/R) — mantida à parte, não é mais
+# usada por padrão pelos 5 modos, mas fica disponível se precisar comparar
+# ou voltar atrás. ──
+def compute_d1_zones_swing_cluster(d1_candles, lookback_dias=D1_LOOKBACK_DIAS, swing_size=50):
+    swings = _extrair_swings_lux_algo(d1_candles, swing_size=swing_size)
+
+    if lookback_dias and swings:
+        cutoff_ms = d1_candles[-1]['t'] - lookback_dias * 24 * 3600 * 1000
+        swings = [s for s in swings if s['t'] >= cutoff_ms]
 
     grupos = []
     for s in swings:
@@ -367,7 +636,7 @@ def compute_zona_forte(d1_candles, tolerancia_pct=ZONA_FORTE_TOLERANCIA_PCT, min
         d1_candles = d1_candles[-lookback_dias:]
 
     swings = []
-    lb = 2
+    lb = 3
     for i in range(lb, len(d1_candles) - lb):
         c = d1_candles[i]
         is_high = all(c['h'] >= d1_candles[j]['h'] for j in range(i - lb, i + lb + 1) if j != i)
@@ -1413,7 +1682,10 @@ def process_pair_scalp(db_file, pair, d1_candles, exec_candles, exec_tf_label, s
     # Acumulação → Manipulação → Distribuição em tempo real, com o Viés
     # Diário (D1) junto pra dar contexto (nunca compra resistência,
     # nunca vende suporte — o próprio sweep já respeita isso: sweep no
-    # fundo só pode virar LONG, sweep no topo só pode virar SHORT). ──
+    # fundo só pode virar LONG, sweep no topo só pode virar SHORT).
+    # ── CORREÇÃO 05/08: agora mostra a ZONA usada (top/bottom/toques),
+    # não só o nível do sweep — sem isso não dá pra conferir a zona
+    # contra o gráfico. ──
     sweep_e_novo = not saved or saved.get('sweep_ts') != sweep.get('t')
     if sweep_e_novo and send_telegram_fn:
         bias_d1_msg = compute_bias_from_swings(d1_candles)
@@ -1432,6 +1704,7 @@ def process_pair_scalp(db_file, pair, d1_candles, exec_candles, exec_tf_label, s
             expectativa_txt = "provável REVERSÃO (baixa)" if bias_d1_msg == 'baixa' else "provável CONTINUAÇÃO (alta)"
 
         msg = f"🧲 <b>Manipulação detectada — {pair}</b>\n\n"
+        msg += f"Zona D1: {round(zona['bottom'],6)} – {round(zona['top'],6)} ({zona['toques']} toques)\n"
         msg += f"Varreu o {lado_txt} da zona D1 em {round(sweep['nivel'],6)}\n"
         msg += f"📊 Viés Diário (D1): <b>{bias_d1_msg.upper()}</b>\n"
         msg += f"🔮 Expectativa (não garantida): {expectativa_txt}\n"
@@ -1864,7 +2137,9 @@ def process_pair_scalp_continuacao(db_file, pair, d1_candles, exec_candles, exec
     resultado['sweep_lado'] = sweep['lado']
 
     # ── NOVO: mesmo alerta de MANIPULAÇÃO do modo Normal — dispara uma
-    # vez por sweep novo, com Viés Diário (D1) junto. ──
+    # vez por sweep novo, com Viés Diário (D1) junto.
+    # ── CORREÇÃO 05/08: idem modo Normal — mostra a ZONA usada
+    # (top/bottom/toques), não só o nível do sweep. ──
     sweep_e_novo = not saved or saved.get('sweep_ts') != sweep.get('t')
     if sweep_e_novo and send_telegram_fn:
         bias_d1_msg = compute_bias_from_swings(d1_candles)
@@ -1883,6 +2158,7 @@ def process_pair_scalp_continuacao(db_file, pair, d1_candles, exec_candles, exec
             expectativa_txt = "provável REVERSÃO (baixa)" if bias_d1_msg == 'baixa' else "provável CONTINUAÇÃO (alta)"
 
         msg = f"🧲 <b>Manipulação detectada — {pair}</b>\n\n"
+        msg += f"Zona D1: {round(zona['bottom'],6)} – {round(zona['top'],6)} ({zona['toques']} toques)\n"
         msg += f"Varreu o {lado_txt} da zona D1 em {round(sweep['nivel'],6)}\n"
         msg += f"📊 Viés Diário (D1): <b>{bias_d1_msg.upper()}</b>\n"
         msg += f"🔮 Expectativa (não garantida): {expectativa_txt}\n"

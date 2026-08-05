@@ -818,6 +818,11 @@ def find_equal_highs_lows(candles, length=3, atr_mult=0.1):
 
 def debug_zonas_completo(d1_candles, exec_candles):
     return {
+        # ── NOVO 05/08: zonas SRchannel (o indicador real que o Juninho usa
+        # no TV — Pivot Period 10, Largura Máx 5%, Força Mín 1, Máx 6 zonas,
+        # Lookback 290) — é isso que os 5 modos (Normal/Continuação/
+        # Antecipado/Confluência/Scalp Rápido) usam como "zona D1" agora. ──
+        'zonas_sr_channel_d1': compute_d1_zones(d1_candles),
         'zona_diaria': compute_zona_diaria_movel(d1_candles),
         'premium_discount': compute_premium_discount(exec_candles),
         'fvgs_abertas': find_open_fvgs(exec_candles),

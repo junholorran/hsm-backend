@@ -436,124 +436,180 @@ def find_d1_order_blocks(d1_candles, swing_size=50, atr_period=14, atr_mult=1.0,
     return unicos
 
 
-# ─── ZONA D1 — algoritmo real do indicador "SRchannel" (Support
-# Resistance Channels) que o Juninho usa no TradingView, confirmado nas
-# configs: Pivot Period=10, Maximum Channel Width%=5, Minimum Strength=1,
-# Maximum Number of S/R=6, Loopback Period=290. Esse é um script Pine
-# público conhecido — algoritmo documentado abaixo, não é chute:
+# ─── ZONA D1 — algoritmo REAL do indicador "SRchannel" (Support
+# Resistance Channels), autor LonesomeTheBlue, código Pine v6 fornecido
+# pelo Juninho. Tradução fiel, linha por linha, do script original —
+# não é mais aproximação. Parâmetros confirmados: Pivot Period=10,
+# Maximum Channel Width%=5, Minimum Strength=1, Maximum Number of S/R=6,
+# Loopback Period=290.
 #
-#   1. Acha pivôs de topo/fundo com janela simétrica de `pivot_period`
-#      candles pra cada lado (candle é pivô se for o maior/menor high/low
-#      dessa janela).
-#   2. Define a largura máxima de canal em valor ABSOLUTO de preço:
-#      (maior high - menor low) do período de loopback inteiro, vezes
-#      `max_channel_width_pct` / 100. Não é tolerância relativa por
-#      pivô (diferente do que eu tinha implementado antes) — é uma
-#      largura fixa calculada uma vez sobre o range total.
-#   3. Agrupa pivôs: cada novo pivô entra no canal existente que
-#      resultaria na MENOR expansão de largura, desde que a largura
-#      final ainda caiba dentro do máximo calculado no passo 2. Se não
-#      couber em nenhum, vira canal novo.
-#   4. "Strength" de cada canal = quantos pivôs entraram nele.
-#   5. Descarta canais com strength < `min_strength`.
-#   6. Ordena por strength (mais forte primeiro) e mantém só os
-#      `max_number_sr` mais fortes.
+# Passo a passo do algoritmo original:
+#   1. Pivôs de topo/fundo via ta.pivothigh/pivotlow (janela simétrica
+#      de `pivot_period` candles pra cada lado, precisa ser
+#      estritamente maior/menor que os dois lados).
+#   2. Só ficam pivôs dentro dos últimos `loopback` candles (relativo
+#      ao candle mais recente).
+#   3. Largura máxima do canal (`cwidth`) = (maior high - menor low)
+#      dos últimos 300 candles (FIXO em 300, não é o loopback) vezes
+#      `channel_width_pct` / 100.
+#   4. Pra CADA pivô (usado como semente), varre TODOS os pivôs (na
+#      ordem do mais recente pro mais antigo) e expande uma faixa
+#      [lo,hi] incluindo cada pivô cuja inclusão mantenha a largura
+#      final dentro de `cwidth`. Cada pivô incluído soma 20 à força
+#      bruta desse candidato.
+#   5. Em cima da força bruta, soma quantos candles (high OU low) dos
+#      últimos `loopback` candles tocam dentro da faixa [lo,hi] desse
+#      candidato — isso pesa muito mais canais realmente respeitados
+#      pelo preço, não só canais com muitos pivôs.
+#   6. Seleção gulosa: pega o candidato de maior força (força mínima =
+#      `min_strength` * 20), remove/marca como usado qualquer outro
+#      candidato cuja faixa se sobreponha à faixa escolhida, repete até
+#      `max_number_sr` canais ou não sobrar candidato válido.
+#   7. Classificação suporte/resistência é DINÂMICA, relativa ao preço
+#      atual: canal inteiro acima do preço = resistência (oferta);
+#      canal inteiro abaixo = suporte (demanda); preço dentro do canal
+#      = "mista" (cor neutra no indicador original).
 # ─────────────────────────────────────────────────────────────────────
 SR_CHANNEL_PIVOT_PERIOD = 10
 SR_CHANNEL_MAX_WIDTH_PCT = 5
 SR_CHANNEL_MIN_STRENGTH = 1
 SR_CHANNEL_MAX_NUMBER = 6
 SR_CHANNEL_LOOKBACK_PERIOD = 290
+SR_CHANNEL_WIDTH_BASIS_BARS = 300  # fixo no script original, não é o loopback
 
 
 def compute_sr_channels(
     d1_candles,
     pivot_period=SR_CHANNEL_PIVOT_PERIOD,
-    max_channel_width_pct=SR_CHANNEL_MAX_WIDTH_PCT,
+    channel_width_pct=SR_CHANNEL_MAX_WIDTH_PCT,
     min_strength=SR_CHANNEL_MIN_STRENGTH,
     max_number_sr=SR_CHANNEL_MAX_NUMBER,
-    loopback_period=SR_CHANNEL_LOOKBACK_PERIOD,
+    loopback=SR_CHANNEL_LOOKBACK_PERIOD,
 ):
-    candles = d1_candles[-loopback_period:] if len(d1_candles) > loopback_period else d1_candles
-    n = len(candles)
+    n = len(d1_candles)
     if n < pivot_period * 2 + 1:
         return []
 
-    highest = max(c['h'] for c in candles)
-    lowest = min(c['l'] for c in candles)
-    max_channel_width = (highest - lowest) * max_channel_width_pct / 100.0
-    if max_channel_width <= 0:
+    highs = [c['h'] for c in d1_candles]
+    lows = [c['l'] for c in d1_candles]
+    closes = [c['c'] for c in d1_candles]
+    last_idx = n - 1
+
+    # ── passo 1+2: pivôs, mais recentes primeiro (equivalente ao
+    # array.unshift do Pine — a ORDEM importa pro passo 4), só dentro
+    # do loopback ──
+    pivots_cronologico = []
+    for i in range(pivot_period, n - pivot_period):
+        janela_h = highs[i - pivot_period:i] + highs[i + 1:i + pivot_period + 1]
+        if highs[i] > max(janela_h):
+            pivots_cronologico.append({'idx': i, 'valor': highs[i], 'tipo': 'high'})
+        janela_l = lows[i - pivot_period:i] + lows[i + 1:i + pivot_period + 1]
+        if lows[i] < min(janela_l):
+            pivots_cronologico.append({'idx': i, 'valor': lows[i], 'tipo': 'low'})
+
+    pivots_cronologico.sort(key=lambda p: p['idx'])
+    pivots = [p for p in reversed(pivots_cronologico) if (last_idx - p['idx']) <= loopback]
+
+    if not pivots:
         return []
 
-    pivos = []
-    for i in range(pivot_period, n - pivot_period):
-        c = candles[i]
-        window = candles[i - pivot_period:i + pivot_period + 1]
-        if c['h'] == max(w['h'] for w in window):
-            pivos.append({'valor': c['h'], 'tipo': 'high', 't': c['t']})
-        if c['l'] == min(w['l'] for w in window):
-            pivos.append({'valor': c['l'], 'tipo': 'low', 't': c['t']})
+    pivotvals = [p['valor'] for p in pivots]
+    m = len(pivotvals)
 
-    canais = []
-    for p in pivos:
-        val = p['valor']
-        melhor_canal = None
-        menor_expansao = None
-        for ch in canais:
-            novo_high = max(ch['high'], val)
-            novo_low = min(ch['low'], val)
-            largura = novo_high - novo_low
-            if largura <= max_channel_width:
-                expansao = largura - (ch['high'] - ch['low'])
-                if menor_expansao is None or expansao < menor_expansao:
-                    menor_expansao = expansao
-                    melhor_canal = ch
-        if melhor_canal:
-            melhor_canal['high'] = max(melhor_canal['high'], val)
-            melhor_canal['low'] = min(melhor_canal['low'], val)
-            melhor_canal['pontos'].append(val)
-            melhor_canal['timestamps'].append(p['t'])
-            melhor_canal['tipos'].append(p['tipo'])
-        else:
-            canais.append({
-                'high': val, 'low': val,
-                'pontos': [val], 'timestamps': [p['t']], 'tipos': [p['tipo']],
-            })
+    # ── passo 3: largura máxima em valor absoluto, base fixa de 300
+    # candles (não o loopback) ──
+    janela_300 = d1_candles[-SR_CHANNEL_WIDTH_BASIS_BARS:] if n >= SR_CHANNEL_WIDTH_BASIS_BARS else d1_candles
+    prdhighest = max(c['h'] for c in janela_300)
+    prdlowest = min(c['l'] for c in janela_300)
+    cwidth = (prdhighest - prdlowest) * channel_width_pct / 100.0
+    if cwidth <= 0:
+        return []
 
+    # ── passo 4: get_sr_vals — pra cada pivô-semente, expande a faixa
+    # incluindo todo pivô que caiba na largura máxima ──
+    candidatos = []
+    for i in range(m):
+        lo = pivotvals[i]
+        hi = lo
+        numpp = 0
+        for y in range(m):
+            cpp = pivotvals[y]
+            wdth = (hi - cpp) if cpp <= hi else (cpp - lo)
+            if wdth <= cwidth:
+                if cpp <= hi:
+                    lo = min(lo, cpp)
+                else:
+                    hi = max(hi, cpp)
+                numpp += 20
+        candidatos.append({'hi': hi, 'lo': lo, 'forca': numpp})
+
+    # ── passo 5: soma toques reais (high/low de candles dentro do
+    # loopback tocando na faixa) ──
+    start_idx = max(0, last_idx - loopback)
+    for cand in candidatos:
+        h_, l_ = cand['hi'], cand['lo']
+        toques = 0
+        for k in range(start_idx, last_idx + 1):
+            hk, lk = highs[k], lows[k]
+            if (l_ <= hk <= h_) or (l_ <= lk <= h_):
+                toques += 1
+        cand['forca'] += toques
+
+    # ── passo 6: seleção gulosa, sem sobreposição ──
+    usados = [False] * len(candidatos)
+    selecionados = []
+    limite = min(10, max_number_sr)
+    for _ in range(limite):
+        melhor_idx = -1
+        melhor_forca = -1
+        for idx, cand in enumerate(candidatos):
+            if usados[idx]:
+                continue
+            if cand['forca'] > melhor_forca and cand['forca'] >= min_strength * 20:
+                melhor_forca = cand['forca']
+                melhor_idx = idx
+        if melhor_idx < 0:
+            break
+        escolhido = candidatos[melhor_idx]
+        selecionados.append(escolhido)
+        hh, ll = escolhido['hi'], escolhido['lo']
+        for idx, cand in enumerate(candidatos):
+            if usados[idx]:
+                continue
+            if (ll <= cand['hi'] <= hh) or (ll <= cand['lo'] <= hh):
+                usados[idx] = True
+        usados[melhor_idx] = True
+
+    # ── passo 7: classificação dinâmica relativa ao preço atual ──
+    preco_atual = closes[-1]
     resultado = []
-    for ch in canais:
-        strength = len(ch['pontos'])
-        if strength < min_strength:
-            continue
-        n_low = ch['tipos'].count('low')
-        n_high = ch['tipos'].count('high')
-        if n_low > n_high:
-            tipo_predominante = 'demanda'
-        elif n_high > n_low:
+    for ch in selecionados:
+        top, bottom = ch['hi'], ch['lo']
+        if top > preco_atual and bottom > preco_atual:
             tipo_predominante = 'oferta'
+        elif top < preco_atual and bottom < preco_atual:
+            tipo_predominante = 'demanda'
         else:
             tipo_predominante = 'mista'
         resultado.append({
-            'top': ch['high'],
-            'bottom': ch['low'],
-            'toques': strength,
-            'ultimo_toque_ts': max(ch['timestamps']),
+            'top': top,
+            'bottom': bottom,
+            'toques': ch['forca'],
+            'ultimo_toque_ts': d1_candles[-1]['t'],
             'tipo_predominante': tipo_predominante,
         })
 
     resultado.sort(key=lambda c: c['toques'], reverse=True)
-    return resultado[:max_number_sr]
+    return resultado
 
 
 # ─── ZONA D1 (SRchannel — indicador real usado pelo Juninho no TV) ─────
 def compute_d1_zones(d1_candles, lookback_dias=None, swing_size=50):
-    # ── SUBSTITUÍDO 05/08 (v4): confirmado com print das configurações
-    # que as caixas coloridas no gráfico do Juninho vêm do indicador
-    # "SRchannel", não LuxAlgo. Troquei pra replicar o algoritmo real
-    # dele (ver compute_sr_channels acima), com os parâmetros exatos
-    # das configs. lookback_dias/swing_size ficam nos argumentos só por
-    # compatibilidade com quem já chama essa função — não são mais
-    # usados aqui. ──
+    # ── SUBSTITUÍDO 05/08 (v5): tradução fiel do código Pine real do
+    # SRchannel (author LonesomeTheBlue), fornecido pelo Juninho — não
+    # é mais aproximação. lookback_dias/swing_size ficam nos argumentos
+    # só por compatibilidade com quem já chama essa função — não são
+    # mais usados aqui. ──
     return compute_sr_channels(d1_candles)
 
 

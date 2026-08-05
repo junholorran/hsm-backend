@@ -97,6 +97,155 @@ SWEEP_MEMORY_MAX_AGE_SECONDS = 12 * 3600  # sweep salvo expira depois de 12h sem
 RSI_GATE_BLOQUEIA_LONG_ACIMA = 60
 RSI_GATE_BLOQUEIA_SHORT_ABAIXO = 40
 
+# ── NOVO 05/08: gates inspirados na estrutura da Vortex Trade IA (GATE_A
+# a GATE_F que ela expõe no "Por que este sinal foi gerado?"). Aplicados
+# nos modos Normal (CHoCH) e Continuação (BOS) — os dois modos "cheios"
+# que já tinham score/RR/indicadores completos. Cada gate é um passa/
+# não passa, reportado no resultado (campo 'gates'), igual a Vortex
+# reporta GATE_C_MONTE_CARLO, GATE_E_MIN_RR etc. individualmente. ──
+
+# GATE A — Regime de Mercado: só entra se o mercado estiver em
+# tendência (ADX >= threshold). Ataca direto o problema visto no SOL —
+# mercado lateralizado gerando sinal atrás de sinal que belisca o stop
+# sem ir a lugar nenhum. Regime "ranging" bloqueia a entrada.
+REGIME_ADX_THRESHOLD = 20
+REGIME_GATE_ATIVO = True
+
+# GATE E — R:R mínimo obrigatório (a Vortex reporta "GATE_E_MIN_RR").
+# Hoje o Kairos só calculava RR no prompt do Trade Ao Vivo (ICT via
+# Claude) — os modos de scalp ao vivo nunca bloqueavam por RR baixo.
+MIN_RR_GATE = 1.5
+RR_GATE_ATIVO = True
+
+# ── NOVO 05/08: R:R alvo configurável POR MODO — antes fixo em 2.0 em
+# todos, a Vortex varia entre 2.0-3.0 dependendo do setup. Cada modo
+# recebeu o valor que faz sentido pro seu perfil de risco: Normal e
+# Continuação (mais estruturados, zona+sweep+CHoCH/BOS) sobem pra 2.5;
+# Cascata SMC (o mais rigoroso, exige 4 timeframes alinhados) vai pro
+# valor mais alto, 3.0; Scalp Rápido (mais agressivo, sem CHoCH, stop
+# curto) mantém 2.0 — subir o alvo ali só pra distância do TP crescer
+# sem crescer a qualidade do gatilho.
+RR_TARGET_NORMAL = 2.5
+RR_TARGET_CONTINUACAO = 2.5
+RR_TARGET_RAPIDO = 2.0
+RR_TARGET_CASCATA = 3.0
+
+# GATE C — Monte Carlo como gate, não só bônus de score. Antes só
+# somava +6 no compute_score; agora também pode bloquear a entrada se
+# a probabilidade não favorecer a direção do sinal.
+MONTE_CARLO_GATE_MIN_PROB = 55
+MONTE_CARLO_GATE_ATIVO = True
+
+
+def compute_market_regime(candles, adx_threshold=REGIME_ADX_THRESHOLD):
+    """
+    Classifica o regime de mercado como 'trending' ou 'ranging', igual
+    ao campo "Regime: TRENDING" que a Vortex mostra. Usa ADX(14) —
+    ADX >= threshold indica tendência real, abaixo disso é lateralização
+    (ranging), onde sweeps/CHoCH tendem a ser ruído, não movimento real.
+    Retorna (regime: str, adx_atual: float|None).
+    """
+    adx_series = compute_adx(candles, 14)
+    adx_atual = next((v for v in reversed(adx_series) if v is not None), None)
+    if adx_atual is None:
+        return 'indefinido', None
+    regime = 'trending' if adx_atual >= adx_threshold else 'ranging'
+    return regime, round(adx_atual, 2)
+
+
+def aplicar_gates_entrada(direcao, entry, sl, tp, indicadores, candles_para_regime, incluir_regime=True):
+    """
+    Roda os gates estilo Vortex (Regime, R:R mínimo, Monte Carlo) numa
+    entrada já calculada. Retorna (passou: bool, gates: list de dict
+    {'nome':, 'passou':, 'detalhe':}) — cada gate reportado individual,
+    igual a Vortex faz no "Filtros de Qualidade".
+
+    `incluir_regime=False` pula o Gate de Regime — usado em modos cujo
+    propósito é justamente operar fora de tendência clara (Antecipado
+    v2, que caça reversão em RSI extremo, e Scalp Rápido, que existe
+    pra ser ágil independente do regime).
+    """
+    gates = []
+    passou_tudo = True
+
+    if REGIME_GATE_ATIVO and incluir_regime:
+        regime, adx_val = compute_market_regime(candles_para_regime)
+        regime_ok = regime == 'trending'
+        gates.append({
+            'nome': 'GATE_A_REGIME',
+            'passou': regime_ok,
+            'detalhe': f"Regime: {regime.upper()} (ADX={adx_val})" if adx_val is not None else "ADX indisponível",
+        })
+        if not regime_ok:
+            passou_tudo = False
+
+    if RR_GATE_ATIVO and entry and sl and tp:
+        risco = abs(entry - sl)
+        retorno = abs(tp - entry)
+        rr = round(retorno / risco, 2) if risco > 0 else 0
+        rr_ok = rr >= MIN_RR_GATE
+        gates.append({
+            'nome': 'GATE_E_MIN_RR',
+            'passou': rr_ok,
+            'detalhe': f"R:R {rr} {'OK' if rr_ok else f'abaixo do mínimo {MIN_RR_GATE}'}",
+        })
+        if not rr_ok:
+            passou_tudo = False
+
+    if MONTE_CARLO_GATE_ATIVO and indicadores:
+        mc = indicadores.get('monte_carlo') or {}
+        prob_alta = mc.get('prob_alta_pct')
+        prob_baixa = mc.get('prob_baixa_pct')
+        if prob_alta is not None and prob_baixa is not None:
+            prob_favoravel = prob_alta if direcao == 'alta' else prob_baixa
+            mc_ok = prob_favoravel >= MONTE_CARLO_GATE_MIN_PROB
+            gates.append({
+                'nome': 'GATE_C_MONTE_CARLO',
+                'passou': mc_ok,
+                'detalhe': f"Prob. favorável {prob_favoravel}% {'OK' if mc_ok else f'abaixo de {MONTE_CARLO_GATE_MIN_PROB}%'}",
+            })
+            if not mc_ok:
+                passou_tudo = False
+        else:
+            gates.append({'nome': 'GATE_C_MONTE_CARLO', 'passou': True, 'detalhe': 'dados insuficientes — não bloqueia'})
+
+    return passou_tudo, gates
+
+
+NOMES_PADRAO_CANDLE_PT = {
+    'Engolfo de Alta': 'Engolfo (Engulfing) — domínio comprador com momentum forte',
+    'Engolfo de Baixa': 'Engolfo (Engulfing) — domínio vendedor com momentum forte',
+    'Martelo (Hammer)': 'Martelo — rejeição de fundo com pavio longo',
+    'Estrela Cadente (Shooting Star)': 'Estrela Cadente — rejeição de topo com pavio longo',
+    'Doji': 'Doji — indecisão, sem domínio claro',
+}
+
+
+def _formatar_motivos_principais(regime, adx_val, evento_tipo, evento_direcao, entry_zone_tipo,
+                                  score, gates, candle_pattern=None, na_killzone=False, killzone_nome=None):
+    """
+    Monta o bloco "Motivos Principais" no mesmo espírito do card "Por
+    que este sinal foi gerado?" da Vortex (Regime/Estrutura/Gatilho/
+    Tipo/Score), mas em cima de dados que o Kairos já calcula de
+    verdade — nada decorativo, cada linha é rastreável até uma função
+    real do motor.
+    """
+    direcao_label = 'BULLISH' if evento_direcao == 'alta' else 'BEARISH'
+    linhas = [
+        f"• Regime: {regime.upper()}{f' (ADX {adx_val})' if adx_val is not None else ''}",
+        f"• Estrutura: {evento_tipo}",
+        f"• Gatilho: {entry_zone_tipo}" + (f" + {NOMES_PADRAO_CANDLE_PT.get(candle_pattern, candle_pattern)}" if candle_pattern else ""),
+        f"• Direção: {direcao_label}",
+        f"• Score: {score}/100",
+    ]
+    if na_killzone:
+        linhas.append(f"• Killzone: {killzone_nome}")
+    gates_txt = ', '.join(f"{g['nome'].replace('GATE_', '').replace('_', ' ')} ✅" for g in gates if g['passou'])
+    if gates_txt:
+        linhas.append(f"• Gates aprovados: {gates_txt}")
+    return "\n".join(linhas)
+
+
 # Portugal (Europe/Lisbon) — horário local aproximado, sem lib de timezone externa.
 # UTC+0 no inverno, UTC+1 no verão (DST). Pra simplificar e evitar dependência
 # externa, usamos UTC+1 fixo (cobre a maior parte do ano de trading ativo);
@@ -104,6 +253,7 @@ RSI_GATE_BLOQUEIA_SHORT_ABAIXO = 40
 PT_UTC_OFFSET_HOURS = 1
 
 KILLZONES = [
+    {'nome': 'Ásia', 'inicio_h': 0, 'fim_h': 3},  # ── NOVO: Tokyo/Ásia killzone (ICT), pedido pra bater com a Vortex que tem London/NY/Ásia
     {'nome': 'London', 'inicio_h': 7, 'fim_h': 10},
     {'nome': 'New York', 'inicio_h': 13, 'fim_h': 16},
 ]
@@ -281,6 +431,30 @@ def init_scalp_db(db_file):
             conn.commit()
         except Exception:
             pass
+        # ── NOVO 05/08: colunas de Break Even + Parcial automatizados
+        # (estilo Vortex — "BE +6.0 pips" / "PARCIAL +6.0 pips"). Cada
+        # tabela de sinal com entry/sl/tp ganha 3 colunas: be_movido
+        # (stop já foi avisado pra mover pra entrada), parcial_feita
+        # (já avisou realização parcial), e status_gestao (texto livre
+        # pra exibir, tipo "BE" ou "PARCIAL +X pips"). Tudo via
+        # ALTER TABLE com try/except — se a coluna já existe, ignora. ──
+        tabelas_com_gestao = [
+            'scalp_signal_state', 'scalp_signal_state_continuacao',
+            'scalp_rapido_signal_state', 'scalp_cascata_signal_state',
+            'scalp_antecipado_signal_state', 'scalp_indicadores_signal_state',
+        ]
+        for tabela in tabelas_com_gestao:
+            for alter_sql in [
+                f"ALTER TABLE {tabela} ADD COLUMN be_movido INTEGER DEFAULT 0",
+                f"ALTER TABLE {tabela} ADD COLUMN parcial_feita INTEGER DEFAULT 0",
+                f"ALTER TABLE {tabela} ADD COLUMN status_gestao TEXT DEFAULT ''",
+                f"ALTER TABLE {tabela} ADD COLUMN resultado_final TEXT DEFAULT 'pendente'",
+            ]:
+                try:
+                    cursor.execute(alter_sql)
+                    conn.commit()
+                except Exception:
+                    pass
 
 
 def is_in_killzone(now_utc=None):
@@ -1658,6 +1832,7 @@ def process_pair_scalp(db_file, pair, d1_candles, exec_candles, exec_tf_label, s
         'entry_zone_bottom': None,
         'entry_zone_tipo': None,
         'indicadores': None,
+        'gates': [],
         'em_cooldown': False,
     }
 
@@ -1847,12 +2022,29 @@ def process_pair_scalp(db_file, pair, d1_candles, exec_candles, exec_tf_label, s
     sl = aplicar_buffer_stop(sweep['nivel'], choch['direcao'])
     entry = preco_atual
     risco = abs(entry - sl)
-    tp = entry + risco * 2 if choch['direcao'] == 'alta' else entry - risco * 2
+    tp = entry + risco * RR_TARGET_NORMAL if choch['direcao'] == 'alta' else entry - risco * RR_TARGET_NORMAL
     resultado['entry'] = round(entry, 6)
     resultado['sl'] = round(sl, 6)
     resultado['tp'] = round(tp, 6)
 
     if score >= SCORE_THRESHOLD_SINAL:
+        # ── NOVO 05/08: gates estilo Vortex (Regime/R:R/Monte Carlo) —
+        # rodam só quando o score já passou no threshold, pra não gastar
+        # processamento à toa. Se algum gate falhar, o sinal NÃO dispara,
+        # mesmo com score alto — igual a Vortex reporta "Filtros de
+        # Qualidade" e bloqueia se algum não passar. ──
+        gates_ok, gates = aplicar_gates_entrada(
+            choch['direcao'], resultado['entry'], resultado['sl'], resultado['tp'],
+            resultado.get('indicadores'), d1_candles,
+        )
+        resultado['gates'] = gates
+
+        if not gates_ok:
+            gates_falhos = [g['nome'] for g in gates if not g['passou']]
+            resultado['motivo'] = f"score {score} ok, mas bloqueado por gate: {', '.join(gates_falhos)}"
+            _save_zone_state(db_file, pair, zona, 'gate_bloqueou', now, sweep=sweep, choch=choch)
+            return resultado
+
         segundos_desde = _segundos_desde_ultimo_alerta(db_file, 'scalp_signal_state', pair)
         em_cooldown = segundos_desde is not None and segundos_desde < COOLDOWN_SECONDS
         resultado['em_cooldown'] = em_cooldown
@@ -1869,15 +2061,21 @@ def process_pair_scalp(db_file, pair, d1_candles, exec_candles, exec_tf_label, s
             if send_telegram_fn:
                 arrow = '📈' if choch['direcao'] == 'alta' else '📉'
                 kz_txt = f" | Killzone: {killzone_nome}" if na_killzone else " | fora da killzone"
+                regime_msg, adx_msg = compute_market_regime(d1_candles)
+                candle_pat = (resultado.get('indicadores') or {}).get('candle_pattern')
                 msg = f"⚡ <b>Sinal Scalp Ao Vivo — {pair}</b>\n\n"
                 msg += f"{arrow} <b>{'LONG' if choch['direcao']=='alta' else 'SHORT'}</b> | TF execução: {exec_tf_label}{kz_txt}\n"
                 msg += f"📍 Entrada: {resultado['entry']}\n"
                 msg += f"🛑 Stop: {resultado['sl']}\n"
-                msg += f"✅ TP: {resultado['tp']}\n"
-                msg += f"🎯 Score: {score}/100 | RSI: {round(last_rsi,1) if last_rsi is not None else 'N/D'} | Viés Diário: {bias_d1.upper()}\n"
+                msg += f"✅ TP: {resultado['tp']}\n\n"
+                msg += f"<b>Por que este sinal foi gerado:</b>\n"
+                msg += _formatar_motivos_principais(
+                    regime_msg, adx_msg, 'CHoCH', choch['direcao'], entry_zone['tipo'],
+                    score, gates, candle_pattern=candle_pat, na_killzone=na_killzone, killzone_nome=killzone_nome,
+                )
+                msg += f"\n\n🎯 RSI: {round(last_rsi,1) if last_rsi is not None else 'N/D'} | Viés Diário: {bias_d1.upper()}"
                 if rsi_contra_aviso:
-                    msg += f"⚠️ Atenção: {rsi_contra_aviso} — entrada mesmo assim, confirme no gráfico antes\n"
-                msg += f"\n💡 Zona D1 → Sweep → CHoCH → retorno {entry_zone['tipo']}"
+                    msg += f"\n⚠️ Atenção: {rsi_contra_aviso} — entrada mesmo assim, confirme no gráfico antes"
                 send_telegram_fn(msg)
     else:
         resultado['motivo'] = f'score {score} abaixo de {SCORE_THRESHOLD_SINAL} — sem entrada'
@@ -2031,7 +2229,7 @@ def process_pair_scalp_filtros_shadow(db_file, pair, d1_candles, exec_candles, e
     entry = preco_atual
     sl = aplicar_buffer_stop(sweep['nivel'], choch['direcao'])
     risco = abs(entry - sl)
-    tp = entry + risco * 2 if choch['direcao'] == 'alta' else entry - risco * 2
+    tp = entry + risco * RR_TARGET_NORMAL if choch['direcao'] == 'alta' else entry - risco * RR_TARGET_NORMAL
 
     resultado = {
         'pair': pair, 'exec_tf': exec_tf_label, 'modo': 'filtros_shadow',
@@ -2129,6 +2327,7 @@ def process_pair_scalp_continuacao(db_file, pair, d1_candles, exec_candles, exec
         'entry_zone_bottom': None,
         'entry_zone_tipo': None,
         'indicadores': None,
+        'gates': [],
         'em_cooldown': False,
     }
 
@@ -2158,19 +2357,18 @@ def process_pair_scalp_continuacao(db_file, pair, d1_candles, exec_candles, exec
 
     saved = _load_saved_state(db_file, pair, table='scalp_zone_state_continuacao')
 
-    # ── NOVO: mesmo alerta de POSSÍVEL ACUMULAÇÃO do modo Normal —
-    # estado próprio (tabela _continuacao), então não interfere no
-    # alerta do modo Normal mesmo que seja a mesma zona D1. ──
+    # ── AJUSTADO 05/08: o aviso "Possível Acumulação" já é enviado pelo
+    # modo Normal (process_pair_scalp), que usa a MESMA zona D1 (mesma
+    # compute_d1_zones). Os dois modos rodando em paralelo mandavam o
+    # mesmo aviso duas vezes pro mesmo par. Aqui só rastreia
+    # internamente (zona_e_nova continua calculada, só não dispara
+    # Telegram) — não perde nenhuma lógica de entrada, só para de
+    # duplicar mensagem. ──
     zona_e_nova = (
         not saved or saved.get('zona_top') is None
         or abs((saved.get('zona_top') or 0) - zona['top']) > (zona['top'] - zona['bottom'])
         or abs((saved.get('zona_bottom') or 0) - zona['bottom']) > (zona['top'] - zona['bottom'])
     )
-    if zona_e_nova and send_telegram_fn:
-        msg = f"🟨 <b>Possível Acumulação — {pair}</b>\n\n"
-        msg += f"Zona D1 identificada: {round(zona['bottom'],6)} – {round(zona['top'],6)} ({zona['toques']} toques)\n"
-        msg += f"👁️ Observando — aguardando manipulação (sweep) pra confirmar."
-        send_telegram_fn(msg)
 
     fresh_sweep = detect_sweep_in_zone(exec_candles, zona)
 
@@ -2197,34 +2395,10 @@ def process_pair_scalp_continuacao(db_file, pair, d1_candles, exec_candles, exec
     resultado['sweep_nivel'] = round(sweep['nivel'], 6)
     resultado['sweep_lado'] = sweep['lado']
 
-    # ── NOVO: mesmo alerta de MANIPULAÇÃO do modo Normal — dispara uma
-    # vez por sweep novo, com Viés Diário (D1) junto.
-    # ── CORREÇÃO 05/08: idem modo Normal — mostra a ZONA usada
-    # (top/bottom/toques), não só o nível do sweep. ──
+    # ── AJUSTADO 05/08: aviso "Manipulação detectada" idem — já sai do
+    # modo Normal pra essa mesma zona/sweep, então aqui só rastreia
+    # (sweep_e_novo), sem mandar Telegram de novo. ──
     sweep_e_novo = not saved or saved.get('sweep_ts') != sweep.get('t')
-    if sweep_e_novo and send_telegram_fn:
-        bias_d1_msg = compute_bias_from_swings(d1_candles)
-        lado_txt = 'topo (resistência)' if sweep['lado'] == 'alta' else 'fundo (suporte)'
-
-        # ── NOVO: EXPECTATIVA baseada em ICT — não é previsão garantida,
-        # é uma inclinação: se o sweep varreu CONTRA o viés diário, o
-        # viés maior tende a "vencer" e puxar reversão; se varreu A FAVOR
-        # do viés diário, tende a reforçar e continuar. Viés neutro não
-        # inclina pra lado nenhum.
-        if bias_d1_msg == 'neutro':
-            expectativa_txt = "imprevisível (viés diário neutro, sem inclinação clara)"
-        elif sweep['lado'] == 'baixa':  # varreu suporte
-            expectativa_txt = "provável REVERSÃO (alta)" if bias_d1_msg == 'alta' else "provável CONTINUAÇÃO (baixa)"
-        else:  # sweep['lado'] == 'alta', varreu resistência
-            expectativa_txt = "provável REVERSÃO (baixa)" if bias_d1_msg == 'baixa' else "provável CONTINUAÇÃO (alta)"
-
-        msg = f"🧲 <b>Manipulação detectada — {pair}</b>\n\n"
-        msg += f"Zona D1: {round(zona['bottom'],6)} – {round(zona['top'],6)} ({zona['toques']} toques)\n"
-        msg += f"Varreu o {lado_txt} da zona D1 em {round(sweep['nivel'],6)}\n"
-        msg += f"📊 Viés Diário (D1): <b>{bias_d1_msg.upper()}</b>\n"
-        msg += f"🔮 Expectativa (não garantida): {expectativa_txt}\n"
-        msg += f"⏳ Aguardando confirmação real da distribuição..."
-        send_telegram_fn(msg)
 
     bos = detect_bos_continuation_after_sweep(exec_candles, sweep)
     if not bos:
@@ -2298,12 +2472,24 @@ def process_pair_scalp_continuacao(db_file, pair, d1_candles, exec_candles, exec
     sl = aplicar_buffer_stop(sweep['nivel'], bos['direcao'])
     entry = preco_atual
     risco = abs(entry - sl)
-    tp = entry + risco * 2 if bos['direcao'] == 'alta' else entry - risco * 2
+    tp = entry + risco * RR_TARGET_CONTINUACAO if bos['direcao'] == 'alta' else entry - risco * RR_TARGET_CONTINUACAO
     resultado['entry'] = round(entry, 6)
     resultado['sl'] = round(sl, 6)
     resultado['tp'] = round(tp, 6)
 
     if score >= SCORE_THRESHOLD_SINAL:
+        gates_ok, gates = aplicar_gates_entrada(
+            bos['direcao'], resultado['entry'], resultado['sl'], resultado['tp'],
+            resultado.get('indicadores'), d1_candles,
+        )
+        resultado['gates'] = gates
+
+        if not gates_ok:
+            gates_falhos = [g['nome'] for g in gates if not g['passou']]
+            resultado['motivo'] = f"score {score} ok, mas bloqueado por gate: {', '.join(gates_falhos)}"
+            _save_zone_state(db_file, pair, zona, 'gate_bloqueou', now, sweep=sweep, choch=bos, table='scalp_zone_state_continuacao')
+            return resultado
+
         segundos_desde = _segundos_desde_ultimo_alerta(db_file, 'scalp_signal_state_continuacao', pair)
         em_cooldown = segundos_desde is not None and segundos_desde < COOLDOWN_SECONDS
         resultado['em_cooldown'] = em_cooldown
@@ -2320,15 +2506,21 @@ def process_pair_scalp_continuacao(db_file, pair, d1_candles, exec_candles, exec
             if send_telegram_fn:
                 arrow = '📈' if bos['direcao'] == 'alta' else '📉'
                 kz_txt = f" | Killzone: {killzone_nome}" if na_killzone else " | fora da killzone"
+                regime_msg, adx_msg = compute_market_regime(d1_candles)
+                candle_pat = (resultado.get('indicadores') or {}).get('candle_pattern')
                 msg = f"🔁 <b>Sinal Scalp Continuação — {pair}</b>\n\n"
                 msg += f"{arrow} <b>{'LONG' if bos['direcao']=='alta' else 'SHORT'}</b> | TF execução: {exec_tf_label}{kz_txt}\n"
                 msg += f"📍 Entrada: {resultado['entry']}\n"
                 msg += f"🛑 Stop: {resultado['sl']}\n"
-                msg += f"✅ TP: {resultado['tp']}\n"
-                msg += f"🎯 Score: {score}/100 | RSI: {round(last_rsi,1) if last_rsi is not None else 'N/D'} | Viés Diário: {bias_d1.upper()}\n"
+                msg += f"✅ TP: {resultado['tp']}\n\n"
+                msg += f"<b>Por que este sinal foi gerado:</b>\n"
+                msg += _formatar_motivos_principais(
+                    regime_msg, adx_msg, 'BOS (continuação)', bos['direcao'], entry_zone['tipo'],
+                    score, gates, candle_pattern=candle_pat, na_killzone=na_killzone, killzone_nome=killzone_nome,
+                )
+                msg += f"\n\n🎯 RSI: {round(last_rsi,1) if last_rsi is not None else 'N/D'} | Viés Diário: {bias_d1.upper()}"
                 if rsi_contra_aviso:
-                    msg += f"⚠️ Atenção: {rsi_contra_aviso} — entrada mesmo assim, confirme no gráfico antes\n"
-                msg += f"\n💡 Zona D1 → Sweep → BOS (continuação, a favor do sweep) → retorno {entry_zone['tipo']}"
+                    msg += f"\n⚠️ Atenção: {rsi_contra_aviso} — entrada mesmo assim, confirme no gráfico antes"
                 send_telegram_fn(msg)
     else:
         resultado['motivo'] = f'score {score} abaixo de {SCORE_THRESHOLD_SINAL} — sem entrada'
@@ -2426,6 +2618,140 @@ def scalp_signal_history(db_file, pair=None, limit=30, table='scalp_signal_state
         return {'signals': [], 'error': str(e)}
 
 
+# ── NOVO 05/08: Break Even + Parcial automatizados, inspirado direto
+# no que a Vortex mostra ("BE +6.0 pips", depois "PARCIAL +6.0 pips").
+# O Kairos não executa ordens de verdade (é sistema de alerta via
+# Telegram, não corretora), então esse monitoramento manda uma MENSAGEM
+# avisando o Juninho pra mover o stop / realizar parte da posição
+# manualmente — não move nada sozinho na exchange. Roda 1x por ciclo,
+# por par, em cima do TF de execução (mesmos candles já buscados no
+# ciclo, sem call extra à Bybit).
+#
+# Lógica: quando o preço andar BE_PROGRESSO_PCT do caminho até o TP
+# (padrão 30%), avisa mover o stop pra entrada (trava risco em zero).
+# Quando andar PARCIAL_PROGRESSO_PCT (padrão 50%), avisa realizar
+# parcial (50% da posição) e deixar o resto correr — igual às "Regras
+# de Ouro" que o próprio Kairos já recomenda em texto no ICT, agora
+# ativamente monitorado nos modos de scalp ao vivo. ──
+BE_PROGRESSO_PCT = 0.30
+PARCIAL_PROGRESSO_PCT = 0.50
+
+
+def _progresso_ate_tp(preco_atual, entry, sl, tp, direcao):
+    """Retorna 0-1+ representando quanto do caminho até o TP já foi
+    percorrido. >=1 significa que já bateu o TP; <0 significa que já
+    foi contra a entrada (pode já ter batido o SL)."""
+    dist_total = abs(tp - entry)
+    if dist_total <= 0:
+        return 0
+    avanco = (preco_atual - entry) if direcao == 'alta' else (entry - preco_atual)
+    return avanco / dist_total
+
+
+def gerenciar_trades_abertos(db_file, pair, exec_candles, table, send_telegram_fn=None,
+                              be_progresso_pct=BE_PROGRESSO_PCT, parcial_progresso_pct=PARCIAL_PROGRESSO_PCT):
+    """
+    Chamar 1x por ciclo, por par, por tabela de sinal (scalp_signal_
+    state, scalp_signal_state_continuacao, scalp_rapido_signal_state,
+    scalp_cascata_signal_state, scalp_antecipado_signal_state,
+    scalp_indicadores_signal_state). Verifica trades alertados
+    (alerted=1) ainda pendentes (resultado_final='pendente') desse par
+    nessa tabela, e avisa BE/Parcial conforme o progresso do preço.
+    """
+    if not exec_candles:
+        return
+    preco_atual = exec_candles[-1]['c']
+
+    try:
+        with sqlite3.connect(db_file) as conn:
+            cursor = conn.cursor()
+            cursor.execute(f'''
+                SELECT id, direcao, entry, sl, tp, be_movido, parcial_feita
+                FROM {table}
+                WHERE pair=? AND alerted=1 AND (resultado_final IS NULL OR resultado_final='pendente')
+            ''', (pair,))
+            trades = cursor.fetchall()
+    except Exception as e:
+        print(f"[scalp_engine] erro ao buscar trades abertos ({table}, {pair}): {e}")
+        return
+
+    if not trades:
+        return
+
+    for trade_id, direcao, entry, sl, tp, be_movido, parcial_feita in trades:
+        if entry is None or sl is None or tp is None:
+            continue
+
+        # Checa se já bateu SL ou TP de verdade nos candles recentes —
+        # se sim, fecha o trade (resultado_final) e não manda mais
+        # aviso de BE/Parcial pra ele.
+        resultado_final = None
+        for c in exec_candles:
+            if direcao == 'alta':
+                if c['l'] <= sl:
+                    resultado_final = 'loss'
+                    break
+                if c['h'] >= tp:
+                    resultado_final = 'win'
+                    break
+            else:
+                if c['h'] >= sl:
+                    resultado_final = 'loss'
+                    break
+                if c['l'] <= tp:
+                    resultado_final = 'win'
+                    break
+
+        if resultado_final:
+            try:
+                with sqlite3.connect(db_file) as conn:
+                    conn.execute(f"UPDATE {table} SET resultado_final=? WHERE id=?", (resultado_final, trade_id))
+                    conn.commit()
+            except Exception as e:
+                print(f"[scalp_engine] erro ao fechar trade {trade_id} ({table}): {e}")
+            continue
+
+        progresso = _progresso_ate_tp(preco_atual, entry, sl, tp, direcao)
+
+        if progresso >= parcial_progresso_pct and not parcial_feita:
+            dist_total = abs(tp - entry)
+            pips_ganhos = round(dist_total * parcial_progresso_pct, 6)
+            try:
+                with sqlite3.connect(db_file) as conn:
+                    conn.execute(
+                        f"UPDATE {table} SET parcial_feita=1, be_movido=1, status_gestao=? WHERE id=?",
+                        (f"PARCIAL +{pips_ganhos}", trade_id)
+                    )
+                    conn.commit()
+            except Exception as e:
+                print(f"[scalp_engine] erro ao marcar parcial do trade {trade_id} ({table}): {e}")
+            if send_telegram_fn:
+                arrow = '📈' if direcao == 'alta' else '📉'
+                msg = f"🎯 <b>Realizar Parcial — {pair}</b>\n\n"
+                msg += f"{arrow} Preço já andou {round(progresso*100)}% do caminho até o TP\n"
+                msg += f"💰 Sugestão: realize 50-70% da posição agora e mova o resto do Stop pra entrada ({entry})\n"
+                msg += f"📍 Entrada original: {entry} | Preço atual: {round(preco_atual, 6)}"
+                send_telegram_fn(msg)
+        elif progresso >= be_progresso_pct and not be_movido:
+            try:
+                with sqlite3.connect(db_file) as conn:
+                    conn.execute(
+                        f"UPDATE {table} SET be_movido=1, status_gestao=? WHERE id=?",
+                        ("BE", trade_id)
+                    )
+                    conn.commit()
+            except Exception as e:
+                print(f"[scalp_engine] erro ao marcar BE do trade {trade_id} ({table}): {e}")
+            if send_telegram_fn:
+                arrow = '📈' if direcao == 'alta' else '📉'
+                msg = f"🛡️ <b>Mover Stop para Break Even — {pair}</b>\n\n"
+                msg += f"{arrow} Preço já andou {round(progresso*100)}% do caminho até o TP\n"
+                msg += f"💡 Sugestão: mova o Stop pra entrada ({entry}) — trava o risco em zero, deixa o resto correr\n"
+                msg += f"📍 Preço atual: {round(preco_atual, 6)}"
+                send_telegram_fn(msg)
+
+
+
 def _save_rapido_signal(db_file, pair, exec_tf_label, resultado, alerted):
     try:
         signal_id = f"rapido_{pair}_{int(time.time()*1000)}"
@@ -2475,6 +2801,7 @@ def process_pair_scalp_rapido(db_file, pair, d1_candles, exec_candles, exec_tf_l
         'resistencia_top': None, 'resistencia_bottom': None,
         'suporte_top': None, 'suporte_bottom': None,
         'zona_movel_top': None, 'zona_movel_bottom': None, 'zona_movel_largura_pct': None,
+        'gates': [],
     }
 
     zona_diaria = compute_zona_diaria_movel(d1_candles)
@@ -2535,7 +2862,20 @@ def process_pair_scalp_rapido(db_file, pair, d1_candles, exec_candles, exec_tf_l
     entry = preco_atual
     sl = aplicar_buffer_stop(sweep['nivel'], direcao)
     risco = abs(entry - sl)
-    tp = entry + risco * 2 if direcao == 'alta' else entry - risco * 2
+    tp = entry + risco * RR_TARGET_RAPIDO if direcao == 'alta' else entry - risco * RR_TARGET_RAPIDO
+
+    # ── NOVO 05/08: só o gate de RR aqui (sem Regime, sem Monte Carlo)
+    # — esse modo existe pra ser ágil, sweep + RSI extremo já é a
+    # própria regra de entrada, checar regime mataria o propósito de
+    # pegar reversão rápida em qualquer condição de mercado. ──
+    gates_ok, gates = aplicar_gates_entrada(
+        direcao, entry, sl, tp, None, d1_candles, incluir_regime=False,
+    )
+    resultado['gates'] = gates
+    if not gates_ok:
+        gates_falhos = [g['nome'] for g in gates if not g['passou']]
+        resultado['motivo'] = f"sweep+RSI ok, mas bloqueado por gate: {', '.join(gates_falhos)}"
+        return resultado
 
     resultado.update({
         'sinal': True,
@@ -2607,6 +2947,7 @@ def process_pair_cascata_smc(db_file, pair, w_candles, d1_candles, h4_candles, h
         'choch_nivel': None, 'choch_direcao': None,
         'entry_zone_top': None, 'entry_zone_bottom': None, 'entry_zone_tipo': None,
         'score': 0, 'na_killzone': False, 'killzone_nome': None, 'indicadores': None,
+        'mtf_status': None, 'gates': [],
     }
 
     try:
@@ -2626,15 +2967,33 @@ def process_pair_cascata_smc(db_file, pair, w_candles, d1_candles, h4_candles, h
         'bias_semanal': bias_w, 'bias_d1': bias_d1, 'bias_h4': bias_h4, 'bias_h1': bias_h1,
     })
 
+    # ── AJUSTADO 05/08: antes exigia os 4 timeframes (Semanal/D1/H4/H1)
+    # 100% iguais pra disparar qualquer sinal — muito rígido. Visto na
+    # Vortex que ela dispara sinal mesmo com "MTF: PARTIAL" (nem todos
+    # os timeframes alinhados) e o resultado real conferido (USDCAD)
+    # foi bom. Agora aceita FULL (4/4) ou PARTIAL (3/4, com o 4º neutro
+    # ou contra) — PARTIAL fica marcado no resultado e na mensagem,
+    # não é escondido. ──
     biases = [bias_w, bias_d1, bias_h4, bias_h1]
-    if 'neutro' in biases or len(set(biases)) != 1:
+    contagem_alta = biases.count('alta')
+    contagem_baixa = biases.count('baixa')
+
+    if contagem_alta == 4:
+        direcao_macro, mtf_status = 'alta', 'FULL'
+    elif contagem_baixa == 4:
+        direcao_macro, mtf_status = 'baixa', 'FULL'
+    elif contagem_alta == 3:
+        direcao_macro, mtf_status = 'alta', 'PARTIAL'
+    elif contagem_baixa == 3:
+        direcao_macro, mtf_status = 'baixa', 'PARTIAL'
+    else:
         resultado['motivo'] = (
-            f"timeframes maiores não alinhados "
+            f"timeframes maiores não alinhados o suficiente "
             f"(Semanal={bias_w}, D1={bias_d1}, H4={bias_h4}, H1={bias_h1})"
         )
         return resultado
 
-    direcao_macro = biases[0]
+    resultado['mtf_status'] = mtf_status
 
     zona_diaria = compute_zona_diaria_movel(d1_candles)
     if not zona_diaria:
@@ -2745,7 +3104,19 @@ def process_pair_cascata_smc(db_file, pair, w_candles, d1_candles, h4_candles, h
     entry = preco_atual
     sl = aplicar_buffer_stop(sweep['nivel'], direcao_macro)
     risco = abs(entry - sl)
-    tp = entry + risco * 2 if direcao_macro == 'alta' else entry - risco * 2
+    tp = entry + risco * RR_TARGET_CASCATA if direcao_macro == 'alta' else entry - risco * RR_TARGET_CASCATA
+
+    # ── NOVO 05/08: gates RR + Monte Carlo (sem Regime — os 4
+    # timeframes alinhados já são um filtro de tendência mais rigoroso
+    # que ADX sozinho, adicionar Regime aqui seria redundante). ──
+    gates_ok, gates = aplicar_gates_entrada(
+        direcao_macro, entry, sl, tp, resultado.get('indicadores'), d1_candles, incluir_regime=False,
+    )
+    resultado['gates'] = gates
+    if not gates_ok:
+        gates_falhos = [g['nome'] for g in gates if not g['passou']]
+        resultado['motivo'] = f"timeframes alinhados ({mtf_status}), mas bloqueado por gate: {', '.join(gates_falhos)}"
+        return resultado
 
     resultado.update({
         'sinal': True,
@@ -2754,7 +3125,7 @@ def process_pair_cascata_smc(db_file, pair, w_candles, d1_candles, h4_candles, h
         'sl': round(sl, 6),
         'tp': round(tp, 6),
         'motivo': 'entrada_confirmada',
-        'score': 100,
+        'score': 100 if mtf_status == 'FULL' else 85,
     })
 
     segundos_desde = _segundos_desde_ultimo_alerta(db_file, 'scalp_cascata_signal_state', pair)
@@ -2766,12 +3137,13 @@ def process_pair_cascata_smc(db_file, pair, w_candles, d1_candles, h4_candles, h
     if send_telegram_fn and not em_cooldown:
         arrow = '📈' if direcao_macro == 'alta' else '📉'
         label = 'LONG' if direcao_macro == 'alta' else 'SHORT'
+        mtf_txt = "todos os 4 timeframes alinhados" if mtf_status == 'FULL' else "3 de 4 timeframes alinhados (parcial)"
         msg = f"🌊 <b>Cascata SMC — {pair}</b>\n\n"
         msg += f"{arrow} <b>{label}</b> | TF execução: {exec_tf_label}\n"
-        msg += f"📊 Alinhamento: Semanal={bias_w} | D1={bias_d1} | H4={bias_h4} | H1={bias_h1}\n"
+        msg += f"📊 Alinhamento: Semanal={bias_w} | D1={bias_d1} | H4={bias_h4} | H1={bias_h1} | MTF: {mtf_status}\n"
         msg += f"🔨 Confirmação: {evento_tipo}\n"
-        msg += f"📍 Entrada: {resultado['entry']}\n🛑 Stop: {resultado['sl']}\n✅ TP (RR 2:1): {resultado['tp']}\n\n"
-        msg += "<b>Todos os timeframes maiores alinhados — sweep na zona diária + confirmação de estrutura.</b>"
+        msg += f"📍 Entrada: {resultado['entry']}\n🛑 Stop: {resultado['sl']}\n✅ TP (RR {RR_TARGET_CASCATA}:1): {resultado['tp']}\n\n"
+        msg += f"<b>{mtf_txt} — sweep na zona diária + confirmação de estrutura.</b>"
         send_telegram_fn(msg)
     elif em_cooldown:
         restante_min = (CASCATA_COOLDOWN_SECONDS - segundos_desde) // 60
@@ -2925,7 +3297,7 @@ def process_pair_scalp_antecipado_v2(db_file, pair, d1_candles, exec_candles, ex
         'sinal': False, 'direcao': None, 'entry': None, 'sl': None, 'tp': None,
         'rsi': None, 'liquidez_varrida': None, 'divergencia_rsi': False,
         'bias_d1': None, 'bias_h4': None, 'motivo': None, 'indicadores': None,
-        'em_cooldown': False,
+        'em_cooldown': False, 'gates': [],
     }
 
     try:
@@ -2977,6 +3349,19 @@ def process_pair_scalp_antecipado_v2(db_file, pair, d1_candles, exec_candles, ex
     sl = aplicar_buffer_stop(sweep['nivel_pavio'], direcao)
     risco = abs(entry - sl)
     tp = entry - risco * RR_FIXO_ANTECIPADO if direcao == 'baixa' else entry + risco * RR_FIXO_ANTECIPADO
+
+    # ── NOVO 05/08: gates RR + Monte Carlo (SEM Regime — esse modo
+    # existe justamente pra caçar reversão em RSI extremo, que muitas
+    # vezes acontece dentro de ranging, não em tendência). ──
+    gates_ok, gates = aplicar_gates_entrada(
+        direcao, entry, sl, tp, resultado.get('indicadores'), d1_candles, incluir_regime=False,
+    )
+    resultado['gates'] = gates
+    if not gates_ok:
+        gates_falhos = [g['nome'] for g in gates if not g['passou']]
+        resultado['rsi'] = round(rsi_val, 1)
+        resultado['motivo'] = f"sweep+RSI ok, mas bloqueado por gate: {', '.join(gates_falhos)}"
+        return resultado
 
     resultado.update({
         'sinal': True,
@@ -3132,7 +3517,7 @@ def process_pair_scalp_indicadores(db_file, pair, exec_candles, exec_tf_label, s
         'stop_via': None,
         'score': 0, 'votos_favor': 0, 'votos_total': 0, 'votos_detalhe': [],
         'tendencia_forte': False, 'indicadores': indicadores, 'em_cooldown': False,
-        'motivo': None,
+        'motivo': None, 'gates': [],
     }
 
     votos_alta, votos_baixa, total, detalhe_votos, tendencia_forte = _votos_indicadores(indicadores, preco_atual)
@@ -3211,6 +3596,21 @@ def process_pair_scalp_indicadores(db_file, pair, exec_candles, exec_tf_label, s
 
     risco = abs(entry - sl)
     tp = entry + risco * RR_INDICADORES if direcao == 'alta' else entry - risco * RR_INDICADORES
+
+    # ── NOVO 05/08: gates estilo Vortex — esse é o único dos 6 modos
+    # sem zona D1/sweep/CHoCH por padrão (vota só em indicadores), então
+    # é o que mais se beneficia do Gate de Regime (evita votar tendência
+    # num mercado sem tendência nenhuma). Roda os 3 gates (Regime, RR,
+    # Monte Carlo) — se algum falhar, sinal não dispara mesmo com
+    # maioria de votos. ──
+    candles_regime = d1_candles if d1_candles else exec_candles
+    gates_ok, gates = aplicar_gates_entrada(direcao, entry, sl, tp, indicadores, candles_regime)
+    resultado['gates'] = gates
+    if not gates_ok:
+        gates_falhos = [g['nome'] for g in gates if not g['passou']]
+        resultado['motivo'] = f"{votos_favor}/{total} indicadores concordando em {direcao}, mas bloqueado por gate: {', '.join(gates_falhos)}"
+        resultado['votos_favor'] = votos_favor
+        return resultado
 
     resultado['votos_favor'] = votos_favor
     resultado['score'] = round(100 * votos_favor / total)

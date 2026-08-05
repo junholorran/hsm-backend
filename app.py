@@ -1386,6 +1386,27 @@ def run_live_cycle(pair, interval_min):
                 except Exception as e:
                     print(f"[journal] erro ao resolver pendentes de {pair}: {e}")
 
+                # ── NOVO 05/08: Break Even + Parcial automatizados
+                # (estilo Vortex — "BE +6.0 pips" / "PARCIAL +6.0
+                # pips"). Roda 1x por ciclo, por par, em cima dos
+                # mesmos exec_candles já buscados — sem call extra à
+                # Bybit. Cobre as 6 tabelas de sinal (Normal,
+                # Continuação, Cascata, Antecipado, Indicadores,
+                # Rápido) — cada trade em aberto (alerted=1,
+                # resultado_final='pendente') é monitorado
+                # independente do modo que o gerou. ──
+                try:
+                    for tabela_gestao in (
+                        'scalp_signal_state', 'scalp_signal_state_continuacao',
+                        'scalp_rapido_signal_state', 'scalp_cascata_signal_state',
+                        'scalp_antecipado_signal_state', 'scalp_indicadores_signal_state',
+                    ):
+                        scalp_engine.gerenciar_trades_abertos(
+                            DB_FILE, pair, exec_candles, tabela_gestao, send_telegram,
+                        )
+                except Exception as e:
+                    print(f"[scalp_engine be_parcial] erro ao gerenciar trades abertos de {pair}: {e}")
+
                 try:
                     cascata_result = scalp_engine.process_pair_cascata_smc(
                         DB_FILE, pair,

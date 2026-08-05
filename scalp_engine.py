@@ -1428,6 +1428,54 @@ def detect_bos_continuation_after_sweep(exec_candles, sweep):
     return None
 
 
+# ── NOVO 05/08: Micro BOS — confirmação extra de precisão, inspirada
+# no gatilho "Micro BOS (Break of Structure)" que a Vortex mostra:
+# "Rompimento de estrutura recente (últimas 3 velas) confirmando
+# mudança de direção no micro timeframe". Diferente do BOS "grande"
+# (que rompe o nível do sweep, podendo levar várias velas), o Micro
+# BOS olha só as últimas N velas do TF de execução — serve como
+# confirmação adicional de que o movimento tá acontecendo *agora*,
+# não é um evento antigo ainda "válido" tecnicamente. ──
+MICRO_BOS_LOOKBACK = 3
+
+
+def detect_micro_bos(exec_candles, direcao, lookback=MICRO_BOS_LOOKBACK):
+    """
+    Verifica se, nas últimas `lookback` velas do TF de execução, o
+    preço rompeu o topo/fundo local imediatamente anterior a essa
+    janela — ou seja, se a mudança de direção é recente de verdade,
+    não uma quebra de estrutura "velha" que já perdeu força.
+
+    direcao: 'alta' (rompeu topo local pra cima) ou 'baixa' (rompeu
+    fundo local pra baixo).
+
+    Retorna dict {'confirmado': bool, 'nivel_rompido': float|None} —
+    nunca bloqueia nada sozinho, é só uma confirmação extra pra
+    reportar/reforçar, igual a Vortex trata como "Gatilho SMC", não
+    como filtro obrigatório adicional.
+    """
+    if not exec_candles or len(exec_candles) < lookback + 2:
+        return {'confirmado': False, 'nivel_rompido': None}
+
+    janela_recente = exec_candles[-lookback:]
+    candles_antes = exec_candles[:-lookback]
+    if not candles_antes:
+        return {'confirmado': False, 'nivel_rompido': None}
+
+    # topo/fundo local imediatamente antes da janela das últimas N velas
+    ref_lookback = min(10, len(candles_antes))
+    candles_ref = candles_antes[-ref_lookback:]
+
+    if direcao == 'alta':
+        topo_local = max(c['h'] for c in candles_ref)
+        rompeu = any(c['c'] > topo_local for c in janela_recente)
+        return {'confirmado': rompeu, 'nivel_rompido': round(topo_local, 6) if rompeu else None}
+    else:
+        fundo_local = min(c['l'] for c in candles_ref)
+        rompeu = any(c['c'] < fundo_local for c in janela_recente)
+        return {'confirmado': rompeu, 'nivel_rompido': round(fundo_local, 6) if rompeu else None}
+
+
 def find_fvg_ob_after_choch(exec_candles, choch, min_gap_pct=MIN_FVG_GAP_PCT):
     start = max(0, choch['index'] - 1)
     end = min(len(exec_candles) - 1, choch['index'] + 4)
@@ -1535,6 +1583,22 @@ def find_breaker_block_after_choch(exec_candles, choch):
 
 def price_in_zone(entry_zone, preco):
     return entry_zone['bottom'] <= preco <= entry_zone['top']
+
+
+# ── NOVO 05/08: entrada no melhor preço da zona, pra bater com o
+# jeito real de operar do Juninho — ele sempre deixa ORDEM PENDENTE
+# (limite), não entra a mercado. Faz sentido colocar a ordem na ponta
+# mais vantajosa da zona de entrada (FVG/OB/iFVG/Breaker), não no
+# preço aleatório de quando o ciclo rodou:
+# - LONG: pede a compra na borda de BAIXO da zona (mais barato possível)
+# - SHORT: pede a venda na borda de CIMA da zona (mais caro possível)
+# Se o preço nunca voltar até essa borda, a ordem pendente simplesmente
+# não enche — isso é o comportamento correto de ordem limite, não um
+# bug. É diferente de entrar a mercado no preço que passava na hora.
+def melhor_preco_na_zona(entry_zone, direcao, preco_atual_fallback=None):
+    if not entry_zone or entry_zone.get('top') is None or entry_zone.get('bottom') is None:
+        return preco_atual_fallback
+    return entry_zone['bottom'] if direcao == 'alta' else entry_zone['top']
 
 
 def candle_e_decisivo(candle, min_body_ratio=MIN_CANDLE_BODY_RATIO):
@@ -2359,7 +2423,7 @@ def process_pair_scalp(db_file, pair, d1_candles, exec_candles, exec_tf_label, s
     resultado['direcao'] = choch['direcao']
 
     sl = aplicar_buffer_stop_atr(sweep['nivel'], choch['direcao'], exec_candles)
-    entry = preco_atual
+    entry = melhor_preco_na_zona(entry_zone, choch['direcao'], preco_atual_fallback=preco_atual)
     risco = abs(entry - sl)
     tp = entry + risco * RR_TARGET_NORMAL if choch['direcao'] == 'alta' else entry - risco * RR_TARGET_NORMAL
     resultado['entry'] = round(entry, 6)
@@ -2402,6 +2466,7 @@ def process_pair_scalp(db_file, pair, d1_candles, exec_candles, exec_tf_label, s
                 kz_txt = f" | Killzone: {killzone_nome}" if na_killzone else " | fora da killzone"
                 regime_msg, adx_msg = compute_market_regime(d1_candles)
                 candle_pat = (resultado.get('indicadores') or {}).get('candle_pattern')
+                micro_bos = detect_micro_bos(exec_candles, choch['direcao'])
                 msg = f"⚡ <b>Sinal Scalp Ao Vivo — {pair}</b>\n\n"
                 msg += f"{arrow} <b>{'LONG' if choch['direcao']=='alta' else 'SHORT'}</b> | TF execução: {exec_tf_label}{kz_txt}\n"
                 msg += f"📍 Entrada: {resultado['entry']}\n"
@@ -2412,6 +2477,8 @@ def process_pair_scalp(db_file, pair, d1_candles, exec_candles, exec_tf_label, s
                     regime_msg, adx_msg, 'CHoCH', choch['direcao'], entry_zone['tipo'],
                     score, gates, candle_pattern=candle_pat, na_killzone=na_killzone, killzone_nome=killzone_nome,
                 )
+                if micro_bos['confirmado']:
+                    msg += f"\n• Micro BOS: confirmado nas últimas {MICRO_BOS_LOOKBACK} velas (rompeu {micro_bos['nivel_rompido']})"
                 msg += f"\n\n🎯 RSI: {round(last_rsi,1) if last_rsi is not None else 'N/D'} | Viés Diário: {bias_d1.upper()}"
                 if rsi_contra_aviso:
                     msg += f"\n⚠️ Atenção: {rsi_contra_aviso} — entrada mesmo assim, confirme no gráfico antes"
@@ -2573,7 +2640,7 @@ def process_pair_scalp_filtros_shadow(db_file, pair, d1_candles, exec_candles, e
     if not filtros_bloqueados:
         return None
 
-    entry = preco_atual
+    entry = melhor_preco_na_zona(entry_zone, choch['direcao'], preco_atual_fallback=preco_atual)
     sl = aplicar_buffer_stop_atr(sweep['nivel'], choch['direcao'], exec_candles)
     risco = abs(entry - sl)
     tp = entry + risco * RR_TARGET_NORMAL if choch['direcao'] == 'alta' else entry - risco * RR_TARGET_NORMAL
@@ -2817,7 +2884,7 @@ def process_pair_scalp_continuacao(db_file, pair, d1_candles, exec_candles, exec
     resultado['direcao'] = bos['direcao']
 
     sl = aplicar_buffer_stop_atr(sweep['nivel'], bos['direcao'], exec_candles)
-    entry = preco_atual
+    entry = melhor_preco_na_zona(entry_zone, bos['direcao'], preco_atual_fallback=preco_atual)
     risco = abs(entry - sl)
     tp = entry + risco * RR_TARGET_CONTINUACAO if bos['direcao'] == 'alta' else entry - risco * RR_TARGET_CONTINUACAO
     resultado['entry'] = round(entry, 6)
@@ -2855,6 +2922,7 @@ def process_pair_scalp_continuacao(db_file, pair, d1_candles, exec_candles, exec
                 kz_txt = f" | Killzone: {killzone_nome}" if na_killzone else " | fora da killzone"
                 regime_msg, adx_msg = compute_market_regime(d1_candles)
                 candle_pat = (resultado.get('indicadores') or {}).get('candle_pattern')
+                micro_bos = detect_micro_bos(exec_candles, bos['direcao'])
                 msg = f"🔁 <b>Sinal Scalp Continuação — {pair}</b>\n\n"
                 msg += f"{arrow} <b>{'LONG' if bos['direcao']=='alta' else 'SHORT'}</b> | TF execução: {exec_tf_label}{kz_txt}\n"
                 msg += f"📍 Entrada: {resultado['entry']}\n"
@@ -2865,6 +2933,8 @@ def process_pair_scalp_continuacao(db_file, pair, d1_candles, exec_candles, exec
                     regime_msg, adx_msg, 'BOS (continuação)', bos['direcao'], entry_zone['tipo'],
                     score, gates, candle_pattern=candle_pat, na_killzone=na_killzone, killzone_nome=killzone_nome,
                 )
+                if micro_bos['confirmado']:
+                    msg += f"\n• Micro BOS: confirmado nas últimas {MICRO_BOS_LOOKBACK} velas (rompeu {micro_bos['nivel_rompido']})"
                 msg += f"\n\n🎯 RSI: {round(last_rsi,1) if last_rsi is not None else 'N/D'} | Viés Diário: {bias_d1.upper()}"
                 if rsi_contra_aviso:
                     msg += f"\n⚠️ Atenção: {rsi_contra_aviso} — entrada mesmo assim, confirme no gráfico antes"

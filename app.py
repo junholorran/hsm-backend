@@ -1033,6 +1033,19 @@ LIVE_SYMBOL_MAP = {
 LIVE_TF_INTERVALS = {'W': 'W', 'D1': 'D', 'H4': '240', 'H1': '60', 'M15': '15', 'M5': '5'}
 AUTO_ALERT_SCORE_THRESHOLD = 65
 
+# ── NOVO 05/08: limite de candles por timeframe na busca à Bybit.
+# O D1 precisa de mais histórico que os outros TFs porque o indicador
+# SRchannel que o Juninho usa no TradingView (base real de comparação
+# das zonas D1) tem Loopback Period = 290 candles nas configs. Com o
+# limite antigo fixo em 200 pra todos os TFs, a zona D1 calculada pelo
+# Kairos ficava sempre mais curta/deslocada que a do TV. Os outros TFs
+# (W/H4/H1/M15/M5) continuam em 200 — não precisam desse histórico
+# maior e pedir mais que isso é gasto de API à toa. ──
+LIVE_TF_CANDLE_LIMIT = {
+    'D1': 300,
+}
+DEFAULT_CANDLE_LIMIT = 200
+
 
 def fetch_bybit_klines(symbol, interval, limit=200):
     url = 'https://api.bybit.com/v5/market/kline'
@@ -1319,7 +1332,8 @@ def run_live_cycle(pair, interval_min):
 
     candles_por_tf_cache = {}
     for tf_label, interval in LIVE_TF_INTERVALS.items():
-        candles = fetch_bybit_klines(symbol, interval, 200)
+        limit = LIVE_TF_CANDLE_LIMIT.get(tf_label, DEFAULT_CANDLE_LIMIT)
+        candles = fetch_bybit_klines(symbol, interval, limit)
         candles_por_tf_cache[tf_label] = candles
 
     cascade_result = None
@@ -1336,8 +1350,8 @@ def run_live_cycle(pair, interval_min):
             print(f"[cascade_engine] erro no ciclo de {pair}: {e}")
 
     # ── NOVO — S/R em D1 E H4 juntos, confirmação de sweep/CHoCH no
-    # M15. Roda em paralelo ao process_pair_full acima (que já cobre
-    # só D1), sem interferir nele — tabela própria
+    # M15. Roda em paralelo ao process_pair_full acima (que só cobre
+    # D1), sem interferir nele — tabela própria
     # (cascade_multi_tf_signal_state), sem custo de IA. ──
     if 'D1' in candles_por_tf_cache and 'H4' in candles_por_tf_cache and 'M15' in candles_por_tf_cache:
         try:
@@ -1363,7 +1377,7 @@ def run_live_cycle(pair, interval_min):
             if exec_tf in candles_por_tf_cache:
                 exec_candles = candles_por_tf_cache[exec_tf]
             elif exec_tf == 'M1':
-                exec_candles = fetch_bybit_klines(symbol, '1', 200)
+                exec_candles = fetch_bybit_klines(symbol, '1', DEFAULT_CANDLE_LIMIT)
             else:
                 exec_candles = None
             if exec_candles:
@@ -2285,8 +2299,8 @@ def scalp_cascata_debug_zonas():
         exec_tf = request.args.get('exec_tf', 'M15')
         symbol = LIVE_SYMBOL_MAP.get(pair, pair.replace('USD', 'USDT'))
         interval = LIVE_TF_INTERVALS.get(exec_tf, '15')
-        d1_candles = fetch_bybit_klines(symbol, 'D', 200)
-        exec_candles = fetch_bybit_klines(symbol, interval, 200)
+        d1_candles = fetch_bybit_klines(symbol, 'D', LIVE_TF_CANDLE_LIMIT.get('D1', DEFAULT_CANDLE_LIMIT))
+        exec_candles = fetch_bybit_klines(symbol, interval, DEFAULT_CANDLE_LIMIT)
         debug = scalp_engine.debug_zonas_completo(d1_candles, exec_candles)
         return jsonify(debug)
     except Exception as e:

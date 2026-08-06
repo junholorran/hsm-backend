@@ -1349,10 +1349,6 @@ def run_live_cycle(pair, interval_min):
         except Exception as e:
             print(f"[cascade_engine] erro no ciclo de {pair}: {e}")
 
-    # ── NOVO — S/R em D1 E H4 juntos, confirmação de sweep/CHoCH no
-    # M15. Roda em paralelo ao process_pair_full acima (que só cobre
-    # D1), sem interferir nele — tabela própria
-    # (cascade_multi_tf_signal_state), sem custo de IA. ──
     if 'D1' in candles_por_tf_cache and 'H4' in candles_por_tf_cache and 'M15' in candles_por_tf_cache:
         try:
             cascade_engine.process_pair_full_multi_tf(
@@ -1386,15 +1382,6 @@ def run_live_cycle(pair, interval_min):
                 except Exception as e:
                     print(f"[journal] erro ao resolver pendentes de {pair}: {e}")
 
-                # ── NOVO 05/08: Break Even + Parcial automatizados
-                # (estilo Vortex — "BE +6.0 pips" / "PARCIAL +6.0
-                # pips"). Roda 1x por ciclo, por par, em cima dos
-                # mesmos exec_candles já buscados — sem call extra à
-                # Bybit. Cobre as 6 tabelas de sinal (Normal,
-                # Continuação, Cascata, Antecipado, Indicadores,
-                # Rápido) — cada trade em aberto (alerted=1,
-                # resultado_final='pendente') é monitorado
-                # independente do modo que o gerou. ──
                 try:
                     for tabela_gestao in (
                         'scalp_signal_state', 'scalp_signal_state_continuacao',
@@ -1433,13 +1420,6 @@ def run_live_cycle(pair, interval_min):
                 except Exception as e:
                     print(f"[scalp_engine cascata] erro no ciclo de {pair}: {e}")
 
-                # ── NOVO — RELIGADO: Modo Normal (CHoCH — reversão).
-                # Descoberto que existia completo no scalp_engine.py mas
-                # nunca era chamado aqui — por isso nunca chegava sinal
-                # nenhum desse modo. Agora já vem com o gate obrigatório
-                # de RSI (regra fixa) embutido no próprio
-                # process_pair_scalp, então não abre mais LONG com RSI
-                # sobrecomprado nem SHORT com RSI sobrevendido. ──
                 try:
                     normal_result = scalp_engine.process_pair_scalp(
                         DB_FILE, pair,
@@ -1462,11 +1442,6 @@ def run_live_cycle(pair, interval_min):
                 except Exception as e:
                     print(f"[scalp_engine normal] erro no ciclo de {pair}: {e}")
 
-                # ── NOVO — RELIGADO: Modo Continuação (BOS). Mesmo caso
-                # do Normal — existia pronto, nunca era chamado. É o
-                # modo que cobre manipulação seguida de DISTRIBUIÇÃO na
-                # mesma direção do sweep (em vez de reversão). Também já
-                # vem com o gate obrigatório de RSI embutido. ──
                 try:
                     continuacao_result = scalp_engine.process_pair_scalp_continuacao(
                         DB_FILE, pair,
@@ -2334,6 +2309,40 @@ def scalp_filtros_shadow_report_route():
         pair = request.args.get('pair')
         limit = int(request.args.get('limit', 50))
         return jsonify(scalp_engine.filtros_shadow_report(DB_FILE, pair=pair, limit=limit))
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# NOVO — Stats e listagem detalhada por modo. Cada um dos 6 modos de
+# scalp grava em tabela própria; esses endpoints separam o que antes
+# só existia agregado (o /journal/stats misturava tudo junto).
+# ═══════════════════════════════════════════════════════════════════════
+
+@app.route('/scalp/stats_por_modo', methods=['GET'])
+def scalp_stats_por_modo():
+    try:
+        return jsonify(scalp_engine.gerar_stats_por_modo(DB_FILE))
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/scalp/trades_detalhado/<modo>', methods=['GET'])
+def scalp_trades_detalhado_route(modo):
+    try:
+        limit = int(request.args.get('limit', 200))
+        resultado = scalp_engine.listar_trades_detalhado(DB_FILE, modo, limit)
+        if 'erro' in resultado:
+            return jsonify(resultado), 400
+        return jsonify(resultado)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/scalp/modos_disponiveis', methods=['GET'])
+def scalp_modos_disponiveis():
+    try:
+        return jsonify({'modos': list(scalp_engine.MODOS_SCALP.keys())})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 

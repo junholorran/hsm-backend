@@ -126,6 +126,14 @@ RR_GATE_ATIVO = True
 # valor mais alto, 3.0; Scalp Rápido (mais agressivo, sem CHoCH, stop
 # curto) mantém 2.0 — subir o alvo ali só pra distância do TP crescer
 # sem crescer a qualidade do gatilho.
+# ── CORRIGIDO (erro meu na sessão anterior): tinha baixado de 2.5
+# pra 2.0 achando que "facilitava" — é o oposto. RR mais baixo exige
+# WIN RATE MAIOR pra empatar (2.5:1 precisa de 28.6% de acerto pra
+# empatar; 2.0:1 precisa de 33.3%). Voltando pra 2.5. O que realmente
+# ajuda a ganhar é win rate melhor (RSI gate real + ADX direcional +
+# zona mais apertada) — essas sim reduzem entrada ruim. RR é só a
+# fasquia de quanto você precisa acertar; baixar ele não ajuda em
+# nada, só ficou mais difícil de bater breakeven à toa.
 RR_TARGET_NORMAL = 2.5
 RR_TARGET_CONTINUACAO = 2.5
 RR_TARGET_RAPIDO = 2.0
@@ -800,7 +808,11 @@ def find_d1_order_blocks(d1_candles, swing_size=50, atr_period=14, atr_mult=1.0,
 
 
 SR_CHANNEL_PIVOT_PERIOD = 10
-SR_CHANNEL_MAX_WIDTH_PCT = 5
+# ── AJUSTADO: 5% -> 2%. Com 5% de amplitude a zona D1 ficava larga
+# demais pra scalp de precisão — quase qualquer sweep contava como
+# "dentro da zona", diluindo o sinal. 2% é mais fiel ao conceito de
+# banda de S/R real, não um range gigante.
+SR_CHANNEL_MAX_WIDTH_PCT = 2
 SR_CHANNEL_MIN_STRENGTH = 1
 SR_CHANNEL_MAX_NUMBER = 6
 SR_CHANNEL_LOOKBACK_PERIOD = 290
@@ -1598,6 +1610,83 @@ def compute_adx(candles, period=14):
     return adx
 
 
+def compute_adx_com_direcao(candles, period=14):
+    """
+    Igual compute_adx, mas também devolve a direção da tendência
+    (+DI vs -DI), pra dar pra saber se um ADX alto é A FAVOR ou
+    CONTRA a direção do sinal — antes o bônus de ADX somava só por
+    "tendência forte existir", mesmo se fosse contra o CHoCH/BOS.
+    Retorna (adx_atual, direcao) onde direcao é 'alta', 'baixa' ou None.
+    """
+    n = len(candles)
+    if n < period * 2 + 2:
+        return None, None
+
+    plus_dm = [0.0] * n
+    minus_dm = [0.0] * n
+    tr = [0.0] * n
+    for i in range(1, n):
+        up_move = candles[i]['h'] - candles[i - 1]['h']
+        down_move = candles[i - 1]['l'] - candles[i]['l']
+        plus_dm[i] = up_move if (up_move > down_move and up_move > 0) else 0.0
+        minus_dm[i] = down_move if (down_move > up_move and down_move > 0) else 0.0
+        h, l, prev_c = candles[i]['h'], candles[i]['l'], candles[i - 1]['c']
+        tr[i] = max(h - l, abs(h - prev_c), abs(l - prev_c))
+
+    atr_s = [None] * n
+    plus_di_s = [None] * n
+    minus_di_s = [None] * n
+    dx = [None] * n
+
+    atr_s[period] = sum(tr[1:period + 1])
+    plus_di_s[period] = sum(plus_dm[1:period + 1])
+    minus_di_s[period] = sum(minus_dm[1:period + 1])
+
+    def _dx_de(plus_s, minus_s, atr_val):
+        if not atr_val:
+            return None
+        pdi = 100 * plus_s / atr_val
+        mdi = 100 * minus_s / atr_val
+        if pdi + mdi == 0:
+            return 0.0
+        return 100 * abs(pdi - mdi) / (pdi + mdi)
+
+    dx[period] = _dx_de(plus_di_s[period], minus_di_s[period], atr_s[period])
+
+    for i in range(period + 1, n):
+        atr_s[i] = atr_s[i - 1] - (atr_s[i - 1] / period) + tr[i]
+        plus_di_s[i] = plus_di_s[i - 1] - (plus_di_s[i - 1] / period) + plus_dm[i]
+        minus_di_s[i] = minus_di_s[i - 1] - (minus_di_s[i - 1] / period) + minus_dm[i]
+        dx[i] = _dx_de(plus_di_s[i], minus_di_s[i], atr_s[i])
+
+    adx = [None] * n
+    janela_inicial = [v for v in dx[period:period * 2] if v is not None]
+    if len(janela_inicial) < period:
+        return None, None
+    idx_primeiro_adx = period * 2 - 1
+    adx[idx_primeiro_adx] = sum(janela_inicial) / period
+    for i in range(idx_primeiro_adx + 1, n):
+        if dx[i] is None:
+            continue
+        adx[i] = (adx[i - 1] * (period - 1) + dx[i]) / period
+
+    adx_atual = next((v for v in reversed(adx) if v is not None), None)
+    if adx_atual is None:
+        return None, None
+
+    idx_atual = len(adx) - 1
+    while idx_atual >= 0 and adx[idx_atual] is None:
+        idx_atual -= 1
+    if idx_atual < 0 or atr_s[idx_atual] is None or not atr_s[idx_atual]:
+        return round(adx_atual, 2), None
+
+    pdi_final = 100 * plus_di_s[idx_atual] / atr_s[idx_atual]
+    mdi_final = 100 * minus_di_s[idx_atual] / atr_s[idx_atual]
+    direcao = 'alta' if pdi_final > mdi_final else 'baixa'
+
+    return round(adx_atual, 2), direcao
+
+
 def compute_bollinger(closes, period=20, std_mult=2):
     n = len(closes)
     upper, mid, lower = [None] * n, [None] * n, [None] * n
@@ -1889,10 +1978,15 @@ def compute_score(zona, sweep, choch, entry_zone, exec_candles, na_killzone, ind
             score += 8
             detalhes.append(('macd_confirmando', 8))
 
-    adx = indicadores.get('adx14')
-    if adx is not None and adx >= 25:
+    # ── AJUSTADO: antes somava só por ADX>=25 existir, sem checar se a
+    # tendência forte era A FAVOR ou CONTRA a direção do CHoCH/BOS —
+    # ou seja, dava pra somar pontos de "tendência forte" mesmo com a
+    # tendência apontando pro lado errado. Agora usa +DI vs -DI pra
+    # só contar quando bate com a direção do sinal.
+    adx_dir, adx_direcao = compute_adx_com_direcao(exec_candles, 14)
+    if adx_dir is not None and adx_dir >= 25 and adx_direcao == direcao:
         score += 7
-        detalhes.append(('adx_tendencia_forte', 7))
+        detalhes.append(('adx_tendencia_forte_a_favor', 7))
 
     ema9, ema21, ema50 = indicadores.get('ema9'), indicadores.get('ema21'), indicadores.get('ema50')
     if ema9 is not None and ema21 is not None and ema50 is not None:
@@ -2139,9 +2233,19 @@ def process_pair_scalp(db_file, pair, d1_candles, exec_candles, exec_tf_label, s
     rsi_contra_aviso = None
     if last_rsi is not None:
         if choch['direcao'] == 'alta' and last_rsi >= RSI_GATE_BLOQUEIA_LONG_ACIMA:
-            rsi_contra_aviso = f"RSI={round(last_rsi,1)} já esticado pra cima"
+            resultado['motivo'] = (
+                f"CHoCH de alta confirmado, mas RSI={round(last_rsi,1)} já esticado pra cima "
+                f"(>= {RSI_GATE_BLOQUEIA_LONG_ACIMA}) — bloqueado (RSI é gate, não só bônus)"
+            )
+            _save_zone_state(db_file, pair, zona, 'rsi_gate_bloqueou', now, sweep=sweep, choch=choch)
+            return resultado
         elif choch['direcao'] == 'baixa' and last_rsi <= RSI_GATE_BLOQUEIA_SHORT_ABAIXO:
-            rsi_contra_aviso = f"RSI={round(last_rsi,1)} já esticado pra baixo"
+            resultado['motivo'] = (
+                f"CHoCH de baixa confirmado, mas RSI={round(last_rsi,1)} já esticado pra baixo "
+                f"(<= {RSI_GATE_BLOQUEIA_SHORT_ABAIXO}) — bloqueado (RSI é gate, não só bônus)"
+            )
+            _save_zone_state(db_file, pair, zona, 'rsi_gate_bloqueou', now, sweep=sweep, choch=choch)
+            return resultado
 
     entry_zone = find_fvg_ob_after_choch(exec_candles, choch)
     if not entry_zone:
@@ -2582,9 +2686,19 @@ def process_pair_scalp_continuacao(db_file, pair, d1_candles, exec_candles, exec
     rsi_contra_aviso = None
     if last_rsi is not None:
         if bos['direcao'] == 'alta' and last_rsi >= RSI_GATE_BLOQUEIA_LONG_ACIMA:
-            rsi_contra_aviso = f"RSI={round(last_rsi,1)} já esticado pra cima"
+            resultado['motivo'] = (
+                f"BOS de alta confirmado, mas RSI={round(last_rsi,1)} já esticado pra cima "
+                f"(>= {RSI_GATE_BLOQUEIA_LONG_ACIMA}) — bloqueado (RSI é gate, não só bônus)"
+            )
+            _save_zone_state(db_file, pair, zona, 'rsi_gate_bloqueou', now, sweep=sweep, choch=bos, table='scalp_zone_state_continuacao')
+            return resultado
         elif bos['direcao'] == 'baixa' and last_rsi <= RSI_GATE_BLOQUEIA_SHORT_ABAIXO:
-            rsi_contra_aviso = f"RSI={round(last_rsi,1)} já esticado pra baixo"
+            resultado['motivo'] = (
+                f"BOS de baixa confirmado, mas RSI={round(last_rsi,1)} já esticado pra baixo "
+                f"(<= {RSI_GATE_BLOQUEIA_SHORT_ABAIXO}) — bloqueado (RSI é gate, não só bônus)"
+            )
+            _save_zone_state(db_file, pair, zona, 'rsi_gate_bloqueou', now, sweep=sweep, choch=bos, table='scalp_zone_state_continuacao')
+            return resultado
 
     entry_zone = find_fvg_ob_after_choch(exec_candles, bos)
     if not entry_zone:

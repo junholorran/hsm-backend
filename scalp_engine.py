@@ -261,10 +261,6 @@ def _formatar_motivos_principais(regime, adx_val, evento_tipo, evento_direcao, e
     return "\n".join(linhas)
 
 
-# ── NOVO 05/08: itens adicionais catalogados do "Relatório Executivo
-# Completo" da Vortex — cada um só entrou aqui porque é rastreável até
-# um cálculo real, não decoração. ──
-
 def classificar_qualidade_rr(rr):
     """
     Label textual de qualidade do R:R, igual ao "BAIXA. Relação de
@@ -283,36 +279,21 @@ def classificar_qualidade_rr(rr):
         return f"ALTA — Relação de 1:{rr} permite ser lucrativo mesmo com taxa de acerto abaixo de {round(100/(1+rr))}%."
 
 
-# ── NOVO 05/08: capital configurável — pra o position sizing entrar
-# nas mensagens automáticas, precisa saber o capital do usuário. Se
-# ficar None (padrão), o bloco de position sizing simplesmente não
-# aparece nas mensagens — nunca inventa um valor. Pra ativar, defina
-# CAPITAL_USUARIO_USD com seu capital real de trading (não a banca
-# toda, só a fatia destinada a essas operações).
 CAPITAL_USUARIO_USD = None  # ex: 10000 — mude aqui pro position sizing aparecer nos sinais
 
-# Position sizing — perfis fixos de risco por trade, igual aos 3
-# botões (Conservador/Moderado/Agressivo) que a Vortex mostra.
 PERFIS_RISCO = {
-    'conservador': 0.0075,  # 0.75% do capital por trade (meio da faixa 0.5-1%)
-    'moderado': 0.015,      # 1.5% do capital por trade (meio da faixa 1-2%)
-    'agressivo': 0.025,     # 2.5% do capital por trade (meio da faixa 2-3%)
+    'conservador': 0.0075,
+    'moderado': 0.015,
+    'agressivo': 0.025,
 }
 
 
 def calcular_position_sizing(capital, entry, sl, perfil='moderado'):
-    """
-    Calcula o tamanho de posição sugerido dado o capital do usuário,
-    entry/sl do sinal, e o perfil de risco escolhido — igual à
-    calculadora "Seu Capital (Banca)" da Vortex. Retorna dict com
-    valor em risco (USD) e % do capital arriscado por unidade.
-    """
     if not capital or not entry or not sl or entry == sl:
         return None
     risco_pct = PERFIS_RISCO.get(perfil, PERFIS_RISCO['moderado'])
     valor_risco_usd = round(capital * risco_pct, 2)
     distancia_stop = abs(entry - sl)
-    # quantidade do ativo que, se bater o stop, perde exatamente valor_risco_usd
     quantidade_sugerida = round(valor_risco_usd / distancia_stop, 6) if distancia_stop > 0 else None
     return {
         'perfil': perfil,
@@ -322,21 +303,7 @@ def calcular_position_sizing(capital, entry, sl, perfil='moderado'):
     }
 
 
-# ── Weak High / Strong Low — classificação de swings por qualidade de
-# liquidez (ICT real). Um swing é "Strong" quando foi respeitado por
-# múltiplos toques sem ser varrido — indica liquidez ainda intacta e
-# reação forte. É "Weak" quando já foi varrido/testado e rompido —
-# indica que a liquidez ali já foi capturada, menos confiável como
-# alvo. O Kairos já detecta EQH/EQL com toques; essa função só
-# classifica o swing mais recente de cada lado. ──
-
 def classificar_forca_swing(swing_nivel, swing_tipo, candles, tolerancia_pct=0.001):
-    """
-    swing_tipo: 'high' ou 'low'. Retorna 'strong' se o nível nunca foi
-    rompido pelos candles seguintes (ainda intacto — liquidez viva),
-    'weak' se já foi rompido em algum candle posterior (liquidez já
-    capturada).
-    """
     if swing_nivel is None or not candles:
         return None
     for c in candles:
@@ -347,10 +314,6 @@ def classificar_forca_swing(swing_nivel, swing_tipo, candles, tolerancia_pct=0.0
     return 'strong'
 
 
-# ── Gate de horário ruim — a Vortex lista janelas explícitas a
-# EVITAR (transição Ásia-Europa e fechamento de NY), não só killzones
-# boas. Baixa liquidez nessas janelas tende a gerar fakeout/ruído.
-# Horários em UTC. ──
 HORARIOS_RUINS_UTC = [
     {'nome': 'Transição Ásia-Europa', 'inicio_h': 5, 'fim_h': 7},
     {'nome': 'Fechamento de NY', 'inicio_h': 21, 'fim_h': 23},
@@ -358,8 +321,6 @@ HORARIOS_RUINS_UTC = [
 
 
 def esta_em_horario_ruim():
-    """Retorna (True, nome_da_janela) se o horário UTC atual cair
-    numa janela de baixa liquidez conhecida, senão (False, None)."""
     import datetime
     hora_utc = datetime.datetime.utcnow().hour
     for janela in HORARIOS_RUINS_UTC:
@@ -369,13 +330,6 @@ def esta_em_horario_ruim():
 
 
 def compute_sazonalidade_mensal(db_file, pair, meses_historico=24):
-    """
-    Sazonalidade real, calculada em cima do próprio histórico de
-    sinais resolvidos (win/loss) do Kairos — não é dado de terceiro,
-    é o retrospecto real do par nesse mês específico ao longo dos
-    últimos meses. Precisa das colunas resultado_final (já
-    adicionadas via ALTER TABLE em init_scalp_db).
-    """
     import datetime
     tabelas = [
         'scalp_signal_state', 'scalp_signal_state_continuacao',
@@ -421,21 +375,11 @@ def compute_sazonalidade_mensal(db_file, pair, meses_historico=24):
     }
 
 
-# ── NOVO 05/08: Fear & Greed Index — dado externo real (API pública
-# alternative.me, a mesma que a maioria das plataformas usa), com
-# cache em memória de 1h pra não bater na API toda vez que um dos 6
-# modos rodar um ciclo pra cada par. É crypto-wide, não por par, então
-# faz sentido cachear globalmente. ──
 _FEAR_GREED_CACHE = {'valor': None, 'classificacao': None, 'timestamp': 0}
-FEAR_GREED_CACHE_TTL = 3600  # 1 hora
+FEAR_GREED_CACHE_TTL = 3600
 
 
 def get_fear_greed_index():
-    """
-    Retorna dict {'valor': int 0-100, 'classificacao': str} ou None se
-    a API falhar. Cacheado por 1h — não é crítico ter valor exato ao
-    segundo, o índice muda devagar.
-    """
     agora = time.time()
     if _FEAR_GREED_CACHE['valor'] is not None and (agora - _FEAR_GREED_CACHE['timestamp']) < FEAR_GREED_CACHE_TTL:
         return {'valor': _FEAR_GREED_CACHE['valor'], 'classificacao': _FEAR_GREED_CACHE['classificacao']}
@@ -462,21 +406,8 @@ def get_fear_greed_index():
 def montar_bloco_analise_extra(db_file, pair, direcao, entry, sl, tp, tabela_para_sazonalidade,
                                 sweep_nivel=None, sweep_tipo=None, exec_candles=None,
                                 entry_zone_tipo=None, obs_com_mitigacao=None):
-    """
-    Bloco único reaproveitado pelos 6 modos — monta em texto os itens
-    "Relatório Executivo" que fazem sentido dentro de uma mensagem de
-    sinal automático: qualidade do R:R, força do swing varrido
-    (Strong/Weak), status de mitigação do OB (se a zona de entrada for
-    OB), e sazonalidade real do par nesse mês. Cada linha só entra se
-    o dado existir — não força nada decorativo.
-
-    (Position sizing fica de fora daqui de propósito: depende do
-    capital do usuário, que o Kairos não guarda automaticamente — é
-    função separada, `calcular_position_sizing`, pra usar sob demanda.)
-    """
     linhas = []
 
-    # R:R quality
     if entry and sl and tp:
         risco = abs(entry - sl)
         retorno = abs(tp - entry)
@@ -486,14 +417,12 @@ def montar_bloco_analise_extra(db_file, pair, direcao, entry, sl, tp, tabela_par
             if qualidade:
                 linhas.append(f"📐 {qualidade}")
 
-    # Força do swing varrido (Strong = liquidez ainda intacta antes do sweep, Weak = já rompida antes)
     if sweep_nivel is not None and sweep_tipo is not None and exec_candles:
         swing_tipo_liquidez = 'high' if sweep_tipo == 'alta' else 'low'
         forca = classificar_forca_swing(sweep_nivel, swing_tipo_liquidez, exec_candles)
         if forca:
             linhas.append(f"💧 Liquidez varrida: {'Strong (intacta até agora)' if forca=='strong' else 'Weak (já tinha sido testada antes)'}")
 
-    # Mitigação do OB, só se a zona de entrada for um Order Block
     if entry_zone_tipo and 'OB' in entry_zone_tipo and obs_com_mitigacao:
         ob_correspondente = next(
             (ob for ob in obs_com_mitigacao if ob.get('bottom') is not None and ob.get('top') is not None
@@ -502,7 +431,6 @@ def montar_bloco_analise_extra(db_file, pair, direcao, entry, sl, tp, tabela_par
         if ob_correspondente is not None:
             linhas.append(f"⚠️ Order Block {'já mitigado antes' if ob_correspondente['mitigado'] else 'ainda intacto (primeira vez)'}")
 
-    # Sazonalidade real
     try:
         saz = compute_sazonalidade_mensal(db_file, pair)
         if saz and saz.get('amostras', 0) > 0:
@@ -510,7 +438,6 @@ def montar_bloco_analise_extra(db_file, pair, direcao, entry, sl, tp, tabela_par
     except Exception:
         pass
 
-    # Fear & Greed Index (crypto-wide, cacheado 1h)
     try:
         fg = get_fear_greed_index()
         if fg:
@@ -518,8 +445,6 @@ def montar_bloco_analise_extra(db_file, pair, direcao, entry, sl, tp, tabela_par
     except Exception:
         pass
 
-    # Position sizing — só aparece se CAPITAL_USUARIO_USD estiver
-    # configurado (nunca inventa um capital)
     if CAPITAL_USUARIO_USD and entry and sl:
         try:
             sizing = calcular_position_sizing(CAPITAL_USUARIO_USD, entry, sl, perfil='moderado')
@@ -534,14 +459,10 @@ def montar_bloco_analise_extra(db_file, pair, direcao, entry, sl, tp, tabela_par
     return "\n".join(linhas)
 
 
-# Portugal (Europe/Lisbon) — horário local aproximado, sem lib de timezone externa.
-# UTC+0 no inverno, UTC+1 no verão (DST). Pra simplificar e evitar dependência
-# externa, usamos UTC+1 fixo (cobre a maior parte do ano de trading ativo);
-# a diferença de 1h no inverno é aceitável pra um gate informativo de killzone.
 PT_UTC_OFFSET_HOURS = 1
 
 KILLZONES = [
-    {'nome': 'Ásia', 'inicio_h': 0, 'fim_h': 3},  # ── NOVO: Tokyo/Ásia killzone (ICT), pedido pra bater com a Vortex que tem London/NY/Ásia
+    {'nome': 'Ásia', 'inicio_h': 0, 'fim_h': 3},
     {'nome': 'London', 'inicio_h': 7, 'fim_h': 10},
     {'nome': 'New York', 'inicio_h': 13, 'fim_h': 16},
 ]
@@ -719,13 +640,6 @@ def init_scalp_db(db_file):
             conn.commit()
         except Exception:
             pass
-        # ── NOVO 05/08: colunas de Break Even + Parcial automatizados
-        # (estilo Vortex — "BE +6.0 pips" / "PARCIAL +6.0 pips"). Cada
-        # tabela de sinal com entry/sl/tp ganha 3 colunas: be_movido
-        # (stop já foi avisado pra mover pra entrada), parcial_feita
-        # (já avisou realização parcial), e status_gestao (texto livre
-        # pra exibir, tipo "BE" ou "PARCIAL +X pips"). Tudo via
-        # ALTER TABLE com try/except — se a coluna já existe, ignora. ──
         tabelas_com_gestao = [
             'scalp_signal_state', 'scalp_signal_state_continuacao',
             'scalp_rapido_signal_state', 'scalp_cascata_signal_state',
@@ -744,9 +658,24 @@ def init_scalp_db(db_file):
                 except Exception:
                     pass
 
+        # ── NOVO: motivo_score — grava o breakdown do que compôs o score
+        # de cada sinal (ex: "banda_d1:20,sweep_choch:25,rsi_favoravel:12"),
+        # só nas 3 tabelas que realmente calculam um score/votos detalhado
+        # (Normal, Continuação, Confluência de Indicadores). Sem isso não
+        # dava pra saber DEPOIS por que um trade específico teve aquele
+        # score — só o número final ficava salvo, o "porquê" se perdia.
+        tabelas_com_motivo = [
+            'scalp_signal_state', 'scalp_signal_state_continuacao', 'scalp_indicadores_signal_state',
+        ]
+        for tabela in tabelas_com_motivo:
+            try:
+                cursor.execute(f"ALTER TABLE {tabela} ADD COLUMN motivo_score TEXT DEFAULT ''")
+                conn.commit()
+            except Exception:
+                pass
+
 
 def is_in_killzone(now_utc=None):
-    """Retorna (bool, nome_killzone_ou_None). Horário Portugal, gate de scalp."""
     now_utc = now_utc or datetime.now(timezone.utc)
     pt_hour = (now_utc + timedelta(hours=PT_UTC_OFFSET_HOURS)).hour
     for kz in KILLZONES:
@@ -755,17 +684,6 @@ def is_in_killzone(now_utc=None):
     return False, None
 
 
-# ── CORRIGIDO 05/08 (v2): extrator de swing points que replica o
-# algoritmo REAL do LuxAlgo Smart Money Concepts (não um pivô simétrico
-# simples). Confirmado com o Juninho: "Swing Points Length" = 50 nas
-# configs do indicador no TradingView. O LuxAlgo usa troca de "perna"
-# (leg) — quando o preço rompe o topo/fundo de uma janela de N candles,
-# a perna vira, e o candle que ficou exatamente N candles atrás daquela
-# virada é marcado como o swing point. É o mesmo método já usado em
-# compute_lux_structure_bias() pra calcular viés — aqui reaproveitamos
-# a mesma lógica, mas extraindo os NÍVEIS de swing, não só a direção,
-# pra alimentar o cluster de zonas D1/H4. Se o Juninho mudar o "Swing
-# Points Length" no LuxAlgo, o swing_size aqui tem que mudar junto. ──
 def _extrair_swings_lux_algo(candles, swing_size=50):
     n = len(candles)
     if n < swing_size + 5:
@@ -799,18 +717,6 @@ def _extrair_swings_lux_algo(candles, swing_size=50):
     return swings
 
 
-# ── NOVO 05/08 (v3): Order Blocks D1 no padrão ICT/LuxAlgo — confirmado
-# com o Juninho que as caixas coloridas que ele vê no gráfico (a
-# referência real) são Order Blocks do LuxAlgo, não swing high/low.
-# Conceito ICT: um Order Block é a ÚLTIMA vela CONTRÁRIA ao movimento,
-# logo antes de um rompimento de estrutura (BOS) que confirma que
-# aquela vela realmente tinha ordens institucionais por trás. Ex: a
-# última vela vermelha antes de um impulso de alta que rompe o topo
-# anterior = Order Block de alta (zona de demanda). Usa o mesmo
-# leg-detection do LuxAlgo (swing_size=50) pra achar os rompimentos de
-# estrutura, e filtra por ATR (igual ao "Order Block Filter: Atr" nas
-# configs do indicador) pra descartar velas insignificantes que não
-# representam movimento institucional real. ──
 def find_d1_order_blocks(d1_candles, swing_size=50, atr_period=14, atr_mult=1.0, lookback_dias=D1_LOOKBACK_DIAS):
     n = len(d1_candles)
     if n < swing_size + atr_period + 5:
@@ -852,13 +758,11 @@ def find_d1_order_blocks(d1_candles, swing_size=50, atr_period=14, atr_mult=1.0,
         c = d1_candles[i]
         atr_val = atr_series[i]
 
-        # ── BOS de alta: fechamento rompe o último swing high → procura
-        # a última vela vermelha (bearish) antes desse rompimento ──
         if swing_high_level is not None and not swing_high_crossed and c['c'] > swing_high_level:
             swing_high_crossed = True
             for k in range(i, max(0, i - swing_size), -1):
                 cand = d1_candles[k]
-                if cand['c'] < cand['o']:  # vela vermelha = candidata a OB de alta
+                if cand['c'] < cand['o']:
                     rng = cand['h'] - cand['l']
                     if atr_val and rng >= atr_val * atr_mult:
                         obs.append({
@@ -867,13 +771,11 @@ def find_d1_order_blocks(d1_candles, swing_size=50, atr_period=14, atr_mult=1.0,
                         })
                     break
 
-        # ── BOS de baixa: fechamento rompe o último swing low → procura
-        # a última vela verde (bullish) antes desse rompimento ──
         if swing_low_level is not None and not swing_low_crossed and c['c'] < swing_low_level:
             swing_low_crossed = True
             for k in range(i, max(0, i - swing_size), -1):
                 cand = d1_candles[k]
-                if cand['c'] > cand['o']:  # vela verde = candidata a OB de baixa
+                if cand['c'] > cand['o']:
                     rng = cand['h'] - cand['l']
                     if atr_val and rng >= atr_val * atr_mult:
                         obs.append({
@@ -886,7 +788,6 @@ def find_d1_order_blocks(d1_candles, swing_size=50, atr_period=14, atr_mult=1.0,
         cutoff_ms = d1_candles[-1]['t'] - lookback_dias * 24 * 3600 * 1000
         obs = [o for o in obs if o['t'] >= cutoff_ms]
 
-    # dedup — mesma vela pode ter sido pega em rompimentos próximos
     vistos = set()
     unicos = []
     for o in obs:
@@ -898,46 +799,12 @@ def find_d1_order_blocks(d1_candles, swing_size=50, atr_period=14, atr_mult=1.0,
     return unicos
 
 
-# ─── ZONA D1 — algoritmo REAL do indicador "SRchannel" (Support
-# Resistance Channels), autor LonesomeTheBlue, código Pine v6 fornecido
-# pelo Juninho. Tradução fiel, linha por linha, do script original —
-# não é mais aproximação. Parâmetros confirmados: Pivot Period=10,
-# Maximum Channel Width%=5, Minimum Strength=1, Maximum Number of S/R=6,
-# Loopback Period=290.
-#
-# Passo a passo do algoritmo original:
-#   1. Pivôs de topo/fundo via ta.pivothigh/pivotlow (janela simétrica
-#      de `pivot_period` candles pra cada lado, precisa ser
-#      estritamente maior/menor que os dois lados).
-#   2. Só ficam pivôs dentro dos últimos `loopback` candles (relativo
-#      ao candle mais recente).
-#   3. Largura máxima do canal (`cwidth`) = (maior high - menor low)
-#      dos últimos 300 candles (FIXO em 300, não é o loopback) vezes
-#      `channel_width_pct` / 100.
-#   4. Pra CADA pivô (usado como semente), varre TODOS os pivôs (na
-#      ordem do mais recente pro mais antigo) e expande uma faixa
-#      [lo,hi] incluindo cada pivô cuja inclusão mantenha a largura
-#      final dentro de `cwidth`. Cada pivô incluído soma 20 à força
-#      bruta desse candidato.
-#   5. Em cima da força bruta, soma quantos candles (high OU low) dos
-#      últimos `loopback` candles tocam dentro da faixa [lo,hi] desse
-#      candidato — isso pesa muito mais canais realmente respeitados
-#      pelo preço, não só canais com muitos pivôs.
-#   6. Seleção gulosa: pega o candidato de maior força (força mínima =
-#      `min_strength` * 20), remove/marca como usado qualquer outro
-#      candidato cuja faixa se sobreponha à faixa escolhida, repete até
-#      `max_number_sr` canais ou não sobrar candidato válido.
-#   7. Classificação suporte/resistência é DINÂMICA, relativa ao preço
-#      atual: canal inteiro acima do preço = resistência (oferta);
-#      canal inteiro abaixo = suporte (demanda); preço dentro do canal
-#      = "mista" (cor neutra no indicador original).
-# ─────────────────────────────────────────────────────────────────────
 SR_CHANNEL_PIVOT_PERIOD = 10
 SR_CHANNEL_MAX_WIDTH_PCT = 5
 SR_CHANNEL_MIN_STRENGTH = 1
 SR_CHANNEL_MAX_NUMBER = 6
 SR_CHANNEL_LOOKBACK_PERIOD = 290
-SR_CHANNEL_WIDTH_BASIS_BARS = 300  # fixo no script original, não é o loopback
+SR_CHANNEL_WIDTH_BASIS_BARS = 300
 
 
 def compute_sr_channels(
@@ -957,9 +824,6 @@ def compute_sr_channels(
     closes = [c['c'] for c in d1_candles]
     last_idx = n - 1
 
-    # ── passo 1+2: pivôs, mais recentes primeiro (equivalente ao
-    # array.unshift do Pine — a ORDEM importa pro passo 4), só dentro
-    # do loopback ──
     pivots_cronologico = []
     for i in range(pivot_period, n - pivot_period):
         janela_h = highs[i - pivot_period:i] + highs[i + 1:i + pivot_period + 1]
@@ -978,8 +842,6 @@ def compute_sr_channels(
     pivotvals = [p['valor'] for p in pivots]
     m = len(pivotvals)
 
-    # ── passo 3: largura máxima em valor absoluto, base fixa de 300
-    # candles (não o loopback) ──
     janela_300 = d1_candles[-SR_CHANNEL_WIDTH_BASIS_BARS:] if n >= SR_CHANNEL_WIDTH_BASIS_BARS else d1_candles
     prdhighest = max(c['h'] for c in janela_300)
     prdlowest = min(c['l'] for c in janela_300)
@@ -987,8 +849,6 @@ def compute_sr_channels(
     if cwidth <= 0:
         return []
 
-    # ── passo 4: get_sr_vals — pra cada pivô-semente, expande a faixa
-    # incluindo todo pivô que caiba na largura máxima ──
     candidatos = []
     for i in range(m):
         lo = pivotvals[i]
@@ -1005,8 +865,6 @@ def compute_sr_channels(
                 numpp += 20
         candidatos.append({'hi': hi, 'lo': lo, 'forca': numpp})
 
-    # ── passo 5: soma toques reais (high/low de candles dentro do
-    # loopback tocando na faixa) ──
     start_idx = max(0, last_idx - loopback)
     for cand in candidatos:
         h_, l_ = cand['hi'], cand['lo']
@@ -1017,7 +875,6 @@ def compute_sr_channels(
                 toques += 1
         cand['forca'] += toques
 
-    # ── passo 6: seleção gulosa, sem sobreposição ──
     usados = [False] * len(candidatos)
     selecionados = []
     limite = min(10, max_number_sr)
@@ -1042,7 +899,6 @@ def compute_sr_channels(
                 usados[idx] = True
         usados[melhor_idx] = True
 
-    # ── passo 7: classificação dinâmica relativa ao preço atual ──
     preco_atual = closes[-1]
     resultado = []
     for ch in selecionados:
@@ -1065,19 +921,10 @@ def compute_sr_channels(
     return resultado
 
 
-# ─── ZONA D1 (SRchannel — indicador real usado pelo Juninho no TV) ─────
 def compute_d1_zones(d1_candles, lookback_dias=None, swing_size=50):
-    # ── SUBSTITUÍDO 05/08 (v5): tradução fiel do código Pine real do
-    # SRchannel (author LonesomeTheBlue), fornecido pelo Juninho — não
-    # é mais aproximação. lookback_dias/swing_size ficam nos argumentos
-    # só por compatibilidade com quem já chama essa função — não são
-    # mais usados aqui. ──
     return compute_sr_channels(d1_candles)
 
 
-# ─── ZONA D1 antiga (cluster de swing S/R) — mantida à parte, não é mais
-# usada por padrão pelos 5 modos, mas fica disponível se precisar comparar
-# ou voltar atrás. ──
 def compute_d1_zones_swing_cluster(d1_candles, lookback_dias=D1_LOOKBACK_DIAS, swing_size=50):
     swings = _extrair_swings_lux_algo(d1_candles, swing_size=swing_size)
 
@@ -1104,13 +951,6 @@ def compute_d1_zones_swing_cluster(d1_candles, lookback_dias=D1_LOOKBACK_DIAS, s
     for g in grupos:
         if len(g['pontos']) >= MIN_EVENTOS_BANDA:
             largura = g['nivel'] * TOLERANCIA_CLUSTER_PCT
-            # ── NOVO — classifica a banda como DEMANDA (maioria dos
-            # toques foi 'low', preço bateu e subiu = comprador
-            # defendendo) ou OFERTA (maioria 'high', preço bateu e
-            # caiu = vendedor defendendo). 'mista' quando empatado —
-            # usado pro Modo Confluência de Indicadores não vender
-            # numa zona de demanda nem comprar numa zona de oferta,
-            # já que esse modo não depende de zona D1 por padrão. ──
             n_low = g['tipos'].count('low')
             n_high = g['tipos'].count('high')
             if n_low > n_high:
@@ -1312,13 +1152,6 @@ def find_order_blocks(exec_candles, lookback=100):
 
 
 def find_order_blocks_com_mitigacao(exec_candles, lookback=100):
-    """
-    Mesma detecção do find_order_blocks, mas cada OB ganha o campo
-    'mitigado': True se o preço já retornou e tocou dentro da zona
-    depois que o OB se formou (igual ao "⚠️ Já mitigado" que a Vortex
-    mostra) — indica que a zona já foi "consumida" e tem menos força
-    de reação da próxima vez.
-    """
     candles = exec_candles[-lookback:] if len(exec_candles) > lookback else exec_candles
     obs = find_order_blocks(exec_candles, lookback)
     for ob in obs:
@@ -1326,7 +1159,7 @@ def find_order_blocks_com_mitigacao(exec_candles, lookback=100):
         if idx is None:
             ob['mitigado'] = None
             continue
-        candles_depois = candles[idx + 2:]  # pula o próprio candle e o de confirmação
+        candles_depois = candles[idx + 2:]
         mitigado = any(c['l'] <= ob['top'] and c['h'] >= ob['bottom'] for c in candles_depois)
         ob['mitigado'] = mitigado
     return obs
@@ -1357,10 +1190,6 @@ def find_equal_highs_lows(candles, length=3, atr_mult=0.1):
 
 def debug_zonas_completo(d1_candles, exec_candles):
     return {
-        # ── NOVO 05/08: zonas SRchannel (o indicador real que o Juninho usa
-        # no TV — Pivot Period 10, Largura Máx 5%, Força Mín 1, Máx 6 zonas,
-        # Lookback 290) — é isso que os 5 modos (Normal/Continuação/
-        # Antecipado/Confluência/Scalp Rápido) usam como "zona D1" agora. ──
         'zonas_sr_channel_d1': compute_d1_zones(d1_candles),
         'zona_diaria': compute_zona_diaria_movel(d1_candles),
         'premium_discount': compute_premium_discount(exec_candles),
@@ -1428,32 +1257,10 @@ def detect_bos_continuation_after_sweep(exec_candles, sweep):
     return None
 
 
-# ── NOVO 05/08: Micro BOS — confirmação extra de precisão, inspirada
-# no gatilho "Micro BOS (Break of Structure)" que a Vortex mostra:
-# "Rompimento de estrutura recente (últimas 3 velas) confirmando
-# mudança de direção no micro timeframe". Diferente do BOS "grande"
-# (que rompe o nível do sweep, podendo levar várias velas), o Micro
-# BOS olha só as últimas N velas do TF de execução — serve como
-# confirmação adicional de que o movimento tá acontecendo *agora*,
-# não é um evento antigo ainda "válido" tecnicamente. ──
 MICRO_BOS_LOOKBACK = 3
 
 
 def detect_micro_bos(exec_candles, direcao, lookback=MICRO_BOS_LOOKBACK):
-    """
-    Verifica se, nas últimas `lookback` velas do TF de execução, o
-    preço rompeu o topo/fundo local imediatamente anterior a essa
-    janela — ou seja, se a mudança de direção é recente de verdade,
-    não uma quebra de estrutura "velha" que já perdeu força.
-
-    direcao: 'alta' (rompeu topo local pra cima) ou 'baixa' (rompeu
-    fundo local pra baixo).
-
-    Retorna dict {'confirmado': bool, 'nivel_rompido': float|None} —
-    nunca bloqueia nada sozinho, é só uma confirmação extra pra
-    reportar/reforçar, igual a Vortex trata como "Gatilho SMC", não
-    como filtro obrigatório adicional.
-    """
     if not exec_candles or len(exec_candles) < lookback + 2:
         return {'confirmado': False, 'nivel_rompido': None}
 
@@ -1462,7 +1269,6 @@ def detect_micro_bos(exec_candles, direcao, lookback=MICRO_BOS_LOOKBACK):
     if not candles_antes:
         return {'confirmado': False, 'nivel_rompido': None}
 
-    # topo/fundo local imediatamente antes da janela das últimas N velas
     ref_lookback = min(10, len(candles_antes))
     candles_ref = candles_antes[-ref_lookback:]
 
@@ -1585,16 +1391,6 @@ def price_in_zone(entry_zone, preco):
     return entry_zone['bottom'] <= preco <= entry_zone['top']
 
 
-# ── NOVO 05/08: entrada no melhor preço da zona, pra bater com o
-# jeito real de operar do Juninho — ele sempre deixa ORDEM PENDENTE
-# (limite), não entra a mercado. Faz sentido colocar a ordem na ponta
-# mais vantajosa da zona de entrada (FVG/OB/iFVG/Breaker), não no
-# preço aleatório de quando o ciclo rodou:
-# - LONG: pede a compra na borda de BAIXO da zona (mais barato possível)
-# - SHORT: pede a venda na borda de CIMA da zona (mais caro possível)
-# Se o preço nunca voltar até essa borda, a ordem pendente simplesmente
-# não enche — isso é o comportamento correto de ordem limite, não um
-# bug. É diferente de entrar a mercado no preço que passava na hora.
 def melhor_preco_na_zona(entry_zone, direcao, preco_atual_fallback=None):
     if not entry_zone or entry_zone.get('top') is None or entry_zone.get('bottom') is None:
         return preco_atual_fallback
@@ -1615,21 +1411,10 @@ def aplicar_buffer_stop(nivel, direcao, buffer_pct=STOP_BUFFER_PCT):
     return nivel * (1 + buffer_pct)
 
 
-# ── NOVO 05/08: buffer de stop via ATR — pendência antiga. O buffer
-# fixo de 0,1% ficava colado demais no nível exato do sweep; em
-# mercado lateralizado (como o SOL que gerou os stops seguidos), um
-# reteste normal já bastava pra bater o stop mesmo quando a tese do
-# trade continuava certa. Buffer via ATR se adapta à volatilidade real
-# do momento em vez de ser sempre o mesmo percentual fixo. ──
-ATR_BUFFER_MULT = 0.25  # 0.25x o ATR(14) do TF de execução como folga
+ATR_BUFFER_MULT = 0.25
 
 
 def aplicar_buffer_stop_atr(nivel, direcao, exec_candles, atr_mult=ATR_BUFFER_MULT, fallback_pct=STOP_BUFFER_PCT):
-    """
-    Versão do buffer de stop que usa ATR em vez de percentual fixo.
-    Se não conseguir calcular ATR (poucos candles), cai no buffer
-    percentual fixo antigo como fallback — nunca quebra.
-    """
     try:
         atr_series = compute_atr(exec_candles, 14)
         atr_atual = next((v for v in reversed(atr_series) if v is not None), None)
@@ -2265,12 +2050,6 @@ def process_pair_scalp(db_file, pair, d1_candles, exec_candles, exec_tf_label, s
 
     saved = _load_saved_state(db_file, pair)
 
-    # ── NOVO: alerta de POSSÍVEL ACUMULAÇÃO — dispara UMA vez, quando
-    # essa zona D1 específica é vista pela primeira vez (compara com a
-    # zona salva do ciclo anterior; mesma zona nos ciclos seguintes não
-    # alerta de novo). Etapa 1 da sequência Acumulação → Manipulação →
-    # Entrada pedida pelo Juninho — só pro modo Normal/Continuação, não
-    # mistura com os outros 4 modos. ──
     zona_e_nova = (
         not saved or saved.get('zona_top') is None
         or abs((saved.get('zona_top') or 0) - zona['top']) > (zona['top'] - zona['bottom'])
@@ -2284,14 +2063,6 @@ def process_pair_scalp(db_file, pair, d1_candles, exec_candles, exec_tf_label, s
 
     fresh_sweep = detect_sweep_in_zone(exec_candles, zona)
 
-    # ── NOVO — pedido explícito do Juninho: "não é a borda, é a
-    # liquidez". A borda da banda D1 sozinha pode disparar mesmo sem
-    # ter um fundo/topo antigo real ali. Agora, todo sweep FRESCO
-    # também precisa varrer uma liquidez real e específica (mesma
-    # função já usada no Antecipado v2: find_liquidez_antiga) — não só
-    # tocar a média da banda. Se não achar liquidez real por trás do
-    # sweep, não conta como manipulação de verdade — descarta e segue
-    # esperando. ──
     if fresh_sweep:
         tipo_liq = 'high' if fresh_sweep['lado'] == 'alta' else 'low'
         liq_valor, _liq_idx = find_liquidez_antiga(exec_candles, fresh_sweep['index'], tipo_liq)
@@ -2314,32 +2085,16 @@ def process_pair_scalp(db_file, pair, d1_candles, exec_candles, exec_tf_label, s
     resultado['sweep_nivel'] = round(sweep['nivel'], 6)
     resultado['sweep_lado'] = sweep['lado']
 
-    # ── NOVO: alerta de MANIPULAÇÃO — dispara UMA vez, na primeira vez
-    # que esse sweep específico é detectado (compara com o sweep_ts
-    # salvo do ciclo anterior; sweep repetido no mesmo nível não alerta
-    # de novo). Cobre o pedido do Juninho de acompanhar a sequência
-    # Acumulação → Manipulação → Distribuição em tempo real, com o Viés
-    # Diário (D1) junto pra dar contexto (nunca compra resistência,
-    # nunca vende suporte — o próprio sweep já respeita isso: sweep no
-    # fundo só pode virar LONG, sweep no topo só pode virar SHORT).
-    # ── CORREÇÃO 05/08: agora mostra a ZONA usada (top/bottom/toques),
-    # não só o nível do sweep — sem isso não dá pra conferir a zona
-    # contra o gráfico. ──
     sweep_e_novo = not saved or saved.get('sweep_ts') != sweep.get('t')
     if sweep_e_novo and send_telegram_fn:
         bias_d1_msg = compute_bias_from_swings(d1_candles)
         lado_txt = 'topo (resistência)' if sweep['lado'] == 'alta' else 'fundo (suporte)'
 
-        # ── NOVO: EXPECTATIVA baseada em ICT — não é previsão garantida,
-        # é uma inclinação: se o sweep varreu CONTRA o viés diário, o
-        # viés maior tende a "vencer" e puxar reversão; se varreu A FAVOR
-        # do viés diário, tende a reforçar e continuar. Viés neutro não
-        # inclina pra lado nenhum.
         if bias_d1_msg == 'neutro':
             expectativa_txt = "imprevisível (viés diário neutro, sem inclinação clara)"
-        elif sweep['lado'] == 'baixa':  # varreu suporte
+        elif sweep['lado'] == 'baixa':
             expectativa_txt = "provável REVERSÃO (alta)" if bias_d1_msg == 'alta' else "provável CONTINUAÇÃO (baixa)"
-        else:  # sweep['lado'] == 'alta', varreu resistência
+        else:
             expectativa_txt = "provável REVERSÃO (baixa)" if bias_d1_msg == 'baixa' else "provável CONTINUAÇÃO (alta)"
 
         msg = f"🧲 <b>Manipulação detectada — {pair}</b>\n\n"
@@ -2379,11 +2134,6 @@ def process_pair_scalp(db_file, pair, d1_candles, exec_candles, exec_tf_label, s
         _save_zone_state(db_file, pair, zona, 'choch_contra_bias_maior', now, sweep=sweep, choch=choch)
         return resultado
 
-    # ── AJUSTADO — pedido explícito do Juninho: "suporte + manipulação
-    # = compra, simples assim", sem o RSI travar a entrada. O RSI volta
-    # a ser INFORMATIVO (mostrado na mensagem, não bloqueia mais nada).
-    # Continua contando como bônus dentro do compute_score (mais abaixo)
-    # — só não impede mais o sinal de disparar sozinho. ──
     last_rsi = resultado['indicadores'].get('rsi14') if resultado.get('indicadores') else None
     resultado['rsi14'] = last_rsi
     rsi_contra_aviso = None
@@ -2431,11 +2181,6 @@ def process_pair_scalp(db_file, pair, d1_candles, exec_candles, exec_tf_label, s
     resultado['tp'] = round(tp, 6)
 
     if score >= SCORE_THRESHOLD_SINAL:
-        # ── NOVO 05/08: gates estilo Vortex (Regime/R:R/Monte Carlo) —
-        # rodam só quando o score já passou no threshold, pra não gastar
-        # processamento à toa. Se algum gate falhar, o sinal NÃO dispara,
-        # mesmo com score alto — igual a Vortex reporta "Filtros de
-        # Qualidade" e bloqueia se algum não passar. ──
         gates_ok, gates = aplicar_gates_entrada(
             choch['direcao'], resultado['entry'], resultado['sl'], resultado['tp'],
             resultado.get('indicadores'), d1_candles,
@@ -2771,13 +2516,6 @@ def process_pair_scalp_continuacao(db_file, pair, d1_candles, exec_candles, exec
 
     saved = _load_saved_state(db_file, pair, table='scalp_zone_state_continuacao')
 
-    # ── AJUSTADO 05/08: o aviso "Possível Acumulação" já é enviado pelo
-    # modo Normal (process_pair_scalp), que usa a MESMA zona D1 (mesma
-    # compute_d1_zones). Os dois modos rodando em paralelo mandavam o
-    # mesmo aviso duas vezes pro mesmo par. Aqui só rastreia
-    # internamente (zona_e_nova continua calculada, só não dispara
-    # Telegram) — não perde nenhuma lógica de entrada, só para de
-    # duplicar mensagem. ──
     zona_e_nova = (
         not saved or saved.get('zona_top') is None
         or abs((saved.get('zona_top') or 0) - zona['top']) > (zona['top'] - zona['bottom'])
@@ -2786,7 +2524,6 @@ def process_pair_scalp_continuacao(db_file, pair, d1_candles, exec_candles, exec
 
     fresh_sweep = detect_sweep_in_zone(exec_candles, zona)
 
-    # ── NOVO — mesma checagem de liquidez real do modo Normal. ──
     if fresh_sweep:
         tipo_liq = 'high' if fresh_sweep['lado'] == 'alta' else 'low'
         liq_valor, _liq_idx = find_liquidez_antiga(exec_candles, fresh_sweep['index'], tipo_liq)
@@ -2809,9 +2546,6 @@ def process_pair_scalp_continuacao(db_file, pair, d1_candles, exec_candles, exec
     resultado['sweep_nivel'] = round(sweep['nivel'], 6)
     resultado['sweep_lado'] = sweep['lado']
 
-    # ── AJUSTADO 05/08: aviso "Manipulação detectada" idem — já sai do
-    # modo Normal pra essa mesma zona/sweep, então aqui só rastreia
-    # (sweep_e_novo), sem mandar Telegram de novo. ──
     sweep_e_novo = not saved or saved.get('sweep_ts') != sweep.get('t')
 
     bos = detect_bos_continuation_after_sweep(exec_candles, sweep)
@@ -2843,8 +2577,6 @@ def process_pair_scalp_continuacao(db_file, pair, d1_candles, exec_candles, exec
         _save_zone_state(db_file, pair, zona, 'bos_contra_bias_maior', now, sweep=sweep, choch=bos, table='scalp_zone_state_continuacao')
         return resultado
 
-    # ── AJUSTADO — mesmo critério do modo Normal: RSI volta a ser
-    # INFORMATIVO, não bloqueia mais a entrada. ──
     last_rsi = resultado['indicadores'].get('rsi14') if resultado.get('indicadores') else None
     resultado['rsi14'] = last_rsi
     rsi_contra_aviso = None
@@ -2999,15 +2731,20 @@ def _save_signal(db_file, pair, exec_tf_label, resultado, alerted, table='scalp_
     try:
         prefixo = 'cont' if table == 'scalp_signal_state_continuacao' else 'scalp'
         signal_id = f"{prefixo}_{pair}_{int(time.time()*1000)}"
+
+        detalhes = resultado.get('detalhes') or []
+        motivo_texto = ','.join(f"{nome}:{pts}" for nome, pts in detalhes)
+
         with sqlite3.connect(db_file) as conn:
             cursor = conn.cursor()
             cursor.execute(f'''
-                INSERT INTO {table} (id, pair, created_at, exec_tf, direcao, score, entry, sl, tp, na_killzone, alerted)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO {table}
+                    (id, pair, created_at, exec_tf, direcao, score, entry, sl, tp, na_killzone, alerted, motivo_score)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 signal_id, pair, int(time.time()), exec_tf_label,
                 resultado['direcao'], resultado['score'], resultado['entry'], resultado['sl'], resultado['tp'],
-                1 if resultado['na_killzone'] else 0, 1 if alerted else 0,
+                1 if resultado['na_killzone'] else 0, 1 if alerted else 0, motivo_texto,
             ))
             conn.commit()
     except Exception as e:
@@ -3043,29 +2780,11 @@ def scalp_signal_history(db_file, pair=None, limit=30, table='scalp_signal_state
         return {'signals': [], 'error': str(e)}
 
 
-# ── NOVO 05/08: Break Even + Parcial automatizados, inspirado direto
-# no que a Vortex mostra ("BE +6.0 pips", depois "PARCIAL +6.0 pips").
-# O Kairos não executa ordens de verdade (é sistema de alerta via
-# Telegram, não corretora), então esse monitoramento manda uma MENSAGEM
-# avisando o Juninho pra mover o stop / realizar parte da posição
-# manualmente — não move nada sozinho na exchange. Roda 1x por ciclo,
-# por par, em cima do TF de execução (mesmos candles já buscados no
-# ciclo, sem call extra à Bybit).
-#
-# Lógica: quando o preço andar BE_PROGRESSO_PCT do caminho até o TP
-# (padrão 30%), avisa mover o stop pra entrada (trava risco em zero).
-# Quando andar PARCIAL_PROGRESSO_PCT (padrão 50%), avisa realizar
-# parcial (50% da posição) e deixar o resto correr — igual às "Regras
-# de Ouro" que o próprio Kairos já recomenda em texto no ICT, agora
-# ativamente monitorado nos modos de scalp ao vivo. ──
 BE_PROGRESSO_PCT = 0.30
 PARCIAL_PROGRESSO_PCT = 0.50
 
 
 def _progresso_ate_tp(preco_atual, entry, sl, tp, direcao):
-    """Retorna 0-1+ representando quanto do caminho até o TP já foi
-    percorrido. >=1 significa que já bateu o TP; <0 significa que já
-    foi contra a entrada (pode já ter batido o SL)."""
     dist_total = abs(tp - entry)
     if dist_total <= 0:
         return 0
@@ -3075,14 +2794,6 @@ def _progresso_ate_tp(preco_atual, entry, sl, tp, direcao):
 
 def gerenciar_trades_abertos(db_file, pair, exec_candles, table, send_telegram_fn=None,
                               be_progresso_pct=BE_PROGRESSO_PCT, parcial_progresso_pct=PARCIAL_PROGRESSO_PCT):
-    """
-    Chamar 1x por ciclo, por par, por tabela de sinal (scalp_signal_
-    state, scalp_signal_state_continuacao, scalp_rapido_signal_state,
-    scalp_cascata_signal_state, scalp_antecipado_signal_state,
-    scalp_indicadores_signal_state). Verifica trades alertados
-    (alerted=1) ainda pendentes (resultado_final='pendente') desse par
-    nessa tabela, e avisa BE/Parcial conforme o progresso do preço.
-    """
     if not exec_candles:
         return
     preco_atual = exec_candles[-1]['c']
@@ -3107,9 +2818,6 @@ def gerenciar_trades_abertos(db_file, pair, exec_candles, table, send_telegram_f
         if entry is None or sl is None or tp is None:
             continue
 
-        # Checa se já bateu SL ou TP de verdade nos candles recentes —
-        # se sim, fecha o trade (resultado_final) e não manda mais
-        # aviso de BE/Parcial pra ele.
         resultado_final = None
         for c in exec_candles:
             if direcao == 'alta':
@@ -3289,10 +2997,6 @@ def process_pair_scalp_rapido(db_file, pair, d1_candles, exec_candles, exec_tf_l
     risco = abs(entry - sl)
     tp = entry + risco * RR_TARGET_RAPIDO if direcao == 'alta' else entry - risco * RR_TARGET_RAPIDO
 
-    # ── NOVO 05/08: só o gate de RR aqui (sem Regime, sem Monte Carlo)
-    # — esse modo existe pra ser ágil, sweep + RSI extremo já é a
-    # própria regra de entrada, checar regime mataria o propósito de
-    # pegar reversão rápida em qualquer condição de mercado. ──
     gates_ok, gates = aplicar_gates_entrada(
         direcao, entry, sl, tp, None, d1_candles, incluir_regime=False,
     )
@@ -3399,13 +3103,6 @@ def process_pair_cascata_smc(db_file, pair, w_candles, d1_candles, h4_candles, h
         'bias_semanal': bias_w, 'bias_d1': bias_d1, 'bias_h4': bias_h4, 'bias_h1': bias_h1,
     })
 
-    # ── AJUSTADO 05/08: antes exigia os 4 timeframes (Semanal/D1/H4/H1)
-    # 100% iguais pra disparar qualquer sinal — muito rígido. Visto na
-    # Vortex que ela dispara sinal mesmo com "MTF: PARTIAL" (nem todos
-    # os timeframes alinhados) e o resultado real conferido (USDCAD)
-    # foi bom. Agora aceita FULL (4/4) ou PARTIAL (3/4, com o 4º neutro
-    # ou contra) — PARTIAL fica marcado no resultado e na mensagem,
-    # não é escondido. ──
     biases = [bias_w, bias_d1, bias_h4, bias_h1]
     contagem_alta = biases.count('alta')
     contagem_baixa = biases.count('baixa')
@@ -3538,9 +3235,6 @@ def process_pair_cascata_smc(db_file, pair, w_candles, d1_candles, h4_candles, h
     risco = abs(entry - sl)
     tp = entry + risco * RR_TARGET_CASCATA if direcao_macro == 'alta' else entry - risco * RR_TARGET_CASCATA
 
-    # ── NOVO 05/08: gates RR + Monte Carlo (sem Regime — os 4
-    # timeframes alinhados já são um filtro de tendência mais rigoroso
-    # que ADX sozinho, adicionar Regime aqui seria redundante). ──
     gates_ok, gates = aplicar_gates_entrada(
         direcao_macro, entry, sl, tp, resultado.get('indicadores'), d1_candles, incluir_regime=False,
     )
@@ -3789,9 +3483,6 @@ def process_pair_scalp_antecipado_v2(db_file, pair, d1_candles, exec_candles, ex
     risco = abs(entry - sl)
     tp = entry - risco * RR_FIXO_ANTECIPADO if direcao == 'baixa' else entry + risco * RR_FIXO_ANTECIPADO
 
-    # ── NOVO 05/08: gates RR + Monte Carlo (SEM Regime — esse modo
-    # existe justamente pra caçar reversão em RSI extremo, que muitas
-    # vezes acontece dentro de ranging, não em tendência). ──
     gates_ok, gates = aplicar_gates_entrada(
         direcao, entry, sl, tp, resultado.get('indicadores'), d1_candles, incluir_regime=False,
     )
@@ -3986,15 +3677,6 @@ def process_pair_scalp_indicadores(db_file, pair, exec_candles, exec_tf_label, s
         resultado['votos_favor'] = max(votos_alta, votos_baixa)
         return resultado
 
-    # ── NOVO — pedido explícito: bloqueio de venda em zona de DEMANDA
-    # D1 e de compra em zona de OFERTA D1. Esse modo (Confluência de
-    # Indicadores) é o único dos 6 que NÃO depende de zona D1 por
-    # padrão — vota só em indicadores técnicos, então sem essa
-    # checagem ele podia (em teoria) vender bem em cima de um suporte
-    # D1 forte, contra a regra de ouro que os outros modos já
-    # respeitam estruturalmente. Se d1_candles não for passado
-    # (chamada antiga sem esse parâmetro), a checagem simplesmente não
-    # roda — não quebra nada que já funcionava. ──
     if d1_candles:
         bandas_d1 = compute_d1_zones(d1_candles)
         zona_htf = find_active_zone(bandas_d1, preco_atual)
@@ -4043,12 +3725,6 @@ def process_pair_scalp_indicadores(db_file, pair, exec_candles, exec_tf_label, s
     risco = abs(entry - sl)
     tp = entry + risco * RR_INDICADORES if direcao == 'alta' else entry - risco * RR_INDICADORES
 
-    # ── NOVO 05/08: gates estilo Vortex — esse é o único dos 6 modos
-    # sem zona D1/sweep/CHoCH por padrão (vota só em indicadores), então
-    # é o que mais se beneficia do Gate de Regime (evita votar tendência
-    # num mercado sem tendência nenhuma). Roda os 3 gates (Regime, RR,
-    # Monte Carlo) — se algum falhar, sinal não dispara mesmo com
-    # maioria de votos. ──
     candles_regime = d1_candles if d1_candles else exec_candles
     gates_ok, gates = aplicar_gates_entrada(direcao, entry, sl, tp, indicadores, candles_regime)
     resultado['gates'] = gates
@@ -4077,16 +3753,17 @@ def process_pair_scalp_indicadores(db_file, pair, exec_candles, exec_tf_label, s
 
     try:
         signal_id = f"ind_{pair}_{int(time.time()*1000)}"
+        votos_texto = ','.join(f"{nome}:{voto}" for nome, voto in resultado.get('votos_detalhe', []))
         with sqlite3.connect(db_file) as conn:
             cursor = conn.cursor()
             cursor.execute('''
                 INSERT INTO scalp_indicadores_signal_state
-                    (id, pair, created_at, exec_tf, direcao, score, votos_favor, votos_total, entry, sl, tp, alerted)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (id, pair, created_at, exec_tf, direcao, score, votos_favor, votos_total, entry, sl, tp, alerted, motivo_score)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 signal_id, pair, int(time.time()), exec_tf_label, direcao, resultado['score'],
                 votos_favor, total, resultado['entry'], resultado['sl'], resultado['tp'],
-                0 if em_cooldown else 1,
+                0 if em_cooldown else 1, votos_texto,
             ))
             conn.commit()
     except Exception as e:
@@ -4116,3 +3793,228 @@ def process_pair_scalp_indicadores(db_file, pair, exec_candles, exec_tf_label, s
         resultado['motivo'] += f' (em cooldown, {restante_min}min restantes)'
 
     return resultado
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# STATS E LISTAGEM POR MODO — pra parar de ver tudo misturado num agregado
+# só. Cada um dos 6 modos grava em tabela própria com resultado_final
+# (win/loss/pendente) — essas funções separam isso por modo.
+# ═══════════════════════════════════════════════════════════════════════
+
+MODOS_SCALP = {
+    'normal_choch': 'scalp_signal_state',
+    'continuacao_bos': 'scalp_signal_state_continuacao',
+    'antecipado_v2': 'scalp_antecipado_signal_state',
+    'confluencia_indicadores': 'scalp_indicadores_signal_state',
+    'scalp_rapido': 'scalp_rapido_signal_state',
+    'cascata_smc': 'scalp_cascata_signal_state',
+}
+
+_TABELAS_COM_SCORE = {
+    'scalp_signal_state', 'scalp_signal_state_continuacao', 'scalp_indicadores_signal_state'
+}
+
+_TABELAS_COM_MOTIVO = {
+    'scalp_signal_state', 'scalp_signal_state_continuacao', 'scalp_indicadores_signal_state'
+}
+
+_COLUNAS_POR_TABELA = {
+    'scalp_signal_state':
+        "id, pair, created_at, exec_tf, direcao, score, entry, sl, tp, na_killzone, resultado_final, motivo_score",
+    'scalp_signal_state_continuacao':
+        "id, pair, created_at, exec_tf, direcao, score, entry, sl, tp, na_killzone, resultado_final, motivo_score",
+    'scalp_antecipado_signal_state':
+        "id, pair, created_at, exec_tf, direcao, rsi, liquidez_varrida, divergencia_rsi, entry, sl, tp, resultado_final",
+    'scalp_indicadores_signal_state':
+        "id, pair, created_at, exec_tf, direcao, score, votos_favor, votos_total, entry, sl, tp, resultado_final, motivo_score",
+    'scalp_rapido_signal_state':
+        "id, pair, created_at, exec_tf, direcao, entry, sl, tp, zona_tipo, resultado_final",
+    'scalp_cascata_signal_state':
+        "id, pair, created_at, exec_tf, direcao, entry, sl, tp, bias_semanal, bias_d1, bias_h4, bias_h1, evento_tipo, resultado_final",
+}
+
+
+def _stats_de_uma_tabela(db_file, tabela):
+    try:
+        with sqlite3.connect(db_file) as conn:
+            cursor = conn.cursor()
+            cursor.execute(f'''
+                SELECT resultado_final, COUNT(*), direcao
+                FROM {tabela}
+                WHERE alerted=1
+                GROUP BY resultado_final, direcao
+            ''')
+            rows = cursor.fetchall()
+    except Exception as e:
+        return {'erro': str(e), 'wins': 0, 'losses': 0, 'pendentes': 0}
+
+    wins = losses = pendentes = 0
+    wins_long = wins_short = losses_long = losses_short = 0
+    for resultado, count, direcao in rows:
+        if resultado == 'win':
+            wins += count
+            if direcao == 'alta':
+                wins_long += count
+            else:
+                wins_short += count
+        elif resultado == 'loss':
+            losses += count
+            if direcao == 'alta':
+                losses_long += count
+            else:
+                losses_short += count
+        else:
+            pendentes += count
+
+    total_resolvidos = wins + losses
+    win_rate = round(100 * wins / total_resolvidos, 1) if total_resolvidos > 0 else None
+
+    total_long = wins_long + losses_long
+    total_short = wins_short + losses_short
+    win_rate_long = round(100 * wins_long / total_long, 1) if total_long > 0 else None
+    win_rate_short = round(100 * wins_short / total_short, 1) if total_short > 0 else None
+
+    return {
+        'wins': wins,
+        'losses': losses,
+        'pendentes': pendentes,
+        'total_resolvidos': total_resolvidos,
+        'win_rate_pct': win_rate,
+        'long': {'wins': wins_long, 'losses': losses_long, 'win_rate_pct': win_rate_long},
+        'short': {'wins': wins_short, 'losses': losses_short, 'win_rate_pct': win_rate_short},
+    }
+
+
+def _stats_por_score_bracket(db_file, tabela):
+    if tabela not in _TABELAS_COM_SCORE:
+        return None
+
+    try:
+        with sqlite3.connect(db_file) as conn:
+            cursor = conn.cursor()
+            cursor.execute(f'''
+                SELECT score, resultado_final FROM {tabela}
+                WHERE alerted=1 AND resultado_final IN ('win','loss')
+            ''')
+            rows = cursor.fetchall()
+    except Exception as e:
+        return {'erro': str(e)}
+
+    brackets = {'50-59': {'w': 0, 'l': 0}, '60-74': {'w': 0, 'l': 0}, '75-100': {'w': 0, 'l': 0}}
+    for score, resultado in rows:
+        if score is None:
+            continue
+        if 50 <= score <= 59:
+            k = '50-59'
+        elif 60 <= score <= 74:
+            k = '60-74'
+        elif score >= 75:
+            k = '75-100'
+        else:
+            continue
+        if resultado == 'win':
+            brackets[k]['w'] += 1
+        else:
+            brackets[k]['l'] += 1
+
+    for k, v in brackets.items():
+        total = v['w'] + v['l']
+        v['win_rate_pct'] = round(100 * v['w'] / total, 1) if total > 0 else None
+        v['total'] = total
+
+    return brackets
+
+
+def _stats_por_componente_motivo(db_file, tabela, top_n=15):
+    if tabela not in _TABELAS_COM_MOTIVO:
+        return None
+
+    try:
+        with sqlite3.connect(db_file) as conn:
+            cursor = conn.cursor()
+            cursor.execute(f'''
+                SELECT motivo_score, resultado_final FROM {tabela}
+                WHERE alerted=1 AND resultado_final IN ('win','loss') AND motivo_score IS NOT NULL AND motivo_score != ''
+            ''')
+            rows = cursor.fetchall()
+    except Exception as e:
+        return {'erro': str(e)}
+
+    if not rows:
+        return {'amostras': 0, 'nota': 'sem sinais com motivo_score preenchido ainda (só sinais gravados após o patch têm isso)'}
+
+    componentes = {}
+    for motivo_texto, resultado in rows:
+        for par_nome_pts in motivo_texto.split(','):
+            if ':' not in par_nome_pts:
+                continue
+            nome = par_nome_pts.split(':')[0]
+            if nome not in componentes:
+                componentes[nome] = {'wins': 0, 'losses': 0}
+            if resultado == 'win':
+                componentes[nome]['wins'] += 1
+            else:
+                componentes[nome]['losses'] += 1
+
+    lista = []
+    for nome, v in componentes.items():
+        total = v['wins'] + v['losses']
+        lista.append({
+            'componente': nome,
+            'wins': v['wins'],
+            'losses': v['losses'],
+            'total': total,
+            'win_rate_pct': round(100 * v['wins'] / total, 1) if total > 0 else None,
+        })
+    lista.sort(key=lambda x: x['total'], reverse=True)
+
+    return {'amostras': len(rows), 'componentes': lista[:top_n]}
+
+
+def gerar_stats_por_modo(db_file):
+    relatorio = {}
+    for nome_modo, tabela in MODOS_SCALP.items():
+        stats = _stats_de_uma_tabela(db_file, tabela)
+        stats['por_score'] = _stats_por_score_bracket(db_file, tabela)
+        stats['por_componente_motivo'] = _stats_por_componente_motivo(db_file, tabela)
+        relatorio[nome_modo] = stats
+
+    ranking = sorted(
+        [
+            (nome, dados['win_rate_pct'], dados['total_resolvidos'])
+            for nome, dados in relatorio.items()
+            if dados.get('win_rate_pct') is not None and dados.get('total_resolvidos', 0) >= 5
+        ],
+        key=lambda x: x[1],
+        reverse=True,
+    )
+
+    return {
+        'por_modo': relatorio,
+        'ranking_win_rate': [
+            {'modo': nome, 'win_rate_pct': wr, 'amostras': n} for nome, wr, n in ranking
+        ],
+    }
+
+
+def listar_trades_detalhado(db_file, modo, limit=200):
+    tabela = MODOS_SCALP.get(modo)
+    if not tabela:
+        return {'erro': f'modo desconhecido: {modo}. Use um de {list(MODOS_SCALP.keys())}'}
+
+    cols = _COLUNAS_POR_TABELA[tabela]
+    try:
+        with sqlite3.connect(db_file) as conn:
+            cursor = conn.cursor()
+            cursor.execute(f'''
+                SELECT {cols} FROM {tabela}
+                WHERE alerted=1
+                ORDER BY created_at DESC LIMIT ?
+            ''', (limit,))
+            rows = cursor.fetchall()
+            nomes_col = [c.strip() for c in cols.split(',')]
+    except Exception as e:
+        return {'erro': str(e)}
+
+    trades = [dict(zip(nomes_col, row)) for row in rows]
+    return {'modo': modo, 'tabela': tabela, 'total': len(trades), 'trades': trades}

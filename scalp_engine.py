@@ -1,67 +1,6 @@
 # scalp_engine.py
 # ─────────────────────────────────────────────────────────────────────────
 # Motor de Scalp Ao Vivo — aditivo, não mexe em nada do cascade_engine.
-#
-# Fluxo (nesta ordem, igual foi validado com o Juninho):
-#   1. Zona D1 (cluster de S/R, banda — não linha fina)
-#   2. Killzone (London 07h-10h ou NY 13h-16h, horário Portugal) — INFORMATIVO.
-#      Cripto não fecha e tem volume real fora dessas janelas também, então
-#      a killzone NÃO bloqueia mais sinal nenhum — só soma um bônus de
-#      qualidade no score quando o sweep/CHoCH acontece dentro dela, e
-#      aparece no texto pra dar contexto.
-#   3. Sweep — preço varre liquidez na borda da zona D1. Uma vez detectado,
-#      fica GRAVADO (não se perde se o candle sair da janela recente),
-#      só é esquecido se a zona D1 mudar de verdade ou passar muito tempo
-#      (12h) sem confirmar CHoCH.
-#   4. CHoCH — no timeframe de EXECUÇÃO escolhido pelo utilizador
-#      (M1/M5/M15), confirma virada de estrutura depois do sweep
-#   5. Retorno à FVG/OB deixado pelo CHoCH — zona de entrada
-#   6. Score determinístico (mesmo espírito do cascade: soma de pesos,
-#      nunca "sensação"). Sinaliza/alerta Telegram com score >= 75,
-#      independente de estar ou não na killzone.
-#
-# Tudo isolado em tabelas próprias (scalp_zone_state, scalp_signal_state),
-# nunca toca nas tabelas do cascade_engine ou do app.py.
-#
-# ── MODO "REJEIÇÃO ANTECIPADA v2" (aditivo, seção mais abaixo) ──
-# Segundo modo, mais agressivo, que roda em PARALELO ao modo acima. Não
-# espera CHoCH confirmar — dispara quando um pavio varre LIQUIDEZ ANTIGA
-# real (fundo/topo estabelecido) na borda da zona D1 E o RSI está extremo
-# (<=20 ou >=80) naquele candle. Regra fechada (tudo ou nada, não é score
-# gradual): zona + liquidez antiga + RSI extremo, os 3 juntos, ou nada.
-# Divergência de RSI (Camada 16 do prompt principal) é BÔNUS de confiança,
-# não obrigatória — soma ao texto/score da mensagem, não bloqueia sinal.
-#
-# ── MODO "CONFLUÊNCIA DE INDICADORES" (aditivo, seção mais abaixo) ──
-# Terceiro modo, roda em paralelo, SEM depender de zona D1/sweep/CHoCH.
-# Vota entre 10 indicadores técnicos e dispara com maioria qualificada.
-#
-# ── MODO "CONTINUAÇÃO (BOS)" — NOVO, aditivo, seção mais abaixo ──
-# Quarto modo. Os três modos acima só entram em REVERSÃO (contra a
-# direção do sweep). Esse modo cobre o caso oposto, pedido pelo Juninho
-# depois de ver um caso real no gráfico: preço varre liquidez na borda
-# da zona D1, mas em vez de virar (CHoCH), ROMPE ainda mais na MESMA
-# direção do sweep — fechamento além do próprio nível varrido, o que é
-# um BOS de continuação (Break of Structure), não uma mudança de caráter.
-# Isso indica que a tese de reversão falhou e o movimento vai continuar.
-# A entrada é no retorno (retest) da FVG/OB/iFVG/Breaker deixado por esse
-# BOS, sempre A FAVOR da direção original do sweep (nunca contra).
-# Reaproveita a mesma detecção de zona D1, mesmo cálculo de score e
-# indicadores técnicos, mesma lógica de FVG/OB/iFVG/Breaker e mesmo
-# cooldown — só troca "espera reversão" por "espera continuação".
-# Tabelas próprias (scalp_zone_state_continuacao, scalp_signal_state_
-# continuacao), nunca mistura com os outros 3 modos.
-#
-# ── CORREÇÃO 05/08 (Juninho) ──────────────────────────────────────────
-# Zonas D1 do scalp_engine estavam saindo deslocadas em relação às zonas
-# reais vistas no TradingView (confirmado em BTCUSDT, AAVEUSDT, SOLUSDT,
-# BNBUSDT). Causa raiz: compute_d1_zones() usava janela de pivô (lb) de
-# apenas 2 candles — curta demais, qualifica qualquer oscilação de 2
-# candles como "pivô estrutural" e mistura ruído com estrutura real no
-# cluster. Corrigido pra lb=3, igual ao cascade_engine.py (que nunca
-# teve esse problema). Também passou a expor a zona (top/bottom/toques)
-# na mensagem "Manipulação detectada" do Telegram, pra dar pra conferir
-# a zona usada direto contra o gráfico, não só o nível do sweep.
 # ─────────────────────────────────────────────────────────────────────────
 
 import sqlite3
@@ -71,89 +10,52 @@ import requests
 from datetime import datetime, timezone, timedelta
 
 SCORE_THRESHOLD_SINAL = 75
-COOLDOWN_SECONDS = 45 * 60  # 45min — meio-termo da faixa 30-60min do Vortex
-TOLERANCIA_CLUSTER_PCT = 0.006   # 0.6% — mesma tolerância usada no cascade pra clusterizar toques
-MIN_EVENTOS_BANDA = 2            # mínimo de toques pra uma banda D1 ser considerada válida
-MIN_FVG_GAP_PCT = 0.0005         # 0.05% do preço — FVG menor que isso é ruído, não conta como zona de entrada
-MIN_CANDLE_BODY_RATIO = 0.35     # candle de confirmação precisa ter corpo >= 35% do range total (afrouxado de 50% — pedido explícito pra disparar mais fácil, depois de ver setup real de score 92 ser bloqueado por esse filtro)
-STOP_BUFFER_PCT = 0.001          # 0.1% de folga além do nível estrutural — stop nunca fica colado no pavio exato
-D1_LOOKBACK_DIAS = 200           # ── AJUSTADO 05/08 (v2): com o extrator de swing no padrão LuxAlgo (swing_size=50), um swing só se confirma depois de romper uma janela de 50 candles — em 45 dias praticamente não sobrava swing nenhum pra formar zona. 200 dias cobre o mesmo range que o Kairos já busca na Bybit (200 candles D1), sem cortar estrutura que o LuxAlgo ainda mostra no gráfico.
-ZONA_FORTE_TOLERANCIA_PCT = 0.0015  # 0.15% — bem mais apertada que a zona D1 (0.6%), pro modo Scalp Rápido
-ZONA_FORTE_MIN_TOQUES = 3           # "liquidez forte" de verdade — mais rigoroso que o mínimo de 2 dos outros modos
-SCALP_RAPIDO_COOLDOWN_SECONDS = 5 * 60  # 5min — bem mais curto, permite reentrada rápida se tomar stop
-ZONA_MOVEL_LOOKBACK = 20                # candles recentes (TF de execução) pra formar a região móvel
-ZONA_MOVEL_MAX_LARGURA_PCT = 0.01       # 1% — região precisa estar "apertada" (lateralizada) pra disparar
-SWING_LOOKBACK = 5               # candles de cada lado pra confirmar swing high/low no TF de execução
-SWEEP_MEMORY_MAX_AGE_SECONDS = 12 * 3600  # sweep salvo expira depois de 12h sem confirmar CHoCH/BOS
+COOLDOWN_SECONDS = 45 * 60
+TOLERANCIA_CLUSTER_PCT = 0.006
+MIN_EVENTOS_BANDA = 2
+MIN_FVG_GAP_PCT = 0.0005
+MIN_CANDLE_BODY_RATIO = 0.35
+STOP_BUFFER_PCT = 0.001
+D1_LOOKBACK_DIAS = 200
+ZONA_FORTE_TOLERANCIA_PCT = 0.0015
+ZONA_FORTE_MIN_TOQUES = 3
+SCALP_RAPIDO_COOLDOWN_SECONDS = 5 * 60
+ZONA_MOVEL_LOOKBACK = 20
+ZONA_MOVEL_MAX_LARGURA_PCT = 0.01
+SWING_LOOKBACK = 5
+SWEEP_MEMORY_MAX_AGE_SECONDS = 12 * 3600
 
-# ── NOVO: gate obrigatório de RSI (regra fixa) — aplicado nos modos
-# Normal (CHoCH) e Continuação (BOS). Antes, o RSI só somava pontos no
-# score (bônus), nunca bloqueava — o que permitia abrir SHORT com RSI
-# sobrevendido (contra a direção) ou LONG com RSI sobrecomprado, desde
-# que os outros componentes do score já somassem 75+. Isso já causou
-# entrada real errada (short no suporte com RSI baixo). Regra fixa:
-# RSI >= 60 bloqueia LONG (mercado já esticado pra cima), RSI <= 40
-# bloqueia SHORT (mercado já esticado pra baixo). Entre 40-60 não
-# bloqueia (zona neutra). ──
 RSI_GATE_BLOQUEIA_LONG_ACIMA = 60
 RSI_GATE_BLOQUEIA_SHORT_ABAIXO = 40
 
-# ── NOVO 05/08: gates inspirados na estrutura da Vortex Trade IA (GATE_A
-# a GATE_F que ela expõe no "Por que este sinal foi gerado?"). Aplicados
-# nos modos Normal (CHoCH) e Continuação (BOS) — os dois modos "cheios"
-# que já tinham score/RR/indicadores completos. Cada gate é um passa/
-# não passa, reportado no resultado (campo 'gates'), igual a Vortex
-# reporta GATE_C_MONTE_CARLO, GATE_E_MIN_RR etc. individualmente. ──
-
-# GATE A — Regime de Mercado: só entra se o mercado estiver em
-# tendência (ADX >= threshold). Ataca direto o problema visto no SOL —
-# mercado lateralizado gerando sinal atrás de sinal que belisca o stop
-# sem ir a lugar nenhum. Regime "ranging" bloqueia a entrada.
 REGIME_ADX_THRESHOLD = 20
 REGIME_GATE_ATIVO = True
 
-# GATE E — R:R mínimo obrigatório (a Vortex reporta "GATE_E_MIN_RR").
-# Hoje o Kairos só calculava RR no prompt do Trade Ao Vivo (ICT via
-# Claude) — os modos de scalp ao vivo nunca bloqueavam por RR baixo.
 MIN_RR_GATE = 1.5
 RR_GATE_ATIVO = True
 
-# ── NOVO 05/08: R:R alvo configurável POR MODO — antes fixo em 2.0 em
-# todos, a Vortex varia entre 2.0-3.0 dependendo do setup. Cada modo
-# recebeu o valor que faz sentido pro seu perfil de risco: Normal e
-# Continuação (mais estruturados, zona+sweep+CHoCH/BOS) sobem pra 2.5;
-# Cascata SMC (o mais rigoroso, exige 4 timeframes alinhados) vai pro
-# valor mais alto, 3.0; Scalp Rápido (mais agressivo, sem CHoCH, stop
-# curto) mantém 2.0 — subir o alvo ali só pra distância do TP crescer
-# sem crescer a qualidade do gatilho.
-# ── CORRIGIDO (erro meu na sessão anterior): tinha baixado de 2.5
-# pra 2.0 achando que "facilitava" — é o oposto. RR mais baixo exige
-# WIN RATE MAIOR pra empatar (2.5:1 precisa de 28.6% de acerto pra
-# empatar; 2.0:1 precisa de 33.3%). Voltando pra 2.5. O que realmente
-# ajuda a ganhar é win rate melhor (RSI gate real + ADX direcional +
-# zona mais apertada) — essas sim reduzem entrada ruim. RR é só a
-# fasquia de quanto você precisa acertar; baixar ele não ajuda em
-# nada, só ficou mais difícil de bater breakeven à toa.
 RR_TARGET_NORMAL = 2.5
 RR_TARGET_CONTINUACAO = 2.5
 RR_TARGET_RAPIDO = 2.0
 RR_TARGET_CASCATA = 3.0
 
-# GATE C — Monte Carlo como gate, não só bônus de score. Antes só
-# somava +6 no compute_score; agora também pode bloquear a entrada se
-# a probabilidade não favorecer a direção do sinal.
 MONTE_CARLO_GATE_MIN_PROB = 55
 MONTE_CARLO_GATE_ATIVO = True
 
+# ── MODOS ATIVOS ── controla quais modos rodam no run_live_cycle (app.py
+# precisa checar este dict antes de chamar cada process_pair_scalp_*).
+# Desativados por decisão de 09/08: fora do padrão Sweep->CHoCH/BOS->FVG.
+MODOS_ATIVOS = {
+    'normal_choch': True,
+    'continuacao_bos': True,
+    'cascata_smc': True,
+    'confluencia_indicadores': False,
+    'scalp_rapido': False,
+    'antecipado_v2': False,
+}
+
 
 def compute_market_regime(candles, adx_threshold=REGIME_ADX_THRESHOLD):
-    """
-    Classifica o regime de mercado como 'trending' ou 'ranging', igual
-    ao campo "Regime: TRENDING" que a Vortex mostra. Usa ADX(14) —
-    ADX >= threshold indica tendência real, abaixo disso é lateralização
-    (ranging), onde sweeps/CHoCH tendem a ser ruído, não movimento real.
-    Retorna (regime: str, adx_atual: float|None).
-    """
     adx_series = compute_adx(candles, 14)
     adx_atual = next((v for v in reversed(adx_series) if v is not None), None)
     if adx_atual is None:
@@ -163,17 +65,6 @@ def compute_market_regime(candles, adx_threshold=REGIME_ADX_THRESHOLD):
 
 
 def aplicar_gates_entrada(direcao, entry, sl, tp, indicadores, candles_para_regime, incluir_regime=True):
-    """
-    Roda os gates estilo Vortex (Regime, R:R mínimo, Monte Carlo) numa
-    entrada já calculada. Retorna (passou: bool, gates: list de dict
-    {'nome':, 'passou':, 'detalhe':}) — cada gate reportado individual,
-    igual a Vortex faz no "Filtros de Qualidade".
-
-    `incluir_regime=False` pula o Gate de Regime — usado em modos cujo
-    propósito é justamente operar fora de tendência clara (Antecipado
-    v2, que caça reversão em RSI extremo, e Scalp Rápido, que existe
-    pra ser ágil independente do regime).
-    """
     gates = []
     passou_tudo = True
 
@@ -218,11 +109,6 @@ def aplicar_gates_entrada(direcao, entry, sl, tp, indicadores, candles_para_regi
         else:
             gates.append({'nome': 'GATE_C_MONTE_CARLO', 'passou': True, 'detalhe': 'dados insuficientes — não bloqueia'})
 
-    # ── NOVO 05/08: GATE_B_HORARIO — bloqueia entrada nas janelas de
-    # baixa liquidez conhecidas (transição Ásia-Europa, fechamento de
-    # NY), inspirado nos "Horários a Evitar" da Vortex. Diferente do
-    # bônus de killzone (que soma pontos quando o horário é bom), esse
-    # gate ativamente BLOQUEIA quando o horário é ruim. ──
     horario_ruim, nome_janela = esta_em_horario_ruim()
     gates.append({
         'nome': 'GATE_B_HORARIO',
@@ -246,13 +132,6 @@ NOMES_PADRAO_CANDLE_PT = {
 
 def _formatar_motivos_principais(regime, adx_val, evento_tipo, evento_direcao, entry_zone_tipo,
                                   score, gates, candle_pattern=None, na_killzone=False, killzone_nome=None):
-    """
-    Monta o bloco "Motivos Principais" no mesmo espírito do card "Por
-    que este sinal foi gerado?" da Vortex (Regime/Estrutura/Gatilho/
-    Tipo/Score), mas em cima de dados que o Kairos já calcula de
-    verdade — nada decorativo, cada linha é rastreável até uma função
-    real do motor.
-    """
     direcao_label = 'BULLISH' if evento_direcao == 'alta' else 'BEARISH'
     linhas = [
         f"• Regime: {regime.upper()}{f' (ADX {adx_val})' if adx_val is not None else ''}",
@@ -270,13 +149,6 @@ def _formatar_motivos_principais(regime, adx_val, evento_tipo, evento_direcao, e
 
 
 def classificar_qualidade_rr(rr):
-    """
-    Label textual de qualidade do R:R, igual ao "BAIXA. Relação de
-    1:1.0 exige alta taxa de acerto." da Vortex. Isso é INFORMATIVO —
-    roda independente do GATE_E_MIN_RR (que já bloqueia sinais com RR
-    abaixo do mínimo); aqui é só pra dar contexto de quão folgado é o
-    RR de um sinal que já passou no gate.
-    """
     if rr is None:
         return None
     if rr < 1.5:
@@ -287,7 +159,7 @@ def classificar_qualidade_rr(rr):
         return f"ALTA — Relação de 1:{rr} permite ser lucrativo mesmo com taxa de acerto abaixo de {round(100/(1+rr))}%."
 
 
-CAPITAL_USUARIO_USD = None  # ex: 10000 — mude aqui pro position sizing aparecer nos sinais
+CAPITAL_USUARIO_USD = None
 
 PERFIS_RISCO = {
     'conservador': 0.0075,
@@ -666,12 +538,6 @@ def init_scalp_db(db_file):
                 except Exception:
                     pass
 
-        # ── NOVO: motivo_score — grava o breakdown do que compôs o score
-        # de cada sinal (ex: "banda_d1:20,sweep_choch:25,rsi_favoravel:12"),
-        # só nas 3 tabelas que realmente calculam um score/votos detalhado
-        # (Normal, Continuação, Confluência de Indicadores). Sem isso não
-        # dava pra saber DEPOIS por que um trade específico teve aquele
-        # score — só o número final ficava salvo, o "porquê" se perdia.
         tabelas_com_motivo = [
             'scalp_signal_state', 'scalp_signal_state_continuacao', 'scalp_indicadores_signal_state',
         ]
@@ -808,10 +674,6 @@ def find_d1_order_blocks(d1_candles, swing_size=50, atr_period=14, atr_mult=1.0,
 
 
 SR_CHANNEL_PIVOT_PERIOD = 10
-# ── AJUSTADO: 5% -> 2%. Com 5% de amplitude a zona D1 ficava larga
-# demais pra scalp de precisão — quase qualquer sweep contava como
-# "dentro da zona", diluindo o sinal. 2% é mais fiel ao conceito de
-# banda de S/R real, não um range gigante.
 SR_CHANNEL_MAX_WIDTH_PCT = 2
 SR_CHANNEL_MIN_STRENGTH = 1
 SR_CHANNEL_MAX_NUMBER = 6
@@ -1611,13 +1473,6 @@ def compute_adx(candles, period=14):
 
 
 def compute_adx_com_direcao(candles, period=14):
-    """
-    Igual compute_adx, mas também devolve a direção da tendência
-    (+DI vs -DI), pra dar pra saber se um ADX alto é A FAVOR ou
-    CONTRA a direção do sinal — antes o bônus de ADX somava só por
-    "tendência forte existir", mesmo se fosse contra o CHoCH/BOS.
-    Retorna (adx_atual, direcao) onde direcao é 'alta', 'baixa' ou None.
-    """
     n = len(candles)
     if n < period * 2 + 2:
         return None, None
@@ -1860,6 +1715,15 @@ def detect_candle_pattern(exec_candles):
     return None
 
 
+def _ema_slope(series, back=5):
+    if len(series) <= back:
+        return None
+    atual, antigo = series[-1], series[-1 - back]
+    if atual is None or antigo is None:
+        return None
+    return atual - antigo
+
+
 def compute_technical_indicators(exec_candles):
     closes = [c['c'] for c in exec_candles]
 
@@ -1883,6 +1747,7 @@ def compute_technical_indicators(exec_candles):
     indicadores = {
         'rsi14': last(rsi_series),
         'ema9': last(ema9), 'ema21': last(ema21), 'ema50': last(ema50), 'ema200': last(ema200),
+        'ema9_slope': _ema_slope(ema9),
         'macd_line': last(macd_line), 'macd_signal': last(macd_signal), 'macd_hist': last(macd_hist),
         'atr14': last(atr_series),
         'adx14': last(adx_series),
@@ -1923,6 +1788,15 @@ def compute_technical_indicators(exec_candles):
     return indicadores
 
 
+# ── PATCH 09/08: compute_score() enxuta ────────────────────────────────
+# Cortados 9 de 11 bônus opcionais (macd, adx-bônus, emas, stochastic,
+# bollinger, atr_risco_saudavel, vwap, poc, ichimoku, monte_carlo,
+# candle_pattern) + o bônus 'rsi_favoravel' (redundante — RSI já é gate
+# obrigatório antes do score rodar, bloqueia entrada, não precisa somar
+# ponto também). Sobra só estrutura de price action real: zona D1 +
+# killzone + sweep/CHoCH + FVG/OB de retorno + volume real no candle da
+# quebra. ADX e Monte Carlo continuam valendo como GATE (bloqueiam
+# entrada em aplicar_gates_entrada), só não somam mais score.
 def compute_score(zona, sweep, choch, entry_zone, exec_candles, na_killzone, indicadores=None):
     detalhes = []
     score = 0
@@ -1947,19 +1821,6 @@ def compute_score(zona, sweep, choch, entry_zone, exec_candles, na_killzone, ind
     score += pts_fvg_ob
     detalhes.append(('fvg_ob_retorno', pts_fvg_ob))
 
-    closes = [c['c'] for c in exec_candles]
-    rsi_series = compute_rsi(closes)
-    last_rsi = rsi_series[-1]
-    if last_rsi is not None:
-        if choch['direcao'] == 'alta' and last_rsi <= 40:
-            pts_rsi = 12 if last_rsi <= 30 else 8
-            score += pts_rsi
-            detalhes.append(('rsi_favoravel', pts_rsi))
-        elif choch['direcao'] == 'baixa' and last_rsi >= 60:
-            pts_rsi = 12 if last_rsi >= 70 else 8
-            score += pts_rsi
-            detalhes.append(('rsi_favoravel', pts_rsi))
-
     vols = [c.get('v', 0) for c in exec_candles[-20:]]
     if vols:
         media_vol = sum(vols) / len(vols)
@@ -1968,115 +1829,210 @@ def compute_score(zona, sweep, choch, entry_zone, exec_candles, na_killzone, ind
             score += 8
             detalhes.append(('volume_choch_forte', 8))
 
-    if indicadores is None:
-        indicadores = compute_technical_indicators(exec_candles)
-    direcao = choch['direcao']
-
-    macd_hist = indicadores.get('macd_hist')
-    if macd_hist is not None:
-        if (direcao == 'alta' and macd_hist > 0) or (direcao == 'baixa' and macd_hist < 0):
-            score += 8
-            detalhes.append(('macd_confirmando', 8))
-
-    # ── AJUSTADO: antes somava só por ADX>=25 existir, sem checar se a
-    # tendência forte era A FAVOR ou CONTRA a direção do CHoCH/BOS —
-    # ou seja, dava pra somar pontos de "tendência forte" mesmo com a
-    # tendência apontando pro lado errado. Agora usa +DI vs -DI pra
-    # só contar quando bate com a direção do sinal.
-    adx_dir, adx_direcao = compute_adx_com_direcao(exec_candles, 14)
-    if adx_dir is not None and adx_dir >= 25 and adx_direcao == direcao:
-        score += 7
-        detalhes.append(('adx_tendencia_forte_a_favor', 7))
-
-    ema9, ema21, ema50 = indicadores.get('ema9'), indicadores.get('ema21'), indicadores.get('ema50')
-    if ema9 is not None and ema21 is not None and ema50 is not None:
-        if direcao == 'alta' and ema9 > ema21 > ema50:
-            score += 8
-            detalhes.append(('emas_alinhadas', 8))
-        elif direcao == 'baixa' and ema9 < ema21 < ema50:
-            score += 8
-            detalhes.append(('emas_alinhadas', 8))
-
-    stoch_k, stoch_d = indicadores.get('stoch_k'), indicadores.get('stoch_d')
-    if stoch_k is not None and stoch_d is not None:
-        if direcao == 'alta' and stoch_k <= 30 and stoch_d <= 30:
-            score += 6
-            detalhes.append(('stochastic_favoravel', 6))
-        elif direcao == 'baixa' and stoch_k >= 70 and stoch_d >= 70:
-            score += 6
-            detalhes.append(('stochastic_favoravel', 6))
-
-    bb_lower, bb_upper = indicadores.get('bollinger_lower'), indicadores.get('bollinger_upper')
-    if bb_lower is not None and bb_upper is not None and sweep.get('nivel') is not None:
-        if direcao == 'alta' and sweep['nivel'] <= bb_lower:
-            score += 5
-            detalhes.append(('bollinger_extremo_favoravel', 5))
-        elif direcao == 'baixa' and sweep['nivel'] >= bb_upper:
-            score += 5
-            detalhes.append(('bollinger_extremo_favoravel', 5))
-
-    atr = indicadores.get('atr14')
-    if atr and atr > 0 and sweep.get('nivel') is not None:
-        preco_atual_est = exec_candles[-1]['c']
-        risco_est = abs(preco_atual_est - sweep['nivel'])
-        razao_atr = risco_est / atr
-        if 0.5 <= razao_atr <= 4:
-            score += 5
-            detalhes.append(('atr_risco_saudavel', 5))
-
-    preco_atual = exec_candles[-1]['c']
-
-    vwap = indicadores.get('vwap')
-    if vwap is not None:
-        if direcao == 'alta' and preco_atual > vwap:
-            score += 5
-            detalhes.append(('vwap_alinhado', 5))
-        elif direcao == 'baixa' and preco_atual < vwap:
-            score += 5
-            detalhes.append(('vwap_alinhado', 5))
-
-    poc = indicadores.get('volume_profile_poc')
-    if poc is not None and poc > 0:
-        distancia_pct = abs(preco_atual - poc) / poc
-        if distancia_pct <= 0.008:
-            score += 5
-            detalhes.append(('poc_proximo', 5))
-
-    ichimoku = indicadores.get('ichimoku') or {}
-    senkou_a, senkou_b = ichimoku.get('senkou_a'), ichimoku.get('senkou_b')
-    if senkou_a is not None and senkou_b is not None:
-        topo_nuvem = max(senkou_a, senkou_b)
-        fundo_nuvem = min(senkou_a, senkou_b)
-        if direcao == 'alta' and preco_atual > topo_nuvem:
-            score += 6
-            detalhes.append(('ichimoku_fora_nuvem', 6))
-        elif direcao == 'baixa' and preco_atual < fundo_nuvem:
-            score += 6
-            detalhes.append(('ichimoku_fora_nuvem', 6))
-
-    mc = indicadores.get('monte_carlo') or {}
-    prob_alta = mc.get('prob_alta_pct')
-    prob_baixa = mc.get('prob_baixa_pct')
-    if prob_alta is not None and prob_baixa is not None:
-        if direcao == 'alta' and prob_alta >= 55:
-            score += 6
-            detalhes.append(('monte_carlo_favoravel', 6))
-        elif direcao == 'baixa' and prob_baixa >= 55:
-            score += 6
-            detalhes.append(('monte_carlo_favoravel', 6))
-
-    padrao = indicadores.get('candle_pattern')
-    padroes_alta = ('Engolfo de Alta', 'Martelo (Hammer)')
-    padroes_baixa = ('Engolfo de Baixa', 'Estrela Cadente (Shooting Star)')
-    if padrao:
-        if direcao == 'alta' and padrao in padroes_alta:
-            score += 6
-            detalhes.append(('candle_pattern_favoravel', 6))
-        elif direcao == 'baixa' and padrao in padroes_baixa:
-            score += 6
-            detalhes.append(('candle_pattern_favoravel', 6))
-
     return min(score, 100), detalhes
+
+
+def find_liquidez_antiga(exec_candles, ate_index, tipo, lookback=None):
+    lookback = lookback or LIQUIDEZ_LOOKBACK
+    inicio = max(0, ate_index - lookback)
+    janela = exec_candles[inicio:ate_index - 2]
+    if len(janela) < 5:
+        return None, None
+
+    if tipo == 'low':
+        idx_relativo = min(range(len(janela)), key=lambda k: janela[k]['l'])
+        valor = janela[idx_relativo]['l']
+    else:
+        idx_relativo = max(range(len(janela)), key=lambda k: janela[k]['h'])
+        valor = janela[idx_relativo]['h']
+
+    idx_absoluto = inicio + idx_relativo
+    return valor, idx_absoluto
+
+
+def detect_sweep_liquidez_antiga(exec_candles, zona, lookback=None):
+    lookback = lookback or ANTECIPADO_SWEEP_LOOKBACK
+    recentes_idx = range(max(0, len(exec_candles) - lookback), len(exec_candles))
+
+    for i in recentes_idx:
+        c = exec_candles[i]
+
+        if c['h'] >= zona['top']:
+            liq_antiga, liq_index = find_liquidez_antiga(exec_candles, i, 'high')
+            if liq_antiga and c['h'] > liq_antiga and c['c'] < liq_antiga:
+                return {
+                    'index': i, 'lado': 'baixa',
+                    'nivel_pavio': c['h'],
+                    'liquidez_varrida': liq_antiga,
+                    'liquidez_index': liq_index,
+                    't': c['t'],
+                }
+
+        if c['l'] <= zona['bottom']:
+            liq_antiga, liq_index = find_liquidez_antiga(exec_candles, i, 'low')
+            if liq_antiga and c['l'] < liq_antiga and c['c'] > liq_antiga:
+                return {
+                    'index': i, 'lado': 'alta',
+                    'nivel_pavio': c['l'],
+                    'liquidez_varrida': liq_antiga,
+                    'liquidez_index': liq_index,
+                    't': c['t'],
+                }
+
+    return None
+
+
+def compute_bias_from_swings(candles, lookback=SWING_LOOKBACK):
+    if not candles or len(candles) < (lookback * 2 + 5):
+        return 'neutro'
+    swings = detect_exec_swings(candles, lookback=lookback)
+    highs = [s for s in swings if s['tipo'] == 'high'][-2:]
+    lows = [s for s in swings if s['tipo'] == 'low'][-2:]
+    if len(highs) == 2 and len(lows) == 2:
+        topos_sobem = highs[1]['valor'] > highs[0]['valor']
+        fundos_sobem = lows[1]['valor'] > lows[0]['valor']
+        topos_descem = highs[1]['valor'] < highs[0]['valor']
+        fundos_descem = lows[1]['valor'] < lows[0]['valor']
+        if topos_sobem and fundos_sobem:
+            return 'alta'
+        if topos_descem and fundos_descem:
+            return 'baixa'
+    return 'neutro'
+
+
+def rsi_extremo_no_candle(exec_candles, idx):
+    closes = [c['c'] for c in exec_candles[:idx + 1]]
+    if len(closes) < 15:
+        return None
+    rsi_series = compute_rsi(closes)
+    return rsi_series[-1]
+
+
+def rsi_no_candle(exec_candles, idx):
+    if idx is None or idx < 0:
+        return None
+    closes = [c['c'] for c in exec_candles[:idx + 1]]
+    if len(closes) < 15:
+        return None
+    rsi_series = compute_rsi(closes)
+    return rsi_series[-1]
+
+
+def check_rsi_divergence(exec_candles, sweep):
+    liq_index = sweep.get('liquidez_index')
+    if liq_index is None:
+        return False
+
+    rsi_liquidez_antiga = rsi_no_candle(exec_candles, liq_index)
+    rsi_sweep_atual = rsi_no_candle(exec_candles, sweep['index'])
+    if rsi_liquidez_antiga is None or rsi_sweep_atual is None:
+        return False
+
+    if sweep['lado'] == 'alta':
+        preco_igual_ou_mais_baixo = sweep['nivel_pavio'] <= sweep['liquidez_varrida']
+        rsi_mais_alto = rsi_sweep_atual > rsi_liquidez_antiga
+        return preco_igual_ou_mais_baixo and rsi_mais_alto
+
+    if sweep['lado'] == 'baixa':
+        preco_igual_ou_mais_alto = sweep['nivel_pavio'] >= sweep['liquidez_varrida']
+        rsi_mais_baixo = rsi_sweep_atual < rsi_liquidez_antiga
+        return preco_igual_ou_mais_alto and rsi_mais_baixo
+
+    return False
+
+
+def _save_zone_state(db_file, pair, zona, fase, now, sweep=None, choch=None, table='scalp_zone_state'):
+    try:
+        with sqlite3.connect(db_file) as conn:
+            cursor = conn.cursor()
+            cursor.execute(f'''
+                INSERT INTO {table} (pair, zona_top, zona_bottom, fase, sweep_ts, sweep_nivel, sweep_lado, choch_ts, choch_nivel, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(pair) DO UPDATE SET
+                    zona_top=excluded.zona_top, zona_bottom=excluded.zona_bottom, fase=excluded.fase,
+                    sweep_ts=excluded.sweep_ts, sweep_nivel=excluded.sweep_nivel, sweep_lado=excluded.sweep_lado,
+                    choch_ts=excluded.choch_ts, choch_nivel=excluded.choch_nivel, updated_at=excluded.updated_at
+            ''', (
+                pair,
+                zona['top'] if zona else None, zona['bottom'] if zona else None,
+                fase,
+                sweep['t'] if sweep else None, sweep['nivel'] if sweep else None, sweep['lado'] if sweep else None,
+                choch['t'] if choch else None, choch['nivel'] if choch else None,
+                now,
+            ))
+            conn.commit()
+    except Exception as e:
+        print(f"[scalp_engine] erro ao salvar zone_state de {pair} ({table}): {e}")
+
+
+def _segundos_desde_ultimo_alerta(db_file, table, pair):
+    try:
+        with sqlite3.connect(db_file) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f'SELECT created_at FROM {table} WHERE pair=? AND alerted=1 ORDER BY created_at DESC LIMIT 1',
+                (pair,)
+            )
+            row = cursor.fetchone()
+        if not row:
+            return None
+        return int(time.time()) - row[0]
+    except Exception as e:
+        print(f"[scalp_engine] erro ao checar cooldown ({table}, {pair}): {e}")
+        return None
+
+
+def _save_signal(db_file, pair, exec_tf_label, resultado, alerted, table='scalp_signal_state'):
+    try:
+        prefixo = 'cont' if table == 'scalp_signal_state_continuacao' else 'scalp'
+        signal_id = f"{prefixo}_{pair}_{int(time.time()*1000)}"
+
+        detalhes = resultado.get('detalhes') or []
+        motivo_texto = ','.join(f"{nome}:{pts}" for nome, pts in detalhes)
+
+        with sqlite3.connect(db_file) as conn:
+            cursor = conn.cursor()
+            cursor.execute(f'''
+                INSERT INTO {table}
+                    (id, pair, created_at, exec_tf, direcao, score, entry, sl, tp, na_killzone, alerted, motivo_score)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                signal_id, pair, int(time.time()), exec_tf_label,
+                resultado['direcao'], resultado['score'], resultado['entry'], resultado['sl'], resultado['tp'],
+                1 if resultado['na_killzone'] else 0, 1 if alerted else 0, motivo_texto,
+            ))
+            conn.commit()
+    except Exception as e:
+        print(f"[scalp_engine] erro ao salvar signal de {pair} ({table}): {e}")
+
+
+def scalp_signal_history(db_file, pair=None, limit=30, table='scalp_signal_state'):
+    try:
+        with sqlite3.connect(db_file) as conn:
+            cursor = conn.cursor()
+            if pair:
+                cursor.execute(f'''
+                    SELECT id, pair, created_at, exec_tf, direcao, score, entry, sl, tp, na_killzone, alerted
+                    FROM {table} WHERE pair=? ORDER BY created_at DESC LIMIT ?
+                ''', (pair, limit))
+            else:
+                cursor.execute(f'''
+                    SELECT id, pair, created_at, exec_tf, direcao, score, entry, sl, tp, na_killzone, alerted
+                    FROM {table} ORDER BY created_at DESC LIMIT ?
+                ''', (limit,))
+            rows = cursor.fetchall()
+
+        signals = []
+        for r in rows:
+            signals.append({
+                'id': r[0], 'pair': r[1], 'created_at': r[2], 'exec_tf': r[3],
+                'direcao': r[4], 'score': r[5], 'entry': r[6], 'sl': r[7], 'tp': r[8],
+                'na_killzone': bool(r[9]), 'alerted': bool(r[10]),
+            })
+        return {'signals': signals}
+    except Exception as e:
+        print(f"[scalp_engine] erro ao gerar histórico de {pair} ({table}): {e}")
+        return {'signals': [], 'error': str(e)}
 
 
 def process_pair_scalp(db_file, pair, d1_candles, exec_candles, exec_tf_label, send_telegram_fn=None, h4_candles=None):
@@ -2088,34 +2044,13 @@ def process_pair_scalp(db_file, pair, d1_candles, exec_candles, exec_tf_label, s
     zona = find_active_zone(bandas, preco_atual)
 
     resultado = {
-        'pair': pair,
-        'exec_tf': exec_tf_label,
-        'na_killzone': na_killzone,
-        'killzone_nome': killzone_nome,
-        'score': 0,
-        'direcao': None,
-        'entry': None,
-        'sl': None,
-        'tp': None,
-        'motivo': None,
-        'detalhes': [],
-        'zona_top': None,
-        'zona_bottom': None,
-        'zona_ativa': False,
-        'zona_ultimo_toque_ts': None,
-        'sweep_nivel': None,
-        'sweep_lado': None,
-        'choch_nivel': None,
-        'choch_direcao': None,
-        'bias_d1': None,
-        'bias_h4': None,
-        'rsi14': None,
-        'entry_zone_top': None,
-        'entry_zone_bottom': None,
-        'entry_zone_tipo': None,
-        'indicadores': None,
-        'gates': [],
-        'em_cooldown': False,
+        'pair': pair, 'exec_tf': exec_tf_label, 'na_killzone': na_killzone, 'killzone_nome': killzone_nome,
+        'score': 0, 'direcao': None, 'entry': None, 'sl': None, 'tp': None, 'motivo': None, 'detalhes': [],
+        'zona_top': None, 'zona_bottom': None, 'zona_ativa': False, 'zona_ultimo_toque_ts': None,
+        'sweep_nivel': None, 'sweep_lado': None, 'choch_nivel': None, 'choch_direcao': None,
+        'bias_d1': None, 'bias_h4': None, 'rsi14': None,
+        'entry_zone_top': None, 'entry_zone_bottom': None, 'entry_zone_tipo': None,
+        'indicadores': None, 'gates': [], 'em_cooldown': False,
     }
 
     try:
@@ -2563,35 +2498,14 @@ def process_pair_scalp_continuacao(db_file, pair, d1_candles, exec_candles, exec
     zona = find_active_zone(bandas, preco_atual)
 
     resultado = {
-        'pair': pair,
-        'exec_tf': exec_tf_label,
-        'modo': 'continuacao',
-        'na_killzone': na_killzone,
-        'killzone_nome': killzone_nome,
-        'score': 0,
-        'direcao': None,
-        'entry': None,
-        'sl': None,
-        'tp': None,
-        'motivo': None,
-        'detalhes': [],
-        'zona_top': None,
-        'zona_bottom': None,
-        'zona_ativa': False,
-        'zona_ultimo_toque_ts': None,
-        'sweep_nivel': None,
-        'sweep_lado': None,
-        'bos_nivel': None,
-        'bos_direcao': None,
-        'bias_d1': None,
-        'bias_h4': None,
-        'rsi14': None,
-        'entry_zone_top': None,
-        'entry_zone_bottom': None,
-        'entry_zone_tipo': None,
-        'indicadores': None,
-        'gates': [],
-        'em_cooldown': False,
+        'pair': pair, 'exec_tf': exec_tf_label, 'modo': 'continuacao',
+        'na_killzone': na_killzone, 'killzone_nome': killzone_nome,
+        'score': 0, 'direcao': None, 'entry': None, 'sl': None, 'tp': None, 'motivo': None, 'detalhes': [],
+        'zona_top': None, 'zona_bottom': None, 'zona_ativa': False, 'zona_ultimo_toque_ts': None,
+        'sweep_nivel': None, 'sweep_lado': None, 'bos_nivel': None, 'bos_direcao': None,
+        'bias_d1': None, 'bias_h4': None, 'rsi14': None,
+        'entry_zone_top': None, 'entry_zone_bottom': None, 'entry_zone_tipo': None,
+        'indicadores': None, 'gates': [], 'em_cooldown': False,
     }
 
     try:
@@ -2620,12 +2534,6 @@ def process_pair_scalp_continuacao(db_file, pair, d1_candles, exec_candles, exec
 
     saved = _load_saved_state(db_file, pair, table='scalp_zone_state_continuacao')
 
-    zona_e_nova = (
-        not saved or saved.get('zona_top') is None
-        or abs((saved.get('zona_top') or 0) - zona['top']) > (zona['top'] - zona['bottom'])
-        or abs((saved.get('zona_bottom') or 0) - zona['bottom']) > (zona['top'] - zona['bottom'])
-    )
-
     fresh_sweep = detect_sweep_in_zone(exec_candles, zona)
 
     if fresh_sweep:
@@ -2649,8 +2557,6 @@ def process_pair_scalp_continuacao(db_file, pair, d1_candles, exec_candles, exec
 
     resultado['sweep_nivel'] = round(sweep['nivel'], 6)
     resultado['sweep_lado'] = sweep['lado']
-
-    sweep_e_novo = not saved or saved.get('sweep_ts') != sweep.get('t')
 
     bos = detect_bos_continuation_after_sweep(exec_candles, sweep)
     if not bos:
@@ -2800,100 +2706,6 @@ def process_pair_scalp_continuacao(db_file, pair, d1_candles, exec_candles, exec
     return resultado
 
 
-def _save_zone_state(db_file, pair, zona, fase, now, sweep=None, choch=None, table='scalp_zone_state'):
-    try:
-        with sqlite3.connect(db_file) as conn:
-            cursor = conn.cursor()
-            cursor.execute(f'''
-                INSERT INTO {table} (pair, zona_top, zona_bottom, fase, sweep_ts, sweep_nivel, sweep_lado, choch_ts, choch_nivel, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(pair) DO UPDATE SET
-                    zona_top=excluded.zona_top, zona_bottom=excluded.zona_bottom, fase=excluded.fase,
-                    sweep_ts=excluded.sweep_ts, sweep_nivel=excluded.sweep_nivel, sweep_lado=excluded.sweep_lado,
-                    choch_ts=excluded.choch_ts, choch_nivel=excluded.choch_nivel, updated_at=excluded.updated_at
-            ''', (
-                pair,
-                zona['top'] if zona else None, zona['bottom'] if zona else None,
-                fase,
-                sweep['t'] if sweep else None, sweep['nivel'] if sweep else None, sweep['lado'] if sweep else None,
-                choch['t'] if choch else None, choch['nivel'] if choch else None,
-                now,
-            ))
-            conn.commit()
-    except Exception as e:
-        print(f"[scalp_engine] erro ao salvar zone_state de {pair} ({table}): {e}")
-
-
-def _segundos_desde_ultimo_alerta(db_file, table, pair):
-    try:
-        with sqlite3.connect(db_file) as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                f'SELECT created_at FROM {table} WHERE pair=? AND alerted=1 ORDER BY created_at DESC LIMIT 1',
-                (pair,)
-            )
-            row = cursor.fetchone()
-        if not row:
-            return None
-        return int(time.time()) - row[0]
-    except Exception as e:
-        print(f"[scalp_engine] erro ao checar cooldown ({table}, {pair}): {e}")
-        return None
-
-
-def _save_signal(db_file, pair, exec_tf_label, resultado, alerted, table='scalp_signal_state'):
-    try:
-        prefixo = 'cont' if table == 'scalp_signal_state_continuacao' else 'scalp'
-        signal_id = f"{prefixo}_{pair}_{int(time.time()*1000)}"
-
-        detalhes = resultado.get('detalhes') or []
-        motivo_texto = ','.join(f"{nome}:{pts}" for nome, pts in detalhes)
-
-        with sqlite3.connect(db_file) as conn:
-            cursor = conn.cursor()
-            cursor.execute(f'''
-                INSERT INTO {table}
-                    (id, pair, created_at, exec_tf, direcao, score, entry, sl, tp, na_killzone, alerted, motivo_score)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (
-                signal_id, pair, int(time.time()), exec_tf_label,
-                resultado['direcao'], resultado['score'], resultado['entry'], resultado['sl'], resultado['tp'],
-                1 if resultado['na_killzone'] else 0, 1 if alerted else 0, motivo_texto,
-            ))
-            conn.commit()
-    except Exception as e:
-        print(f"[scalp_engine] erro ao salvar signal de {pair} ({table}): {e}")
-
-
-def scalp_signal_history(db_file, pair=None, limit=30, table='scalp_signal_state'):
-    try:
-        with sqlite3.connect(db_file) as conn:
-            cursor = conn.cursor()
-            if pair:
-                cursor.execute(f'''
-                    SELECT id, pair, created_at, exec_tf, direcao, score, entry, sl, tp, na_killzone, alerted
-                    FROM {table} WHERE pair=? ORDER BY created_at DESC LIMIT ?
-                ''', (pair, limit))
-            else:
-                cursor.execute(f'''
-                    SELECT id, pair, created_at, exec_tf, direcao, score, entry, sl, tp, na_killzone, alerted
-                    FROM {table} ORDER BY created_at DESC LIMIT ?
-                ''', (limit,))
-            rows = cursor.fetchall()
-
-        signals = []
-        for r in rows:
-            signals.append({
-                'id': r[0], 'pair': r[1], 'created_at': r[2], 'exec_tf': r[3],
-                'direcao': r[4], 'score': r[5], 'entry': r[6], 'sl': r[7], 'tp': r[8],
-                'na_killzone': bool(r[9]), 'alerted': bool(r[10]),
-            })
-        return {'signals': signals}
-    except Exception as e:
-        print(f"[scalp_engine] erro ao gerar histórico de {pair} ({table}): {e}")
-        return {'signals': [], 'error': str(e)}
-
-
 BE_PROGRESSO_PCT = 0.30
 PARCIAL_PROGRESSO_PCT = 0.50
 
@@ -2996,7 +2808,6 @@ def gerenciar_trades_abertos(db_file, pair, exec_candles, table, send_telegram_f
                 msg += f"💡 Sugestão: mova o Stop pra entrada ({entry}) — trava o risco em zero, deixa o resto correr\n"
                 msg += f"📍 Preço atual: {round(preco_atual, 6)}"
                 send_telegram_fn(msg)
-
 
 
 def _save_rapido_signal(db_file, pair, exec_tf_label, resultado, alerted):
@@ -3121,11 +2932,8 @@ def process_pair_scalp_rapido(db_file, pair, d1_candles, exec_candles, exec_tf_l
         return resultado
 
     resultado.update({
-        'sinal': True,
-        'direcao': direcao,
-        'entry': round(entry, 6),
-        'sl': round(sl, 6),
-        'tp': round(tp, 6),
+        'sinal': True, 'direcao': direcao,
+        'entry': round(entry, 6), 'sl': round(sl, 6), 'tp': round(tp, 6),
         'motivo': 'entrada_confirmada',
     })
 
@@ -3213,9 +3021,7 @@ def process_pair_cascata_smc(db_file, pair, w_candles, d1_candles, h4_candles, h
     bias_d1 = compute_lux_structure_bias(d1_candles)
     bias_h4 = compute_lux_structure_bias(h4_candles) if h4_candles else 'neutro'
     bias_h1 = compute_lux_structure_bias(h1_candles) if h1_candles else 'neutro'
-    resultado.update({
-        'bias_semanal': bias_w, 'bias_d1': bias_d1, 'bias_h4': bias_h4, 'bias_h1': bias_h1,
-    })
+    resultado.update({'bias_semanal': bias_w, 'bias_d1': bias_d1, 'bias_h4': bias_h4, 'bias_h1': bias_h1})
 
     biases = [bias_w, bias_d1, bias_h4, bias_h1]
     contagem_alta = biases.count('alta')
@@ -3252,11 +3058,8 @@ def process_pair_cascata_smc(db_file, pair, w_candles, d1_candles, h4_candles, h
 
     fresh_sweep = detect_sweep_zona_diaria_movel(exec_candles, zona_diaria)
 
-    zona_para_validar = None
     if fresh_sweep:
-        zona_para_validar = (
-            zona_diaria['resistencia'] if fresh_sweep['tipo_zona'] == 'resistencia' else zona_diaria['suporte']
-        )
+        zona_para_validar = zona_diaria['resistencia'] if fresh_sweep['tipo_zona'] == 'resistencia' else zona_diaria['suporte']
     else:
         zona_para_validar = zona_diaria['suporte']
 
@@ -3359,11 +3162,8 @@ def process_pair_cascata_smc(db_file, pair, w_candles, d1_candles, h4_candles, h
         return resultado
 
     resultado.update({
-        'sinal': True,
-        'direcao': direcao_macro,
-        'entry': round(entry, 6),
-        'sl': round(sl, 6),
-        'tp': round(tp, 6),
+        'sinal': True, 'direcao': direcao_macro,
+        'entry': round(entry, 6), 'sl': round(sl, 6), 'tp': round(tp, 6),
         'motivo': 'entrada_confirmada',
         'score': 100 if mtf_status == 'FULL' else 85,
     })
@@ -3404,113 +3204,6 @@ RSI_EXTREMO_ALTA = 80
 LIQUIDEZ_LOOKBACK = 40
 RR_FIXO_ANTECIPADO = 2.0
 ANTECIPADO_SWEEP_LOOKBACK = 10
-
-
-def find_liquidez_antiga(exec_candles, ate_index, tipo, lookback=LIQUIDEZ_LOOKBACK):
-    inicio = max(0, ate_index - lookback)
-    janela = exec_candles[inicio:ate_index - 2]
-    if len(janela) < 5:
-        return None, None
-
-    if tipo == 'low':
-        idx_relativo = min(range(len(janela)), key=lambda k: janela[k]['l'])
-        valor = janela[idx_relativo]['l']
-    else:
-        idx_relativo = max(range(len(janela)), key=lambda k: janela[k]['h'])
-        valor = janela[idx_relativo]['h']
-
-    idx_absoluto = inicio + idx_relativo
-    return valor, idx_absoluto
-
-
-def detect_sweep_liquidez_antiga(exec_candles, zona, lookback=ANTECIPADO_SWEEP_LOOKBACK):
-    recentes_idx = range(max(0, len(exec_candles) - lookback), len(exec_candles))
-
-    for i in recentes_idx:
-        c = exec_candles[i]
-
-        if c['h'] >= zona['top']:
-            liq_antiga, liq_index = find_liquidez_antiga(exec_candles, i, 'high')
-            if liq_antiga and c['h'] > liq_antiga and c['c'] < liq_antiga:
-                return {
-                    'index': i, 'lado': 'baixa',
-                    'nivel_pavio': c['h'],
-                    'liquidez_varrida': liq_antiga,
-                    'liquidez_index': liq_index,
-                    't': c['t'],
-                }
-
-        if c['l'] <= zona['bottom']:
-            liq_antiga, liq_index = find_liquidez_antiga(exec_candles, i, 'low')
-            if liq_antiga and c['l'] < liq_antiga and c['c'] > liq_antiga:
-                return {
-                    'index': i, 'lado': 'alta',
-                    'nivel_pavio': c['l'],
-                    'liquidez_varrida': liq_antiga,
-                    'liquidez_index': liq_index,
-                    't': c['t'],
-                }
-
-    return None
-
-
-def compute_bias_from_swings(candles, lookback=SWING_LOOKBACK):
-    if not candles or len(candles) < (lookback * 2 + 5):
-        return 'neutro'
-    swings = detect_exec_swings(candles, lookback=lookback)
-    highs = [s for s in swings if s['tipo'] == 'high'][-2:]
-    lows = [s for s in swings if s['tipo'] == 'low'][-2:]
-    if len(highs) == 2 and len(lows) == 2:
-        topos_sobem = highs[1]['valor'] > highs[0]['valor']
-        fundos_sobem = lows[1]['valor'] > lows[0]['valor']
-        topos_descem = highs[1]['valor'] < highs[0]['valor']
-        fundos_descem = lows[1]['valor'] < lows[0]['valor']
-        if topos_sobem and fundos_sobem:
-            return 'alta'
-        if topos_descem and fundos_descem:
-            return 'baixa'
-    return 'neutro'
-
-
-def rsi_extremo_no_candle(exec_candles, idx):
-    closes = [c['c'] for c in exec_candles[:idx + 1]]
-    if len(closes) < 15:
-        return None
-    rsi_series = compute_rsi(closes)
-    return rsi_series[-1]
-
-
-def rsi_no_candle(exec_candles, idx):
-    if idx is None or idx < 0:
-        return None
-    closes = [c['c'] for c in exec_candles[:idx + 1]]
-    if len(closes) < 15:
-        return None
-    rsi_series = compute_rsi(closes)
-    return rsi_series[-1]
-
-
-def check_rsi_divergence(exec_candles, sweep):
-    liq_index = sweep.get('liquidez_index')
-    if liq_index is None:
-        return False
-
-    rsi_liquidez_antiga = rsi_no_candle(exec_candles, liq_index)
-    rsi_sweep_atual = rsi_no_candle(exec_candles, sweep['index'])
-    if rsi_liquidez_antiga is None or rsi_sweep_atual is None:
-        return False
-
-    if sweep['lado'] == 'alta':
-        preco_igual_ou_mais_baixo = sweep['nivel_pavio'] <= sweep['liquidez_varrida']
-        rsi_mais_alto = rsi_sweep_atual > rsi_liquidez_antiga
-        return preco_igual_ou_mais_baixo and rsi_mais_alto
-
-    if sweep['lado'] == 'baixa':
-        preco_igual_ou_mais_alto = sweep['nivel_pavio'] >= sweep['liquidez_varrida']
-        rsi_mais_baixo = rsi_sweep_atual < rsi_liquidez_antiga
-        return preco_igual_ou_mais_alto and rsi_mais_baixo
-
-    return False
 
 
 def _save_antecipado_signal(db_file, pair, exec_tf_label, resultado, alerted):
@@ -3608,11 +3301,8 @@ def process_pair_scalp_antecipado_v2(db_file, pair, d1_candles, exec_candles, ex
         return resultado
 
     resultado.update({
-        'sinal': True,
-        'direcao': direcao,
-        'entry': round(entry, 6),
-        'sl': round(sl, 6),
-        'tp': round(tp, 6),
+        'sinal': True, 'direcao': direcao,
+        'entry': round(entry, 6), 'sl': round(sl, 6), 'tp': round(tp, 6),
         'rsi': round(rsi_val, 1),
         'liquidez_varrida': round(sweep['liquidez_varrida'], 6),
         'divergencia_rsi': tem_divergencia,
@@ -3666,9 +3356,13 @@ def process_pair_scalp_antecipado_v2(db_file, pair, d1_candles, exec_candles, ex
     return resultado
 
 
-VOTOS_MINIMOS_SINAL = 7
+VOTOS_MINIMOS_SINAL = 8  # PATCH 09/08: 7 -> 8, corta "quase empate"
 ATR_MULT_STOP = 1.5
 RR_INDICADORES = 2.0
+
+VWAP_POC_MIN_DIST_PCT = 0.003
+EMA_SLOPE_MIN_PCT = 0.001
+MONTE_CARLO_GATE_VOTE_MIN_PROB = 62
 
 
 def _votos_indicadores(indicadores, preco_atual):
@@ -3679,10 +3373,12 @@ def _votos_indicadores(indicadores, preco_atual):
         votos.append(('macd', 'alta' if macd_hist > 0 else 'baixa'))
 
     ema9, ema21, ema50 = indicadores.get('ema9'), indicadores.get('ema21'), indicadores.get('ema50')
-    if ema9 is not None and ema21 is not None and ema50 is not None:
-        if ema9 > ema21 > ema50:
+    ema9_slope = indicadores.get('ema9_slope')
+    if ema9 is not None and ema21 is not None and ema50 is not None and ema9_slope is not None:
+        slope_min = preco_atual * EMA_SLOPE_MIN_PCT
+        if ema9 > ema21 > ema50 and ema9_slope > slope_min:
             votos.append(('emas', 'alta'))
-        elif ema9 < ema21 < ema50:
+        elif ema9 < ema21 < ema50 and ema9_slope < -slope_min:
             votos.append(('emas', 'baixa'))
 
     rsi = indicadores.get('rsi14')
@@ -3707,12 +3403,16 @@ def _votos_indicadores(indicadores, preco_atual):
             votos.append(('bollinger', 'baixa'))
 
     vwap = indicadores.get('vwap')
-    if vwap is not None:
-        votos.append(('vwap', 'alta' if preco_atual > vwap else 'baixa'))
+    if vwap is not None and vwap > 0:
+        dist_pct = abs(preco_atual - vwap) / vwap
+        if dist_pct >= VWAP_POC_MIN_DIST_PCT:
+            votos.append(('vwap', 'alta' if preco_atual > vwap else 'baixa'))
 
     poc = indicadores.get('volume_profile_poc')
     if poc is not None and poc > 0:
-        votos.append(('volume_profile_poc', 'alta' if preco_atual > poc else 'baixa'))
+        dist_pct = abs(preco_atual - poc) / poc
+        if dist_pct >= VWAP_POC_MIN_DIST_PCT:
+            votos.append(('volume_profile_poc', 'alta' if preco_atual > poc else 'baixa'))
 
     ichimoku = indicadores.get('ichimoku') or {}
     senkou_a, senkou_b = ichimoku.get('senkou_a'), ichimoku.get('senkou_b')
@@ -3726,9 +3426,9 @@ def _votos_indicadores(indicadores, preco_atual):
     mc = indicadores.get('monte_carlo') or {}
     prob_alta, prob_baixa = mc.get('prob_alta_pct'), mc.get('prob_baixa_pct')
     if prob_alta is not None and prob_baixa is not None:
-        if prob_alta >= 55:
+        if prob_alta >= MONTE_CARLO_GATE_VOTE_MIN_PROB:
             votos.append(('monte_carlo', 'alta'))
-        elif prob_baixa >= 55:
+        elif prob_baixa >= MONTE_CARLO_GATE_VOTE_MIN_PROB:
             votos.append(('monte_carlo', 'baixa'))
 
     padrao = indicadores.get('candle_pattern')
@@ -3789,6 +3489,28 @@ def process_pair_scalp_indicadores(db_file, pair, exec_candles, exec_tf_label, s
     else:
         resultado['motivo'] = f'sem maioria suficiente ainda (alta={votos_alta}, baixa={votos_baixa}, mínimo={VOTOS_MINIMOS_SINAL})'
         resultado['votos_favor'] = max(votos_alta, votos_baixa)
+        return resultado
+
+    # ── PATCH 09/08: VETO — RSI ou Stochastic esticado CONTRA o lado que
+    # a maioria votou. É o caso raiz do problema: trend-following domina
+    # a votação exatamente no topo/fundo do movimento, onde RSI/Stoch
+    # mean-reversion grita reversão. Antes só "não votavam" nesse
+    # cenário — agora VETAM ativamente, mesmo com maioria formada.
+    rsi_val = indicadores.get('rsi14')
+    stoch_k_val, stoch_d_val = indicadores.get('stoch_k'), indicadores.get('stoch_d')
+    veto_contrario = None
+    if direcao == 'alta' and rsi_val is not None and rsi_val >= 65:
+        veto_contrario = f'RSI={round(rsi_val,1)} já esticado pra cima (>=65), contra o LONG'
+    elif direcao == 'baixa' and rsi_val is not None and rsi_val <= 35:
+        veto_contrario = f'RSI={round(rsi_val,1)} já esticado pra baixo (<=35), contra o SHORT'
+    elif direcao == 'alta' and stoch_k_val is not None and stoch_d_val is not None and stoch_k_val >= 80 and stoch_d_val >= 80:
+        veto_contrario = f'Stochastic ({round(stoch_k_val,1)}/{round(stoch_d_val,1)}) esticado pra cima, contra o LONG'
+    elif direcao == 'baixa' and stoch_k_val is not None and stoch_d_val is not None and stoch_k_val <= 20 and stoch_d_val <= 20:
+        veto_contrario = f'Stochastic ({round(stoch_k_val,1)}/{round(stoch_d_val,1)}) esticado pra baixo, contra o SHORT'
+
+    if veto_contrario:
+        resultado['motivo'] = f"{votos_favor}/{total} indicadores concordando em {direcao}, mas VETADO: {veto_contrario}"
+        resultado['votos_favor'] = votos_favor
         return resultado
 
     if d1_candles:
@@ -3854,10 +3576,7 @@ def process_pair_scalp_indicadores(db_file, pair, exec_candles, exec_tf_label, s
     resultado['stop_via'] = stop_via
 
     resultado.update({
-        'sinal': True,
-        'entry': round(entry, 6),
-        'sl': round(sl, 6),
-        'tp': round(tp, 6),
+        'sinal': True, 'entry': round(entry, 6), 'sl': round(sl, 6), 'tp': round(tp, 6),
         'motivo': f'{votos_favor}/{total} indicadores concordando em {direcao}' + (' + tendência forte (ADX≥25)' if tendencia_forte else ''),
     })
 
@@ -3908,12 +3627,6 @@ def process_pair_scalp_indicadores(db_file, pair, exec_candles, exec_tf_label, s
 
     return resultado
 
-
-# ═══════════════════════════════════════════════════════════════════════
-# STATS E LISTAGEM POR MODO — pra parar de ver tudo misturado num agregado
-# só. Cada um dos 6 modos grava em tabela própria com resultado_final
-# (win/loss/pendente) — essas funções separam isso por modo.
-# ═══════════════════════════════════════════════════════════════════════
 
 MODOS_SCALP = {
     'normal_choch': 'scalp_signal_state',
@@ -3989,11 +3702,8 @@ def _stats_de_uma_tabela(db_file, tabela):
     win_rate_short = round(100 * wins_short / total_short, 1) if total_short > 0 else None
 
     return {
-        'wins': wins,
-        'losses': losses,
-        'pendentes': pendentes,
-        'total_resolvidos': total_resolvidos,
-        'win_rate_pct': win_rate,
+        'wins': wins, 'losses': losses, 'pendentes': pendentes,
+        'total_resolvidos': total_resolvidos, 'win_rate_pct': win_rate,
         'long': {'wins': wins_long, 'losses': losses_long, 'win_rate_pct': win_rate_long},
         'short': {'wins': wins_short, 'losses': losses_short, 'win_rate_pct': win_rate_short},
     }
@@ -4074,10 +3784,7 @@ def _stats_por_componente_motivo(db_file, tabela, top_n=15):
     for nome, v in componentes.items():
         total = v['wins'] + v['losses']
         lista.append({
-            'componente': nome,
-            'wins': v['wins'],
-            'losses': v['losses'],
-            'total': total,
+            'componente': nome, 'wins': v['wins'], 'losses': v['losses'], 'total': total,
             'win_rate_pct': round(100 * v['wins'] / total, 1) if total > 0 else None,
         })
     lista.sort(key=lambda x: x['total'], reverse=True)
@@ -4099,8 +3806,7 @@ def gerar_stats_por_modo(db_file):
             for nome, dados in relatorio.items()
             if dados.get('win_rate_pct') is not None and dados.get('total_resolvidos', 0) >= 5
         ],
-        key=lambda x: x[1],
-        reverse=True,
+        key=lambda x: x[1], reverse=True,
     )
 
     return {

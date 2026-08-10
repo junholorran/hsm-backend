@@ -21,6 +21,7 @@ client = anthropic.Anthropic(api_key=os.environ.get('ANTHROPIC_API_KEY'))
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
 DB_FILE = '/data/alerts.db'
+app.config['DB_FILE'] = DB_FILE
 
 PRECOS_TICKER = {}
 
@@ -285,6 +286,8 @@ cascade_engine.init_cascade_db(DB_FILE)
 cascade_engine.init_cascade_signal_db(DB_FILE)
 cascade_engine.init_cascade_multi_tf_db(DB_FILE)
 scalp_engine.init_scalp_db(DB_FILE)
+scalp_engine.init_explicacao_db(DB_FILE)
+app.register_blueprint(scalp_engine.explicacao_bp)
 
 
 ICT_SYSTEM_PROMPT = (
@@ -575,128 +578,6 @@ ICT_SYSTEM_PROMPT = (
     "- Usa APENAS tags HTML: <b> <i> <u> no corpo da analise (fora do BLOCO_DADOS)\n"
     "- Fecha todas as tags HTML abertas\n"
 )
-
-
-def build_dynamic_prompt(pair, valid_tfs):
-    return (
-        f"Analisa os graficos de {pair} nos timeframes ({', '.join(valid_tfs)}) com maxima precisao e objetividade.\n\n"
-        "FORMATO OBRIGATORIO DA RESPOSTA — SEGUIR EXATAMENTE:\n\n"
-
-        "<b>⚡ KAIROS MENTOR — " + pair + "</b>\n"
-        "Data/Hora: [data e hora UTC]\n\n"
-        "---\n\n"
-
-        "<b>🧭 RACIOCINIO EM CASCATA (D1 → H4 → H1 → M15/M5)</b>\n"
-        "[narra o raciocinio descendo os timeframes, conectando o que cada "
-        "um mostra e por que importa para o proximo, em tom de trader "
-        "explicando, nao lista de campos]\n\n"
-        "---\n\n"
-
-        "<b>🧭 SENTIDO DO MERCADO</b>\n"
-        "<b>Dominante:</b> [📈 LONG / 📉 SHORT / ⏸ NEUTRO — FORA]\n"
-        "<b>Tipo de Setup:</b> [TENDENCIA / REVERSAO / CONTINUIDADE]\n"
-        "<b>Proximo Passo Logico:</b> [1-2 frases diretas — o que o mercado vai fazer]\n"
-        "<b>Midnight Open:</b> [valor exato] — preco esta [ACIMA/ABAIXO] — bias [BULLISH/BEARISH]\n"
-        "<b>ADR Hoje:</b> [range ja usado hoje] de [ADR medio] — [% usado] — [ENTRADA OK / CUIDADO — range quase esgotado]\n\n"
-        "---\n\n"
-
-        "<b>📉 CENARIO SHORT — Probabilidade: [X]%</b>\n"
-        "<b>Condicao:</b> [o que tem de acontecer para este cenario]\n\n"
-        "<b>⚡ SCALP (M5/M15):</b>\n"
-        "Short: $[valor] | SL: $[valor] | TP: $[valor] | RR: 1:[x]\n"
-        "<b>Trigger:</b> [vela de confirmacao obrigatoria]\n\n"
-        "<b>🕐 INTRADAY (H1):</b>\n"
-        "Short: $[valor] | SL: $[valor] | TP1: $[valor] | TP2: $[valor] | RR: 1:[x]\n"
-        "<b>Trigger:</b> [vela de confirmacao obrigatoria]\n\n"
-        "<b>📅 SWING (H4/D1):</b>\n"
-        "Short: $[valor] | SL: $[valor] | TP1: $[valor] | TP2: $[valor] | TP3: $[valor] | RR: 1:[x]\n"
-        "<b>Trigger:</b> [vela de confirmacao obrigatoria]\n\n"
-        "<b>😴 PASSIVO (ordem limite short):</b>\n"
-        "Limit Short: $[valor] | SL: $[valor] | TP: $[valor] | RR: 1:[x]\n\n"
-        "<b>⚠️ Invalida SHORT se:</b> [nivel exato]\n\n"
-        "---\n\n"
-
-        "<b>📈 CENARIO LONG — Probabilidade: [X]%</b>\n"
-        "<b>Condicao:</b> [o que tem de acontecer para este cenario]\n\n"
-        "<b>⚡ SCALP (M5/M15):</b>\n"
-        "Long: $[valor] | SL: $[valor] | TP: $[valor] | RR: 1:[x]\n"
-        "<b>Trigger:</b> [vela de confirmacao obrigatoria]\n\n"
-        "<b>🕐 INTRADAY (H1):</b>\n"
-        "Long: $[valor] | SL: $[valor] | TP1: $[valor] | TP2: $[valor] | RR: 1:[x]\n"
-        "<b>Trigger:</b> [vela de confirmacao obrigatoria]\n\n"
-        "<b>📅 SWING (H4/D1):</b>\n"
-        "Long: $[valor] | SL: $[valor] | TP1: $[valor] | TP2: $[valor] | TP3: $[valor] | RR: 1:[x]\n"
-        "<b>Trigger:</b> [vela de confirmacao obrigatoria]\n\n"
-        "<b>😴 PASSIVO (ordem limite long):</b>\n"
-        "Limit Long: $[valor] | SL: $[valor] | TP: $[valor] | RR: 1:[x]\n\n"
-        "<b>⚠️ Invalida LONG se:</b> [nivel exato]\n\n"
-        "---\n\n"
-
-        "<b>📊 ANALISE COMPLETA — 16 CAMADAS ICT</b>\n\n"
-
-        "<b>BIAS DE MERCADO</b>\n"
-        "- <b>D1:</b> [BULLISH/BEARISH] — RSI:[valor] MACD:[bull/bear] Estoc:[valor]\n"
-        "- <b>H4:</b> [BULLISH/BEARISH] — RSI:[valor] MACD:[bull/bear] Estoc:[valor]\n"
-        "- <b>H1:</b> [bias] — RSI:[valor] MACD:[bull/bear] Estoc:[valor]\n"
-        "- <b>M15/M5:</b> [bias] — RSI:[valor] MACD:[bull/bear] Estoc:[valor]\n\n"
-
-        "<b>DIVERGENCIAS (Camada 16)</b>\n"
-        "[para cada timeframe onde houver dois topos/fundos comparaveis, "
-        "reporta se ha ou nao divergencia confirmada segundo a regra rigida. "
-        "Onde nao houver segundo topo/fundo, reporta como 'alerta de "
-        "exaustao', nunca como divergencia]\n\n"
-
-        "<b>LIQUIDEZ & ESTRUTURA</b>\n"
-        "- <b>BSL:</b> $[valor] — [contexto]\n"
-        "- <b>SSL:</b> $[valor] — [contexto]\n"
-        "- <b>AVISO LIQUIDEZ:</b> [BSL/SSL que pode varrer stop]\n"
-        "- <b>OB Bearish:</b> [zona exata] — papel: CONTINUIDADE\n"
-        "- <b>OB Bullish:</b> [zona exata] — papel: CONTINUIDADE\n"
-        "- <b>FVG Aberto:</b> [zona e status] — papel: CONTINUIDADE\n"
-        "- <b>IFVG:</b> [zona e status]\n"
-        "- <b>Breaker Block:</b> [zona se sequencia completa confirmada, "
-        "senao 'nao confirmado neste recorte'] — papel: REVERSAO\n"
-        "- <b>BPR:</b> [zona se identificado, senao 'nao identificavel com "
-        "precisao neste recorte'] — informativo, nao conta no score\n"
-        "- <b>IDM:</b> [nivel se identificado, senao 'nao identificavel com "
-        "precisao neste recorte'] — informativo, nao conta no score\n"
-        "- <b>CHoCH:</b> [status e nivel exato]\n\n"
-
-        "<b>OTE — OPTIMAL TRADE ENTRY</b>\n"
-        "- Swing: [low] para [high] — Range: [x] pontos\n"
-        "- 61.8%: $[valor]\n"
-        "- 70.5%: $[valor]\n"
-        "- 79.0%: $[valor]\n"
-        "- Zona OTE ideal: $[valor] — $[valor]\n\n"
-
-        "<b>WYCKOFF + PO3/AMD</b>\n"
-        "- Fase Wyckoff: [fase atual]\n"
-        "- PO3: Accumulation [zona] / Manipulation [nivel] / Distribution [em curso/aguarda]\n\n"
-
-        "<b>SCORE OPERACIONAL: [X]/100</b>\n"
-        "- Confluencias ativas (com peso de cada uma): [lista]\n"
-        "- Penalizacoes: [lista]\n"
-        "- Soma por extenso: [ex: 15+15+10+10+10-15 = 45] — este numero "
-        "TEM de ser identico ao [X] declarado no titulo desta secao e ao "
-        "SCORE_FINAL do bloco de dados no fim da resposta\n\n"
-
-        "<b>RECOMENDACAO FINAL</b>\n"
-        "[narrativa completa mas objetiva — maximo 6 linhas, tom de trader "
-        "explicando a decisao, nao relatorio]\n\n"
-        "---\n\n"
-
-        "BLOCO_DADOS_INICIO\n"
-        "DIRECAO_FINAL: [LONG ou SHORT ou NEUTRO]\n"
-        "SCORE_FINAL: [numero]\n"
-        "ENTRY_FINAL: [preco exato]\n"
-        "SL_FINAL: [preco exato]\n"
-        "TP1_FINAL: [preco exato]\n"
-        "TP2_FINAL: [preco exato]\n"
-        "TP3_FINAL: [preco exato ou vazio]\n"
-        "BLOCO_DADOS_FIM"
-    )
-
-
 SPOT_SYSTEM_PROMPT = (
     "Es um analista de acumulacao Spot/DCA (Dollar Cost Averaging) de "
     "elite, especializado em identificar zonas de reforco de posicao em "
@@ -829,6 +710,126 @@ SPOT_SYSTEM_PROMPT = (
     "- Usa APENAS tags HTML: <b> <i> <u> no corpo da analise (fora do BLOCO_DADOS)\n"
     "- Fecha todas as tags HTML abertas\n"
 )
+
+
+def build_dynamic_prompt(pair, valid_tfs):
+    return (
+        f"Analisa os graficos de {pair} nos timeframes ({', '.join(valid_tfs)}) com maxima precisao e objetividade.\n\n"
+        "FORMATO OBRIGATORIO DA RESPOSTA — SEGUIR EXATAMENTE:\n\n"
+
+        "<b>⚡ KAIROS MENTOR — " + pair + "</b>\n"
+        "Data/Hora: [data e hora UTC]\n\n"
+        "---\n\n"
+
+        "<b>🧭 RACIOCINIO EM CASCATA (D1 → H4 → H1 → M15/M5)</b>\n"
+        "[narra o raciocinio descendo os timeframes, conectando o que cada "
+        "um mostra e por que importa para o proximo, em tom de trader "
+        "explicando, nao lista de campos]\n\n"
+        "---\n\n"
+
+        "<b>🧭 SENTIDO DO MERCADO</b>\n"
+        "<b>Dominante:</b> [📈 LONG / 📉 SHORT / ⏸ NEUTRO — FORA]\n"
+        "<b>Tipo de Setup:</b> [TENDENCIA / REVERSAO / CONTINUIDADE]\n"
+        "<b>Proximo Passo Logico:</b> [1-2 frases diretas — o que o mercado vai fazer]\n"
+        "<b>Midnight Open:</b> [valor exato] — preco esta [ACIMA/ABAIXO] — bias [BULLISH/BEARISH]\n"
+        "<b>ADR Hoje:</b> [range ja usado hoje] de [ADR medio] — [% usado] — [ENTRADA OK / CUIDADO — range quase esgotado]\n\n"
+        "---\n\n"
+
+        "<b>📉 CENARIO SHORT — Probabilidade: [X]%</b>\n"
+        "<b>Condicao:</b> [o que tem de acontecer para este cenario]\n\n"
+        "<b>⚡ SCALP (M5/M15):</b>\n"
+        "Short: $[valor] | SL: $[valor] | TP: $[valor] | RR: 1:[x]\n"
+        "<b>Trigger:</b> [vela de confirmacao obrigatoria]\n\n"
+        "<b>🕐 INTRADAY (H1):</b>\n"
+        "Short: $[valor] | SL: $[valor] | TP1: $[valor] | TP2: $[valor] | RR: 1:[x]\n"
+        "<b>Trigger:</b> [vela de confirmacao obrigatoria]\n\n"
+        "<b>📅 SWING (H4/D1):</b>\n"
+        "Short: $[valor] | SL: $[valor] | TP1: $[valor] | TP2: $[valor] | TP3: $[valor] | RR: 1:[x]\n"
+        "<b>Trigger:</b> [vela de confirmacao obrigatoria]\n\n"
+        "<b>😴 PASSIVO (ordem limite short):</b>\n"
+        "Limit Short: $[valor] | SL: $[valor] | TP: $[valor] | RR: 1:[x]\n\n"
+        "<b>⚠️ Invalida SHORT se:</b> [nivel exato]\n\n"
+        "---\n\n"
+
+        "<b>📈 CENARIO LONG — Probabilidade: [X]%</b>\n"
+        "<b>Condicao:</b> [o que tem de acontecer para este cenario]\n\n"
+        "<b>⚡ SCALP (M5/M15):</b>\n"
+        "Long: $[valor] | SL: $[valor] | TP: $[valor] | RR: 1:[x]\n"
+        "<b>Trigger:</b> [vela de confirmacao obrigatoria]\n\n"
+        "<b>🕐 INTRADAY (H1):</b>\n"
+        "Long: $[valor] | SL: $[valor] | TP1: $[valor] | TP2: $[valor] | RR: 1:[x]\n"
+        "<b>Trigger:</b> [vela de confirmacao obrigatoria]\n\n"
+        "<b>📅 SWING (H4/D1):</b>\n"
+        "Long: $[valor] | SL: $[valor] | TP1: $[valor] | TP2: $[valor] | TP3: $[valor] | RR: 1:[x]\n"
+        "<b>Trigger:</b> [vela de confirmacao obrigatoria]\n\n"
+        "<b>😴 PASSIVO (ordem limite long):</b>\n"
+        "Limit Long: $[valor] | SL: $[valor] | TP: $[valor] | RR: 1:[x]\n\n"
+        "<b>⚠️ Invalida LONG se:</b> [nivel exato]\n\n"
+        "---\n\n"
+
+        "<b>📊 ANALISE COMPLETA — 16 CAMADAS ICT</b>\n\n"
+
+        "<b>BIAS DE MERCADO</b>\n"
+        "- <b>D1:</b> [BULLISH/BEARISH] — RSI:[valor] MACD:[bull/bear] Estoc:[valor]\n"
+        "- <b>H4:</b> [BULLISH/BEARISH] — RSI:[valor] MACD:[bull/bear] Estoc:[valor]\n"
+        "- <b>H1:</b> [bias] — RSI:[valor] MACD:[bull/bear] Estoc:[valor]\n"
+        "- <b>M15/M5:</b> [bias] — RSI:[valor] MACD:[bull/bear] Estoc:[valor]\n\n"
+
+        "<b>DIVERGENCIAS (Camada 16)</b>\n"
+        "[para cada timeframe onde houver dois topos/fundos comparaveis, "
+        "reporta se ha ou nao divergencia confirmada segundo a regra rigida. "
+        "Onde nao houver segundo topo/fundo, reporta como 'alerta de "
+        "exaustao', nunca como divergencia]\n\n"
+
+        "<b>LIQUIDEZ & ESTRUTURA</b>\n"
+        "- <b>BSL:</b> $[valor] — [contexto]\n"
+        "- <b>SSL:</b> $[valor] — [contexto]\n"
+        "- <b>AVISO LIQUIDEZ:</b> [BSL/SSL que pode varrer stop]\n"
+        "- <b>OB Bearish:</b> [zona exata] — papel: CONTINUIDADE\n"
+        "- <b>OB Bullish:</b> [zona exata] — papel: CONTINUIDADE\n"
+        "- <b>FVG Aberto:</b> [zona e status] — papel: CONTINUIDADE\n"
+        "- <b>IFVG:</b> [zona e status]\n"
+        "- <b>Breaker Block:</b> [zona se sequencia completa confirmada, "
+        "senao 'nao confirmado neste recorte'] — papel: REVERSAO\n"
+        "- <b>BPR:</b> [zona se identificado, senao 'nao identificavel com "
+        "precisao neste recorte'] — informativo, nao conta no score\n"
+        "- <b>IDM:</b> [nivel se identificado, senao 'nao identificavel com "
+        "precisao neste recorte'] — informativo, nao conta no score\n"
+        "- <b>CHoCH:</b> [status e nivel exato]\n\n"
+
+        "<b>OTE — OPTIMAL TRADE ENTRY</b>\n"
+        "- Swing: [low] para [high] — Range: [x] pontos\n"
+        "- 61.8%: $[valor]\n"
+        "- 70.5%: $[valor]\n"
+        "- 79.0%: $[valor]\n"
+        "- Zona OTE ideal: $[valor] — $[valor]\n\n"
+
+        "<b>WYCKOFF + PO3/AMD</b>\n"
+        "- Fase Wyckoff: [fase atual]\n"
+        "- PO3: Accumulation [zona] / Manipulation [nivel] / Distribution [em curso/aguarda]\n\n"
+
+        "<b>SCORE OPERACIONAL: [X]/100</b>\n"
+        "- Confluencias ativas (com peso de cada uma): [lista]\n"
+        "- Penalizacoes: [lista]\n"
+        "- Soma por extenso: [ex: 15+15+10+10+10-15 = 45] — este numero "
+        "TEM de ser identico ao [X] declarado no titulo desta secao e ao "
+        "SCORE_FINAL do bloco de dados no fim da resposta\n\n"
+
+        "<b>RECOMENDACAO FINAL</b>\n"
+        "[narrativa completa mas objetiva — maximo 6 linhas, tom de trader "
+        "explicando a decisao, nao relatorio]\n\n"
+        "---\n\n"
+
+        "BLOCO_DADOS_INICIO\n"
+        "DIRECAO_FINAL: [LONG ou SHORT ou NEUTRO]\n"
+        "SCORE_FINAL: [numero]\n"
+        "ENTRY_FINAL: [preco exato]\n"
+        "SL_FINAL: [preco exato]\n"
+        "TP1_FINAL: [preco exato]\n"
+        "TP2_FINAL: [preco exato]\n"
+        "TP3_FINAL: [preco exato ou vazio]\n"
+        "BLOCO_DADOS_FIM"
+    )
 
 
 def build_dynamic_spot_prompt(pair, valid_tfs, holding):
@@ -1033,14 +1034,6 @@ LIVE_SYMBOL_MAP = {
 LIVE_TF_INTERVALS = {'W': 'W', 'D1': 'D', 'H4': '240', 'H1': '60', 'M15': '15', 'M5': '5'}
 AUTO_ALERT_SCORE_THRESHOLD = 65
 
-# ── NOVO 05/08: limite de candles por timeframe na busca à Bybit.
-# O D1 precisa de mais histórico que os outros TFs porque o indicador
-# SRchannel que o Juninho usa no TradingView (base real de comparação
-# das zonas D1) tem Loopback Period = 290 candles nas configs. Com o
-# limite antigo fixo em 200 pra todos os TFs, a zona D1 calculada pelo
-# Kairos ficava sempre mais curta/deslocada que a do TV. Os outros TFs
-# (W/H4/H1/M15/M5) continuam em 200 — não precisam desse histórico
-# maior e pedir mais que isso é gasto de API à toa. ──
 LIVE_TF_CANDLE_LIMIT = {
     'D1': 300,
 }
@@ -1232,15 +1225,6 @@ def _draw_scalp_overlays(img, draw, resultado, y_for, W, H, padR, font, preco_at
         draw.text((6, min(y_top, y_bottom) - 12), f"Entrada ({tipo})", fill=cor, font=font)
 
 
-# ═══════════════════════════════════════════════════════════════════════
-# NOVO — Journal também alimentado pelos 4 modos de Scalp Ao Vivo
-# (Cascata SMC, Rejeição Antecipada v2, Confluência de Indicadores,
-# Scalp Rápido), não só pelo Trade Ao Vivo (ICT completo via Claude).
-# Reaproveita a MESMA tabela `journal` já usada pelo Trade Ao Vivo — o
-# app (Journal/Stats) passa a enxergar os modos sem precisar mexer
-# no index.html.
-# ═══════════════════════════════════════════════════════════════════════
-
 def save_scalp_signal_to_journal(pair, modo_label, exec_tf, direcao, score, entry, sl, tp, motivo):
     if entry is None or sl is None or tp is None or not direcao:
         return
@@ -1325,8 +1309,6 @@ def resolve_pending_journal_trades(pair, candles):
                     print(f"[journal] erro ao resolver trade {trade_id}: {e}")
     except Exception as e:
         print(f"[journal] erro ao checar pendentes de {pair}: {e}")
-
-
 def run_live_cycle(pair, interval_min):
     symbol = LIVE_SYMBOL_MAP.get(pair, pair.replace('USD', 'USDT'))
 
@@ -1395,7 +1377,7 @@ def run_live_cycle(pair, interval_min):
                     print(f"[scalp_engine be_parcial] erro ao gerenciar trades abertos de {pair}: {e}")
 
                 try:
-                    cascata_result = scalp_engine.process_pair_cascata_smc(
+                    cascata_result = scalp_engine.process_pair_cascata_smc_com_explicacao(
                         DB_FILE, pair,
                         candles_por_tf_cache.get('W'),
                         candles_por_tf_cache['D1'],
@@ -1421,7 +1403,7 @@ def run_live_cycle(pair, interval_min):
                     print(f"[scalp_engine cascata] erro no ciclo de {pair}: {e}")
 
                 try:
-                    normal_result = scalp_engine.process_pair_scalp(
+                    normal_result = scalp_engine.process_pair_scalp_com_explicacao(
                         DB_FILE, pair,
                         candles_por_tf_cache['D1'],
                         exec_candles,
@@ -1443,7 +1425,7 @@ def run_live_cycle(pair, interval_min):
                     print(f"[scalp_engine normal] erro no ciclo de {pair}: {e}")
 
                 try:
-                    continuacao_result = scalp_engine.process_pair_scalp_continuacao(
+                    continuacao_result = scalp_engine.process_pair_scalp_continuacao_com_explicacao(
                         DB_FILE, pair,
                         candles_por_tf_cache['D1'],
                         exec_candles,
@@ -1470,7 +1452,7 @@ def run_live_cycle(pair, interval_min):
                 # se quiser ligar de novo, sem precisar mexer aqui.
                 if scalp_engine.MODOS_ATIVOS.get('antecipado_v2', True):
                     try:
-                        antecipado_result = scalp_engine.process_pair_scalp_antecipado_v2(
+                        antecipado_result = scalp_engine.process_pair_scalp_antecipado_v2_com_explicacao(
                             DB_FILE, pair,
                             candles_por_tf_cache['D1'],
                             exec_candles,
@@ -1496,7 +1478,7 @@ def run_live_cycle(pair, interval_min):
                 # Checa scalp_engine.MODOS_ATIVOS antes de rodar.
                 if scalp_engine.MODOS_ATIVOS.get('confluencia_indicadores', True):
                     try:
-                        indicadores_result = scalp_engine.process_pair_scalp_indicadores(
+                        indicadores_result = scalp_engine.process_pair_scalp_indicadores_com_explicacao(
                             DB_FILE, pair,
                             exec_candles,
                             exec_tf,
@@ -1521,7 +1503,7 @@ def run_live_cycle(pair, interval_min):
                 # scalp_engine.MODOS_ATIVOS antes de rodar.
                 if scalp_engine.MODOS_ATIVOS.get('scalp_rapido', True):
                     try:
-                        rapido_result = scalp_engine.process_pair_scalp_rapido(
+                        rapido_result = scalp_engine.process_pair_scalp_rapido_com_explicacao(
                             DB_FILE, pair,
                             candles_por_tf_cache['D1'],
                             exec_candles,
@@ -2231,8 +2213,6 @@ def scalp_history_route():
         return jsonify({'error': str(e)}), 500
 
 
-# ── NOVO: status do modo Normal (CHoCH — reversão), religado no ciclo.
-# Espelha o mesmo padrão dos outros endpoints /scalp_*/status. ──
 @app.route('/scalp_normal/status', methods=['GET'])
 def scalp_normal_status():
     try:
@@ -2325,12 +2305,6 @@ def scalp_filtros_shadow_report_route():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-
-# ═══════════════════════════════════════════════════════════════════════
-# NOVO — Stats e listagem detalhada por modo. Cada um dos 6 modos de
-# scalp grava em tabela própria; esses endpoints separam o que antes
-# só existia agregado (o /journal/stats misturava tudo junto).
-# ═══════════════════════════════════════════════════════════════════════
 
 @app.route('/scalp/stats_por_modo', methods=['GET'])
 def scalp_stats_por_modo():

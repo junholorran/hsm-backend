@@ -7,6 +7,8 @@ import sqlite3
 import time
 import random
 import requests
+import json
+from flask import Blueprint, jsonify, current_app
 from datetime import datetime, timezone, timedelta
 
 SCORE_THRESHOLD_SINAL = 75
@@ -42,9 +44,6 @@ RR_TARGET_CASCATA = 3.0
 MONTE_CARLO_GATE_MIN_PROB = 55
 MONTE_CARLO_GATE_ATIVO = True
 
-# ── MODOS ATIVOS ── controla quais modos rodam no run_live_cycle (app.py
-# precisa checar este dict antes de chamar cada process_pair_scalp_*).
-# Desativados por decisão de 09/08: fora do padrão Sweep->CHoCH/BOS->FVG.
 MODOS_ATIVOS = {
     'normal_choch': True,
     'continuacao_bos': True,
@@ -1154,8 +1153,6 @@ def detect_micro_bos(exec_candles, direcao, lookback=MICRO_BOS_LOOKBACK):
         fundo_local = min(c['l'] for c in candles_ref)
         rompeu = any(c['c'] < fundo_local for c in janela_recente)
         return {'confirmado': rompeu, 'nivel_rompido': round(fundo_local, 6) if rompeu else None}
-
-
 def find_fvg_ob_after_choch(exec_candles, choch, min_gap_pct=MIN_FVG_GAP_PCT):
     start = max(0, choch['index'] - 1)
     end = min(len(exec_candles) - 1, choch['index'] + 4)
@@ -1788,15 +1785,6 @@ def compute_technical_indicators(exec_candles):
     return indicadores
 
 
-# ── PATCH 09/08: compute_score() enxuta ────────────────────────────────
-# Cortados 9 de 11 bônus opcionais (macd, adx-bônus, emas, stochastic,
-# bollinger, atr_risco_saudavel, vwap, poc, ichimoku, monte_carlo,
-# candle_pattern) + o bônus 'rsi_favoravel' (redundante — RSI já é gate
-# obrigatório antes do score rodar, bloqueia entrada, não precisa somar
-# ponto também). Sobra só estrutura de price action real: zona D1 +
-# killzone + sweep/CHoCH + FVG/OB de retorno + volume real no candle da
-# quebra. ADX e Monte Carlo continuam valendo como GATE (bloqueiam
-# entrada em aplicar_gates_entrada), só não somam mais score.
 def compute_score(zona, sweep, choch, entry_zone, exec_candles, na_killzone, indicadores=None):
     detalhes = []
     score = 0
@@ -2033,8 +2021,6 @@ def scalp_signal_history(db_file, pair=None, limit=30, table='scalp_signal_state
     except Exception as e:
         print(f"[scalp_engine] erro ao gerar histórico de {pair} ({table}): {e}")
         return {'signals': [], 'error': str(e)}
-
-
 def process_pair_scalp(db_file, pair, d1_candles, exec_candles, exec_tf_label, send_telegram_fn=None, h4_candles=None):
     now = int(time.time())
     na_killzone, killzone_nome = is_in_killzone()
@@ -2487,8 +2473,6 @@ def filtros_shadow_report(db_file, pair=None, limit=50):
     except Exception as e:
         print(f"[scalp_engine] erro ao gerar filtros_shadow_report: {e}")
         return {'total_casos': 0, 'contagem_por_filtro': {}, 'casos': [], 'error': str(e)}
-
-
 def process_pair_scalp_continuacao(db_file, pair, d1_candles, exec_candles, exec_tf_label, send_telegram_fn=None, h4_candles=None):
     now = int(time.time())
     na_killzone, killzone_nome = is_in_killzone()
@@ -2808,8 +2792,6 @@ def gerenciar_trades_abertos(db_file, pair, exec_candles, table, send_telegram_f
                 msg += f"💡 Sugestão: mova o Stop pra entrada ({entry}) — trava o risco em zero, deixa o resto correr\n"
                 msg += f"📍 Preço atual: {round(preco_atual, 6)}"
                 send_telegram_fn(msg)
-
-
 def _save_rapido_signal(db_file, pair, exec_tf_label, resultado, alerted):
     try:
         signal_id = f"rapido_{pair}_{int(time.time()*1000)}"
@@ -3354,9 +3336,7 @@ def process_pair_scalp_antecipado_v2(db_file, pair, d1_candles, exec_candles, ex
         resultado['motivo'] = f'entrada_confirmada, mas em cooldown ({restante_min}min restantes)'
 
     return resultado
-
-
-VOTOS_MINIMOS_SINAL = 8  # PATCH 09/08: 7 -> 8, corta "quase empate"
+VOTOS_MINIMOS_SINAL = 8
 ATR_MULT_STOP = 1.5
 RR_INDICADORES = 2.0
 
@@ -3491,11 +3471,6 @@ def process_pair_scalp_indicadores(db_file, pair, exec_candles, exec_tf_label, s
         resultado['votos_favor'] = max(votos_alta, votos_baixa)
         return resultado
 
-    # ── PATCH 09/08: VETO — RSI ou Stochastic esticado CONTRA o lado que
-    # a maioria votou. É o caso raiz do problema: trend-following domina
-    # a votação exatamente no topo/fundo do movimento, onde RSI/Stoch
-    # mean-reversion grita reversão. Antes só "não votavam" nesse
-    # cenário — agora VETAM ativamente, mesmo com maioria formada.
     rsi_val = indicadores.get('rsi14')
     stoch_k_val, stoch_d_val = indicadores.get('stoch_k'), indicadores.get('stoch_d')
     veto_contrario = None
@@ -3838,3 +3813,244 @@ def listar_trades_detalhado(db_file, modo, limit=200):
 
     trades = [dict(zip(nomes_col, row)) for row in rows]
     return {'modo': modo, 'tabela': tabela, 'total': len(trades), 'trades': trades}
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# EXPLICAÇÃO DE SINAL — "Por que este sinal foi gerado?"
+# Gera e persiste o payload completo (gates, monte carlo, ichimoku,
+# breakdown de score) toda vez que um sinal de verdade sai, e expõe via
+# endpoint Flask. Não modifica nenhuma função existente acima — só
+# envolve (wrapper) as 6 funções process_pair_scalp_*.
+# ═══════════════════════════════════════════════════════════════════════
+
+TABELA_POR_MODO = MODOS_SCALP
+
+
+def init_explicacao_db(db_file):
+    with sqlite3.connect(db_file) as conn:
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS scalp_explicacoes (
+                signal_id TEXT PRIMARY KEY,
+                pair TEXT,
+                modo TEXT,
+                created_at INTEGER,
+                payload_json TEXT
+            )
+        ''')
+        conn.commit()
+
+
+def _gates_para_filtros(gates):
+    return [
+        {'nome': g['nome'], 'passou': g['passou'], 'descricao': g.get('detalhe', '')}
+        for g in (gates or [])
+    ]
+
+
+def build_explicacao_payload(resultado, modo, regime_info=None):
+    direcao = resultado.get('direcao')
+    entry, sl, tp = resultado.get('entry'), resultado.get('sl'), resultado.get('tp')
+    rr = None
+    if entry and sl and tp:
+        risco = abs(entry - sl)
+        rr = round(abs(tp - entry) / risco, 2) if risco else None
+
+    indicadores = resultado.get('indicadores') or {}
+    monte_carlo = indicadores.get('monte_carlo')
+    ichimoku = indicadores.get('ichimoku')
+
+    score = resultado.get('score')
+    votos_favor = resultado.get('votos_favor')
+    votos_total = resultado.get('votos_total')
+
+    motivos = []
+    if regime_info:
+        regime, adx = regime_info
+        motivos.append(f"Regime: {regime.upper()}" + (f" (ADX {adx})" if adx is not None else ""))
+
+    estrutura = None
+    if resultado.get('choch_direcao') is not None:
+        estrutura = 'CHOCH'
+    elif resultado.get('bos_direcao') is not None:
+        estrutura = 'BOS'
+    elif resultado.get('evento_tipo'):
+        estrutura = resultado['evento_tipo']
+    if estrutura:
+        motivos.append(f"Estrutura: {estrutura}")
+
+    if resultado.get('entry_zone_tipo'):
+        motivos.append(f"Gatilho: {resultado['entry_zone_tipo']}")
+
+    padrao = indicadores.get('candle_pattern')
+    if padrao:
+        motivos.append(f"Padrão: {padrao}")
+
+    if score is not None:
+        motivos.append(f"Score: {score}/100")
+    elif votos_favor is not None and votos_total is not None:
+        motivos.append(f"Votos: {votos_favor}/{votos_total} indicadores")
+
+    if resultado.get('mtf_status'):
+        motivos.append(f"MTF: {resultado['mtf_status']}")
+
+    payload = {
+        'modo': modo,
+        'pair': resultado.get('pair'),
+        'direcao': direcao,
+        'motivos_principais': motivos,
+        'contexto_de_mercado': {
+            'regime': regime_info[0].upper() if regime_info else None,
+            'adx': regime_info[1] if regime_info else indicadores.get('adx14'),
+            'na_killzone': resultado.get('na_killzone'),
+            'killzone_nome': resultado.get('killzone_nome'),
+            'bias_d1': resultado.get('bias_d1'),
+            'bias_h4': resultado.get('bias_h4'),
+            'bias_semanal': resultado.get('bias_semanal'),
+        },
+        'analise_tecnica': {
+            'entrada': entry,
+            'sl': sl,
+            'tp': tp,
+            'rr': rr,
+            'rsi14': resultado.get('rsi14') or indicadores.get('rsi14'),
+        },
+        'filtros_de_qualidade': _gates_para_filtros(resultado.get('gates')),
+        'score_total': {
+            'score': score,
+            'votos_favor': votos_favor,
+            'votos_total': votos_total,
+        },
+        'breakdown_score': resultado.get('detalhes') or resultado.get('votos_detalhe') or [],
+    }
+
+    if monte_carlo:
+        payload['monte_carlo'] = monte_carlo
+    if ichimoku:
+        payload['ichimoku'] = {**ichimoku, 'informativo': True}
+
+    return payload
+
+
+def salvar_explicacao_ultimo_sinal(db_file, modo, pair, resultado, regime_info=None):
+    houve_sinal = resultado.get('motivo') == 'entrada' or resultado.get('sinal') is True
+    if not houve_sinal:
+        return None
+
+    tabela = TABELA_POR_MODO.get(modo)
+    if not tabela:
+        return None
+
+    try:
+        with sqlite3.connect(db_file) as conn:
+            row = conn.execute(
+                f"SELECT id, created_at FROM {tabela} WHERE pair=? ORDER BY created_at DESC LIMIT 1",
+                (pair,),
+            ).fetchone()
+        if not row:
+            return None
+        signal_id, created_at = row
+
+        payload = build_explicacao_payload(resultado, modo, regime_info=regime_info)
+
+        with sqlite3.connect(db_file) as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO scalp_explicacoes "
+                "(signal_id, pair, modo, created_at, payload_json) VALUES (?, ?, ?, ?, ?)",
+                (signal_id, pair, modo, created_at, json.dumps(payload, ensure_ascii=False)),
+            )
+            conn.commit()
+        return signal_id
+    except Exception as e:
+        print(f"[explicacao] erro ao salvar explicacao ({modo}, {pair}): {e}")
+        return None
+
+
+def process_pair_scalp_com_explicacao(db_file, pair, d1_candles, exec_candles, exec_tf_label,
+                                       send_telegram_fn=None, h4_candles=None):
+    resultado = process_pair_scalp(db_file, pair, d1_candles, exec_candles, exec_tf_label,
+                                    send_telegram_fn, h4_candles)
+    regime_info = compute_market_regime(d1_candles)
+    salvar_explicacao_ultimo_sinal(db_file, 'normal_choch', pair, resultado, regime_info=regime_info)
+    return resultado
+
+
+def process_pair_scalp_continuacao_com_explicacao(db_file, pair, d1_candles, exec_candles, exec_tf_label,
+                                                    send_telegram_fn=None, h4_candles=None):
+    resultado = process_pair_scalp_continuacao(db_file, pair, d1_candles, exec_candles, exec_tf_label,
+                                                send_telegram_fn, h4_candles)
+    regime_info = compute_market_regime(d1_candles)
+    salvar_explicacao_ultimo_sinal(db_file, 'continuacao_bos', pair, resultado, regime_info=regime_info)
+    return resultado
+
+
+def process_pair_scalp_indicadores_com_explicacao(db_file, pair, exec_candles, exec_tf_label,
+                                                     send_telegram_fn=None, d1_candles=None):
+    resultado = process_pair_scalp_indicadores(db_file, pair, exec_candles, exec_tf_label,
+                                                send_telegram_fn, d1_candles)
+    salvar_explicacao_ultimo_sinal(db_file, 'confluencia_indicadores', pair, resultado)
+    return resultado
+
+
+def process_pair_scalp_rapido_com_explicacao(db_file, pair, d1_candles, exec_candles, exec_tf_label,
+                                               send_telegram_fn=None):
+    resultado = process_pair_scalp_rapido(db_file, pair, d1_candles, exec_candles, exec_tf_label,
+                                           send_telegram_fn)
+    salvar_explicacao_ultimo_sinal(db_file, 'scalp_rapido', pair, resultado)
+    return resultado
+
+
+def process_pair_cascata_smc_com_explicacao(db_file, pair, w_candles, d1_candles, h4_candles, h1_candles,
+                                              exec_candles, exec_tf_label, send_telegram_fn=None):
+    resultado = process_pair_cascata_smc(db_file, pair, w_candles, d1_candles, h4_candles, h1_candles,
+                                          exec_candles, exec_tf_label, send_telegram_fn)
+    salvar_explicacao_ultimo_sinal(db_file, 'cascata_smc', pair, resultado)
+    return resultado
+
+
+def process_pair_scalp_antecipado_v2_com_explicacao(db_file, pair, d1_candles, exec_candles, exec_tf_label,
+                                                       send_telegram_fn=None, h4_candles=None):
+    resultado = process_pair_scalp_antecipado_v2(db_file, pair, d1_candles, exec_candles, exec_tf_label,
+                                                  send_telegram_fn, h4_candles)
+    salvar_explicacao_ultimo_sinal(db_file, 'antecipado_v2', pair, resultado)
+    return resultado
+
+
+explicacao_bp = Blueprint("explicacao_bp", __name__)
+
+
+def _db_file_explicacao():
+    return current_app.config.get('DB_FILE') or current_app.config.get('DB_PATH', '/data/alerts.db')
+
+
+@explicacao_bp.route("/scalp/sinal/<signal_id>/explicacao", methods=["GET"])
+def explicacao_por_id(signal_id):
+    try:
+        with sqlite3.connect(_db_file_explicacao()) as conn:
+            row = conn.execute(
+                "SELECT payload_json FROM scalp_explicacoes WHERE signal_id=?", (signal_id,)
+            ).fetchone()
+    except Exception as e:
+        return jsonify({"erro": str(e)}), 500
+
+    if not row:
+        return jsonify({"erro": "sinal nao encontrado ou ainda sem explicacao gerada"}), 404
+    return jsonify(json.loads(row[0]))
+
+
+@explicacao_bp.route("/scalp/sinal/ultimo/<modo>/<pair>/explicacao", methods=["GET"])
+def explicacao_ultimo(modo, pair):
+    if modo not in TABELA_POR_MODO:
+        return jsonify({"erro": f"modo desconhecido: {modo}. Use um de {list(TABELA_POR_MODO.keys())}"}), 400
+    try:
+        with sqlite3.connect(_db_file_explicacao()) as conn:
+            row = conn.execute(
+                "SELECT payload_json FROM scalp_explicacoes WHERE modo=? AND pair=? "
+                "ORDER BY created_at DESC LIMIT 1",
+                (modo, pair),
+            ).fetchone()
+    except Exception as e:
+        return jsonify({"erro": str(e)}), 500
+
+    if not row:
+        return jsonify({"erro": f"nenhum sinal com explicacao ainda para {pair}/{modo}"}), 404
+    return jsonify(json.loads(row[0]))

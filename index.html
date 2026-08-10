@@ -355,6 +355,35 @@ body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-h
 .live-tf-row{display:flex;gap:5px;flex-wrap:wrap;margin-top:8px;}
 .live-tf-btn{background:var(--surface2);border:1px solid var(--border);color:var(--text2);padding:5px 10px;border-radius:6px;font-size:10px;font-weight:700;font-family:'Space Mono',monospace;cursor:pointer;-webkit-tap-highlight-color:transparent;}
 .live-tf-btn.active{background:var(--gold);color:#000;border-color:transparent;}
+
+/* NOVO — Modal "Por que este sinal foi gerado?" */
+.explic-overlay{position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:500;display:none;align-items:flex-end;justify-content:center;}
+.explic-overlay.show{display:flex;}
+.explic-modal{background:var(--bg);border:1px solid var(--gold);border-radius:20px 20px 0 0;width:100%;max-width:600px;max-height:88vh;overflow-y:auto;padding:20px 18px 30px;}
+.explic-modal-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;}
+.explic-modal-title{font-size:16px;font-weight:700;font-family:'Space Mono',monospace;color:var(--text);display:flex;align-items:center;gap:8px;}
+.explic-close-btn{width:32px;height:32px;border-radius:50%;border:1px solid var(--gold);background:transparent;color:var(--gold);font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;-webkit-tap-highlight-color:transparent;}
+.explic-summary-row{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:18px;}
+.explic-chip{padding:6px 12px;border-radius:20px;border:1px solid var(--border);font-size:11px;font-weight:700;font-family:'Space Mono',monospace;color:var(--text2);background:var(--surface2);}
+.explic-chip.gold{border-color:var(--gold);color:var(--gold);background:rgba(240,192,64,.1);}
+.explic-section-title{font-size:11px;font-weight:700;color:var(--gold);font-family:'Space Mono',monospace;letter-spacing:1px;margin:18px 0 8px;display:flex;align-items:center;gap:6px;}
+.explic-list{list-style:none;padding:0;margin:0;}
+.explic-list li{font-size:13px;color:var(--text2);padding:6px 0 6px 16px;position:relative;border-bottom:1px solid var(--border);}
+.explic-list li:last-child{border-bottom:none;}
+.explic-list li::before{content:'•';position:absolute;left:0;color:var(--gold);}
+.explic-box{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:10px 14px;}
+.explic-kv{display:flex;justify-content:space-between;font-size:12px;padding:5px 0;font-family:'Space Mono',monospace;}
+.explic-kv span{color:var(--muted);}
+.explic-kv b{color:var(--text);}
+.explic-kv.red-val b{color:var(--red);}
+.explic-kv.green-val b{color:var(--green);}
+.explic-gate{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:10px 14px;margin-bottom:8px;}
+.explic-gate-title{font-size:12px;font-weight:700;font-family:'Space Mono',monospace;color:var(--text);}
+.explic-gate-desc{font-size:11px;color:var(--muted);margin-top:3px;line-height:1.4;}
+.explic-score-total{text-align:center;background:var(--surface);border:1px solid var(--gold);border-radius:12px;padding:16px;margin-top:18px;}
+.explic-score-label{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:2px;font-family:'Space Mono',monospace;}
+.explic-score-big{font-size:32px;font-weight:700;font-family:'Space Mono',monospace;color:var(--gold);margin-top:4px;}
+.explic-trigger-btn{width:100%;margin-top:10px;padding:9px;background:transparent;border:1px solid var(--gold);color:var(--gold);border-radius:8px;font-size:11px;font-weight:700;font-family:'Space Mono',monospace;cursor:pointer;letter-spacing:.5px;-webkit-tap-highlight-color:transparent;}
 </style>
 <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
 </head>
@@ -369,7 +398,6 @@ body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-h
 </div>
 
 <button id="floatingMicBtn" onclick="toggleVoiceFloating()" title="Ligar/desligar narração por voz" style="position:fixed;top:14px;right:14px;z-index:150;background:var(--surface);border:1px solid var(--border);border-radius:50%;width:38px;height:38px;font-size:17px;cursor:pointer;-webkit-tap-highlight-color:transparent;">🔊</button>
-
 <div class="section" style="margin-bottom:8px;">
   <div class="pair-selector-label">GRÁFICO AO VIVO — TIMEFRAME</div>
   <div class="live-tf-row" id="liveTfRow">
@@ -500,18 +528,11 @@ body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-h
   <div id="sinaisRecentesList"><div class="signals-empty">A carregar...</div></div>
 </div>
 
-<!-- NOVO: Radar da Cascata — todos os pares vigiados, fase atual de
-     cada um (zona/sweep/CHoCH/score), puxado do /cascade/status.
-     Ordenado com os mais quentes (score>=75) no topo. -->
 <div class="section">
   <div class="section-title">🎯 Setups Ao Vivo — Cascata (todos os pares)</div>
   <div id="cascadeFeedList"><div class="signals-empty">A carregar...</div></div>
 </div>
 
-<!-- NOVO: Scalp Ao Vivo — zona D1 + killzone + sweep + CHoCH no TF de
-     execução escolhido (M1/M5/M15) + retorno FVG/OB + score. Controle
-     de ligar/desligar por par fica aqui, o radar embaixo mostra todos
-     os pares vigiados de uma vez. -->
 <div class="section">
   <div class="section-title">⚡ Scalp Ao Vivo</div>
   <div class="pair-selector-card" style="margin:0 0 12px;">
@@ -535,8 +556,6 @@ body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-h
     </button>
   </div>
 
-  <!-- Card com gráfico REAL do par ativo (candle real da Bybit + zona
-       D1/sweep/CHoCH/entrada desenhados a partir do /scalp/status) -->
   <div class="result-summary-card" id="scalpChartCard" style="margin-bottom:12px;">
     <div class="rsc-header">
       <div>
@@ -556,16 +575,13 @@ body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-h
         <div class="rsc-level"><div class="rsc-level-label">STOP</div><div class="rsc-level-val red" id="scalpChartSl">—</div></div>
         <div class="rsc-level"><div class="rsc-level-label">TP</div><div class="rsc-level-val green" id="scalpChartTp">—</div></div>
       </div>
+      <button class="explic-trigger-btn" onclick="openExplicacaoModal('cascata_smc', activePair)">⚡ Por que este sinal foi gerado?</button>
     </div>
   </div>
 
   <div id="scalpFeedList"><div class="signals-empty">A carregar...</div></div>
 </div>
 
-<!-- NOVO: card com gráfico REAL do modo Rejeição Antecipada v2 —
-     candle real (TF de execução), com liquidez antiga varrida + RSI
-     extremo + entrada/SL/TP desenhados a partir do que o
-     /scalp_antecipado/status devolve de verdade. -->
 <div class="section">
   <div class="section-title">⚠️ Rejeição Antecipada v2</div>
   <div class="result-summary-card" id="antecipadoChartCard" style="margin-bottom:12px;">
@@ -587,13 +603,11 @@ body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-h
         <div class="rsc-level"><div class="rsc-level-label">STOP</div><div class="rsc-level-val red" id="antecipadoChartSl">—</div></div>
         <div class="rsc-level"><div class="rsc-level-label">TP</div><div class="rsc-level-val green" id="antecipadoChartTp">—</div></div>
       </div>
+      <button class="explic-trigger-btn" onclick="openExplicacaoModal('antecipado_v2', activePair)">⚡ Por que este sinal foi gerado?</button>
     </div>
   </div>
 </div>
 
-<!-- NOVO: card com gráfico REAL do modo Confluência de Indicadores —
-     candle real (TF de execução), votos dos ~11 indicadores técnicos
-     e entrada/SL/TP desenhados a partir do /scalp_indicadores/status. -->
 <div class="section">
   <div class="section-title">📊 Confluência de Indicadores</div>
   <div class="result-summary-card" id="indicadoresChartCard" style="margin-bottom:12px;">
@@ -615,15 +629,12 @@ body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-h
         <div class="rsc-level"><div class="rsc-level-label">STOP</div><div class="rsc-level-val red" id="indicadoresChartSl">—</div></div>
         <div class="rsc-level"><div class="rsc-level-label">TP</div><div class="rsc-level-val green" id="indicadoresChartTp">—</div></div>
       </div>
+      <button class="explic-trigger-btn" onclick="openExplicacaoModal('confluencia_indicadores', activePair)">⚡ Por que este sinal foi gerado?</button>
       <div class="pair-selector-label" style="margin-top:8px;margin-bottom:0;" id="indicadoresChartVotos"></div>
     </div>
   </div>
 </div>
 
-<!-- NOVO: card com gráfico REAL do modo Scalp Rápido — Liquidez Forte —
-     candle real (TF de execução), com resistência/suporte de ontem
-     (zona diária móvel) + região móvel Donchian + entrada/SL/TP
-     desenhados a partir do /scalp_rapido/status. -->
 <div class="section">
   <div class="section-title">⚡ Scalp Rápido — Liquidez Forte</div>
   <div class="result-summary-card" id="rapidoChartCard" style="margin-bottom:12px;">
@@ -645,12 +656,11 @@ body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-h
         <div class="rsc-level"><div class="rsc-level-label">STOP</div><div class="rsc-level-val red" id="rapidoChartSl">—</div></div>
         <div class="rsc-level"><div class="rsc-level-label">TP</div><div class="rsc-level-val green" id="rapidoChartTp">—</div></div>
       </div>
+      <button class="explic-trigger-btn" onclick="openExplicacaoModal('scalp_rapido', activePair)">⚡ Por que este sinal foi gerado?</button>
     </div>
   </div>
 </div>
 
-<!-- NOVO: Feed de Ciclos — todo ciclo do scheduler, mesmo os fracos,
-     separado do journal, pra ver histórico completo e debugar Telegram -->
 <div class="section">
   <div class="section-title">Feed de Ciclos (todos, inclusive fracos)</div>
   <div id="feedCiclosList"><div class="signals-empty">A carregar...</div></div>
@@ -829,6 +839,15 @@ body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-h
 
 <div class="toast" id="toast"></div>
 
+<div class="explic-overlay" id="explicacaoOverlay" onclick="if(event.target===this) closeExplicacaoModal()">
+  <div class="explic-modal">
+    <div class="explic-modal-header">
+      <div class="explic-modal-title">⚡ Por que este sinal foi gerado?</div>
+      <button class="explic-close-btn" onclick="closeExplicacaoModal()">✕</button>
+    </div>
+    <div id="explicacaoBody"><div class="signals-empty">A carregar...</div></div>
+  </div>
+</div>
 <script>
 // ── STATE ──
 let activePair = 'BTCUSD';
@@ -1783,7 +1802,6 @@ function resetAll(){
   updateUploadZone();
   window.scrollTo({top:0,behavior:'smooth'});
 }
-
 const LIVE_TF_INTERVALS = { D1: 'D', H4: '240', H1: '60', M15: '15', M5: '5' };
 const LIVE_SYMBOL_MAP = {'BTCUSD':'BTCUSDT','ETHUSD':'ETHUSDT','SOLUSD':'SOLUSDT','XRPUSD':'XRPUSDT','LINKUSD':'LINKUSDT','ADAUSD':'ADAUSDT','AVAXUSD':'AVAXUSDT','BNBUSD':'BNBUSDT','AAVEUSD':'AAVEUSDT','ONDOUSD':'ONDOUSDT','INJUSD':'INJUSDT','NEARUSD':'NEARUSDT','PENDLEUSD':'PENDLEUSDT','SUIUSD':'SUIUSDT','JTOUSD':'JTOUSDT','ETHFIUSD':'ETHFIUSDT','JUPUSD':'JUPUSDT','ENAUSD':'ENAUSDT'};
 
@@ -3434,7 +3452,6 @@ setTimeout(updateServerPrices,500);
 setInterval(updateServerPrices,15000);
 setTimeout(()=>loadFundingOI('BTCUSD'),1200);
 setInterval(()=>loadFundingOI(activePair),60000);
-
 const SIGNALS_SYMBOL_MAP = {'BTCUSD':'BTCUSDT','ETHUSD':'ETHUSDT','SOLUSD':'SOLUSDT','XRPUSD':'XRPUSDT','LINKUSD':'LINKUSDT','ADAUSD':'ADAUSDT','AVAXUSD':'AVAXUSDT','BNBUSD':'BNBUSDT','AAVEUSD':'AAVEUSDT','ONDOUSD':'ONDOUSDT','INJUSD':'INJUSDT','NEARUSD':'NEARUSDT','PENDLEUSD':'PENDLEUSDT','SUIUSD':'SUIUSDT','JTOUSD':'JTOUSDT','ETHFIUSD':'ETHFIUSDT','JUPUSD':'JUPUSDT','ENAUSD':'ENAUSDT'};
 
 function computeLivePct(direction, entry, currentPrice){
@@ -3512,9 +3529,6 @@ async function loadSignalsPanel(){
 setTimeout(loadSignalsPanel, 1500);
 setInterval(loadSignalsPanel, 20000);
 
-// ── NOVO: Radar da Cascata — traduz o resultado bruto do cascade_engine
-// (motivo/score) numa fase visual, pra cada par que o /cascade/status
-// devolver. Ordena com os mais quentes (score>=75) no topo. ──
 function derivarFaseCascade(r){
   if(!r || !r.result) return {fase:0, texto:'Sem ciclo ainda', cor:'var(--muted)', dot:'⚪'};
   const res = r.result;
@@ -3567,10 +3581,6 @@ async function loadCascadeFeed(){
 setTimeout(loadCascadeFeed, 1500);
 setInterval(loadCascadeFeed, 15000);
 
-// ── NOVO: Scalp Ao Vivo — TF de execução escolhido pelo utilizador
-// (M1/M5/M15), sessões ligadas/desligadas por par, e o radar puxando
-// /scalp/status. Killzone é só INFORMATIVO (bônus no score, não gate);
-// aqui só mostramos o horário atual de forma informativa. ──
 let scalpExecTf = 'M5';
 let scalpSessions = {};
 
@@ -3585,7 +3595,7 @@ function updateScalpKillzoneNow(){
   const el = document.getElementById('scalpKillzoneNow');
   if(!el) return;
   const nowUtc = new Date();
-  const ptHour = (nowUtc.getUTCHours() + 1) % 24; // aproximação UTC+1, igual ao backend
+  const ptHour = (nowUtc.getUTCHours() + 1) % 24;
   let dentro = null;
   if(ptHour >= 7 && ptHour < 10) dentro = 'London (07h-10h)';
   else if(ptHour >= 13 && ptHour < 16) dentro = 'New York (13h-16h)';
@@ -3646,44 +3656,33 @@ function derivarFaseScalp(r){
   const kzTag = res.na_killzone ? ' 🟢KZ' : ' 🔴fora-KZ';
   const motivo = res.motivo || '';
 
-  // Cascata SMC: timeframes maiores ainda não alinhados
   if(motivo.indexOf('timeframes maiores não alinhados') === 0)
     return {texto:'Aguardando alinhamento macro (Sem→D1→H4→H1)', cor:'var(--muted)', dot:'⚪', fase:1};
 
-  // Cascata: alinhado, mas sem candle D1 anterior ainda
   if(motivo.indexOf('sem candle D1 anterior disponível') >= 0)
     return {texto:'Timeframes alinhados — aguardando dado D1', cor:'#f0c040', dot:'🟡', fase:2};
 
-  // Cascata: alinhado, mas sem sweep na zona diária ainda
   if(motivo.indexOf('sem sweep na zona diária ainda') >= 0)
     return {texto:'Macro alinhado — aguardando sweep na zona diária'+kzTag, cor:'#f0c040', dot:'🟡', fase:2};
 
-  // Cascata: sweep contra o bias maior (descartado)
   if(motivo.indexOf('descartado (sweep contra o bias maior)') >= 0)
     return {texto:'Sweep encontrado, mas contra o macro — descartado', cor:'var(--muted)', dot:'⚪', fase:1};
 
-  // Cascata: sweep alinhado, aguardando CHoCH/BOS
   if(motivo.indexOf('sem CHoCH nem BOS confirmado ainda') >= 0)
     return {texto:'Sweep alinhado — aguardando CHoCH ou BOS ('+res.exec_tf+')'+kzTag, cor:'#f85149', dot:'🟠', fase:3};
 
-  // Cascata: CHoCH/BOS confirmou, mas contra o macro
   if(motivo.indexOf('contra o macro') >= 0 && motivo.indexOf('descartado') >= 0)
     return {texto:motivo, cor:'var(--muted)', dot:'⚪', fase:1};
 
-  // Cascata: confirmou tudo, mas preço em Premium/Discount errado
   if(motivo.indexOf('não compra no topo') >= 0 || motivo.indexOf('não vende no fundo') >= 0)
     return {texto:(res.evento_tipo||'Estrutura')+' confirmado — aguardando preço sair de '+(motivo.indexOf('PREMIUM')>=0?'Premium':'Discount')+kzTag, cor:'#a685f2', dot:'🟣', fase:5};
 
-  // Cascata: sinal confirmado, mas em cooldown
   if(motivo.indexOf('entrada_confirmada, mas em cooldown') === 0)
     return {texto:'🔥 Setup confirmado — aguardando cooldown ('+(res.evento_tipo||'')+', '+(res.direcao==='alta'?'LONG':'SHORT')+')', cor:'#58a6ff', dot:'🔵', fase:6};
 
-  // Cascata: sinal ativo de verdade
   if(motivo === 'entrada_confirmada')
     return {texto:'🔥 SETUP ATIVO (Cascata) — '+(res.direcao==='alta'?'LONG':'SHORT')+' via '+(res.evento_tipo||'')+' ('+res.exec_tf+')', cor:'#3fb950', dot:'🟢', fase:7};
 
-  // ── modos antigos (Modo 1/2), mantidos por compatibilidade caso
-  // algum dia voltem a ser chamados no ciclo ──
   if(motivo === 'preço fora da zona D1 (última zona mapeada mantida)'){
     const sweepTxt = res.sweep_nivel ? ' — sweep anterior ('+res.sweep_lado+') ainda guardado' : '';
     return {texto:'Fora da zona agora (última zona mantida)'+sweepTxt, cor:'var(--muted)', dot:'⚪', fase:1};
@@ -3703,7 +3702,6 @@ function derivarFaseScalp(r){
   if(motivo && motivo.indexOf('score') >= 0)
     return {texto:'Score '+res.score+' (falta pra 75)'+kzTag, cor:'#58a6ff', dot:'🔵', fase:6};
 
-  // fallback: mostra o motivo cru em vez de mentir "Sem ciclo ainda"
   return {texto: motivo || 'Sem ciclo ainda', cor:'var(--muted)', dot:'⚪', fase:0};
 }
 
@@ -3742,9 +3740,6 @@ async function loadScalpFeed(){
 setTimeout(loadScalpFeed, 1500);
 setInterval(loadScalpFeed, 15000);
 
-// ── NOVO: card com gráfico REAL do par ativo no Scalp — candle real da
-// Bybit (TF de execução), com zona D1, sweep, CHoCH e entrada/SL/TP
-// desenhados a partir do que o /scalp/status devolve de verdade. ──
 function drawScalpChart(candles, result){
   const canvas = document.getElementById('scalpChartCanvas');
   if(!canvas || !candles || candles.length < 5) return;
@@ -3890,13 +3885,6 @@ async function loadScalpDetailCard(){
 setTimeout(loadScalpDetailCard, 1600);
 setInterval(loadScalpDetailCard, 15000);
 
-// ═══════════════════════════════════════════════════════════════════
-// NOVO: cards dos outros 3 modos ativos (Antecipado v2, Confluência de
-// Indicadores, Scalp Rápido) — mesmo padrão visual do card da Cascata
-// (candle real + zonas/níveis desenhados a partir do que o backend
-// devolve de verdade), só trocando os campos que cada modo usa.
-// ═══════════════════════════════════════════════════════════════════
-
 function derivarFaseAntecipado(result){
   if(!result || !result.motivo) return {texto:'Sem ciclo ainda', cor:'var(--muted)'};
   const r = result;
@@ -3942,9 +3930,6 @@ function derivarFaseRapido(result){
   return {texto:m, cor:'var(--muted)'};
 }
 
-// desenho genérico: candle real + linhas de entrada/stop/tp + até 2
-// zonas retangulares opcionais (usado pelos 3 modos, cada um passa as
-// zonas que fizer sentido pro seu conceito)
 function drawGenericLevelsChart(canvasId, candles, levels, zonas){
   const canvas = document.getElementById(canvasId);
   if(!canvas || !candles || candles.length < 5) return;
@@ -4010,7 +3995,6 @@ function drawGenericLevelsChart(canvasId, candles, levels, zonas){
   });
 }
 
-// ── Rejeição Antecipada v2 ──
 async function loadAntecipadoDetailCard(){
   const pairLabelEl = document.getElementById('antecipadoChartPairLabel');
   if(!pairLabelEl) return;
@@ -4057,7 +4041,6 @@ async function loadAntecipadoDetailCard(){
 setTimeout(loadAntecipadoDetailCard, 1700);
 setInterval(loadAntecipadoDetailCard, 15000);
 
-// ── Confluência de Indicadores ──
 async function loadIndicadoresDetailCard(){
   const pairLabelEl = document.getElementById('indicadoresChartPairLabel');
   if(!pairLabelEl) return;
@@ -4107,7 +4090,6 @@ async function loadIndicadoresDetailCard(){
 setTimeout(loadIndicadoresDetailCard, 1800);
 setInterval(loadIndicadoresDetailCard, 15000);
 
-// ── Scalp Rápido — Liquidez Forte ──
 async function loadRapidoDetailCard(){
   const pairLabelEl = document.getElementById('rapidoChartPairLabel');
   if(!pairLabelEl) return;
@@ -4170,8 +4152,6 @@ async function loadRapidoDetailCard(){
 setTimeout(loadRapidoDetailCard, 1900);
 setInterval(loadRapidoDetailCard, 15000);
 
-// ── NOVO: Feed de Ciclos — busca /live/history e desenha todo ciclo do
-// scheduler (mesmo os fracos), separado dos Sinais Ativos/Recentes. ──
 async function loadFeedCiclos(){
   try{
     const res = await fetch('/live/history?limit=25');
@@ -4425,6 +4405,99 @@ function showToast(msg){
   toast.textContent = msg;
   toast.classList.add('show');
   setTimeout(()=>toast.classList.remove('show'), 3000);
+}
+
+// ── NOVO — Modal "Por que este sinal foi gerado?" ──
+async function openExplicacaoModal(modo, pair){
+  const overlay = document.getElementById('explicacaoOverlay');
+  const body = document.getElementById('explicacaoBody');
+  overlay.classList.add('show');
+  body.innerHTML = '<div class="signals-empty">A carregar...</div>';
+  try{
+    const res = await fetch('/scalp/sinal/ultimo/' + modo + '/' + pair + '/explicacao');
+    const data = await res.json();
+    if(data.erro){
+      body.innerHTML = '<div class="signals-empty">' + data.erro + '</div>';
+      return;
+    }
+    body.innerHTML = renderExplicacao(data);
+  }catch(e){
+    body.innerHTML = '<div class="signals-empty">Erro ao carregar: ' + e.message + '</div>';
+  }
+}
+
+function closeExplicacaoModal(){
+  document.getElementById('explicacaoOverlay').classList.remove('show');
+}
+
+function renderExplicacao(d){
+  const resumo = d.resumo || {};
+  const dirLabel = resumo.direcao === 'alta' ? '📈 COMPRA' : resumo.direcao === 'baixa' ? '📉 VENDA' : '—';
+  const probTxt = (resumo.prob_acerto_pct != null) ? resumo.prob_acerto_pct + '%' : 'N/D';
+
+  let html = '';
+
+  html += '<div class="explic-summary-row">';
+  html += '<span class="explic-chip">' + dirLabel + '</span>';
+  html += '<span class="explic-chip">' + (resumo.par || '') + '</span>';
+  html += '<span class="explic-chip">' + (resumo.timeframe || '') + '</span>';
+  html += '<span class="explic-chip gold">🎯 ' + probTxt + ' (Monte Carlo real)</span>';
+  html += '</div>';
+
+  html += '<div class="explic-section-title">✅ Motivos Principais</div>';
+  html += '<ul class="explic-list">' + (d.motivos_principais || []).map(m => '<li>' + m + '</li>').join('') + '</ul>';
+
+  const ctx = d.contexto_de_mercado || {};
+  html += '<div class="explic-section-title">📊 Contexto de Mercado</div>';
+  html += '<div class="explic-box">';
+  if(ctx.regime) html += '<div class="explic-kv"><span>Regime</span><b>' + ctx.regime + (ctx.adx != null ? ' (ADX ' + ctx.adx + ')' : '') + '</b></div>';
+  if(ctx.na_killzone != null) html += '<div class="explic-kv"><span>Killzone</span><b>' + (ctx.na_killzone ? ('sim — ' + (ctx.killzone_nome || '')) : 'não') + '</b></div>';
+  if(ctx.bias_d1) html += '<div class="explic-kv"><span>Viés D1</span><b>' + ctx.bias_d1 + '</b></div>';
+  if(ctx.bias_h4) html += '<div class="explic-kv"><span>Viés H4</span><b>' + ctx.bias_h4 + '</b></div>';
+  if(ctx.bias_semanal) html += '<div class="explic-kv"><span>Viés Semanal</span><b>' + ctx.bias_semanal + '</b></div>';
+  html += '</div>';
+
+  const at = d.analise_tecnica || {};
+  html += '<div class="explic-section-title">📐 Análise Técnica</div>';
+  html += '<div class="explic-box">';
+  if(at.entrada) html += '<div class="explic-kv"><span>Entrada</span><b>' + at.entrada + '</b></div>';
+  if(at.sl) html += '<div class="explic-kv red-val"><span>Stop</span><b>' + at.sl + '</b></div>';
+  if(at.tp) html += '<div class="explic-kv green-val"><span>TP</span><b>' + at.tp + '</b></div>';
+  if(at.rr) html += '<div class="explic-kv"><span>Risco/Retorno</span><b>1:' + at.rr + '</b></div>';
+  if(at.rsi14 != null) html += '<div class="explic-kv"><span>RSI</span><b>' + at.rsi14 + '</b></div>';
+  html += '</div>';
+
+  html += '<div class="explic-section-title">🛡️ Filtros de Qualidade</div>';
+  html += (d.filtros_de_qualidade || []).map(g => {
+    const icon = g.passou ? '✅' : '❌';
+    return '<div class="explic-gate"><div class="explic-gate-title">' + icon + ' ' + g.nome + '</div><div class="explic-gate-desc">' + (g.descricao || '') + '</div></div>';
+  }).join('');
+
+  if(d.monte_carlo){
+    const mc = d.monte_carlo;
+    html += '<div class="explic-section-title">🎲 Monte Carlo (simulação real, não decorativa)</div>';
+    html += '<div class="explic-box">';
+    html += '<div class="explic-kv"><span>Prob. Alta</span><b>' + mc.prob_alta_pct + '%</b></div>';
+    html += '<div class="explic-kv"><span>Prob. Baixa</span><b>' + mc.prob_baixa_pct + '%</b></div>';
+    html += '<div class="explic-kv"><span>Simulações</span><b>' + mc.n_sims + ' x ' + mc.n_steps + ' passos</b></div>';
+    html += '</div>';
+  }
+
+  if(d.ichimoku){
+    html += '<div class="explic-section-title">☁️ Ichimoku (informativo)</div>';
+    html += '<div class="explic-box"><div class="explic-kv"><span>Viés</span><b>' + (d.ichimoku.bias || '—') + '</b></div></div>';
+  }
+
+  const st = d.score_total || {};
+  const scoreTxt = st.score != null
+    ? st.score + '/100'
+    : (st.votos_favor != null ? st.votos_favor + '/' + st.votos_total + ' votos' : '—');
+  html += '<div class="explic-score-total">';
+  html += '<div class="explic-score-label">Score Total</div>';
+  html += '<div class="explic-score-big">' + scoreTxt + '</div>';
+  html += '</div>';
+
+  return html;
 }
 
 updateUploadZone();

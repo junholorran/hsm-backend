@@ -10,6 +10,7 @@ import requests
 import json
 from flask import Blueprint, jsonify, current_app
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 
 SCORE_THRESHOLD_SINAL = 75
 COOLDOWN_SECONDS = 45 * 60
@@ -45,13 +46,15 @@ MONTE_CARLO_GATE_MIN_PROB = 55
 MONTE_CARLO_GATE_ATIVO = True
 
 MODOS_ATIVOS = {
-    'normal_choch': True,
-    'continuacao_bos': True,
-    'cascata_smc': True,
+    'normal_choch': False,          # desativado 10/08 — win rate 8.3%, substituído pelo gates_vortex
+    'continuacao_bos': False,        # desativado 10/08 — win rate 0.0%, substituído pelo gates_vortex
+    'cascata_smc': False,            # desativado 10/08 — zero trades em semanas, substituído pelo gates_vortex
     'confluencia_indicadores': False,
     'scalp_rapido': False,
     'antecipado_v2': False,
-    '4camadas': False,  # experimental — réplica intencional da lógica do concorrente
+    '4camadas': False,               # réplica intencional do concorrente — mantido só como referência/comparação
+    'sfp_liquidez': False,           # incorporado dentro do gates_vortex — não precisa rodar separado
+    'gates_vortex': True,            # ── MOTOR ÚNICO ── junta tudo que foi validado até aqui
 }
 
 
@@ -2022,6 +2025,1030 @@ def scalp_signal_history(db_file, pair=None, limit=30, table='scalp_signal_state
     except Exception as e:
         print(f"[scalp_engine] erro ao gerar histórico de {pair} ({table}): {e}")
         return {'signals': [], 'error': str(e)}
+# ═══════════════════════════════════════════════════════════════════════
+# TP DINÂMICO — decisão explícita do usuário (10/08): nada de RR fixo
+# tipo "sempre 2.5x". O alvo passa a vir da análise real do gráfico —
+# a próxima liquidez de verdade (zona D1 oposta, Order Block, Equal
+# Highs/Lows) que o preço tem motivo real pra buscar. Só cai pro
+# Monte Carlo real (nunca decorativo) ou pro RR mínimo se não houver
+# nenhuma liquidez real mapeada na direção do trade.
+# ═══════════════════════════════════════════════════════════════════════
+
+TP_DINAMICO_MAX_RR = 6.0  # teto de sanidade — nunca mira mais que isso
+
+
+def _find_liquidez_alvo(direcao, entry, exec_candles, d1_candles):
+    """Levanta candidatos reais de alvo (liquidez) na direção do trade:
+    Equal Highs/Lows, zona D1 oposta, Order Blocks."""
+    candidatos = []
+
+    try:
+        for eq in find_equal_highs_lows(exec_candles):
+            nivel = eq['nivel']
+            if direcao == 'alta' and nivel > entry:
+                candidatos.append((eq['tipo'], nivel))
+            elif direcao == 'baixa' and nivel < entry:
+                candidatos.append((eq['tipo'], nivel))
+    except Exception:
+        pass
+
+    try:
+        for banda in compute_d1_zones(d1_candles):
+            if direcao == 'alta' and banda['top'] > entry:
+                candidatos.append(('zona_d1', banda['top']))
+            elif direcao == 'baixa' and banda['bottom'] < entry:
+                candidatos.append(('zona_d1', banda['bottom']))
+    except Exception:
+        pass
+
+    try:
+        for ob in find_order_blocks(exec_candles):
+            if direcao == 'alta' and ob['bottom'] > entry:
+                candidatos.append(('OB', ob['bottom']))
+            elif direcao == 'baixa' and ob['top'] < entry:
+                candidatos.append(('OB', ob['top']))
+    except Exception:
+        pass
+
+    return candidatos
+
+
+def calcular_tp_dinamico(direcao, entry, sl, exec_candles, d1_candles, min_rr=None):
+    """
+    Devolve (tp, origem_texto). Prioridade:
+    1. Liquidez real mais próxima (EQH/EQL, zona D1, OB) que já renda
+       pelo menos min_rr — pega a MAIS PRÓXIMA, não a mais distante,
+       porque é a que o preço tem mais chance de alcançar primeiro.
+    2. Monte Carlo real (cenário otimista/pessimista da simulação),
+       se render pelo menos min_rr.
+    3. Só em último caso, RR mínimo puro sobre o risco real do setup.
+    """
+    min_rr = min_rr if min_rr is not None else MIN_RR_GATE
+    risco = abs(entry - sl)
+    if risco <= 0:
+        return None, 'sem_risco_valido'
+
+    validos = []
+    for origem, nivel in _find_liquidez_alvo(direcao, entry, exec_candles, d1_candles):
+        distancia = abs(nivel - entry)
+        rr = distancia / risco
+        if min_rr <= rr <= TP_DINAMICO_MAX_RR:
+            validos.append((origem, nivel, rr))
+
+    if validos:
+        validos.sort(key=lambda x: x[2])  # mais próximo primeiro
+        origem, nivel, rr = validos[0]
+        return nivel, f'liquidez_real:{origem} (RR {rr:.2f})'
+
+    try:
+        mc = compute_monte_carlo(exec_candles)
+    except Exception:
+        mc = None
+    if mc:
+        alvo_mc = mc['cenario_otimista'] if direcao == 'alta' else mc['cenario_pessimista']
+        distancia = abs(alvo_mc - entry)
+        rr = distancia / risco
+        if rr >= min_rr:
+            return alvo_mc, f'monte_carlo (RR {rr:.2f})'
+
+    tp_fallback = entry + risco * min_rr if direcao == 'alta' else entry - risco * min_rr
+    return tp_fallback, f'fallback_rr_minimo ({min_rr})'
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# MULTI-ATIVO — Bias (NY Midnight Open) + SFP (Swing Failure Pattern
+# contra sessão anterior) + MSS + FVG, com validação estrita em
+# sequência (cada passo tem que confirmar o anterior, sem gambiarra de
+# soma de pontos). Funciona pra qualquer ativo que alimente candles —
+# XAU/USD ainda não tem fonte de dado real conectada no backend, mas a
+# lógica em si já roda igual pra XAU e pra Cripto assim que a fonte
+# existir.
+# ═══════════════════════════════════════════════════════════════════════
+
+PARES_METAL = {'XAUUSD', 'XAUUSDT', 'GOLDUSD', 'GOLDUSDT', 'PAXGUSDT'}
+
+ASSET_PROFILES = {
+    'metal': {'wick_buffer_mult': 1.0},
+    'crypto': {'wick_buffer_mult': 1.8},  # cripto pavia bem mais forte que XAU/forex
+}
+
+NY_TZ = ZoneInfo('America/New_York')
+
+SESSOES_UTC = {
+    'asia': (0, 8),      # 00:00–08:00 UTC
+    'london': (7, 16),   # 07:00–16:00 UTC (cobre o killzone de Londres)
+}
+
+
+def get_asset_class(pair):
+    return 'metal' if pair.upper() in PARES_METAL else 'crypto'
+
+
+def get_asset_profile(pair):
+    return ASSET_PROFILES[get_asset_class(pair)]
+
+
+def _find_open_at_hour(candles, hora_alvo, tz):
+    """Acha o open do candle mais recente que abriu na hora alvo, no
+    fuso horário indicado — serve de 'linha de água' de referência
+    (Midnight Open)."""
+    melhor = None
+    for c in candles:
+        dt = datetime.fromtimestamp(c['t'] / 1000, tz=timezone.utc).astimezone(tz)
+        if dt.hour == hora_alvo and dt.minute < 5:
+            melhor = c
+    return melhor['o'] if melhor else None
+
+
+def compute_midnight_open_utc(candles):
+    """UTC Midnight Open — abertura do candle das 00:00 UTC."""
+    return _find_open_at_hour(candles, 0, timezone.utc)
+
+
+def compute_midnight_open_ny(candles):
+    """NY Midnight Open — abertura às 00:00 America/New_York (DST correto
+    via zoneinfo, sem offset fixo que quebra no horário de verão)."""
+    return _find_open_at_hour(candles, 0, NY_TZ)
+
+
+def compute_bias_midnight_open(candles, midnight_open_fn=compute_midnight_open_ny):
+    """Bias de Compra/Venda: preço atual acima ou abaixo do Midnight
+    Open. Retorna ('alta'|'baixa'|None, midnight_open)."""
+    if not candles:
+        return None, None
+    midnight_open = midnight_open_fn(candles)
+    if midnight_open is None:
+        return None, None
+    preco_atual = candles[-1]['c']
+    bias = 'alta' if preco_atual > midnight_open else 'baixa'
+    return bias, midnight_open
+
+
+def compute_session_high_low(candles, sessao, dias_atras=1):
+    """High/Low de uma sessão (Ásia ou Londres) de N dias atrás — nível
+    de liquidez real que o SFP vai testar."""
+    if sessao not in SESSOES_UTC or not candles:
+        return None
+    inicio_h, fim_h = SESSOES_UTC[sessao]
+    hoje_utc = datetime.fromtimestamp(candles[-1]['t'] / 1000, tz=timezone.utc).date()
+    dia_alvo = hoje_utc - timedelta(days=dias_atras)
+
+    highs, lows = [], []
+    for c in candles:
+        dt = datetime.fromtimestamp(c['t'] / 1000, tz=timezone.utc)
+        if dt.date() == dia_alvo and inicio_h <= dt.hour < fim_h:
+            highs.append(c['h'])
+            lows.append(c['l'])
+    if not highs:
+        return None
+    return {'high': max(highs), 'low': min(lows), 'sessao': sessao, 'dia': str(dia_alvo)}
+
+
+def detect_sfp_sessao(exec_candles, session_range):
+    """
+    Swing Failure Pattern contra o High/Low de uma sessão específica:
+    candle que ultrapassa o nível com o pavio mas FECHA de volta dentro
+    — a assinatura clássica de caça de liquidez SMC. Procura nos
+    últimos candles (mais recente primeiro).
+    """
+    if not session_range:
+        return None
+    high, low = session_range['high'], session_range['low']
+    for i in range(len(exec_candles) - 1, max(0, len(exec_candles) - 40), -1):
+        c = exec_candles[i]
+        if c['h'] > high and c['c'] < high:
+            return {
+                'index': i, 'tipo': 'SFP_bearish', 'nivel': high,
+                'sl_nivel': c['h'], 't': c['t'], 'sessao': session_range['sessao'],
+            }
+        if c['l'] < low and c['c'] > low:
+            return {
+                'index': i, 'tipo': 'SFP_bullish', 'nivel': low,
+                'sl_nivel': c['l'], 't': c['t'], 'sessao': session_range['sessao'],
+            }
+    return None
+
+
+def compute_wick_atr(candles, period=14):
+    """ATR calculado só em cima do tamanho dos pavios (rejeição), não do
+    range total do candle. Cripto costuma ter pavios muito mais longos
+    que XAU/forex — um ATR de corpo comum fica curto demais pro stop."""
+    n = len(candles)
+    if n < period + 1:
+        return None
+    pavios = []
+    for c in candles[-period:]:
+        corpo_top = max(c['o'], c['c'])
+        corpo_bottom = min(c['o'], c['c'])
+        pavio_sup = c['h'] - corpo_top
+        pavio_inf = corpo_bottom - c['l']
+        pavios.append(max(pavio_sup, pavio_inf))
+    return sum(pavios) / len(pavios) if pavios else None
+
+
+def aplicar_buffer_stop_multiativo(nivel, direcao, exec_candles, pair, fallback_pct=STOP_BUFFER_PCT):
+    """Buffer de stop ajustado pela CLASSE do ativo. Cripto usa o pavio
+    médio (wick ATR) multiplicado pelo perfil do ativo; XAU/metal usa o
+    ATR normal, que já é adequado pro comportamento mais 'liso' dele."""
+    classe = get_asset_class(pair)
+    perfil = get_asset_profile(pair)
+
+    if classe == 'crypto':
+        wick_atr = compute_wick_atr(exec_candles, 14)
+        if wick_atr and wick_atr > 0:
+            folga = wick_atr * perfil['wick_buffer_mult']
+            return nivel - folga if direcao == 'alta' else nivel + folga
+        return aplicar_buffer_stop_atr(nivel, direcao, exec_candles, fallback_pct=fallback_pct)
+
+    return aplicar_buffer_stop_atr(nivel, direcao, exec_candles, fallback_pct=fallback_pct)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# PIPELINE SMC/ICT ESTRITO — Bias (Midnight Open) → SFP → MSS (M1) → FVG.
+# Só retorna sinal quando 100% das condições passarem em sequência; se
+# qualquer passo falhar ou for invalidado (breakout real), devolve
+# status NEUTRAL (equivalente a NULL) — nunca força um sinal.
+#
+# Funciona igual pra XAU/USD e Cripto (BTC/ETH/SOL/...) — só troca a
+# fonte do Midnight Open (NY pro ouro, UTC pra cripto) e a janela de
+# liquidez (sessão anterior pro ouro, últimos 3-7 dias pra cripto).
+# ═══════════════════════════════════════════════════════════════════════
+
+SFP_LIQUIDEZ_COOLDOWN_SECONDS = 45 * 60
+XAU_PIP_SIZE = 0.01  # ajusta aqui se a tua corretora usar outra convenção de pip pro XAU
+XAU_SL_BUFFER_PIPS = 2
+CRYPTO_SL_BUFFER_PCT = 0.002  # 0.2%
+MSS_CORPO_MIN_PCT = 0.5  # corpo/range mínimo pra considerar "momentum forte"
+TP1_MIN_RR = 2.0
+TP2_MIN_RR = 3.0
+
+
+def init_sfp_liquidez_db(db_file):
+    with sqlite3.connect(db_file) as conn:
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS scalp_sfp_liquidez_signal_state (
+                id TEXT PRIMARY KEY,
+                pair TEXT,
+                created_at INTEGER,
+                exec_tf TEXT,
+                direcao TEXT,
+                entry REAL,
+                sl REAL,
+                tp1 REAL,
+                tp2 REAL,
+                bias_context TEXT,
+                resultado_final TEXT DEFAULT 'pendente',
+                alerted INTEGER DEFAULT 0
+            )
+        ''')
+        conn.commit()
+
+
+def _save_sfp_liquidez_signal(db_file, pair, exec_tf_label, resultado, alerted):
+    try:
+        signal_id = f"sfp_{pair}_{int(time.time()*1000)}"
+        with sqlite3.connect(db_file) as conn:
+            conn.execute('''
+                INSERT INTO scalp_sfp_liquidez_signal_state
+                    (id, pair, created_at, exec_tf, direcao, entry, sl, tp1, tp2, bias_context, alerted)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                signal_id, pair, int(time.time()), exec_tf_label,
+                resultado['direcao'], resultado['entry'], resultado['sl'],
+                resultado['tp1'], resultado['tp2'], resultado.get('bias_context'),
+                1 if alerted else 0,
+            ))
+            conn.commit()
+    except Exception as e:
+        print(f"[scalp_engine sfp_liquidez] erro ao salvar sinal de {pair}: {e}")
+
+
+# ── PASSO 1: Bias via Midnight Open ─────────────────────────────────────
+
+def compute_bias_midnight_open_estrito(pair, candles_por_tf):
+    """
+    Bias ESTRITO de reversão (consequent encroachment ICT):
+    - Preço ACIMA do Midnight Open -> só procura SHORT.
+    - Preço ABAIXO do Midnight Open -> só procura LONG.
+    XAU usa NY Midnight Open (~05:00 WET, calculado via zoneinfo com DST
+    correto — equivale ao "05:00 UTC+1" pedido, mas sem quebrar no
+    horário de verão). Cripto usa UTC Midnight Open (00:00 UTC).
+
+    Retorna (direcao_permitida, midnight_open, bias_context) — qualquer
+    um None se não der pra calcular.
+    """
+    classe = get_asset_class(pair)
+    candles_ref = candles_por_tf.get('M15') or candles_por_tf.get('M5') or candles_por_tf.get('H1')
+    if not candles_ref:
+        return None, None, None
+
+    midnight_open = compute_midnight_open_ny(candles_ref) if classe == 'metal' else compute_midnight_open_utc(candles_ref)
+    if midnight_open is None:
+        return None, None, None
+
+    preco_atual = candles_ref[-1]['c']
+    if preco_atual > midnight_open:
+        return 'baixa', midnight_open, 'ACIMA_MIDNIGHT_OPEN'
+    return 'alta', midnight_open, 'ABAIXO_MIDNIGHT_OPEN'
+
+
+# ── PASSO 2: Liquidez de referência + SFP com cancelamento por breakout ──
+
+def compute_liquidez_referencia(pair, candles_por_tf):
+    """
+    XAU: High/Low da sessão anterior (Londres, fallback Ásia).
+    Cripto: High/Low dos últimos 3-7 dias (D1), excluindo o dia em curso.
+    Devolve também 'cutoff_ts' — só candles depois desse timestamp
+    contam pra validação do SFP (não pode usar candle que ainda fez
+    parte da própria formação da liquidez).
+    """
+    classe = get_asset_class(pair)
+
+    if classe == 'metal':
+        candles_sessao = candles_por_tf.get('M15') or candles_por_tf.get('H1')
+        if not candles_sessao:
+            return None
+        for sessao in ('london', 'asia'):
+            liquidez = compute_session_high_low(candles_sessao, sessao, dias_atras=1)
+            if liquidez:
+                candles_da_sessao = [
+                    c for c in candles_sessao
+                    if datetime.fromtimestamp(c['t'] / 1000, tz=timezone.utc).date().isoformat() == liquidez['dia']
+                    and SESSOES_UTC[sessao][0] <= datetime.fromtimestamp(c['t'] / 1000, tz=timezone.utc).hour < SESSOES_UTC[sessao][1]
+                ]
+                liquidez['cutoff_ts'] = max(c['t'] for c in candles_da_sessao) if candles_da_sessao else None
+                liquidez['candles_liquidez'] = candles_da_sessao
+                return liquidez
+        return None
+
+    # cripto: últimos 3-7 dias em D1
+    d1 = candles_por_tf.get('D1')
+    if not d1 or len(d1) < 4:
+        return None
+    janela = d1[-8:-1] if len(d1) >= 8 else d1[:-1]
+    if len(janela) < 3:
+        return None
+    return {
+        'high': max(c['h'] for c in janela),
+        'low': min(c['l'] for c in janela),
+        'sessao': f'ultimos_{len(janela)}_dias', 'dia': None,
+        'cutoff_ts': janela[-1]['t'],
+        'candles_liquidez': janela,
+    }
+
+
+def validar_sfp_estrito(candles_sfp, liquidez, direcao_permitida):
+    """
+    Varre os candles CRONOLOGICAMENTE a partir do fim da janela de
+    liquidez. O primeiro evento que acontecer decide tudo:
+    - Fechamento de CORPO além do nível -> Breakout real, CANCELA a
+      análise (retorna None, motivo 'breakout_cancela_analise').
+    - Pavio ultrapassa mas fecha de volta dentro -> SFP confirmado.
+    Só olha o lado relevante pra direção permitida pelo Bias (Passo 1).
+    """
+    if not liquidez:
+        return None, 'sem_liquidez_mapeada'
+
+    cutoff_ts = liquidez.get('cutoff_ts')
+    candles_pos = [c for c in candles_sfp if cutoff_ts is None or c['t'] > cutoff_ts]
+    high_liq, low_liq = liquidez['high'], liquidez['low']
+
+    for c in candles_pos:
+        if direcao_permitida == 'baixa':  # bias pede SHORT -> só liquidez de topo interessa
+            if c['c'] > high_liq:
+                return None, 'breakout_cancela_analise'
+            if c['h'] > high_liq and c['c'] < high_liq:
+                return {'tipo': 'SFP_venda', 'nivel': high_liq, 'sl_pavio': c['h'], 't': c['t']}, 'sfp_confirmado'
+        elif direcao_permitida == 'alta':  # bias pede LONG -> só liquidez de fundo interessa
+            if c['c'] < low_liq:
+                return None, 'breakout_cancela_analise'
+            if c['l'] < low_liq and c['c'] > low_liq:
+                return {'tipo': 'SFP_compra', 'nivel': low_liq, 'sl_pavio': c['l'], 't': c['t']}, 'sfp_confirmado'
+
+    return None, 'sem_sfp_ainda'
+
+
+# ── PASSO 3: MSS confirmado no M1, com corpo forte ──────────────────────
+
+def validar_mss_m1(candles_m1, sfp, direcao_permitida, corpo_min_pct=MSS_CORPO_MIN_PCT):
+    """
+    Exige fechamento de corpo (não só pavio) quebrando o último
+    fundo/topo relevante em M1, na direção do SFP, com momentum real
+    (corpo/range >= corpo_min_pct — filtra rompimentos fracos/indecisos).
+    """
+    if not candles_m1:
+        return None
+
+    candles_pos_sfp = [c for c in candles_m1 if c['t'] > sfp['t']]
+    if len(candles_pos_sfp) < 5:
+        return None
+
+    swings_m1 = detect_exec_swings(candles_pos_sfp, lookback=3)
+    tipo_ref = 'low' if direcao_permitida == 'baixa' else 'high'
+    referencias = [s for s in swings_m1 if s['tipo'] == tipo_ref]
+    if not referencias:
+        return None
+    ref = referencias[0]
+
+    for i, c in enumerate(candles_pos_sfp):
+        if c['t'] <= ref['t']:
+            continue
+        range_total = c['h'] - c['l']
+        corpo = abs(c['c'] - c['o'])
+        corpo_forte = range_total > 0 and (corpo / range_total) >= corpo_min_pct
+
+        if direcao_permitida == 'baixa' and c['c'] < ref['valor'] and corpo_forte:
+            return {'index': i, 'direcao': 'baixa', 'nivel': ref['valor'], 't': c['t'], 'candles_ref': candles_pos_sfp}
+        if direcao_permitida == 'alta' and c['c'] > ref['valor'] and corpo_forte:
+            return {'index': i, 'direcao': 'alta', 'nivel': ref['valor'], 't': c['t'], 'candles_ref': candles_pos_sfp}
+
+    return None
+
+
+# ── PASSO 4: POI (FVG), entrada 50%, SL/TP por classe de ativo ──────────
+
+def calcular_sl_estrito(pair, sfp):
+    """SL por classe de ativo, exatamente como especificado:
+    XAU = pavio do SFP + buffer de pips. Cripto = pavio do SFP * 0.2%."""
+    classe = get_asset_class(pair)
+    venda = sfp['tipo'] == 'SFP_venda'
+
+    if classe == 'metal':
+        buffer = XAU_SL_BUFFER_PIPS * XAU_PIP_SIZE
+        return sfp['sl_pavio'] + buffer if venda else sfp['sl_pavio'] - buffer
+
+    fator = (1 + CRYPTO_SL_BUFFER_PCT) if venda else (1 - CRYPTO_SL_BUFFER_PCT)
+    return sfp['sl_pavio'] * fator
+
+
+def _buscar_alvo_eqh_eql(direcao, entry, risco, candles_liquidez, min_rr):
+    """TP2 — Equal Highs/Lows da própria janela de liquidez (sessão
+    anterior no XAU, últimos dias na cripto), do lado oposto ao SFP."""
+    if not candles_liquidez or risco <= 0:
+        return None, None
+    try:
+        eqs = find_equal_highs_lows(candles_liquidez)
+    except Exception:
+        return None, None
+
+    candidatos = []
+    for eq in eqs:
+        nivel = eq['nivel']
+        if direcao == 'alta' and nivel > entry:
+            candidatos.append(nivel)
+        elif direcao == 'baixa' and nivel < entry:
+            candidatos.append(nivel)
+
+    validos = [(n, abs(n - entry) / risco) for n in candidatos if abs(n - entry) / risco >= min_rr]
+    if not validos:
+        return None, None
+    validos.sort(key=lambda x: x[1])
+    nivel, rr = validos[0]
+    return nivel, rr
+
+
+def process_pair_sfp_liquidez(db_file, pair, candles_por_tf, exec_tf_label='M1', send_telegram_fn=None):
+    """
+    Pipeline completo. `candles_por_tf` é um dict {'D1':..., 'H1':...,
+    'M15':..., 'M5':..., 'M1':...} — mesmo formato que o run_live_cycle
+    já monta hoje (candles_por_tf_cache), só precisa garantir que M1
+    também seja buscado quando esse modo estiver ligado.
+
+    Devolve sempre um dict com 'status': 'SIGNAL_DISPARADO' ou 'NEUTRAL'.
+    Nunca força sinal — qualquer passo que falhar já encerra ali.
+    """
+    resultado = {
+        'pair': pair, 'exec_tf': exec_tf_label, 'modo': 'sfp_liquidez',
+        'status': 'NEUTRAL', 'sinal': False, 'direcao': None,
+        'entry': None, 'sl': None, 'tp1': None, 'tp2': None,
+        'bias_context': None, 'midnight_open': None,
+        'sfp': None, 'mss': None, 'fvg_zone': None,
+        'motivo': None, 'em_cooldown': False,
+    }
+
+    # PASSO 1
+    direcao_permitida, midnight_open, bias_context = compute_bias_midnight_open_estrito(pair, candles_por_tf)
+    resultado['midnight_open'] = midnight_open
+    resultado['bias_context'] = bias_context
+    if direcao_permitida is None:
+        resultado['motivo'] = 'sem candles suficientes pra calcular Midnight Open'
+        return resultado
+
+    # PASSO 2
+    liquidez = compute_liquidez_referencia(pair, candles_por_tf)
+    candles_sfp = candles_por_tf.get('M15') or candles_por_tf.get('M5')
+    sfp, motivo_sfp = validar_sfp_estrito(candles_sfp or [], liquidez, direcao_permitida)
+    if not sfp:
+        resultado['motivo'] = f'Bias {bias_context}, {motivo_sfp}'
+        return resultado
+    resultado['sfp'] = sfp
+
+    # PASSO 3
+    candles_m1 = candles_por_tf.get('M1')
+    if not candles_m1:
+        resultado['motivo'] = 'SFP confirmado, mas sem candles M1 disponíveis pra validar o MSS'
+        return resultado
+    mss = validar_mss_m1(candles_m1, sfp, direcao_permitida)
+    if not mss:
+        resultado['motivo'] = f"SFP confirmado ({sfp['tipo']}), mas sem MSS de corpo forte no M1 ainda"
+        return resultado
+    resultado['mss'] = {'nivel': mss['nivel'], 't': mss['t']}
+
+    # PASSO 4
+    entry_zone = find_fvg_ob_after_choch(mss['candles_ref'], mss)
+    if not entry_zone or entry_zone.get('tipo') != 'FVG':
+        resultado['motivo'] = 'MSS confirmado, mas sem FVG real após a expansão — descartado'
+        return resultado
+
+    fvg_top, fvg_bottom = entry_zone['top'], entry_zone['bottom']
+    entry = (fvg_top + fvg_bottom) / 2
+    sl = calcular_sl_estrito(pair, sfp)
+    risco = abs(entry - sl)
+    if risco <= 0:
+        resultado['motivo'] = 'risco calculado inválido (entry == sl)'
+        return resultado
+
+    resultado['fvg_zone'] = {'fvg_top': round(fvg_top, 6), 'fvg_bottom': round(fvg_bottom, 6), 'fvg_50_pct': round(entry, 6)}
+
+    candles_m15 = candles_por_tf.get('M15') or candles_sfp or []
+    tp1, _tp1_rr = calcular_tp_dinamico(direcao_permitida, entry, sl, candles_m15, candles_por_tf.get('D1') or [], min_rr=TP1_MIN_RR)
+    tp2, _tp2_rr = _buscar_alvo_eqh_eql(direcao_permitida, entry, risco, liquidez.get('candles_liquidez'), TP2_MIN_RR)
+    if tp2 is None:
+        tp2, _ = calcular_tp_dinamico(direcao_permitida, entry, sl, candles_m15, candles_por_tf.get('D1') or [], min_rr=TP2_MIN_RR)
+
+    rr_tp1 = round(abs(tp1 - entry) / risco, 2) if tp1 else None
+
+    resultado.update({
+        'status': 'SIGNAL_DISPARADO', 'sinal': True, 'direcao': direcao_permitida,
+        'entry': round(entry, 6), 'sl': round(sl, 6),
+        'tp1': round(tp1, 6) if tp1 else None,
+        'tp2': round(tp2, 6) if tp2 else None,
+        'tp': round(tp1, 6) if tp1 else None,  # alias pro payload padrão de explicação
+        'risco_recompensa': f"1:{rr_tp1}" if rr_tp1 else None,
+        'motivo': 'entrada_confirmada',
+    })
+
+    segundos_desde = _segundos_desde_ultimo_alerta(db_file, 'scalp_sfp_liquidez_signal_state', pair)
+    em_cooldown = segundos_desde is not None and segundos_desde < SFP_LIQUIDEZ_COOLDOWN_SECONDS
+    resultado['em_cooldown'] = em_cooldown
+
+    _save_sfp_liquidez_signal(db_file, pair, exec_tf_label, resultado, alerted=not em_cooldown)
+
+    if send_telegram_fn and not em_cooldown:
+        arrow = '📈' if direcao_permitida == 'alta' else '📉'
+        label = 'LONG' if direcao_permitida == 'alta' else 'SHORT'
+        msg = f"🎯 <b>SFP + Liquidez (estrito) — {pair}</b>\n\n"
+        msg += f"{arrow} <b>{label}</b> | Bias: {bias_context}\n"
+        msg += f"💧 SFP: {sfp['tipo']} em {round(sfp['nivel'],6)}\n"
+        msg += f"📍 Entrada (50% FVG): {resultado['entry']}\n"
+        msg += f"🛑 Stop: {resultado['sl']}\n"
+        msg += f"✅ TP1: {resultado['tp1']} (RR {resultado['risco_recompensa']})\n"
+        if resultado['tp2']:
+            msg += f"✅ TP2: {resultado['tp2']}\n"
+        msg += "\n<i>Pipeline estrito: Bias → SFP → MSS(M1) → FVG, todos confirmados.</i>"
+        send_telegram_fn(msg)
+    elif em_cooldown:
+        restante_min = (SFP_LIQUIDEZ_COOLDOWN_SECONDS - segundos_desde) // 60
+        resultado['motivo'] = f'entrada_confirmada, mas em cooldown ({restante_min}min restantes)'
+
+    return resultado
+
+
+def formatar_saida_kairos_json(resultado):
+    """Formato de saída EXATO pedido pra alimentar a interface do Kairos."""
+    if resultado.get('status') != 'SIGNAL_DISPARADO':
+        return {'status': 'NEUTRAL', 'ativo': resultado.get('pair'), 'motivo': resultado.get('motivo')}
+
+    return {
+        'status': 'SIGNAL_DISPARADO',
+        'ativo': resultado.get('pair'),
+        'direcao': 'LONG' if resultado.get('direcao') == 'alta' else 'SHORT',
+        'bias_context': resultado.get('bias_context'),
+        'setup': 'SFP_SWEEP + MSS + FVG_RETRACE',
+        'execucao': {
+            'preco_entrada': resultado.get('entry'),
+            'stop_loss': resultado.get('sl'),
+            'take_profit_1': resultado.get('tp1'),
+            'take_profit_2': resultado.get('tp2'),
+            'risco_recompensa': resultado.get('risco_recompensa'),
+        },
+        'fvg_zone': resultado.get('fvg_zone'),
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# PIPELINE DE GATES (A-F) — "modelo avançado da Vortex", com uma diferença
+# de propósito: o Gate C (Monte Carlo) usa a simulação REAL que já existe
+# no engine (compute_monte_carlo), não um número decorativo. Se a Vortex
+# mostra 91% fixo, aqui o número é o que a simulação realmente calcular
+# — mesmo que isso signifique o gate falhar com mais frequência.
+#
+# Reaproveita quase tudo que já existe: indicadores técnicos, camadas de
+# score do modo '4camadas', Bias/SFP/MSS/FVG do modo 'sfp_liquidez',
+# Monte Carlo, Ichimoku, TP dinâmico, SMC quality, buffer multi-ativo.
+# Só duas peças novas: Supertrend e detector de Wyckoff Spring/UTAD.
+# ═══════════════════════════════════════════════════════════════════════
+
+def compute_supertrend(candles, period=10, multiplier=3.0):
+    """
+    Supertrend(10, 3.0) — implementação pura Python, sem pandas-ta/ta-lib
+    (o backend já reimplementa todos os indicadores assim, de propósito,
+    pra não depender de libs pesadas/compiladas no deploy do Railway).
+    Retorna (linha, direcao) onde direcao[i] é 'alta' ou 'baixa'.
+    """
+    n = len(candles)
+    if n < period + 1:
+        return [None] * n, [None] * n
+
+    atr_series = compute_atr(candles, period)
+    hl2 = [(c['h'] + c['l']) / 2 for c in candles]
+
+    banda_superior = [None] * n
+    banda_inferior = [None] * n
+    supertrend = [None] * n
+    direcao = [None] * n
+
+    for i in range(n):
+        if atr_series[i] is None:
+            continue
+        banda_superior[i] = hl2[i] + multiplier * atr_series[i]
+        banda_inferior[i] = hl2[i] - multiplier * atr_series[i]
+
+    primeiro_valido = next((i for i in range(n) if atr_series[i] is not None), None)
+    if primeiro_valido is None:
+        return supertrend, direcao
+
+    direcao[primeiro_valido] = 'alta'
+    supertrend[primeiro_valido] = banda_inferior[primeiro_valido]
+
+    for i in range(primeiro_valido + 1, n):
+        if atr_series[i] is None:
+            continue
+
+        if banda_superior[i] is not None and banda_superior[i - 1] is not None:
+            if candles[i - 1]['c'] > banda_superior[i - 1]:
+                banda_superior[i] = min(banda_superior[i], banda_superior[i - 1])
+        if banda_inferior[i] is not None and banda_inferior[i - 1] is not None:
+            if candles[i - 1]['c'] < banda_inferior[i - 1]:
+                banda_inferior[i] = max(banda_inferior[i], banda_inferior[i - 1])
+
+        dir_anterior = direcao[i - 1] or 'alta'
+        if dir_anterior == 'alta' and candles[i]['c'] < banda_inferior[i]:
+            direcao[i] = 'baixa'
+        elif dir_anterior == 'baixa' and candles[i]['c'] > banda_superior[i]:
+            direcao[i] = 'alta'
+        else:
+            direcao[i] = dir_anterior
+
+        supertrend[i] = banda_inferior[i] if direcao[i] == 'alta' else banda_superior[i]
+
+    return supertrend, direcao
+
+
+def detect_wyckoff_spring_utad(candles, lookback=30, tolerancia_pct=0.002):
+    """
+    Detector simplificado de Spring (manipulação em fundo, dentro de uma
+    faixa de acumulação) e UTAD — Upthrust After Distribution (manipulação
+    em topo, dentro de uma faixa de distribuição).
+
+    Heurística: pega o range dos últimos `lookback` candles ANTES do
+    candle mais recente; se o candle mais recente varre o fundo/topo
+    desse range com o pavio mas fecha de volta dentro dele — e o range
+    anterior tinha comportamento lateral (largura pequena relativa ao
+    preço) — classifica como Spring/UTAD.
+    """
+    n = len(candles)
+    if n < lookback + 2:
+        return None
+
+    janela = candles[-(lookback + 1):-1]
+    atual = candles[-1]
+
+    topo_range = max(c['h'] for c in janela)
+    fundo_range = min(c['l'] for c in janela)
+    largura_pct = (topo_range - fundo_range) / fundo_range if fundo_range else 1
+
+    lateral = largura_pct <= 0.05  # faixa de acumulação/distribuição razoavelmente apertada
+
+    if atual['l'] < fundo_range * (1 - tolerancia_pct) and atual['c'] > fundo_range and lateral:
+        return {'tipo': 'spring', 'nivel': fundo_range, 'lateral': True, 'largura_pct': round(largura_pct * 100, 2)}
+
+    if atual['h'] > topo_range * (1 + tolerancia_pct) and atual['c'] < topo_range and lateral:
+        return {'tipo': 'utad', 'nivel': topo_range, 'lateral': True, 'largura_pct': round(largura_pct * 100, 2)}
+
+    return None
+
+
+HORAS_TOXICAS_UTC = {7, 23}  # troca de sessão / baixa liquidez, conforme especificado
+GATES_COOLDOWN_SECONDS = 40 * 60  # dentro da faixa pedida de 30-60min
+GATES_STALENESS_MAX_SEG = 30
+GATE_C_MONTE_CARLO_MIN_PROB = 85  # real, não decorativo — pode falhar com frequência
+GATE_E_MIN_RR = 2.0
+GATE_D_MIN_OBS = 3
+GATE_D_MIN_FVGS = 2
+
+
+def esta_em_hora_toxica_estrita(candles_referencia):
+    """Horas tóxicas exatas do pipeline de Gates (07:00 e 23:00 UTC) —
+    separado da lógica de killzone (bônus) já usada nos outros modos,
+    porque aqui o requisito é BLOQUEAR, não só somar/subtrair pontos."""
+    if not candles_referencia:
+        return False
+    dt = datetime.fromtimestamp(candles_referencia[-1]['t'] / 1000, tz=timezone.utc)
+    return dt.hour in HORAS_TOXICAS_UTC
+
+
+def dados_obsoletos(candles, max_latencia_seg=GATES_STALENESS_MAX_SEG):
+    """Staleness — descarta a análise se o candle mais recente já tem
+    mais de `max_latencia_seg` de idade (dado desatualizado)."""
+    if not candles:
+        return True
+    ultimo_ts = candles[-1]['t'] / 1000
+    agora = time.time()
+    return (agora - ultimo_ts) > max_latencia_seg
+
+
+def _confianca_padrao_candle(padrao, exec_candles):
+    """Heurística de confiança do padrão de candle (Pin Bar/Hammer), com
+    base na proporção pavio/corpo do último candle — NÃO é uma
+    probabilidade estatisticamente validada, é um score relativo
+    (quanto maior a rejeição, maior a 'confiança' do padrão)."""
+    if not padrao or not exec_candles:
+        return None
+    c = exec_candles[-1]
+    corpo = abs(c['c'] - c['o']) or 0.0001
+    pavio_sup = c['h'] - max(c['o'], c['c'])
+    pavio_inf = min(c['o'], c['c']) - c['l']
+    razao = max(pavio_sup, pavio_inf) / corpo
+    confianca = min(95, round(50 + razao * 10))
+    return confianca
+
+
+def init_gates_vortex_db(db_file):
+    with sqlite3.connect(db_file) as conn:
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS scalp_gates_vortex_signal_state (
+                id TEXT PRIMARY KEY,
+                pair TEXT,
+                created_at INTEGER,
+                exec_tf TEXT,
+                direcao TEXT,
+                score INTEGER,
+                entry REAL,
+                sl REAL,
+                tp1 REAL,
+                tp2 REAL,
+                resultado_final TEXT DEFAULT 'pendente',
+                alerted INTEGER DEFAULT 0
+            )
+        ''')
+        conn.commit()
+
+
+def _save_gates_vortex_signal(db_file, pair, exec_tf_label, resultado, alerted):
+    try:
+        signal_id = f"gates_{pair}_{int(time.time()*1000)}"
+        with sqlite3.connect(db_file) as conn:
+            conn.execute('''
+                INSERT INTO scalp_gates_vortex_signal_state
+                    (id, pair, created_at, exec_tf, direcao, score, entry, sl, tp1, tp2, alerted)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                signal_id, pair, int(time.time()), exec_tf_label,
+                resultado['direcao'], resultado['score'],
+                resultado['entry'], resultado['sl'], resultado['tp1'], resultado['tp2'],
+                1 if alerted else 0,
+            ))
+            conn.commit()
+    except Exception as e:
+        print(f"[scalp_engine gates_vortex] erro ao salvar sinal de {pair}: {e}")
+
+
+def process_pair_gates_vortex(db_file, pair, candles_por_tf, exec_tf_label='M1', send_telegram_fn=None):
+    """
+    Pipeline completo de Gates A-F. Só retorna SIGNAL_DISPARADO quando
+    TODOS os 6 gates passarem. Reaproveita Bias/SFP/MSS/FVG do modo
+    'sfp_liquidez' e as camadas de score do modo '4camadas' — não
+    duplica lógica, só monta os gates por cima do que já existe.
+    """
+    resultado = {
+        'pair': pair, 'exec_tf': exec_tf_label, 'modo': 'gates_vortex',
+        'status': 'NEUTRAL', 'sinal': False, 'direcao': None,
+        'score': 0, 'entry': None, 'sl': None, 'tp1': None, 'tp2': None,
+        'gates': {}, 'motivo': None, 'em_cooldown': False,
+    }
+
+    candles_h1 = candles_por_tf.get('H1')
+    candles_m15 = candles_por_tf.get('M15')
+    candles_m5 = candles_por_tf.get('M5')
+    candles_m1 = candles_por_tf.get('M1')
+    candles_d1 = candles_por_tf.get('D1')
+
+    candles_gatilho = candles_m1 or candles_m5
+    if not candles_gatilho or not candles_h1:
+        resultado['motivo'] = 'candles insuficientes (precisa pelo menos H1 e M1/M5)'
+        return resultado
+
+    # ── Staleness ──
+    if dados_obsoletos(candles_gatilho):
+        resultado['motivo'] = f'dados obsoletos — candle mais recente com mais de {GATES_STALENESS_MAX_SEG}s'
+        return resultado
+
+    # ── Hora tóxica ──
+    if esta_em_hora_toxica_estrita(candles_gatilho):
+        resultado['motivo'] = 'horário tóxico (troca de sessão/baixa liquidez) — sinal bloqueado'
+        return resultado
+
+    # ── Bias (Midnight Open) ──
+    direcao_permitida, midnight_open, bias_context = compute_bias_midnight_open_estrito(pair, candles_por_tf)
+    if direcao_permitida is None:
+        resultado['motivo'] = 'sem candles suficientes pra calcular Midnight Open'
+        return resultado
+
+    # ── SFP contra liquidez (sessão anterior ou 3-7 dias) ──
+    liquidez = compute_liquidez_referencia(pair, candles_por_tf)
+    sfp, motivo_sfp = validar_sfp_estrito(candles_m15 or candles_m5 or [], liquidez, direcao_permitida)
+    if not sfp:
+        resultado['motivo'] = f'Bias {bias_context}, {motivo_sfp}'
+        return resultado
+
+    # ── Validação do gatilho de rejeição: padrão + volume + ATR múltiplo ──
+    padrao = detect_candle_pattern(candles_gatilho)
+    confianca_padrao = _confianca_padrao_candle(padrao, candles_gatilho)
+    if not padrao or (confianca_padrao is not None and confianca_padrao < 75):
+        resultado['motivo'] = f'SFP confirmado, mas padrão de rejeição fraco (confiança {confianca_padrao})'
+        return resultado
+
+    vols = [c.get('v', 0) for c in candles_gatilho[-20:]]
+    media_vol = sum(vols) / len(vols) if vols else 0
+    volume_ok = candles_gatilho[-1].get('v', 0) > media_vol * 1.0 if media_vol else False
+
+    atr_atual = next((v for v in reversed(compute_atr(candles_gatilho, 14)) if v is not None), None)
+    ultimo = candles_gatilho[-1]
+    range_atual = ultimo['h'] - ultimo['l']
+    atr_multiplo = round(range_atual / atr_atual, 2) if atr_atual and atr_atual > 0 else None
+    atr_ok = atr_multiplo is not None and atr_multiplo > 1.2
+
+    # ── MSS no M1 ──
+    if not candles_m1:
+        resultado['motivo'] = 'SFP e gatilho ok, mas sem candles M1 pra validar MSS'
+        return resultado
+    mss = validar_mss_m1(candles_m1, sfp, direcao_permitida)
+    if not mss:
+        resultado['motivo'] = f"SFP confirmado ({sfp['tipo']}), mas sem MSS de corpo forte no M1 ainda"
+        return resultado
+
+    # ── FVG (POI), entrada 50% ──
+    entry_zone = find_fvg_ob_after_choch(mss['candles_ref'], mss)
+    if not entry_zone or entry_zone.get('tipo') != 'FVG':
+        resultado['motivo'] = 'MSS confirmado, mas sem FVG real após a expansão'
+        return resultado
+    entry = (entry_zone['top'] + entry_zone['bottom']) / 2
+    sl = calcular_sl_estrito(pair, sfp)
+    risco = abs(entry - sl)
+    if risco <= 0:
+        resultado['motivo'] = 'risco calculado inválido'
+        return resultado
+
+    # ── Camadas de score (reaproveita as do modo 4camadas) ──
+    h4_candles = candles_por_tf.get('H4')
+    h1_candles_regime = candles_h1
+    pts_regime, det_regime = _camada_regime_mtf(candles_d1 or candles_h1, h4_candles, h1_candles_regime)
+    pts_confluencias, det_confluencias = _camada_confluencias(candles_gatilho, direcao_permitida)
+
+    mc = compute_monte_carlo(candles_gatilho)
+    prob_acerto = None
+    if mc:
+        prob_acerto = mc['prob_alta_pct'] if direcao_permitida == 'alta' else mc['prob_baixa_pct']
+
+    smc_quality = {'obs': len(find_order_blocks(candles_gatilho)), 'fvgs': len(find_open_fvgs(candles_gatilho))}
+
+    tp1, _ = calcular_tp_dinamico(direcao_permitida, entry, sl, candles_m15 or candles_gatilho, candles_d1 or [], min_rr=GATE_E_MIN_RR)
+    tp2, _ = calcular_tp_dinamico(direcao_permitida, entry, sl, candles_m15 or candles_gatilho, candles_d1 or [], min_rr=3.0)
+    rr_tp1 = round(abs(tp1 - entry) / risco, 2) if tp1 else 0
+
+    ichimoku = compute_ichimoku(candles_gatilho)
+    ichi_bias = None
+    if ichimoku and ichimoku.get('senkou_a') is not None:
+        topo = max(ichimoku['senkou_a'], ichimoku['senkou_b'])
+        fundo = min(ichimoku['senkou_a'], ichimoku['senkou_b'])
+        preco = candles_gatilho[-1]['c']
+        ichi_bias = 'BULLISH' if preco > topo else ('BEARISH' if preco < fundo else 'NEUTRAL')
+
+    supertrend_linha, supertrend_dir = compute_supertrend(candles_h1, 10, 3.0)
+    supertrend_atual = supertrend_dir[-1] if supertrend_dir else None
+
+    wyckoff = detect_wyckoff_spring_utad(candles_gatilho)
+
+    # ── GATES ──
+    gate_a = (det_regime.get('bias_d1') == direcao_permitida or det_regime.get('mtf_alinhado')) and (mss['direcao'] == direcao_permitida)
+    gate_b = bool(sfp) and bool(mss) and bool(entry_zone)
+    gate_c = prob_acerto is not None and prob_acerto >= GATE_C_MONTE_CARLO_MIN_PROB
+    gate_d = smc_quality['obs'] >= GATE_D_MIN_OBS and smc_quality['fvgs'] >= GATE_D_MIN_FVGS
+    gate_e = rr_tp1 >= GATE_E_MIN_RR
+    gate_f = True  # informativo, nunca bloqueia
+
+    gates = {
+        'A_MTF_ALIGNMENT': gate_a,
+        'B_TRIGGER': gate_b,
+        'C_MONTE_CARLO': gate_c,
+        'D_SMC_QUALITY': gate_d,
+        'E_MIN_RR': gate_e,
+        'F_ICHIMOKU_INFO': gate_f,
+    }
+    resultado['gates'] = gates
+
+    if not all(gates.values()):
+        falhos = [nome for nome, ok in gates.items() if not ok]
+        resultado['motivo'] = f"Pipeline chegou até o FVG, mas falhou nos gates: {', '.join(falhos)}"
+        resultado['score'] = pts_regime + pts_confluencias
+        return resultado
+
+    score = min(100, pts_regime + pts_confluencias + (25 if volume_ok else 0) + (confianca_padrao or 0) // 4)
+
+    volatilidade = None
+    if atr_atual and entry:
+        atr_pct = (atr_atual / entry) * 100
+        volatilidade = 'LOW' if atr_pct < 0.3 else ('MEDIUM' if atr_pct < 0.8 else 'HIGH')
+
+    resultado.update({
+        'status': 'SIGNAL_DISPARADO', 'sinal': True, 'direcao': direcao_permitida,
+        'score': score, 'prob_acerto': prob_acerto,
+        'entry': round(entry, 6), 'sl': round(sl, 6),
+        'tp1': round(tp1, 6) if tp1 else None, 'tp2': round(tp2, 6) if tp2 else None,
+        'tp': round(tp1, 6) if tp1 else None,
+        'risco_recompensa': f"1:{rr_tp1}",
+        'regime': det_regime.get('regime'), 'adx': det_regime.get('adx'),
+        'estrutura': 'CHOCH', 'gatilho': padrao, 'confianca_padrao': confianca_padrao,
+        'volatilidade': volatilidade, 'vies_contexto': f"{det_regime.get('viés_contexto','NEUTRO')}_MACRO",
+        'atr_multiplo': atr_multiplo, 'smc_quality': smc_quality,
+        'ichimoku_bias': ichi_bias, 'supertrend_direcao': supertrend_atual,
+        'wyckoff': wyckoff,
+        'motivo': 'entrada_confirmada',
+    })
+
+    segundos_desde = _segundos_desde_ultimo_alerta(db_file, 'scalp_gates_vortex_signal_state', pair)
+    em_cooldown = segundos_desde is not None and segundos_desde < GATES_COOLDOWN_SECONDS
+    resultado['em_cooldown'] = em_cooldown
+
+    _save_gates_vortex_signal(db_file, pair, exec_tf_label, resultado, alerted=not em_cooldown)
+
+    if send_telegram_fn and not em_cooldown:
+        arrow = '📈' if direcao_permitida == 'alta' else '📉'
+        label = 'COMPRA' if direcao_permitida == 'alta' else 'VENDA'
+        msg = f"🚦 <b>Gates Vortex — {pair}</b>\n\n"
+        msg += f"{arrow} <b>{label}</b> | Score: {score}/100 | Prob. real: {prob_acerto}%\n"
+        msg += f"📍 Entrada: {resultado['entry']}\n🛑 Stop: {resultado['sl']}\n"
+        msg += f"✅ TP1: {resultado['tp1']} (RR {resultado['risco_recompensa']})\n"
+        if resultado['tp2']:
+            msg += f"✅ TP2: {resultado['tp2']}\n"
+        msg += "\n<i>Todos os 6 gates confirmados (A-F).</i>"
+        send_telegram_fn(msg)
+    elif em_cooldown:
+        restante_min = (GATES_COOLDOWN_SECONDS - segundos_desde) // 60
+        resultado['motivo'] = f'entrada_confirmada, mas em cooldown ({restante_min}min restantes)'
+
+    return resultado
+
+
+def formatar_saida_gates_json(resultado):
+    """Formato de saída EXATO pedido, no estilo do sistema de Gates."""
+    if resultado.get('status') != 'SIGNAL_DISPARADO':
+        return {'status': 'NEUTRAL', 'ativo': resultado.get('pair'), 'motivo': resultado.get('motivo'), 'gates': resultado.get('gates')}
+
+    return {
+        'status': 'SIGNAL_DISPARADO',
+        'ativo': resultado.get('pair'),
+        'sinal': 'COMPRA' if resultado.get('direcao') == 'alta' else 'VENDA',
+        'score': resultado.get('score'),
+        'prob_acerto': f"{resultado.get('prob_acerto')}%" if resultado.get('prob_acerto') is not None else None,
+        'risco_retorno': resultado.get('risco_recompensa'),
+        'execucao': {
+            'entrada': resultado.get('entry'),
+            'stop_loss': resultado.get('sl'),
+            'take_profit_1': resultado.get('tp1'),
+            'take_profit_2': resultado.get('tp2'),
+        },
+        'motivos_principais': {
+            'regime': resultado.get('regime'),
+            'estrutura': resultado.get('estrutura'),
+            'gatilho': resultado.get('gatilho'),
+            'tipo': 'CONTINUATION',
+            'padrao': f"{resultado.get('gatilho')} ({resultado.get('confianca_padrao')}%)" if resultado.get('gatilho') else None,
+        },
+        'contexto_mercado': {
+            'adx_14': resultado.get('adx'),
+            'volatilidade': resultado.get('volatilidade'),
+            'vies_contexto': resultado.get('vies_contexto'),
+            'atr_multiplo': resultado.get('atr_multiplo'),
+        },
+        'gates_validacao': resultado.get('gates'),
+    }
+
+
+
+
+
 def process_pair_scalp(db_file, pair, d1_candles, exec_candles, exec_tf_label, send_telegram_fn=None, h4_candles=None):
     now = int(time.time())
     na_killzone, killzone_nome = is_in_killzone()
@@ -2198,10 +3225,11 @@ def process_pair_scalp(db_file, pair, d1_candles, exec_candles, exec_tf_label, s
     resultado['detalhes'] = detalhes
     resultado['direcao'] = choch['direcao']
 
-    sl = aplicar_buffer_stop_atr(sweep['nivel'], choch['direcao'], exec_candles)
+    sl = aplicar_buffer_stop_multiativo(sweep['nivel'], choch['direcao'], exec_candles, pair)
     entry = melhor_preco_na_zona(entry_zone, choch['direcao'], preco_atual_fallback=preco_atual)
     risco = abs(entry - sl)
-    tp = entry + risco * RR_TARGET_NORMAL if choch['direcao'] == 'alta' else entry - risco * RR_TARGET_NORMAL
+    tp, tp_origem = calcular_tp_dinamico(choch['direcao'], entry, sl, exec_candles, d1_candles)
+    resultado['tp_origem'] = tp_origem
     resultado['entry'] = round(entry, 6)
     resultado['sl'] = round(sl, 6)
     resultado['tp'] = round(tp, 6)
@@ -2412,9 +3440,9 @@ def process_pair_scalp_filtros_shadow(db_file, pair, d1_candles, exec_candles, e
         return None
 
     entry = melhor_preco_na_zona(entry_zone, choch['direcao'], preco_atual_fallback=preco_atual)
-    sl = aplicar_buffer_stop_atr(sweep['nivel'], choch['direcao'], exec_candles)
+    sl = aplicar_buffer_stop_multiativo(sweep['nivel'], choch['direcao'], exec_candles, pair)
     risco = abs(entry - sl)
-    tp = entry + risco * RR_TARGET_NORMAL if choch['direcao'] == 'alta' else entry - risco * RR_TARGET_NORMAL
+    tp, _tp_origem = calcular_tp_dinamico(choch['direcao'], entry, sl, exec_candles, d1_candles)
 
     resultado = {
         'pair': pair, 'exec_tf': exec_tf_label, 'modo': 'filtros_shadow',
@@ -2620,10 +3648,11 @@ def process_pair_scalp_continuacao(db_file, pair, d1_candles, exec_candles, exec
     resultado['detalhes'] = detalhes
     resultado['direcao'] = bos['direcao']
 
-    sl = aplicar_buffer_stop_atr(sweep['nivel'], bos['direcao'], exec_candles)
+    sl = aplicar_buffer_stop_multiativo(sweep['nivel'], bos['direcao'], exec_candles, pair)
     entry = melhor_preco_na_zona(entry_zone, bos['direcao'], preco_atual_fallback=preco_atual)
     risco = abs(entry - sl)
-    tp = entry + risco * RR_TARGET_CONTINUACAO if bos['direcao'] == 'alta' else entry - risco * RR_TARGET_CONTINUACAO
+    tp, tp_origem = calcular_tp_dinamico(bos['direcao'], entry, sl, exec_candles, d1_candles)
+    resultado['tp_origem'] = tp_origem
     resultado['entry'] = round(entry, 6)
     resultado['sl'] = round(sl, 6)
     resultado['tp'] = round(tp, 6)
@@ -2901,7 +3930,7 @@ def process_pair_scalp_rapido(db_file, pair, d1_candles, exec_candles, exec_tf_l
 
     direcao = direcao_provisoria
     entry = preco_atual
-    sl = aplicar_buffer_stop_atr(sweep['nivel'], direcao, exec_candles)
+    sl = aplicar_buffer_stop_multiativo(sweep['nivel'], direcao, exec_candles, pair)
     risco = abs(entry - sl)
     tp = entry + risco * RR_TARGET_RAPIDO if direcao == 'alta' else entry - risco * RR_TARGET_RAPIDO
 
@@ -3132,9 +4161,10 @@ def process_pair_cascata_smc(db_file, pair, w_candles, d1_candles, h4_candles, h
             return resultado
 
     entry = preco_atual
-    sl = aplicar_buffer_stop_atr(sweep['nivel'], direcao_macro, exec_candles)
+    sl = aplicar_buffer_stop_multiativo(sweep['nivel'], direcao_macro, exec_candles, pair)
     risco = abs(entry - sl)
-    tp = entry + risco * RR_TARGET_CASCATA if direcao_macro == 'alta' else entry - risco * RR_TARGET_CASCATA
+    tp, tp_origem = calcular_tp_dinamico(direcao_macro, entry, sl, exec_candles, d1_candles)
+    resultado['tp_origem'] = tp_origem
 
     gates_ok, gates = aplicar_gates_entrada(
         direcao_macro, entry, sl, tp, resultado.get('indicadores'), d1_candles, incluir_regime=False,
@@ -3166,7 +4196,8 @@ def process_pair_cascata_smc(db_file, pair, w_candles, d1_candles, h4_candles, h
         msg += f"{arrow} <b>{label}</b> | TF execução: {exec_tf_label}\n"
         msg += f"📊 Alinhamento: Semanal={bias_w} | D1={bias_d1} | H4={bias_h4} | H1={bias_h1} | MTF: {mtf_status}\n"
         msg += f"🔨 Confirmação: {evento_tipo}\n"
-        msg += f"📍 Entrada: {resultado['entry']}\n🛑 Stop: {resultado['sl']}\n✅ TP (RR {RR_TARGET_CASCATA}:1): {resultado['tp']}\n\n"
+        rr_real = round(abs(resultado['tp'] - resultado['entry']) / abs(resultado['entry'] - resultado['sl']), 2) if resultado['entry'] != resultado['sl'] else None
+        msg += f"📍 Entrada: {resultado['entry']}\n🛑 Stop: {resultado['sl']}\n✅ TP (RR {rr_real}:1 — {tp_origem}): {resultado['tp']}\n\n"
         msg += f"<b>{mtf_txt} — sweep na zona diária + confirmação de estrutura.</b>"
         bloco_extra = montar_bloco_analise_extra(
             db_file, pair, direcao_macro, resultado['entry'], resultado['sl'], resultado['tp'],
@@ -3613,6 +4644,8 @@ MODOS_SCALP = {
     'scalp_rapido': 'scalp_rapido_signal_state',
     'cascata_smc': 'scalp_cascata_signal_state',
     '4camadas': 'scalp_4camadas_signal_state',
+    'sfp_liquidez': 'scalp_sfp_liquidez_signal_state',
+    'gates_vortex': 'scalp_gates_vortex_signal_state',
 }
 
 _TABELAS_COM_SCORE = {
@@ -4265,6 +5298,7 @@ def build_explicacao_payload(resultado, modo, regime_info=None, exec_candles=Non
             'entrada': entry,
             'sl': sl,
             'tp': tp,
+            'tp_origem': resultado.get('tp_origem'),
             'rr': rr,
             'rsi14': resultado.get('rsi14') or indicadores.get('rsi14'),
             'atr_multiplo': atr_multiplo,
@@ -4381,6 +5415,22 @@ def process_pair_4camadas_com_explicacao(db_file, pair, d1_candles, h4_candles, 
     resultado = process_pair_4camadas(db_file, pair, d1_candles, h4_candles, h1_candles, exec_candles,
                                        exec_tf_label, send_telegram_fn)
     salvar_explicacao_ultimo_sinal(db_file, '4camadas', pair, resultado, exec_candles=exec_candles)
+    return resultado
+
+
+def process_pair_sfp_liquidez_com_explicacao(db_file, pair, candles_por_tf, exec_tf_label='M1',
+                                               send_telegram_fn=None):
+    resultado = process_pair_sfp_liquidez(db_file, pair, candles_por_tf, exec_tf_label, send_telegram_fn)
+    exec_candles_ref = candles_por_tf.get('M1') or candles_por_tf.get('M5')
+    salvar_explicacao_ultimo_sinal(db_file, 'sfp_liquidez', pair, resultado, exec_candles=exec_candles_ref)
+    return resultado
+
+
+def process_pair_gates_vortex_com_explicacao(db_file, pair, candles_por_tf, exec_tf_label='M1',
+                                               send_telegram_fn=None):
+    resultado = process_pair_gates_vortex(db_file, pair, candles_por_tf, exec_tf_label, send_telegram_fn)
+    exec_candles_ref = candles_por_tf.get('M1') or candles_por_tf.get('M5')
+    salvar_explicacao_ultimo_sinal(db_file, 'gates_vortex', pair, resultado, exec_candles=exec_candles_ref)
     return resultado
 
 

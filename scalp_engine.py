@@ -51,6 +51,7 @@ MODOS_ATIVOS = {
     'confluencia_indicadores': False,
     'scalp_rapido': False,
     'antecipado_v2': False,
+    '4camadas': False,  # experimental — réplica intencional da lógica do concorrente
 }
 
 
@@ -3116,6 +3117,7 @@ def process_pair_cascata_smc(db_file, pair, w_candles, d1_candles, h4_candles, h
     preco_atual = exec_candles[-1]['c']
     pd_zone = compute_premium_discount(exec_candles)
     if pd_zone:
+        resultado['zona_pd'] = 'PREMIUM' if preco_atual > pd_zone['equilibrium'] else 'DISCOUNT'
         if direcao_macro == 'alta' and preco_atual > pd_zone['equilibrium']:
             resultado['motivo'] = (
                 f"{evento_tipo} ok e alinhado, mas preço está em PREMIUM "
@@ -3610,6 +3612,7 @@ MODOS_SCALP = {
     'confluencia_indicadores': 'scalp_indicadores_signal_state',
     'scalp_rapido': 'scalp_rapido_signal_state',
     'cascata_smc': 'scalp_cascata_signal_state',
+    '4camadas': 'scalp_4camadas_signal_state',
 }
 
 _TABELAS_COM_SCORE = {
@@ -3633,6 +3636,8 @@ _COLUNAS_POR_TABELA = {
         "id, pair, created_at, exec_tf, direcao, entry, sl, tp, zona_tipo, resultado_final",
     'scalp_cascata_signal_state':
         "id, pair, created_at, exec_tf, direcao, entry, sl, tp, bias_semanal, bias_d1, bias_h4, bias_h1, evento_tipo, resultado_final",
+    'scalp_4camadas_signal_state':
+        "id, pair, created_at, exec_tf, direcao, score, entry, sl, tp, resultado_final",
 }
 
 
@@ -3816,7 +3821,287 @@ def listar_trades_detalhado(db_file, modo, limit=200):
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# EXPLICAÇÃO DE SINAL — "Por que este sinal foi gerado?"
+# MODO "4 CAMADAS" — réplica da lógica do app concorrente (Trading IA 24/7
+# / Vortex), reconstruída a partir dos prints: Regime&MTF (30) + Estrutura
+# SMC (30) + Gatilho&Energia (25) + Confluências (15) = 100.
+#
+# ATENÇÃO — decisão explícita do usuário: SEM gate de contradição. A
+# direção final vem só da camada Gatilho&Energia (o micro trigger), e as
+# outras 3 camadas só somam pontos, mesmo que apontem pra direção
+# oposta. Isso é DE PROPÓSITO igual ao app original — inclusive reproduz
+# o mesmo furo que gerou o sinal de COMPRA em XAUUSD com contexto
+# BEARISH/Baixista/Premium que a gente identificou. Ver conversa: se
+# quiser blindar isso depois, é só adicionar um gate comparando
+# camada_regime['bias'] / camada_estrutura['direcao'] vs
+# camada_gatilho['direcao'] antes de disparar o sinal.
+# ═══════════════════════════════════════════════════════════════════════
+
+SCORE_THRESHOLD_4CAMADAS = 75
+COOLDOWN_4CAMADAS_SECONDS = 30 * 60
+
+CANDLE_PATTERNS_BULLISH = ('Martelo (Hammer)', 'Engolfo de Alta')
+CANDLE_PATTERNS_BEARISH = ('Estrela Cadente (Shooting Star)', 'Engolfo de Baixa')
+
+
+def init_4camadas_db(db_file):
+    with sqlite3.connect(db_file) as conn:
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS scalp_4camadas_signal_state (
+                id TEXT PRIMARY KEY,
+                pair TEXT,
+                created_at INTEGER,
+                exec_tf TEXT,
+                direcao TEXT,
+                score INTEGER,
+                entry REAL,
+                sl REAL,
+                tp REAL,
+                resultado_final TEXT DEFAULT 'pendente',
+                alerted INTEGER DEFAULT 0
+            )
+        ''')
+        conn.commit()
+
+
+def _camada_regime_mtf(d1_candles, h4_candles, h1_candles):
+    """Regime&MTF — até 30 pontos. Não decide direção, só soma."""
+    regime, adx = compute_market_regime(d1_candles)
+    pts = 0
+    detalhes = {'regime': regime.upper() if regime else None, 'adx': adx}
+    if regime == 'trending':
+        pts += 15
+
+    bias_d1 = compute_bias_from_swings(d1_candles)
+    bias_h4 = compute_bias_from_swings(h4_candles) if h4_candles else 'neutro'
+    bias_h1 = compute_bias_from_swings(h1_candles) if h1_candles else 'neutro'
+    detalhes['bias_d1'] = bias_d1
+    detalhes['bias_h4'] = bias_h4
+    detalhes['bias_h1'] = bias_h1
+
+    biases_validos = [b for b in (bias_d1, bias_h4, bias_h1) if b != 'neutro']
+    mtf_alinhado = False
+    if biases_validos and len(set(biases_validos)) == 1 and len(biases_validos) >= 2:
+        pts += 15
+        mtf_alinhado = True
+    elif biases_validos:
+        # concordância parcial (pelo menos 2 de 3 no mesmo lado)
+        from collections import Counter
+        contagem = Counter(biases_validos)
+        if contagem.most_common(1)[0][1] >= 2:
+            pts += 8
+
+    detalhes['mtf_alinhado'] = mtf_alinhado
+    detalhes['viés_contexto'] = (bias_d1 if bias_d1 != 'neutro' else bias_h4).upper() if (bias_d1 != 'neutro' or bias_h4 != 'neutro') else 'NEUTRO'
+    return min(pts, 30), detalhes
+
+
+def _camada_estrutura_smc(d1_candles, exec_candles):
+    """Estrutura SMC — até 30 pontos. Também não decide direção final."""
+    pts = 0
+    detalhes = {'estrutura': None, 'zona_pd': None, 'choch_direcao': None}
+
+    bandas = compute_d1_zones(d1_candles)
+    preco_atual = exec_candles[-1]['c']
+    zona = find_active_zone(bandas, preco_atual)
+    if zona:
+        pts += 10
+
+    choch_direcao = None
+    if zona:
+        sweep = detect_sweep_in_zone(exec_candles, zona)
+        if sweep:
+            choch = detect_choch_after_sweep(exec_candles, sweep)
+            if choch:
+                pts += 10
+                choch_direcao = choch['direcao']
+                detalhes['choch_direcao'] = choch_direcao
+                detalhes['estrutura'] = 'Baixista' if choch_direcao == 'baixa' else 'Altista'
+
+                entry_zone = find_fvg_ob_after_choch(exec_candles, choch)
+                if not entry_zone:
+                    entry_zone = find_ifvg_after_choch(exec_candles, choch)
+                if entry_zone:
+                    pts += 10
+                    detalhes['entry_zone_tipo'] = entry_zone['tipo']
+
+    pd_zone = compute_premium_discount(exec_candles)
+    if pd_zone:
+        detalhes['zona_pd'] = 'PREMIUM' if preco_atual > pd_zone['equilibrium'] else 'DISCOUNT'
+
+    return min(pts, 30), detalhes
+
+
+def _camada_gatilho_energia(exec_candles):
+    """Gatilho&Energia — até 25 pontos. ESSA camada decide a direção
+    final do sinal (igual ao app original)."""
+    pts = 0
+    detalhes = {'padrao_candle': None, 'direcao': None, 'micro_bos': False, 'volume_acima_media': False}
+
+    padrao = detect_candle_pattern(exec_candles)
+    detalhes['padrao_candle'] = padrao
+
+    direcao = None
+    if padrao in CANDLE_PATTERNS_BULLISH:
+        direcao = 'alta'
+        pts += 10
+    elif padrao in CANDLE_PATTERNS_BEARISH:
+        direcao = 'baixa'
+        pts += 10
+    else:
+        # fallback: direção da última vela, sem padrão de rejeição claro
+        ultimo = exec_candles[-1]
+        direcao = 'alta' if ultimo['c'] >= ultimo['o'] else 'baixa'
+
+    detalhes['direcao'] = direcao
+
+    micro = detect_micro_bos(exec_candles, direcao)
+    if micro.get('confirmado'):
+        pts += 10
+        detalhes['micro_bos'] = True
+
+    vols = [c.get('v', 0) for c in exec_candles[-20:]]
+    if vols:
+        media_vol = sum(vols) / len(vols)
+        if exec_candles[-1].get('v', 0) > media_vol * 1.3:
+            pts += 5
+            detalhes['volume_acima_media'] = True
+
+    return min(pts, 25), detalhes, direcao
+
+
+def _camada_confluencias(exec_candles, direcao):
+    """Confluências — até 15 pontos. Monte Carlo real + Ichimoku."""
+    pts = 0
+    detalhes = {'monte_carlo_ok': False, 'ichimoku_alinhado': False}
+
+    mc = compute_monte_carlo(exec_candles)
+    if mc:
+        prob_favoravel = mc['prob_alta_pct'] if direcao == 'alta' else mc['prob_baixa_pct']
+        if prob_favoravel >= 55:
+            pts += 8
+            detalhes['monte_carlo_ok'] = True
+        detalhes['monte_carlo'] = mc
+
+    ichi = compute_ichimoku(exec_candles)
+    if ichi and ichi.get('senkou_a') is not None and ichi.get('senkou_b') is not None:
+        topo = max(ichi['senkou_a'], ichi['senkou_b'])
+        fundo = min(ichi['senkou_a'], ichi['senkou_b'])
+        preco = exec_candles[-1]['c']
+        ichi_bias = 'alta' if preco > topo else ('baixa' if preco < fundo else 'neutro')
+        if ichi_bias == direcao:
+            pts += 7
+            detalhes['ichimoku_alinhado'] = True
+        detalhes['ichimoku_bias'] = ichi_bias
+
+    return min(pts, 15), detalhes
+
+
+def _save_4camadas_signal(db_file, pair, exec_tf_label, resultado, alerted):
+    try:
+        signal_id = f"4cam_{pair}_{int(time.time()*1000)}"
+        with sqlite3.connect(db_file) as conn:
+            conn.execute('''
+                INSERT INTO scalp_4camadas_signal_state
+                    (id, pair, created_at, exec_tf, direcao, score, entry, sl, tp, alerted)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                signal_id, pair, int(time.time()), exec_tf_label,
+                resultado['direcao'], resultado['score'],
+                resultado['entry'], resultado['sl'], resultado['tp'],
+                1 if alerted else 0,
+            ))
+            conn.commit()
+    except Exception as e:
+        print(f"[scalp_engine 4camadas] erro ao salvar sinal de {pair}: {e}")
+
+
+def process_pair_4camadas(db_file, pair, d1_candles, h4_candles, h1_candles, exec_candles,
+                           exec_tf_label, send_telegram_fn=None):
+    """
+    Modo '4 Camadas' — réplica intencional da lógica do app concorrente,
+    SEM gate de contradição entre camadas (decisão explícita do usuário).
+    A direção final vem só da camada Gatilho&Energia.
+    """
+    resultado = {
+        'pair': pair, 'exec_tf': exec_tf_label, 'modo': '4camadas',
+        'sinal': False, 'direcao': None, 'entry': None, 'sl': None, 'tp': None,
+        'score': 0, 'motivo': None, 'em_cooldown': False,
+        'camada_regime': None, 'camada_estrutura': None,
+        'camada_gatilho': None, 'camada_confluencias': None,
+        'indicadores': None, 'gates': [],
+    }
+
+    try:
+        resultado['indicadores'] = compute_technical_indicators(exec_candles)
+    except Exception as e:
+        print(f"[scalp_engine 4camadas] erro ao calcular indicadores de {pair}: {e}")
+
+    pts_regime, det_regime = _camada_regime_mtf(d1_candles, h4_candles, h1_candles)
+    pts_estrutura, det_estrutura = _camada_estrutura_smc(d1_candles, exec_candles)
+    pts_gatilho, det_gatilho, direcao_final = _camada_gatilho_energia(exec_candles)
+    pts_confluencias, det_confluencias = _camada_confluencias(exec_candles, direcao_final)
+
+    score_total = pts_regime + pts_estrutura + pts_gatilho + pts_confluencias
+
+    resultado['camada_regime'] = {**det_regime, 'score': pts_regime}
+    resultado['camada_estrutura'] = {**det_estrutura, 'score': pts_estrutura}
+    resultado['camada_gatilho'] = {**det_gatilho, 'score': pts_gatilho}
+    resultado['camada_confluencias'] = {**det_confluencias, 'score': pts_confluencias}
+    resultado['score'] = score_total
+    resultado['direcao'] = direcao_final
+    resultado['detalhes'] = [
+        ('regime_mtf', pts_regime), ('estrutura_smc', pts_estrutura),
+        ('gatilho_energia', pts_gatilho), ('confluencias', pts_confluencias),
+    ]
+
+    if score_total < SCORE_THRESHOLD_4CAMADAS:
+        resultado['motivo'] = f'score {score_total} abaixo de {SCORE_THRESHOLD_4CAMADAS} — sem entrada'
+        return resultado
+
+    preco_atual = exec_candles[-1]['c']
+    atr_series = compute_atr(exec_candles, 14)
+    atr_atual = next((v for v in reversed(atr_series) if v is not None), None)
+    if not atr_atual or atr_atual <= 0:
+        resultado['motivo'] = 'score suficiente, mas ATR indisponível pra calcular stop'
+        return resultado
+
+    entry = preco_atual
+    sl = entry - atr_atual * 1.5 if direcao_final == 'alta' else entry + atr_atual * 1.5
+    risco = abs(entry - sl)
+    tp = entry + risco * 2.5 if direcao_final == 'alta' else entry - risco * 2.5
+
+    resultado.update({
+        'sinal': True,
+        'entry': round(entry, 6), 'sl': round(sl, 6), 'tp': round(tp, 6),
+        'motivo': 'entrada_confirmada',
+    })
+
+    segundos_desde = _segundos_desde_ultimo_alerta(db_file, 'scalp_4camadas_signal_state', pair)
+    em_cooldown = segundos_desde is not None and segundos_desde < COOLDOWN_4CAMADAS_SECONDS
+    resultado['em_cooldown'] = em_cooldown
+
+    _save_4camadas_signal(db_file, pair, exec_tf_label, resultado, alerted=not em_cooldown)
+
+    if send_telegram_fn and not em_cooldown:
+        arrow = '📈' if direcao_final == 'alta' else '📉'
+        label = 'COMPRA' if direcao_final == 'alta' else 'VENDA'
+        msg = f"🔶 <b>Sinal 4 Camadas — {pair}</b>\n\n"
+        msg += f"{arrow} <b>{label}</b> | TF execução: {exec_tf_label}\n"
+        msg += f"📍 Entrada: {resultado['entry']}\n🛑 Stop: {resultado['sl']}\n✅ TP: {resultado['tp']}\n\n"
+        msg += f"<b>Score Total: {score_total}/100</b>\n"
+        msg += f"• Regime&MTF: {pts_regime}/30 (viés contexto: {det_regime.get('viés_contexto')})\n"
+        msg += f"• Estrutura SMC: {pts_estrutura}/30 (estrutura: {det_estrutura.get('estrutura')}, zona: {det_estrutura.get('zona_pd')})\n"
+        msg += f"• Gatilho&Energia: {pts_gatilho}/25 (padrão: {det_gatilho.get('padrao_candle')})\n"
+        msg += f"• Confluências: {pts_confluencias}/15\n\n"
+        msg += "⚠️ <i>Modo experimental — réplica intencional da lógica do concorrente, sem gate de contradição entre camadas.</i>"
+        send_telegram_fn(msg)
+    elif em_cooldown:
+        restante_min = (COOLDOWN_4CAMADAS_SECONDS - segundos_desde) // 60
+        resultado['motivo'] = f'entrada_confirmada, mas em cooldown ({restante_min}min restantes)'
+
+    return resultado
+
+
 # Gera e persiste o payload completo (gates, monte carlo, ichimoku,
 # breakdown de score) toda vez que um sinal de verdade sai, e expõe via
 # endpoint Flask. Não modifica nenhuma função existente acima — só
@@ -3847,7 +4132,7 @@ def _gates_para_filtros(gates):
     ]
 
 
-def build_explicacao_payload(resultado, modo, regime_info=None):
+def build_explicacao_payload(resultado, modo, regime_info=None, exec_candles=None):
     direcao = resultado.get('direcao')
     entry, sl, tp = resultado.get('entry'), resultado.get('sl'), resultado.get('tp')
     rr = None
@@ -3858,6 +4143,56 @@ def build_explicacao_payload(resultado, modo, regime_info=None):
     indicadores = resultado.get('indicadores') or {}
     monte_carlo = indicadores.get('monte_carlo')
     ichimoku = indicadores.get('ichimoku')
+
+    # ── ATR múltiplo (distância do stop em unidades de ATR) e
+    # Volatilidade (ATR% do preço, bucket LOW/MEDIUM/HIGH) — dados reais,
+    # calculados a partir do ATR que o engine já computa sempre.
+    atr14 = indicadores.get('atr14')
+    atr_multiplo = None
+    if atr14 and entry and sl and atr14 > 0:
+        atr_multiplo = round(abs(entry - sl) / atr14, 2)
+
+    volatilidade = None
+    if atr14 and entry and entry > 0:
+        atr_pct = (atr14 / entry) * 100
+        if atr_pct < 0.3:
+            volatilidade = 'LOW'
+        elif atr_pct < 0.8:
+            volatilidade = 'MEDIUM'
+        else:
+            volatilidade = 'HIGH'
+
+    # ── Vela de Rejeição / Energia confirmada — derivado do padrão de
+    # candle que o engine já detecta (detect_candle_pattern) e do
+    # componente de volume que já entra no compute_score.
+    padrao_candle = indicadores.get('candle_pattern')
+    vela_rejeicao = padrao_candle in (
+        'Martelo (Hammer)', 'Estrela Cadente (Shooting Star)',
+        'Engolfo de Alta', 'Engolfo de Baixa',
+    )
+    breakdown_bruto = resultado.get('detalhes') or resultado.get('votos_detalhe') or []
+    energia_confirmada = bool(
+        any(item[0] == 'volume_choch_forte' for item in breakdown_bruto)
+        or resultado.get('tendencia_forte')
+    )
+
+    # ── Zona Premium/Discount — só existe pro modo cascata_smc, que já
+    # calcula isso internamente (compute_premium_discount). Vem pronto
+    # em resultado['zona_pd'] quando o process_pair_cascata_smc grava.
+    zona_pd = resultado.get('zona_pd')
+
+    # ── SMC Quality (nº de Order Blocks e FVGs abertos) — só calculável
+    # se os candles de execução forem passados pro wrapper. Sem custo
+    # extra de rede: usa as mesmas funções que o engine já tem.
+    smc_quality = None
+    if exec_candles:
+        try:
+            smc_quality = {
+                'obs': len(find_order_blocks(exec_candles)),
+                'fvgs': len(find_open_fvgs(exec_candles)),
+            }
+        except Exception:
+            smc_quality = None
 
     score = resultado.get('score')
     votos_favor = resultado.get('votos_favor')
@@ -3918,6 +4253,8 @@ def build_explicacao_payload(resultado, modo, regime_info=None):
         'contexto_de_mercado': {
             'regime': regime_info[0].upper() if regime_info else None,
             'adx': regime_info[1] if regime_info else indicadores.get('adx14'),
+            'volatilidade': volatilidade,
+            'zona_pd': zona_pd,
             'na_killzone': resultado.get('na_killzone'),
             'killzone_nome': resultado.get('killzone_nome'),
             'bias_d1': resultado.get('bias_d1'),
@@ -3930,7 +4267,14 @@ def build_explicacao_payload(resultado, modo, regime_info=None):
             'tp': tp,
             'rr': rr,
             'rsi14': resultado.get('rsi14') or indicadores.get('rsi14'),
+            'atr_multiplo': atr_multiplo,
         },
+        'gatilho_energia': {
+            'padrao_candle': padrao_candle,
+            'vela_rejeicao': vela_rejeicao,
+            'energia_confirmada': energia_confirmada,
+        },
+        'smc_quality': smc_quality,
         'filtros_de_qualidade': _gates_para_filtros(resultado.get('gates')),
         'score_total': {
             'score': score,
@@ -3948,7 +4292,7 @@ def build_explicacao_payload(resultado, modo, regime_info=None):
     return payload
 
 
-def salvar_explicacao_ultimo_sinal(db_file, modo, pair, resultado, regime_info=None):
+def salvar_explicacao_ultimo_sinal(db_file, modo, pair, resultado, regime_info=None, exec_candles=None):
     houve_sinal = resultado.get('motivo') == 'entrada' or resultado.get('sinal') is True
     if not houve_sinal:
         return None
@@ -3967,7 +4311,7 @@ def salvar_explicacao_ultimo_sinal(db_file, modo, pair, resultado, regime_info=N
             return None
         signal_id, created_at = row
 
-        payload = build_explicacao_payload(resultado, modo, regime_info=regime_info)
+        payload = build_explicacao_payload(resultado, modo, regime_info=regime_info, exec_candles=exec_candles)
 
         with sqlite3.connect(db_file) as conn:
             conn.execute(
@@ -3987,7 +4331,7 @@ def process_pair_scalp_com_explicacao(db_file, pair, d1_candles, exec_candles, e
     resultado = process_pair_scalp(db_file, pair, d1_candles, exec_candles, exec_tf_label,
                                     send_telegram_fn, h4_candles)
     regime_info = compute_market_regime(d1_candles)
-    salvar_explicacao_ultimo_sinal(db_file, 'normal_choch', pair, resultado, regime_info=regime_info)
+    salvar_explicacao_ultimo_sinal(db_file, 'normal_choch', pair, resultado, regime_info=regime_info, exec_candles=exec_candles)
     return resultado
 
 
@@ -3996,7 +4340,7 @@ def process_pair_scalp_continuacao_com_explicacao(db_file, pair, d1_candles, exe
     resultado = process_pair_scalp_continuacao(db_file, pair, d1_candles, exec_candles, exec_tf_label,
                                                 send_telegram_fn, h4_candles)
     regime_info = compute_market_regime(d1_candles)
-    salvar_explicacao_ultimo_sinal(db_file, 'continuacao_bos', pair, resultado, regime_info=regime_info)
+    salvar_explicacao_ultimo_sinal(db_file, 'continuacao_bos', pair, resultado, regime_info=regime_info, exec_candles=exec_candles)
     return resultado
 
 
@@ -4004,7 +4348,7 @@ def process_pair_scalp_indicadores_com_explicacao(db_file, pair, exec_candles, e
                                                      send_telegram_fn=None, d1_candles=None):
     resultado = process_pair_scalp_indicadores(db_file, pair, exec_candles, exec_tf_label,
                                                 send_telegram_fn, d1_candles)
-    salvar_explicacao_ultimo_sinal(db_file, 'confluencia_indicadores', pair, resultado)
+    salvar_explicacao_ultimo_sinal(db_file, 'confluencia_indicadores', pair, resultado, exec_candles=exec_candles)
     return resultado
 
 
@@ -4012,7 +4356,7 @@ def process_pair_scalp_rapido_com_explicacao(db_file, pair, d1_candles, exec_can
                                                send_telegram_fn=None):
     resultado = process_pair_scalp_rapido(db_file, pair, d1_candles, exec_candles, exec_tf_label,
                                            send_telegram_fn)
-    salvar_explicacao_ultimo_sinal(db_file, 'scalp_rapido', pair, resultado)
+    salvar_explicacao_ultimo_sinal(db_file, 'scalp_rapido', pair, resultado, exec_candles=exec_candles)
     return resultado
 
 
@@ -4020,7 +4364,7 @@ def process_pair_cascata_smc_com_explicacao(db_file, pair, w_candles, d1_candles
                                               exec_candles, exec_tf_label, send_telegram_fn=None):
     resultado = process_pair_cascata_smc(db_file, pair, w_candles, d1_candles, h4_candles, h1_candles,
                                           exec_candles, exec_tf_label, send_telegram_fn)
-    salvar_explicacao_ultimo_sinal(db_file, 'cascata_smc', pair, resultado)
+    salvar_explicacao_ultimo_sinal(db_file, 'cascata_smc', pair, resultado, exec_candles=exec_candles)
     return resultado
 
 
@@ -4028,7 +4372,15 @@ def process_pair_scalp_antecipado_v2_com_explicacao(db_file, pair, d1_candles, e
                                                        send_telegram_fn=None, h4_candles=None):
     resultado = process_pair_scalp_antecipado_v2(db_file, pair, d1_candles, exec_candles, exec_tf_label,
                                                   send_telegram_fn, h4_candles)
-    salvar_explicacao_ultimo_sinal(db_file, 'antecipado_v2', pair, resultado)
+    salvar_explicacao_ultimo_sinal(db_file, 'antecipado_v2', pair, resultado, exec_candles=exec_candles)
+    return resultado
+
+
+def process_pair_4camadas_com_explicacao(db_file, pair, d1_candles, h4_candles, h1_candles, exec_candles,
+                                           exec_tf_label, send_telegram_fn=None):
+    resultado = process_pair_4camadas(db_file, pair, d1_candles, h4_candles, h1_candles, exec_candles,
+                                       exec_tf_label, send_telegram_fn)
+    salvar_explicacao_ultimo_sinal(db_file, '4camadas', pair, resultado, exec_candles=exec_candles)
     return resultado
 
 

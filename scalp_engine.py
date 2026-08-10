@@ -3893,10 +3893,27 @@ def build_explicacao_payload(resultado, modo, regime_info=None):
     if resultado.get('mtf_status'):
         motivos.append(f"MTF: {resultado['mtf_status']}")
 
+    # Prob. Acerto real — Monte Carlo pareado com a direção do sinal
+    # (prob_alta_pct se COMPRA/alta, prob_baixa_pct se VENDA/baixa).
+    # Nada de número decorativo: se o Monte Carlo não rodou (poucos
+    # candles), fica None e o front deve mostrar "N/D".
+    prob_acerto_pct = None
+    if monte_carlo and direcao:
+        prob_acerto_pct = (
+            monte_carlo.get('prob_alta_pct') if direcao == 'alta'
+            else monte_carlo.get('prob_baixa_pct')
+        )
+
     payload = {
         'modo': modo,
         'pair': resultado.get('pair'),
         'direcao': direcao,
+        'resumo': {
+            'direcao': direcao,
+            'par': resultado.get('pair'),
+            'timeframe': resultado.get('exec_tf'),
+            'prob_acerto_pct': prob_acerto_pct,
+        },
         'motivos_principais': motivos,
         'contexto_de_mercado': {
             'regime': regime_info[0].upper() if regime_info else None,

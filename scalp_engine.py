@@ -2604,7 +2604,6 @@ def detect_wyckoff_spring_utad(candles, lookback=30, tolerancia_pct=0.002):
 
 HORAS_TOXICAS_UTC = {7, 23}  # troca de sessão / baixa liquidez, conforme especificado
 GATES_COOLDOWN_SECONDS = 40 * 60  # dentro da faixa pedida de 30-60min
-GATES_STALENESS_MAX_SEG = 30
 GATE_C_MONTE_CARLO_MIN_PROB = 85  # real, não decorativo — pode falhar com frequência
 GATE_E_MIN_RR = 2.0
 GATE_D_MIN_OBS = 3
@@ -2621,14 +2620,25 @@ def esta_em_hora_toxica_estrita(candles_referencia):
     return dt.hour in HORAS_TOXICAS_UTC
 
 
-def dados_obsoletos(candles, max_latencia_seg=GATES_STALENESS_MAX_SEG):
-    """Staleness — descarta a análise se o candle mais recente já tem
-    mais de `max_latencia_seg` de idade (dado desatualizado)."""
+GATES_STALENESS_MAX_SEG = 90  # antes 30 — realista pro ciclo em lote (7-9 pares, várias chamadas cada)
+
+
+def dados_obsoletos(candles, max_latencia_seg=GATES_STALENESS_MAX_SEG, intervalo_candle_seg=60):
+    """
+    Staleness — descarta a análise se o FECHAMENTO estimado do candle
+    mais recente já tem mais de `max_latencia_seg` de idade.
+
+    Correção importante: o timestamp de um candle é a ABERTURA, não o
+    fechamento. Um candle M1 recém-aberto sempre tem 0-59s de "idade"
+    mesmo em tempo real perfeito — medir direto da abertura reprovava
+    quase todo ciclo à toa. Agora soma a duração do candle
+    (`intervalo_candle_seg`) antes de comparar.
+    """
     if not candles:
         return True
-    ultimo_ts = candles[-1]['t'] / 1000
+    fechamento_estimado = candles[-1]['t'] / 1000 + intervalo_candle_seg
     agora = time.time()
-    return (agora - ultimo_ts) > max_latencia_seg
+    return (agora - fechamento_estimado) > max_latencia_seg
 
 
 def _confianca_padrao_candle(padrao, exec_candles):
@@ -2708,12 +2718,13 @@ def process_pair_gates_vortex(db_file, pair, candles_por_tf, exec_tf_label='M1',
     candles_d1 = candles_por_tf.get('D1')
 
     candles_gatilho = candles_m1 or candles_m5
+    intervalo_gatilho_seg = 60 if candles_m1 else 300
     if not candles_gatilho or not candles_h1:
         resultado['motivo'] = 'candles insuficientes (precisa pelo menos H1 e M1/M5)'
         return resultado
 
     # ── Staleness ──
-    if dados_obsoletos(candles_gatilho):
+    if dados_obsoletos(candles_gatilho, intervalo_candle_seg=intervalo_gatilho_seg):
         resultado['motivo'] = f'dados obsoletos — candle mais recente com mais de {GATES_STALENESS_MAX_SEG}s'
         return resultado
 

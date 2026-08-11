@@ -38,6 +38,8 @@ SCALP_NORMAL_STATUS = {}  # pair -> {'result': {...}, 'updated_at': int}
 SCALP_RAPIDO_STATUS = {}  # pair -> {'result': {...}, 'updated_at': int}
 
 SCALP_CASCATA_STATUS = {}  # pair -> {'result': {...}, 'updated_at': int}
+STATUS_4CAMADAS = {}  # pair -> {'result': {...}, 'updated_at': int}
+STATUS_GATES_VORTEX = {}  # pair -> {'result': {...}, 'updated_at': int}
 
 CACHE_WINDOW_SECONDS = 15 * 60  # 15 minutos
 
@@ -1358,202 +1360,82 @@ def run_live_cycle(pair, interval_min):
                 exec_candles = fetch_bybit_klines(symbol, '1', DEFAULT_CANDLE_LIMIT)
             else:
                 exec_candles = None
+
             if exec_candles:
                 try:
                     resolve_pending_journal_trades(pair, exec_candles)
                 except Exception as e:
                     print(f"[journal] erro ao resolver pendentes de {pair}: {e}")
 
+                # Resolução de WIN/LOSS — genérica, cobre TODAS as tabelas
+                # de MODOS_SCALP automaticamente (inclusive as novas:
+                # scalp_4camadas_signal_state e scalp_gates_vortex_signal_state).
                 try:
-                    for tabela_gestao in (
-                        'scalp_signal_state', 'scalp_signal_state_continuacao',
-                        'scalp_rapido_signal_state', 'scalp_cascata_signal_state',
-                        'scalp_antecipado_signal_state', 'scalp_indicadores_signal_state',
-                    ):
+                    for tabela_gestao in set(scalp_engine.MODOS_SCALP.values()):
                         scalp_engine.gerenciar_trades_abertos(
                             DB_FILE, pair, exec_candles, tabela_gestao, send_telegram,
                         )
                 except Exception as e:
-                    print(f"[scalp_engine be_parcial] erro ao gerenciar trades abertos de {pair}: {e}")
+                    print(f"[scalp_engine] erro ao gerenciar trades abertos de {pair}: {e}")
 
-                try:
-                    cascata_result = scalp_engine.process_pair_cascata_smc_com_explicacao(
-                        DB_FILE, pair,
-                        candles_por_tf_cache.get('W'),
-                        candles_por_tf_cache['D1'],
-                        candles_por_tf_cache.get('H4'),
-                        candles_por_tf_cache.get('H1'),
-                        exec_candles,
-                        exec_tf,
-                        send_telegram,
-                    )
-                    SCALP_CASCATA_STATUS[pair] = {'result': cascata_result, 'updated_at': int(time.time())}
-                    SCALP_STATUS[pair] = {'result': cascata_result, 'updated_at': int(time.time())}
-                    scalp_result = cascata_result
-
-                    if cascata_result.get('sinal') and not cascata_result.get('em_cooldown'):
-                        save_scalp_signal_to_journal(
-                            pair, 'Cascata', exec_tf,
-                            cascata_result.get('direcao'),
-                            cascata_result.get('score', 100),
-                            cascata_result.get('entry'), cascata_result.get('sl'), cascata_result.get('tp'),
-                            cascata_result.get('motivo'),
-                        )
-                except Exception as e:
-                    print(f"[scalp_engine cascata] erro no ciclo de {pair}: {e}")
-
-                try:
-                    normal_result = scalp_engine.process_pair_scalp_com_explicacao(
-                        DB_FILE, pair,
-                        candles_por_tf_cache['D1'],
-                        exec_candles,
-                        exec_tf,
-                        send_telegram,
-                        h4_candles=candles_por_tf_cache.get('H4'),
-                    )
-                    SCALP_NORMAL_STATUS[pair] = {'result': normal_result, 'updated_at': int(time.time())}
-
-                    if normal_result.get('motivo') == 'entrada' and not normal_result.get('em_cooldown'):
-                        save_scalp_signal_to_journal(
-                            pair, 'Normal CHoCH', exec_tf,
-                            normal_result.get('direcao'),
-                            normal_result.get('score', 0),
-                            normal_result.get('entry'), normal_result.get('sl'), normal_result.get('tp'),
-                            normal_result.get('motivo'),
-                        )
-                except Exception as e:
-                    print(f"[scalp_engine normal] erro no ciclo de {pair}: {e}")
-
-                try:
-                    continuacao_result = scalp_engine.process_pair_scalp_continuacao_com_explicacao(
-                        DB_FILE, pair,
-                        candles_por_tf_cache['D1'],
-                        exec_candles,
-                        exec_tf,
-                        send_telegram,
-                        h4_candles=candles_por_tf_cache.get('H4'),
-                    )
-                    SCALP_CONTINUACAO_STATUS[pair] = {'result': continuacao_result, 'updated_at': int(time.time())}
-
-                    if continuacao_result.get('motivo') == 'entrada' and not continuacao_result.get('em_cooldown'):
-                        save_scalp_signal_to_journal(
-                            pair, 'Continuacao BOS', exec_tf,
-                            continuacao_result.get('direcao'),
-                            continuacao_result.get('score', 0),
-                            continuacao_result.get('entry'), continuacao_result.get('sl'), continuacao_result.get('tp'),
-                            continuacao_result.get('motivo'),
-                        )
-                except Exception as e:
-                    print(f"[scalp_engine continuacao] erro no ciclo de {pair}: {e}")
-
-                # ── PATCH 09/08: modo Antecipado v2 desativado (fora do
-                # padrão Sweep->CHoCH/BOS->FVG->Entrada). Checa
-                # scalp_engine.MODOS_ATIVOS antes de rodar — reativa lá
-                # se quiser ligar de novo, sem precisar mexer aqui.
-                if scalp_engine.MODOS_ATIVOS.get('antecipado_v2', True):
+                # Modo 4camadas (réplica Vortex, sem trava)
+                if scalp_engine.MODOS_ATIVOS.get('4camadas', False):
                     try:
-                        antecipado_result = scalp_engine.process_pair_scalp_antecipado_v2_com_explicacao(
+                        resultado_4cam = scalp_engine.process_pair_4camadas_com_explicacao(
                             DB_FILE, pair,
                             candles_por_tf_cache['D1'],
+                            candles_por_tf_cache.get('H4'),
+                            candles_por_tf_cache.get('H1'),
                             exec_candles,
                             exec_tf,
                             send_telegram,
-                            h4_candles=candles_por_tf_cache.get('H4'),
                         )
-                        SCALP_ANTECIPADO_STATUS[pair] = {'result': antecipado_result, 'updated_at': int(time.time())}
+                        STATUS_4CAMADAS[pair] = {'result': resultado_4cam, 'updated_at': int(time.time())}
+                        scalp_result = resultado_4cam
 
-                        if antecipado_result.get('sinal') and not antecipado_result.get('em_cooldown'):
+                        if resultado_4cam.get('sinal') and not resultado_4cam.get('em_cooldown'):
                             save_scalp_signal_to_journal(
-                                pair, 'Antecipado v2', exec_tf,
-                                antecipado_result.get('direcao'),
-                                100,
-                                antecipado_result.get('entry'), antecipado_result.get('sl'), antecipado_result.get('tp'),
-                                antecipado_result.get('motivo'),
+                                pair, '4 Camadas', exec_tf,
+                                resultado_4cam.get('direcao'),
+                                resultado_4cam.get('score', 0),
+                                resultado_4cam.get('entry'), resultado_4cam.get('sl'), resultado_4cam.get('tp'),
+                                resultado_4cam.get('motivo'),
                             )
                     except Exception as e:
-                        print(f"[scalp_engine antecipado] erro no ciclo de {pair}: {e}")
+                        print(f"[scalp_engine 4camadas] erro no ciclo de {pair}: {e}")
 
-                # ── PATCH 09/08: modo Confluência de Indicadores
-                # desativado (votação sem gate estrutural — 16.3% WR).
-                # Checa scalp_engine.MODOS_ATIVOS antes de rodar.
-                if scalp_engine.MODOS_ATIVOS.get('confluencia_indicadores', True):
+                # Modo Gates Vortex (restrito, com trava)
+                if scalp_engine.MODOS_ATIVOS.get('gates_vortex', False):
                     try:
-                        indicadores_result = scalp_engine.process_pair_scalp_indicadores_com_explicacao(
-                            DB_FILE, pair,
-                            exec_candles,
-                            exec_tf,
-                            send_telegram,
-                            d1_candles=candles_por_tf_cache.get('D1'),
+                        candles_por_tf_gates = {
+                            'D1': candles_por_tf_cache.get('D1'),
+                            'H4': candles_por_tf_cache.get('H4'),
+                            'H1': candles_por_tf_cache.get('H1'),
+                            'M15': candles_por_tf_cache.get('M15'),
+                            'M5': candles_por_tf_cache.get('M5'),
+                            'M1': candles_por_tf_cache.get('M1'),
+                        }
+                        resultado_gates = scalp_engine.process_pair_gates_vortex_com_explicacao(
+                            DB_FILE, pair, candles_por_tf_gates,
+                            exec_tf_label='M1',
+                            send_telegram_fn=send_telegram,
                         )
-                        SCALP_INDICADORES_STATUS[pair] = {'result': indicadores_result, 'updated_at': int(time.time())}
+                        STATUS_GATES_VORTEX[pair] = {'result': resultado_gates, 'updated_at': int(time.time())}
+                        scalp_result = resultado_gates
 
-                        if indicadores_result.get('sinal') and not indicadores_result.get('em_cooldown'):
+                        if resultado_gates.get('sinal') and not resultado_gates.get('em_cooldown'):
                             save_scalp_signal_to_journal(
-                                pair, 'Confluência Indicadores', exec_tf,
-                                indicadores_result.get('direcao'),
-                                indicadores_result.get('score', 0),
-                                indicadores_result.get('entry'), indicadores_result.get('sl'), indicadores_result.get('tp'),
-                                indicadores_result.get('motivo'),
+                                pair, 'Gates Vortex', 'M1',
+                                resultado_gates.get('direcao'),
+                                resultado_gates.get('score', 0),
+                                resultado_gates.get('entry'), resultado_gates.get('sl'), resultado_gates.get('tp1'),
+                                resultado_gates.get('motivo'),
                             )
                     except Exception as e:
-                        print(f"[scalp_engine indicadores] erro no ciclo de {pair}: {e}")
+                        print(f"[scalp_engine gates_vortex] erro no ciclo de {pair}: {e}")
 
-                # ── PATCH 09/08: modo Scalp Rápido desativado (sem
-                # CHoCH, entra direto no sweep+RSI). Checa
-                # scalp_engine.MODOS_ATIVOS antes de rodar.
-                if scalp_engine.MODOS_ATIVOS.get('scalp_rapido', True):
-                    try:
-                        rapido_result = scalp_engine.process_pair_scalp_rapido_com_explicacao(
-                            DB_FILE, pair,
-                            candles_por_tf_cache['D1'],
-                            exec_candles,
-                            exec_tf,
-                            send_telegram,
-                        )
-                        SCALP_RAPIDO_STATUS[pair] = {'result': rapido_result, 'updated_at': int(time.time())}
-
-                        if rapido_result.get('sinal') and not rapido_result.get('em_cooldown'):
-                            save_scalp_signal_to_journal(
-                                pair, 'Scalp Rápido', exec_tf,
-                                rapido_result.get('direcao'),
-                                100,
-                                rapido_result.get('entry'), rapido_result.get('sl'), rapido_result.get('tp'),
-                                rapido_result.get('motivo'),
-                            )
-                    except Exception as e:
-                        print(f"[scalp_engine rapido] erro no ciclo de {pair}: {e}")
-
-                try:
-                    scalp_engine.process_pair_scalp_filtros_shadow(
-                        DB_FILE, pair,
-                        candles_por_tf_cache['D1'],
-                        exec_candles,
-                        exec_tf,
-                        h4_candles=candles_por_tf_cache.get('H4'),
-                    )
-                except Exception as e:
-                    print(f"[scalp_engine filtros_shadow] erro no ciclo de {pair}: {e}")
     except Exception as e:
-        print(f"[scalp_engine] erro no ciclo de {pair}: {e}")
-
-    now = int(time.time())
-    resumo_motivo = None
-    resumo_score = 0
-    if cascade_result:
-        resumo_motivo = cascade_result.get('motivo')
-        resumo_score = cascade_result.get('score') or 0
-    if scalp_result and scalp_result.get('motivo'):
-        resumo_motivo = scalp_result['motivo']
-        resumo_score = max(resumo_score, scalp_result.get('score') or 0)
-
-    with sqlite3.connect(DB_FILE) as conn:
-        cursor = conn.cursor()
-        cursor.execute('''
-            UPDATE live_watch SET last_run=?, last_score=?, last_result=?, updated_at=? WHERE pair=?
-        ''', (now, resumo_score, resumo_motivo, now, pair))
-        conn.commit()
-
-    return {'pair': pair, 'cascade': cascade_result, 'scalp': scalp_result}
+        print(f"[scalp_engine] erro geral no ciclo de scalp de {pair}: {e}")
 
 
 def live_scheduler_loop():
@@ -2197,6 +2079,28 @@ def scalp_status():
         if pair:
             return jsonify(SCALP_STATUS.get(pair, {}))
         return jsonify(SCALP_STATUS)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/scalp_4camadas/status', methods=['GET'])
+def scalp_4camadas_status():
+    try:
+        pair = request.args.get('pair')
+        if pair:
+            return jsonify(STATUS_4CAMADAS.get(pair, {}))
+        return jsonify(STATUS_4CAMADAS)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/scalp_gates_vortex/status', methods=['GET'])
+def scalp_gates_vortex_status():
+    try:
+        pair = request.args.get('pair')
+        if pair:
+            return jsonify(STATUS_GATES_VORTEX.get(pair, {}))
+        return jsonify(STATUS_GATES_VORTEX)
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 

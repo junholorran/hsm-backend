@@ -2871,9 +2871,11 @@ def process_pair_gates_vortex(db_file, pair, candles_por_tf, exec_tf_label='M1',
     if send_telegram_fn and not em_cooldown:
         arrow = '📈' if direcao_permitida == 'alta' else '📉'
         label = 'COMPRA' if direcao_permitida == 'alta' else 'VENDA'
+        tipo_ordem = 'BUY LIMIT' if direcao_permitida == 'alta' else 'SELL LIMIT'
         msg = f"🚦 <b>Gates Vortex — {pair}</b>\n\n"
         msg += f"{arrow} <b>{label}</b> | Score: {score}/100 | Prob. real: {prob_acerto}%\n"
-        msg += f"📍 Entrada: {resultado['entry']}\n🛑 Stop: {resultado['sl']}\n"
+        msg += f"📍 <b>Ordem LIMITE ({tipo_ordem}) em {resultado['entry']}</b> — não é a mercado, espera o preço voltar ali (50% do FVG)\n"
+        msg += f"🛑 Stop: {resultado['sl']}\n"
         msg += f"✅ TP1: {resultado['tp1']} (RR {resultado['risco_recompensa']})\n"
         if resultado['tp2']:
             msg += f"✅ TP2: {resultado['tp2']}\n"
@@ -3837,7 +3839,8 @@ def process_pair_4camadas(db_file, pair, d1_candles, h4_candles, h1_candles, exe
         label = 'COMPRA' if direcao_final == 'alta' else 'VENDA'
         msg = f"🔶 <b>Sinal 4 Camadas — {pair}</b>\n\n"
         msg += f"{arrow} <b>{label}</b> | TF execução: {exec_tf_label}\n"
-        msg += f"📍 Entrada: {resultado['entry']}\n🛑 Stop: {resultado['sl']}\n✅ TP: {resultado['tp']}\n\n"
+        msg += f"📍 <b>Entrada A MERCADO em {resultado['entry']}</b> (preço no momento do sinal — não precisa esperar, executa direto)\n"
+        msg += f"🛑 Stop: {resultado['sl']}\n✅ TP: {resultado['tp']}\n\n"
         msg += f"<b>Score Total: {score_total}/100</b>\n"
         msg += f"• Regime&MTF: {pts_regime}/30 (viés contexto: {det_regime.get('viés_contexto')})\n"
         msg += f"• Estrutura SMC: {pts_estrutura}/30 (estrutura: {det_estrutura.get('estrutura')}, zona: {det_estrutura.get('zona_pd')})\n"

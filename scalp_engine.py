@@ -2697,7 +2697,7 @@ def _save_gates_vortex_signal(db_file, pair, exec_tf_label, resultado, alerted):
         print(f"[scalp_engine gates_vortex] erro ao salvar sinal de {pair}: {e}")
 
 
-def process_pair_gates_vortex(db_file, pair, candles_por_tf, exec_tf_label='M1', send_telegram_fn=None):
+def process_pair_gates_vortex(db_file, pair, candles_por_tf, exec_tf_label='M5', send_telegram_fn=None):
     """
     Pipeline completo de Gates A-F. Só retorna SIGNAL_DISPARADO quando
     TODOS os 6 gates passarem. Reaproveita Bias/SFP/MSS/FVG do modo
@@ -2717,10 +2717,11 @@ def process_pair_gates_vortex(db_file, pair, candles_por_tf, exec_tf_label='M1',
     candles_m1 = candles_por_tf.get('M1')
     candles_d1 = candles_por_tf.get('D1')
 
-    candles_gatilho = candles_m1 or candles_m5
-    intervalo_gatilho_seg = 60 if candles_m1 else 300
+    candles_gatilho = candles_m5 or candles_m1
+    tf_gatilho_usado = 'M5' if candles_m5 else 'M1'
+    intervalo_gatilho_seg = 300 if candles_m5 else 60
     if not candles_gatilho or not candles_h1:
-        resultado['motivo'] = 'candles insuficientes (precisa pelo menos H1 e M1/M5)'
+        resultado['motivo'] = 'candles insuficientes (precisa pelo menos H1 e M5/M1)'
         return resultado
 
     # ── Staleness ──
@@ -2764,13 +2765,14 @@ def process_pair_gates_vortex(db_file, pair, candles_por_tf, exec_tf_label='M1',
     atr_multiplo = round(range_atual / atr_atual, 2) if atr_atual and atr_atual > 0 else None
     atr_ok = atr_multiplo is not None and atr_multiplo > 1.2
 
-    # ── MSS no M1 ──
-    if not candles_m1:
-        resultado['motivo'] = 'SFP e gatilho ok, mas sem candles M1 pra validar MSS'
+    # ── MSS no mesmo TF do gatilho (M5 por padrão, igual à Vortex; M1 só se M5 faltar) ──
+    candles_mss = candles_m5 or candles_m1
+    if not candles_mss:
+        resultado['motivo'] = 'SFP e gatilho ok, mas sem candles M5/M1 pra validar MSS'
         return resultado
-    mss = validar_mss_m1(candles_m1, sfp, direcao_permitida)
+    mss = validar_mss_m1(candles_mss, sfp, direcao_permitida)
     if not mss:
-        resultado['motivo'] = f"SFP confirmado ({sfp['tipo']}), mas sem MSS de corpo forte no M1 ainda"
+        resultado['motivo'] = f"SFP confirmado ({sfp['tipo']}), mas sem MSS de corpo forte no {tf_gatilho_usado} ainda"
         return resultado
 
     # ── FVG (POI), entrada 50% ──
@@ -2815,6 +2817,15 @@ def process_pair_gates_vortex(db_file, pair, candles_por_tf, exec_tf_label='M1',
 
     wyckoff = detect_wyckoff_spring_utad(candles_gatilho)
 
+    # ── Premium/Discount — princípio SMC básico: não compra caro (Premium),
+    # não vende barato (Discount). Diferente do modo '4camadas' (onde isso é
+    # só informativo, de propósito), aqui vira veto real (Gate G).
+    pd_zone = compute_premium_discount(candles_gatilho)
+    zona_pd = None
+    if pd_zone:
+        preco_atual_pd = candles_gatilho[-1]['c']
+        zona_pd = 'PREMIUM' if preco_atual_pd > pd_zone['equilibrium'] else 'DISCOUNT'
+
     # ── GATES ──
     gate_a = (det_regime.get('bias_d1') == direcao_permitida or det_regime.get('mtf_alinhado')) and (mss['direcao'] == direcao_permitida)
     gate_b = bool(sfp) and bool(mss) and bool(entry_zone)
@@ -2822,6 +2833,11 @@ def process_pair_gates_vortex(db_file, pair, candles_por_tf, exec_tf_label='M1',
     gate_d = smc_quality['obs'] >= GATE_D_MIN_OBS and smc_quality['fvgs'] >= GATE_D_MIN_FVGS
     gate_e = rr_tp1 >= GATE_E_MIN_RR
     gate_f = True  # informativo, nunca bloqueia
+    gate_g = True
+    if zona_pd == 'PREMIUM' and direcao_permitida == 'alta':
+        gate_g = False  # não compra em zona cara
+    elif zona_pd == 'DISCOUNT' and direcao_permitida == 'baixa':
+        gate_g = False  # não vende em zona barata
 
     gates = {
         'A_MTF_ALIGNMENT': gate_a,
@@ -2830,8 +2846,10 @@ def process_pair_gates_vortex(db_file, pair, candles_por_tf, exec_tf_label='M1',
         'D_SMC_QUALITY': gate_d,
         'E_MIN_RR': gate_e,
         'F_ICHIMOKU_INFO': gate_f,
+        'G_PREMIUM_DISCOUNT': gate_g,
     }
     resultado['gates'] = gates
+    resultado['zona_pd'] = zona_pd
 
     if not all(gates.values()):
         falhos = [nome for nome, ok in gates.items() if not ok]
@@ -2873,7 +2891,7 @@ def process_pair_gates_vortex(db_file, pair, candles_por_tf, exec_tf_label='M1',
         label = 'COMPRA' if direcao_permitida == 'alta' else 'VENDA'
         tipo_ordem = 'BUY LIMIT' if direcao_permitida == 'alta' else 'SELL LIMIT'
         msg = f"🚦 <b>Gates Vortex — {pair}</b>\n\n"
-        msg += f"{arrow} <b>{label}</b> | Score: {score}/100 | Prob. real: {prob_acerto}%\n"
+        msg += f"{arrow} <b>{label}</b> | Score: {score}/100 | Confiança: {prob_acerto}% (Monte Carlo, não calibrado)\n"
         msg += f"📍 <b>Ordem LIMITE ({tipo_ordem}) em {resultado['entry']}</b> — não é a mercado, espera o preço voltar ali (50% do FVG)\n"
         msg += f"🛑 Stop: {resultado['sl']}\n"
         msg += f"✅ TP1: {resultado['tp1']} (RR {resultado['risco_recompensa']})\n"
@@ -2898,6 +2916,7 @@ def formatar_saida_gates_json(resultado):
         'ativo': resultado.get('pair'),
         'sinal': 'COMPRA' if resultado.get('direcao') == 'alta' else 'VENDA',
         'score': resultado.get('score'),
+        'confianca': f"{resultado.get('prob_acerto')}% (Monte Carlo, não calibrado)" if resultado.get('prob_acerto') is not None else None,
         'prob_acerto': f"{resultado.get('prob_acerto')}%" if resultado.get('prob_acerto') is not None else None,
         'risco_retorno': resultado.get('risco_recompensa'),
         'execucao': {
@@ -3837,9 +3856,10 @@ def process_pair_4camadas(db_file, pair, d1_candles, h4_candles, h1_candles, exe
     if send_telegram_fn and not em_cooldown:
         arrow = '📈' if direcao_final == 'alta' else '📉'
         label = 'COMPRA' if direcao_final == 'alta' else 'VENDA'
+        tipo_ordem = 'BUY LIMIT' if direcao_final == 'alta' else 'SELL LIMIT'
         msg = f"🔶 <b>Sinal 4 Camadas — {pair}</b>\n\n"
         msg += f"{arrow} <b>{label}</b> | TF execução: {exec_tf_label}\n"
-        msg += f"📍 <b>Entrada A MERCADO em {resultado['entry']}</b> (preço no momento do sinal — não precisa esperar, executa direto)\n"
+        msg += f"📍 <b>Ordem LIMITE ({tipo_ordem}) em {resultado['entry']}</b> — protege contra slippage entre o sinal e a execução\n"
         msg += f"🛑 Stop: {resultado['sl']}\n✅ TP: {resultado['tp']}\n\n"
         msg += f"<b>Score Total: {score_total}/100</b>\n"
         msg += f"• Regime&MTF: {pts_regime}/30 (viés contexto: {det_regime.get('viés_contexto')})\n"
@@ -4000,6 +4020,7 @@ def build_explicacao_payload(resultado, modo, regime_info=None, exec_candles=Non
             'direcao': direcao,
             'par': resultado.get('pair'),
             'timeframe': resultado.get('exec_tf'),
+            'confianca_pct': prob_acerto_pct,
             'prob_acerto_pct': prob_acerto_pct,
         },
         'motivos_principais': motivos,
@@ -4092,10 +4113,10 @@ def process_pair_4camadas_com_explicacao(db_file, pair, d1_candles, h4_candles, 
 
 
 
-def process_pair_gates_vortex_com_explicacao(db_file, pair, candles_por_tf, exec_tf_label='M1',
+def process_pair_gates_vortex_com_explicacao(db_file, pair, candles_por_tf, exec_tf_label='M5',
                                                send_telegram_fn=None):
     resultado = process_pair_gates_vortex(db_file, pair, candles_por_tf, exec_tf_label, send_telegram_fn)
-    exec_candles_ref = candles_por_tf.get('M1') or candles_por_tf.get('M5')
+    exec_candles_ref = candles_por_tf.get('M5') or candles_por_tf.get('M1')
     salvar_explicacao_ultimo_sinal(db_file, 'gates_vortex', pair, resultado, exec_candles=exec_candles_ref)
     return resultado
 

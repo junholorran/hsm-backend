@@ -2428,6 +2428,36 @@ def validar_sfp_estrito(candles_sfp, liquidez, direcao_permitida):
     return None, 'sem_sfp_ainda'
 
 
+def validar_sfp_cascata_tf(candles_por_tf, liquidez, direcao_permitida):
+    """
+    Tenta achar o SFP em cascata: M15 primeiro (sweep mais confiável,
+    menos ruído), se não achar cai pro M5, se não achar cai pro M1 —
+    maximiza oportunidade sem abrir mão de tentar o TF mais limpo
+    primeiro. Se qualquer TF confirmar breakout real, cancela na hora
+    (não faz sentido procurar SFP num nível que já foi rompido de vez).
+    Retorna (sfp, motivo, timeframe_usado).
+    """
+    ordem_tfs = ['M15', 'M5', 'M1']
+    ultimo_motivo = 'sem_candles_sfp'
+
+    for tf_label in ordem_tfs:
+        candles_tf = candles_por_tf.get(tf_label)
+        if not candles_tf:
+            continue
+
+        sfp, motivo = validar_sfp_estrito(candles_tf, liquidez, direcao_permitida)
+
+        if sfp:
+            return sfp, motivo, tf_label
+
+        if motivo == 'breakout_cancela_analise':
+            return None, motivo, tf_label
+
+        ultimo_motivo = motivo
+
+    return None, ultimo_motivo, None
+
+
 # ── PASSO 3: MSS confirmado no M1, com corpo forte ──────────────────────
 
 def validar_mss_m1(candles_m1, sfp, direcao_permitida, corpo_min_pct=MSS_CORPO_MIN_PCT):
@@ -2536,12 +2566,12 @@ def process_pair_sfp_liquidez(db_file, pair, candles_por_tf, exec_tf_label='M1',
 
     # PASSO 2
     liquidez = compute_liquidez_referencia(pair, candles_por_tf)
-    candles_sfp = candles_por_tf.get('M15') or candles_por_tf.get('M5')
-    sfp, motivo_sfp = validar_sfp_estrito(candles_sfp or [], liquidez, direcao_permitida)
+    sfp, motivo_sfp, tf_sfp_usado = validar_sfp_cascata_tf(candles_por_tf, liquidez, direcao_permitida)
     if not sfp:
         resultado['motivo'] = f'Bias {bias_context}, {motivo_sfp}'
         return resultado
     resultado['sfp'] = sfp
+    resultado['tf_sfp_usado'] = tf_sfp_usado
 
     # PASSO 3
     candles_m1 = candles_por_tf.get('M1')
@@ -2867,10 +2897,11 @@ def process_pair_gates_vortex(db_file, pair, candles_por_tf, exec_tf_label='M1',
 
     # ── SFP contra liquidez (sessão anterior ou 3-7 dias) ──
     liquidez = compute_liquidez_referencia(pair, candles_por_tf)
-    sfp, motivo_sfp = validar_sfp_estrito(candles_m15 or candles_m5 or [], liquidez, direcao_permitida)
+    sfp, motivo_sfp, tf_sfp_usado = validar_sfp_cascata_tf(candles_por_tf, liquidez, direcao_permitida)
     if not sfp:
         resultado['motivo'] = f'Bias {bias_context}, {motivo_sfp}'
         return resultado
+    resultado['tf_sfp_usado'] = tf_sfp_usado
 
     # ── Validação do gatilho de rejeição: padrão + volume + ATR múltiplo ──
     padrao = detect_candle_pattern(candles_gatilho)

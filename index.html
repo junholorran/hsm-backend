@@ -519,16 +519,6 @@ body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-h
 </div>
 
 <div class="section">
-  <div class="section-title">Sinais Ativos</div>
-  <div id="sinaisAtivosList"><div class="signals-empty">A carregar...</div></div>
-</div>
-
-<div class="section">
-  <div class="section-title">Sinais Recentes</div>
-  <div id="sinaisRecentesList"><div class="signals-empty">A carregar...</div></div>
-</div>
-
-<div class="section">
   <div class="section-title">🎯 Setups Ao Vivo — Cascata (todos os pares)</div>
   <div id="cascadeFeedList"><div class="signals-empty">A carregar...</div></div>
 </div>
@@ -556,113 +546,50 @@ body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-h
     </button>
   </div>
 
-  <div class="result-summary-card" id="scalpChartCard" style="margin-bottom:12px;">
+  <div class="result-summary-card" id="camadas4ChartCard" style="margin-bottom:12px;">
     <div class="rsc-header">
       <div>
-        <div class="rsc-pair" id="scalpChartPairLabel">BTCUSDT</div>
-        <div class="rsc-tfs" id="scalpChartSub">A carregar...</div>
+        <div class="rsc-pair" id="camadas4ChartPairLabel">BTCUSDT</div>
+        <div class="rsc-tfs" id="camadas4ChartSub">🔶 4 Camadas (estilo Vortex, sem trava)</div>
       </div>
       <div class="rsc-right">
-        <div class="rsc-score score-mid" id="scalpChartScore">0/100</div>
+        <div class="rsc-score score-mid" id="camadas4ChartScore">0/100</div>
       </div>
     </div>
     <div class="rsc-body">
-      <div style="background:#0a0a0f;border-radius:8px;overflow:hidden;margin-bottom:10px;">
-        <canvas id="scalpChartCanvas" width="900" height="360" style="width:100%;display:block;"></canvas>
-      </div>
       <div class="rsc-levels">
-        <div class="rsc-level"><div class="rsc-level-label">ENTRADA</div><div class="rsc-level-val" id="scalpChartEntry">—</div></div>
-        <div class="rsc-level"><div class="rsc-level-label">STOP</div><div class="rsc-level-val red" id="scalpChartSl">—</div></div>
-        <div class="rsc-level"><div class="rsc-level-label">TP</div><div class="rsc-level-val green" id="scalpChartTp">—</div></div>
+        <div class="rsc-level"><div class="rsc-level-label">ENTRADA</div><div class="rsc-level-val" id="camadas4ChartEntry">—</div></div>
+        <div class="rsc-level"><div class="rsc-level-label">STOP</div><div class="rsc-level-val red" id="camadas4ChartSl">—</div></div>
+        <div class="rsc-level"><div class="rsc-level-label">TP</div><div class="rsc-level-val green" id="camadas4ChartTp">—</div></div>
       </div>
-      <button class="explic-trigger-btn" onclick="openExplicacaoModal('cascata_smc', activePair)">⚡ Por que este sinal foi gerado?</button>
+      <button class="explic-trigger-btn" onclick="openExplicacaoModal('4camadas', activePair)">⚡ Por que este sinal foi gerado?</button>
     </div>
   </div>
 
-  <div id="scalpFeedList"><div class="signals-empty">A carregar...</div></div>
-</div>
-
-<div class="section">
-  <div class="section-title">⚠️ Rejeição Antecipada v2</div>
-  <div class="result-summary-card" id="antecipadoChartCard" style="margin-bottom:12px;">
+  <div class="result-summary-card" id="gatesVortexChartCard" style="margin-bottom:12px;">
     <div class="rsc-header">
       <div>
-        <div class="rsc-pair" id="antecipadoChartPairLabel">BTCUSDT</div>
-        <div class="rsc-tfs" id="antecipadoChartSub">A carregar...</div>
+        <div class="rsc-pair" id="gatesVortexChartPairLabel">BTCUSDT</div>
+        <div class="rsc-tfs" id="gatesVortexChartSub">🚦 Gates Vortex (restrito, 6 gates)</div>
       </div>
       <div class="rsc-right">
-        <div class="rsc-score score-mid" id="antecipadoChartRsi">RSI —</div>
+        <div class="rsc-score score-mid" id="gatesVortexChartScore">0/100</div>
       </div>
     </div>
     <div class="rsc-body">
-      <div style="background:#0a0a0f;border-radius:8px;overflow:hidden;margin-bottom:10px;">
-        <canvas id="antecipadoChartCanvas" width="900" height="360" style="width:100%;display:block;"></canvas>
-      </div>
       <div class="rsc-levels">
-        <div class="rsc-level"><div class="rsc-level-label">ENTRADA</div><div class="rsc-level-val" id="antecipadoChartEntry">—</div></div>
-        <div class="rsc-level"><div class="rsc-level-label">STOP</div><div class="rsc-level-val red" id="antecipadoChartSl">—</div></div>
-        <div class="rsc-level"><div class="rsc-level-label">TP</div><div class="rsc-level-val green" id="antecipadoChartTp">—</div></div>
+        <div class="rsc-level"><div class="rsc-level-label">ENTRADA</div><div class="rsc-level-val" id="gatesVortexChartEntry">—</div></div>
+        <div class="rsc-level"><div class="rsc-level-label">STOP</div><div class="rsc-level-val red" id="gatesVortexChartSl">—</div></div>
+        <div class="rsc-level"><div class="rsc-level-label">TP1</div><div class="rsc-level-val green" id="gatesVortexChartTp">—</div></div>
       </div>
-      <button class="explic-trigger-btn" onclick="openExplicacaoModal('antecipado_v2', activePair)">⚡ Por que este sinal foi gerado?</button>
-    </div>
-  </div>
-</div>
-
-<div class="section">
-  <div class="section-title">📊 Confluência de Indicadores</div>
-  <div class="result-summary-card" id="indicadoresChartCard" style="margin-bottom:12px;">
-    <div class="rsc-header">
-      <div>
-        <div class="rsc-pair" id="indicadoresChartPairLabel">BTCUSDT</div>
-        <div class="rsc-tfs" id="indicadoresChartSub">A carregar...</div>
-      </div>
-      <div class="rsc-right">
-        <div class="rsc-score score-mid" id="indicadoresChartScore">0/100</div>
-      </div>
-    </div>
-    <div class="rsc-body">
-      <div style="background:#0a0a0f;border-radius:8px;overflow:hidden;margin-bottom:10px;">
-        <canvas id="indicadoresChartCanvas" width="900" height="360" style="width:100%;display:block;"></canvas>
-      </div>
-      <div class="rsc-levels">
-        <div class="rsc-level"><div class="rsc-level-label">ENTRADA</div><div class="rsc-level-val" id="indicadoresChartEntry">—</div></div>
-        <div class="rsc-level"><div class="rsc-level-label">STOP</div><div class="rsc-level-val red" id="indicadoresChartSl">—</div></div>
-        <div class="rsc-level"><div class="rsc-level-label">TP</div><div class="rsc-level-val green" id="indicadoresChartTp">—</div></div>
-      </div>
-      <button class="explic-trigger-btn" onclick="openExplicacaoModal('confluencia_indicadores', activePair)">⚡ Por que este sinal foi gerado?</button>
-      <div class="pair-selector-label" style="margin-top:8px;margin-bottom:0;" id="indicadoresChartVotos"></div>
-    </div>
-  </div>
-</div>
-
-<div class="section">
-  <div class="section-title">⚡ Scalp Rápido — Liquidez Forte</div>
-  <div class="result-summary-card" id="rapidoChartCard" style="margin-bottom:12px;">
-    <div class="rsc-header">
-      <div>
-        <div class="rsc-pair" id="rapidoChartPairLabel">BTCUSDT</div>
-        <div class="rsc-tfs" id="rapidoChartSub">A carregar...</div>
-      </div>
-      <div class="rsc-right">
-        <div class="rsc-score score-mid" id="rapidoChartRsi">RSI —</div>
-      </div>
-    </div>
-    <div class="rsc-body">
-      <div style="background:#0a0a0f;border-radius:8px;overflow:hidden;margin-bottom:10px;">
-        <canvas id="rapidoChartCanvas" width="900" height="360" style="width:100%;display:block;"></canvas>
-      </div>
-      <div class="rsc-levels">
-        <div class="rsc-level"><div class="rsc-level-label">ENTRADA</div><div class="rsc-level-val" id="rapidoChartEntry">—</div></div>
-        <div class="rsc-level"><div class="rsc-level-label">STOP</div><div class="rsc-level-val red" id="rapidoChartSl">—</div></div>
-        <div class="rsc-level"><div class="rsc-level-label">TP</div><div class="rsc-level-val green" id="rapidoChartTp">—</div></div>
-      </div>
-      <button class="explic-trigger-btn" onclick="openExplicacaoModal('scalp_rapido', activePair)">⚡ Por que este sinal foi gerado?</button>
+      <button class="explic-trigger-btn" onclick="openExplicacaoModal('gates_vortex', activePair)">⚡ Por que este sinal foi gerado?</button>
     </div>
   </div>
 </div>
 
 <div class="section">
   <div class="section-title">Feed de Ciclos (todos, inclusive fracos)</div>
+
   <div id="feedCiclosList"><div class="signals-empty">A carregar...</div></div>
 </div>
 
@@ -3452,82 +3379,6 @@ setTimeout(updateServerPrices,500);
 setInterval(updateServerPrices,15000);
 setTimeout(()=>loadFundingOI('BTCUSD'),1200);
 setInterval(()=>loadFundingOI(activePair),60000);
-const SIGNALS_SYMBOL_MAP = {'BTCUSD':'BTCUSDT','ETHUSD':'ETHUSDT','SOLUSD':'SOLUSDT','XRPUSD':'XRPUSDT','LINKUSD':'LINKUSDT','ADAUSD':'ADAUSDT','AVAXUSD':'AVAXUSDT','BNBUSD':'BNBUSDT','AAVEUSD':'AAVEUSDT','ONDOUSD':'ONDOUSDT','INJUSD':'INJUSDT','NEARUSD':'NEARUSDT','PENDLEUSD':'PENDLEUSDT','SUIUSD':'SUIUSDT','JTOUSD':'JTOUSDT','ETHFIUSD':'ETHFIUSDT','JUPUSD':'JUPUSDT','ENAUSD':'ENAUSDT'};
-
-function computeLivePct(direction, entry, currentPrice){
-  const e = parseFloat(entry);
-  if(!e || !currentPrice) return null;
-  if(direction === 'SHORT') return ((e - currentPrice) / e) * 100;
-  return ((currentPrice - e) / e) * 100;
-}
-
-async function loadSignalsPanel(){
-  try{
-    const res = await fetch('/journal');
-    const data = await res.json();
-    if(data.error) throw new Error(data.error);
-    const trades = data.trades || [];
-
-    const ativos = trades.filter(t => t.status === 'pending');
-    const recentes = trades.filter(t => t.status === 'win' || t.status === 'loss').slice(0, 5);
-
-    const ativosEl = document.getElementById('sinaisAtivosList');
-    if(ativos.length === 0){
-      ativosEl.innerHTML = '<div class="signals-empty">Nenhum sinal em aberto agora.</div>';
-    } else {
-      const cardsHtml = await Promise.all(ativos.map(async t=>{
-        const symbol = SIGNALS_SYMBOL_MAP[t.pair] || t.pair;
-        const currentPrice = await getPrice(t.pair).catch(()=>null);
-        const pct = computeLivePct(t.direction, t.entry, currentPrice);
-        const pctColor = pct == null ? 'var(--muted)' : (pct >= 0 ? 'var(--green)' : 'var(--red)');
-        const pctStr = pct == null ? '--' : (pct>=0?'+':'')+pct.toFixed(2)+'%';
-        const dirIcon = t.direction === 'SHORT' ? '📉' : '📈';
-        return `
-          <div class="signals-card live">
-            <div class="signals-header-row">
-              <div class="signals-pair"><span class="signals-dir-icon">${dirIcon}</span>${t.pair.replace('USD','USDT')} · ${t.direction}</div>
-              <div class="signals-live-badge"><span class="signals-live-dot"></span>AO VIVO</div>
-            </div>
-            <div class="signals-header-row" style="margin-bottom:6px;">
-              <div class="signals-levels-row">
-                <span>Entrada <b>$${t.entry||'--'}</b></span>
-                <span>Stop <b>$${t.sl||'--'}</b></span>
-                <span>TP1 <b>$${t.tp1||'--'}</b></span>
-              </div>
-              <div class="signals-pnl" style="color:${pctColor}">${pctStr}</div>
-            </div>
-          </div>`;
-      }));
-      ativosEl.innerHTML = cardsHtml.join('');
-    }
-
-    const recentesEl = document.getElementById('sinaisRecentesList');
-    if(recentes.length === 0){
-      recentesEl.innerHTML = '<div class="signals-empty">Sem sinais fechados ainda.</div>';
-    } else {
-      recentesEl.innerHTML = `<div class="signals-card">` + recentes.map(t=>{
-        const isWin = t.status === 'win';
-        const pnlVal = Math.abs(t.pnl || 0);
-        return `
-          <div class="signals-recent-row">
-            <div class="signals-recent-left">
-              <span class="signals-result-badge ${isWin?'win':'loss'}">${isWin?'LUCRO':'PERDA'}</span>
-              <span style="font-size:12px;font-weight:700;font-family:'Space Mono',monospace;">${t.pair.replace('USD','USDT')}</span>
-              <span style="font-size:10px;color:var(--muted);">${t.direction}</span>
-            </div>
-            <div style="font-size:13px;font-weight:700;font-family:'Space Mono',monospace;color:${isWin?'var(--green)':'var(--red)'}">
-              ${isWin?'+':'-'}$${pnlVal.toFixed(2)}
-            </div>
-          </div>`;
-      }).join('') + `</div>`;
-    }
-  }catch(e){
-    document.getElementById('sinaisAtivosList').innerHTML = '<div class="signals-empty">Erro ao carregar sinais</div>';
-  }
-}
-
-setTimeout(loadSignalsPanel, 1500);
-setInterval(loadSignalsPanel, 20000);
 
 function derivarFaseCascade(r){
   if(!r || !r.result) return {fase:0, texto:'Sem ciclo ainda', cor:'var(--muted)', dot:'⚪'};
@@ -3737,8 +3588,6 @@ async function loadScalpFeed(){
   }
 }
 
-setTimeout(loadScalpFeed, 1500);
-setInterval(loadScalpFeed, 15000);
 
 function drawScalpChart(candles, result){
   const canvas = document.getElementById('scalpChartCanvas');
@@ -3841,6 +3690,64 @@ function drawScalpChart(candles, result){
   });
 }
 
+async function load4CamadasDetailCard(){
+  const pairLabelEl = document.getElementById('camadas4ChartPairLabel');
+  if(!pairLabelEl) return;
+  const scoreEl = document.getElementById('camadas4ChartScore');
+  const entryEl = document.getElementById('camadas4ChartEntry');
+  const slEl = document.getElementById('camadas4ChartSl');
+  const tpEl = document.getElementById('camadas4ChartTp');
+  pairLabelEl.textContent = activePair.replace('USD','USDT');
+
+  try{
+    const res = await fetch('/scalp_4camadas/status?pair='+activePair);
+    const data = await res.json();
+    const result = data.result || null;
+    if(!result){
+      scoreEl.textContent = '0/100';
+      entryEl.textContent = slEl.textContent = tpEl.textContent = '—';
+      return;
+    }
+    const score = result.score || 0;
+    scoreEl.textContent = score + '/100';
+    scoreEl.className = 'rsc-score ' + (score>=75?'score-high':score>=50?'score-mid':'score-low');
+    entryEl.textContent = result.entry ? '$'+result.entry : '—';
+    slEl.textContent = result.sl ? '$'+result.sl : '—';
+    tpEl.textContent = result.tp ? '$'+result.tp : '—';
+  }catch(e){
+    console.warn('Erro ao carregar card 4camadas:', e.message);
+  }
+}
+
+async function loadGatesVortexDetailCard(){
+  const pairLabelEl = document.getElementById('gatesVortexChartPairLabel');
+  if(!pairLabelEl) return;
+  const scoreEl = document.getElementById('gatesVortexChartScore');
+  const entryEl = document.getElementById('gatesVortexChartEntry');
+  const slEl = document.getElementById('gatesVortexChartSl');
+  const tpEl = document.getElementById('gatesVortexChartTp');
+  pairLabelEl.textContent = activePair.replace('USD','USDT');
+
+  try{
+    const res = await fetch('/scalp_gates_vortex/status?pair='+activePair);
+    const data = await res.json();
+    const result = data.result || null;
+    if(!result){
+      scoreEl.textContent = '0/100';
+      entryEl.textContent = slEl.textContent = tpEl.textContent = '—';
+      return;
+    }
+    const score = result.score || 0;
+    scoreEl.textContent = (result.status === 'SIGNAL_DISPARADO' ? '🟢 ' : '') + score + '/100';
+    scoreEl.className = 'rsc-score ' + (score>=75?'score-high':score>=50?'score-mid':'score-low');
+    entryEl.textContent = result.entry ? '$'+result.entry : '—';
+    slEl.textContent = result.sl ? '$'+result.sl : '—';
+    tpEl.textContent = result.tp1 ? '$'+result.tp1 : '—';
+  }catch(e){
+    console.warn('Erro ao carregar card gates_vortex:', e.message);
+  }
+}
+
 async function loadScalpDetailCard(){
   const pairLabelEl = document.getElementById('scalpChartPairLabel');
   const subEl = document.getElementById('scalpChartSub');
@@ -3882,8 +3789,10 @@ async function loadScalpDetailCard(){
   }
 }
 
-setTimeout(loadScalpDetailCard, 1600);
-setInterval(loadScalpDetailCard, 15000);
+setTimeout(load4CamadasDetailCard, 1600);
+setInterval(load4CamadasDetailCard, 15000);
+setTimeout(loadGatesVortexDetailCard, 1650);
+setInterval(loadGatesVortexDetailCard, 15000);
 
 function derivarFaseAntecipado(result){
   if(!result || !result.motivo) return {texto:'Sem ciclo ainda', cor:'var(--muted)'};
@@ -4038,8 +3947,6 @@ async function loadAntecipadoDetailCard(){
     subEl.textContent = 'Erro ao carregar gráfico';
   }
 }
-setTimeout(loadAntecipadoDetailCard, 1700);
-setInterval(loadAntecipadoDetailCard, 15000);
 
 async function loadIndicadoresDetailCard(){
   const pairLabelEl = document.getElementById('indicadoresChartPairLabel');
@@ -4087,8 +3994,6 @@ async function loadIndicadoresDetailCard(){
     subEl.textContent = 'Erro ao carregar gráfico';
   }
 }
-setTimeout(loadIndicadoresDetailCard, 1800);
-setInterval(loadIndicadoresDetailCard, 15000);
 
 async function loadRapidoDetailCard(){
   const pairLabelEl = document.getElementById('rapidoChartPairLabel');
@@ -4149,8 +4054,6 @@ async function loadRapidoDetailCard(){
     subEl.textContent = 'Erro ao carregar gráfico';
   }
 }
-setTimeout(loadRapidoDetailCard, 1900);
-setInterval(loadRapidoDetailCard, 15000);
 
 async function loadFeedCiclos(){
   try{
@@ -4314,7 +4217,6 @@ async function updateTrade(id, status, pnl){
     if(data.error) throw new Error(data.error);
     showToast('Trade atualizado!');
     loadJournal();
-    loadSignalsPanel();
   }catch(e){
     showToast('Erro: ' + e.message);
   }
@@ -4451,6 +4353,8 @@ function renderExplicacao(d){
   html += '<div class="explic-section-title">📊 Contexto de Mercado</div>';
   html += '<div class="explic-box">';
   if(ctx.regime) html += '<div class="explic-kv"><span>Regime</span><b>' + ctx.regime + (ctx.adx != null ? ' (ADX ' + ctx.adx + ')' : '') + '</b></div>';
+  if(ctx.volatilidade) html += '<div class="explic-kv"><span>Volatilidade</span><b>' + ctx.volatilidade + '</b></div>';
+  if(ctx.zona_pd) html += '<div class="explic-kv"><span>Zona</span><b>' + ctx.zona_pd + '</b></div>';
   if(ctx.na_killzone != null) html += '<div class="explic-kv"><span>Killzone</span><b>' + (ctx.na_killzone ? ('sim — ' + (ctx.killzone_nome || '')) : 'não') + '</b></div>';
   if(ctx.bias_d1) html += '<div class="explic-kv"><span>Viés D1</span><b>' + ctx.bias_d1 + '</b></div>';
   if(ctx.bias_h4) html += '<div class="explic-kv"><span>Viés H4</span><b>' + ctx.bias_h4 + '</b></div>';
@@ -4465,7 +4369,26 @@ function renderExplicacao(d){
   if(at.tp) html += '<div class="explic-kv green-val"><span>TP</span><b>' + at.tp + '</b></div>';
   if(at.rr) html += '<div class="explic-kv"><span>Risco/Retorno</span><b>1:' + at.rr + '</b></div>';
   if(at.rsi14 != null) html += '<div class="explic-kv"><span>RSI</span><b>' + at.rsi14 + '</b></div>';
+  if(at.atr_multiplo != null) html += '<div class="explic-kv"><span>Stop em ATR</span><b>' + at.atr_multiplo + 'x</b></div>';
   html += '</div>';
+
+  const ge = d.gatilho_energia || {};
+  if(ge.padrao_candle || ge.vela_rejeicao != null){
+    html += '<div class="explic-section-title">⚡ Gatilho & Energia</div>';
+    html += '<div class="explic-box">';
+    if(ge.padrao_candle) html += '<div class="explic-kv"><span>Padrão</span><b>' + ge.padrao_candle + '</b></div>';
+    html += '<div class="explic-kv"><span>Vela de Rejeição</span><b>' + (ge.vela_rejeicao ? '✅ sim' : '— não') + '</b></div>';
+    html += '<div class="explic-kv"><span>Energia confirmada</span><b>' + (ge.energia_confirmada ? '✅ sim' : '— não') + '</b></div>';
+    html += '</div>';
+  }
+
+  if(d.smc_quality){
+    html += '<div class="explic-section-title">🧱 SMC Quality</div>';
+    html += '<div class="explic-box">';
+    html += '<div class="explic-kv"><span>Order Blocks</span><b>' + d.smc_quality.obs + '</b></div>';
+    html += '<div class="explic-kv"><span>FVGs abertos</span><b>' + d.smc_quality.fvgs + '</b></div>';
+    html += '</div>';
+  }
 
   html += '<div class="explic-section-title">🛡️ Filtros de Qualidade</div>';
   html += (d.filtros_de_qualidade || []).map(g => {

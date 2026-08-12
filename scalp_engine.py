@@ -1976,19 +1976,13 @@ TP_DINAMICO_MAX_RR = 6.0  # teto de sanidade — nunca mira mais que isso
 
 
 def _find_liquidez_alvo(direcao, entry, exec_candles, d1_candles):
-    """Mapeia alvos que o preço realmente pode buscar primeiro.
-
-    Regras:
-    - EQH/EQL: o próprio nível é o alvo.
-    - Zona D1: usa a BORDA DE ENTRADA da zona (primeiro obstáculo), não a
-      borda mais distante.
-    - OB: só usa OB contrário ao trade e a borda mais próxima do preço.
-    Retorna tuplas (origem, nível)."""
+    """Levanta candidatos reais de alvo (liquidez) na direção do trade:
+    Equal Highs/Lows, zona D1 oposta, Order Blocks."""
     candidatos = []
 
     try:
         for eq in find_equal_highs_lows(exec_candles):
-            nivel = float(eq['nivel'])
+            nivel = eq['nivel']
             if direcao == 'alta' and nivel > entry:
                 candidatos.append((eq['tipo'], nivel))
             elif direcao == 'baixa' and nivel < entry:
@@ -1997,41 +1991,36 @@ def _find_liquidez_alvo(direcao, entry, exec_candles, d1_candles):
         pass
 
     try:
-        for banda in compute_d1_zones(d1_candles or []):
-            if direcao == 'alta' and banda['bottom'] > entry:
-                candidatos.append(('zona_d1', banda['bottom']))
-            elif direcao == 'baixa' and banda['top'] < entry:
+        for banda in compute_d1_zones(d1_candles):
+            if direcao == 'alta' and banda['top'] > entry:
                 candidatos.append(('zona_d1', banda['top']))
+            elif direcao == 'baixa' and banda['bottom'] < entry:
+                candidatos.append(('zona_d1', banda['bottom']))
     except Exception:
         pass
 
     try:
         for ob in find_order_blocks(exec_candles):
-            tipo = ob.get('tipo', '')
-            if direcao == 'alta' and tipo == 'OB_bearish' and ob['bottom'] > entry:
-                # Primeiro toque numa oferta acima do preço.
-                candidatos.append(('OB_oferta', ob['bottom']))
-            elif direcao == 'baixa' and tipo == 'OB_bullish' and ob['top'] < entry:
-                # Primeiro toque numa demanda abaixo do preço.
-                candidatos.append(('OB_demanda', ob['top']))
+            if direcao == 'alta' and ob['bottom'] > entry:
+                candidatos.append(('OB', ob['bottom']))
+            elif direcao == 'baixa' and ob['top'] < entry:
+                candidatos.append(('OB', ob['top']))
     except Exception:
         pass
 
-    # Remove níveis duplicados/quase iguais para não contar o mesmo alvo
-    # várias vezes por fontes diferentes.
-    unicos = []
-    tolerancia = max(abs(entry) * 0.00005, 1e-12)
-    for origem, nivel in sorted(candidatos, key=lambda x: abs(x[1] - entry)):
-        if not any(abs(nivel - n) <= tolerancia for _, n in unicos):
-            unicos.append((origem, nivel))
-    return unicos
+    return candidatos
 
 
 def calcular_tp_dinamico(direcao, entry, sl, exec_candles, d1_candles, min_rr=None):
-    """Escolhe TP por liquidez real, depois Monte Carlo, depois RR mínimo.
-
-    Nunca devolve um alvo fora da direção do trade e nunca ultrapassa
-    TP_DINAMICO_MAX_RR. A origem é devolvida para auditoria/replay."""
+    """
+    Devolve (tp, origem_texto). Prioridade:
+    1. Liquidez real mais próxima (EQH/EQL, zona D1, OB) que já renda
+       pelo menos min_rr — pega a MAIS PRÓXIMA, não a mais distante,
+       porque é a que o preço tem mais chance de alcançar primeiro.
+    2. Monte Carlo real (cenário otimista/pessimista da simulação),
+       se render pelo menos min_rr.
+    3. Só em último caso, RR mínimo puro sobre o risco real do setup.
+    """
     min_rr = min_rr if min_rr is not None else MIN_RR_GATE
     risco = abs(entry - sl)
     if risco <= 0:
@@ -2041,30 +2030,27 @@ def calcular_tp_dinamico(direcao, entry, sl, exec_candles, d1_candles, min_rr=No
     for origem, nivel in _find_liquidez_alvo(direcao, entry, exec_candles, d1_candles):
         distancia = abs(nivel - entry)
         rr = distancia / risco
-        na_direcao = nivel > entry if direcao == 'alta' else nivel < entry
-        if na_direcao and min_rr <= rr <= TP_DINAMICO_MAX_RR:
+        if min_rr <= rr <= TP_DINAMICO_MAX_RR:
             validos.append((origem, nivel, rr))
 
     if validos:
-        validos.sort(key=lambda x: x[2])
+        validos.sort(key=lambda x: x[2])  # mais próximo primeiro
         origem, nivel, rr = validos[0]
-        return round(nivel, 6), f'liquidez_real:{origem} (RR {rr:.2f})'
+        return nivel, f'liquidez_real:{origem} (RR {rr:.2f})'
 
     try:
         mc = compute_monte_carlo(exec_candles)
     except Exception:
         mc = None
-
     if mc:
         alvo_mc = mc['cenario_otimista'] if direcao == 'alta' else mc['cenario_pessimista']
-        na_direcao = alvo_mc > entry if direcao == 'alta' else alvo_mc < entry
         distancia = abs(alvo_mc - entry)
-        rr = distancia / risco if risco > 0 else 0
-        if na_direcao and min_rr <= rr <= TP_DINAMICO_MAX_RR:
-            return round(alvo_mc, 6), f'monte_carlo (RR {rr:.2f})'
+        rr = distancia / risco
+        if rr >= min_rr:
+            return alvo_mc, f'monte_carlo (RR {rr:.2f})'
 
     tp_fallback = entry + risco * min_rr if direcao == 'alta' else entry - risco * min_rr
-    return round(tp_fallback, 6), f'fallback_rr_minimo ({min_rr})'
+    return tp_fallback, f'fallback_rr_minimo ({min_rr})'
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -2333,66 +2319,50 @@ def compute_liquidez_referencia(pair, candles_por_tf):
                 return liquidez
         return None
 
-    # cripto: últimos 3-7 dias COMPLETOS em D1, excluindo o dia atual.
-    # Importante: o timestamp do D1 é a ABERTURA do dia. O cutoff tem de
-    # ser o fim do último dia usado na liquidez; usar janela[-1]['t']
-    # deixava parte desse próprio dia disponível para o SFP e contaminava
-    # a referência (self-reference).
+    # cripto: últimos 3-7 dias em D1
     d1 = candles_por_tf.get('D1')
     if not d1 or len(d1) < 4:
         return None
     janela = d1[-8:-1] if len(d1) >= 8 else d1[:-1]
     if len(janela) < 3:
         return None
-    ultimo_dia_liquidez_ts = janela[-1]['t']
-    cutoff_ts = ultimo_dia_liquidez_ts + 24 * 60 * 60 * 1000
     return {
         'high': max(c['h'] for c in janela),
         'low': min(c['l'] for c in janela),
         'sessao': f'ultimos_{len(janela)}_dias', 'dia': None,
-        'cutoff_ts': cutoff_ts,
-        'liquidez_inicio_ts': janela[0]['t'],
-        'liquidez_fim_ts': ultimo_dia_liquidez_ts + 24 * 60 * 60 * 1000 - 1,
+        'cutoff_ts': janela[-1]['t'],
         'candles_liquidez': janela,
     }
 
 
 def validar_sfp_estrito(candles_sfp, liquidez, direcao_permitida):
-    """Valida SFP sem auto-referência e sem aceitar SFP invalidado depois.
-
-    A janela é percorrida em ordem cronológica. Cada sweep/reclaim válido
-    atualiza o candidato. Se, depois dele, houver fechamento de corpo além
-    da liquidez, o nível é considerado rompido e toda a análise é cancelada.
-    Assim o engine pode usar o SFP mais recente que ainda esteja válido.
+    """
+    Varre os candles CRONOLOGICAMENTE a partir do fim da janela de
+    liquidez. O primeiro evento que acontecer decide tudo:
+    - Fechamento de CORPO além do nível -> Breakout real, CANCELA a
+      análise (retorna None, motivo 'breakout_cancela_analise').
+    - Pavio ultrapassa mas fecha de volta dentro -> SFP confirmado.
+    Só olha o lado relevante pra direção permitida pelo Bias (Passo 1).
     """
     if not liquidez:
         return None, 'sem_liquidez_mapeada'
 
     cutoff_ts = liquidez.get('cutoff_ts')
-    candles_pos = [c for c in candles_sfp if cutoff_ts is None or c['t'] >= cutoff_ts]
+    candles_pos = [c for c in candles_sfp if cutoff_ts is None or c['t'] > cutoff_ts]
     high_liq, low_liq = liquidez['high'], liquidez['low']
-    ultimo_sfp = None
 
     for c in candles_pos:
-        if direcao_permitida == 'baixa':
+        if direcao_permitida == 'baixa':  # bias pede SHORT -> só liquidez de topo interessa
             if c['c'] > high_liq:
                 return None, 'breakout_cancela_analise'
             if c['h'] > high_liq and c['c'] < high_liq:
-                ultimo_sfp = {
-                    'tipo': 'SFP_venda', 'nivel': high_liq,
-                    'sl_pavio': c['h'], 't': c['t'],
-                }
-        elif direcao_permitida == 'alta':
+                return {'tipo': 'SFP_venda', 'nivel': high_liq, 'sl_pavio': c['h'], 't': c['t']}, 'sfp_confirmado'
+        elif direcao_permitida == 'alta':  # bias pede LONG -> só liquidez de fundo interessa
             if c['c'] < low_liq:
                 return None, 'breakout_cancela_analise'
             if c['l'] < low_liq and c['c'] > low_liq:
-                ultimo_sfp = {
-                    'tipo': 'SFP_compra', 'nivel': low_liq,
-                    'sl_pavio': c['l'], 't': c['t'],
-                }
+                return {'tipo': 'SFP_compra', 'nivel': low_liq, 'sl_pavio': c['l'], 't': c['t']}, 'sfp_confirmado'
 
-    if ultimo_sfp:
-        return ultimo_sfp, 'sfp_confirmado'
     return None, 'sem_sfp_ainda'
 
 
@@ -2760,10 +2730,10 @@ def detect_wyckoff_spring_utad(candles, lookback=30, tolerancia_pct=0.002):
 
 HORAS_TOXICAS_UTC = {7, 23}  # troca de sessão / baixa liquidez, conforme especificado
 GATES_COOLDOWN_SECONDS = 40 * 60  # dentro da faixa pedida de 30-60min
-GATE_C_MONTE_CARLO_MIN_PROB = 65  # filtro direcional real; validar/ajustar pelo replay, não tratar como probabilidade calibrada
+GATE_C_MONTE_CARLO_MIN_PROB = 85  # real, não decorativo — pode falhar com frequência
 GATE_E_MIN_RR = 2.0
-GATE_D_MIN_OBS = 1
-GATE_D_MIN_FVGS = 1
+GATE_D_MIN_OBS = 3
+GATE_D_MIN_FVGS = 2
 
 
 def esta_em_hora_toxica_estrita(candles_referencia):
@@ -2797,29 +2767,14 @@ def dados_obsoletos(candles, max_latencia_seg=GATES_STALENESS_MAX_SEG, intervalo
     return (agora - fechamento_estimado) > max_latencia_seg
 
 
-def _find_candle_index_by_timestamp(candles, timestamp):
-    if not candles or timestamp is None:
-        return None
-    for i in range(len(candles) - 1, -1, -1):
-        if candles[i].get('t') == timestamp:
-            return i
-    return None
-
-
-def _pattern_at_index(candles, idx):
-    if not candles or idx is None or idx < 1 or idx >= len(candles):
-        return None
-    return detect_candle_pattern(candles[:idx + 1])
-
-
-def _confianca_padrao_candle(padrao, exec_candles, idx=None):
+def _confianca_padrao_candle(padrao, exec_candles):
     """Heurística de confiança do padrão de candle (Pin Bar/Hammer), com
     base na proporção pavio/corpo do último candle — NÃO é uma
     probabilidade estatisticamente validada, é um score relativo
     (quanto maior a rejeição, maior a 'confiança' do padrão)."""
     if not padrao or not exec_candles:
         return None
-    c = exec_candles[idx if idx is not None else -1]
+    c = exec_candles[-1]
     corpo = abs(c['c'] - c['o']) or 0.0001
     pavio_sup = c['h'] - max(c['o'], c['c'])
     pavio_inf = min(c['o'], c['c']) - c['l']
@@ -3096,44 +3051,22 @@ def process_pair_gates_vortex(db_file, pair, candles_por_tf, exec_tf_label='M5',
         return resultado
     resultado['tf_sfp_usado'] = tf_sfp_usado
 
-    # ── Validação do gatilho de rejeição ────────────────────────────────
-    # O padrão precisa pertencer ao EVENTO que gerou a tese (SFP), não ao
-    # último candle disponível. Antes, um SFP antigo podia ser confirmado e
-    # o engine depois exigir que a vela atual fosse um Hammer/Engolfo, o que
-    # eliminava sinais válidos sem relação causal.
-    idx_sfp_gatilho = _find_candle_index_by_timestamp(candles_gatilho, sfp.get('t'))
-    padrao = _pattern_at_index(candles_gatilho, idx_sfp_gatilho)
-
-    # Se o SFP veio de M15 e o M5 não tiver o timestamp exato, usa a vela
-    # mais próxima anterior ao MSS como fallback, sem olhar para o futuro.
-    confianca_padrao = _confianca_padrao_candle(padrao, candles_gatilho, idx_sfp_gatilho)
-    # O SFP é a confirmação estrutural principal; candle pattern é filtro
-    # auxiliar. Aceitamos SFP forte mesmo sem nome clássico de padrão, mas
-    # exigimos rejeição mensurável no próprio candle.
-    if idx_sfp_gatilho is not None:
-        c_sfp = candles_gatilho[idx_sfp_gatilho]
-        range_sfp = c_sfp['h'] - c_sfp['l']
-        corpo_sfp = abs(c_sfp['c'] - c_sfp['o'])
-        pavio_relevante = (c_sfp['h'] - max(c_sfp['o'], c_sfp['c'])) if direcao_permitida == 'baixa' else (min(c_sfp['o'], c_sfp['c']) - c_sfp['l'])
-        rejeicao_ok = range_sfp > 0 and pavio_relevante / range_sfp >= 0.25
-    else:
-        rejeicao_ok = False
-
-    if not rejeicao_ok:
-        resultado['motivo'] = f'SFP confirmado, mas rejeição física insuficiente no candle do SFP (padrão={padrao})'
+    # ── Validação do gatilho de rejeição: padrão + volume + ATR múltiplo ──
+    padrao = detect_candle_pattern(candles_gatilho)
+    confianca_padrao = _confianca_padrao_candle(padrao, candles_gatilho)
+    if not padrao or (confianca_padrao is not None and confianca_padrao < 75):
+        resultado['motivo'] = f'SFP confirmado, mas padrão de rejeição fraco (confiança {confianca_padrao})'
         return resultado
 
     vols = [c.get('v', 0) for c in candles_gatilho[-20:]]
     media_vol = sum(vols) / len(vols) if vols else 0
-    volume_evento = candles_gatilho[idx_sfp_gatilho].get('v', 0) if idx_sfp_gatilho is not None else 0
-    volume_ok = volume_evento > media_vol * 1.05 if media_vol else False
+    volume_ok = candles_gatilho[-1].get('v', 0) > media_vol * 1.0 if media_vol else False
 
     atr_atual = next((v for v in reversed(compute_atr(candles_gatilho, 14)) if v is not None), None)
-    idx_atr = idx_sfp_gatilho if idx_sfp_gatilho is not None else len(candles_gatilho) - 1
-    atr_evento = compute_atr(candles_gatilho, 14)[idx_atr] if idx_atr < len(candles_gatilho) else None
-    range_evento = candles_gatilho[idx_sfp_gatilho]['h'] - candles_gatilho[idx_sfp_gatilho]['l'] if idx_sfp_gatilho is not None else 0
-    atr_multiplo = round(range_evento / atr_evento, 2) if atr_evento and atr_evento > 0 else None
-    atr_ok = atr_multiplo is not None and atr_multiplo >= 1.05
+    ultimo = candles_gatilho[-1]
+    range_atual = ultimo['h'] - ultimo['l']
+    atr_multiplo = round(range_atual / atr_atual, 2) if atr_atual and atr_atual > 0 else None
+    atr_ok = atr_multiplo is not None and atr_multiplo > 1.2
 
     # ── MSS no mesmo TF do gatilho (M5 por padrão, igual à Vortex; M1 só se M5 faltar) ──
     candles_mss = candles_m5 or candles_m1
@@ -3170,8 +3103,8 @@ def process_pair_gates_vortex(db_file, pair, candles_por_tf, exec_tf_label='M5',
 
     smc_quality = {'obs': len(find_order_blocks(candles_gatilho)), 'fvgs': len(find_open_fvgs(candles_gatilho))}
 
-    tp1, tp1_origem = calcular_tp_dinamico(direcao_permitida, entry, sl, candles_m15 or candles_gatilho, candles_d1 or [], min_rr=GATE_E_MIN_RR)
-    tp2, tp2_origem = calcular_tp_dinamico(direcao_permitida, entry, sl, candles_m15 or candles_gatilho, candles_d1 or [], min_rr=3.0)
+    tp1, _ = calcular_tp_dinamico(direcao_permitida, entry, sl, candles_m15 or candles_gatilho, candles_d1 or [], min_rr=GATE_E_MIN_RR)
+    tp2, _ = calcular_tp_dinamico(direcao_permitida, entry, sl, candles_m15 or candles_gatilho, candles_d1 or [], min_rr=3.0)
     rr_tp1 = round(abs(tp1 - entry) / risco, 2) if tp1 else 0
 
     ichimoku = compute_ichimoku(candles_gatilho)
@@ -3190,9 +3123,7 @@ def process_pair_gates_vortex(db_file, pair, candles_por_tf, exec_tf_label='M5',
     # ── Premium/Discount — princípio SMC básico: não compra caro (Premium),
     # não vende barato (Discount). Diferente do modo '4camadas' (onde isso é
     # só informativo, de propósito), aqui vira veto real (Gate G).
-    pd_reference = candles_d1 or candles_h1 or candles_gatilho
-    pd_lookback = min(20, len(pd_reference))
-    pd_zone = compute_premium_discount(pd_reference, lookback=pd_lookback) if pd_reference else None
+    pd_zone = compute_premium_discount(candles_gatilho)
     zona_pd = None
     if pd_zone:
         preco_atual_pd = candles_gatilho[-1]['c']
@@ -3200,10 +3131,8 @@ def process_pair_gates_vortex(db_file, pair, candles_por_tf, exec_tf_label='M5',
 
     # ── GATES ──
     gate_a = (det_regime.get('bias_d1') == direcao_permitida or det_regime.get('mtf_alinhado')) and (mss['direcao'] == direcao_permitida)
-    gate_b = bool(sfp) and bool(mss) and bool(entry_zone) and atr_ok
-    # Monte Carlo é filtro de direção/edge, NÃO uma probabilidade calibrada
-    # de win. O valor continua vindo da simulação real do engine.
-    gate_c = (not MONTE_CARLO_GATE_ATIVO) or (prob_acerto is not None and prob_acerto >= GATE_C_MONTE_CARLO_MIN_PROB)
+    gate_b = bool(sfp) and bool(mss) and bool(entry_zone)
+    gate_c = prob_acerto is not None and prob_acerto >= GATE_C_MONTE_CARLO_MIN_PROB
     gate_d = smc_quality['obs'] >= GATE_D_MIN_OBS and smc_quality['fvgs'] >= GATE_D_MIN_FVGS
     gate_e = rr_tp1 >= GATE_E_MIN_RR
     gate_f = True  # informativo, nunca bloqueia
@@ -3244,7 +3173,6 @@ def process_pair_gates_vortex(db_file, pair, candles_por_tf, exec_tf_label='M5',
         'entry': round(entry, 6), 'sl': round(sl, 6),
         'tp1': round(tp1, 6) if tp1 else None, 'tp2': round(tp2, 6) if tp2 else None,
         'tp': round(tp1, 6) if tp1 else None,
-        'tp1_origem': tp1_origem, 'tp2_origem': tp2_origem,
         'risco_recompensa': f"1:{rr_tp1}",
         'regime': det_regime.get('regime'), 'adx': det_regime.get('adx'),
         'estrutura': 'CHOCH', 'gatilho': padrao, 'confianca_padrao': confianca_padrao,
@@ -3266,7 +3194,7 @@ def process_pair_gates_vortex(db_file, pair, candles_por_tf, exec_tf_label='M5',
         label = 'COMPRA' if direcao_permitida == 'alta' else 'VENDA'
         tipo_ordem = 'BUY LIMIT' if direcao_permitida == 'alta' else 'SELL LIMIT'
         msg = f"🚦 <b>Gates Vortex — {pair}</b>\n\n"
-        msg += f"{arrow} <b>{label}</b> | Score: {score}/100 | Edge MC: {prob_acerto}% (simulação, não calibrada)\n"
+        msg += f"{arrow} <b>{label}</b> | Score: {score}/100 | Confiança: {prob_acerto}% (Monte Carlo, não calibrado)\n"
         msg += f"📍 <b>Ordem LIMITE ({tipo_ordem}) em {resultado['entry']}</b> — não é a mercado, espera o preço voltar ali (50% do FVG)\n"
         msg += f"🛑 Stop: {resultado['sl']}\n"
         msg += f"✅ TP1: {resultado['tp1']} (RR {resultado['risco_recompensa']})\n"

@@ -1830,6 +1830,130 @@ def compute_bias_from_swings(candles, lookback=SWING_LOOKBACK):
     return 'neutro'
 
 
+HTF_PREMIUM_DISCOUNT_LOOKBACK = 90
+HTF_EQUILIBRIUM_BUFFER_PCT = 0.03  # 3% de banda neutra em torno do equilíbrio
+
+
+def compute_htf_narrative(d1, h4, h1):
+    """
+    Camada de NARRATIVA (contexto), não de gatilho.
+
+    Interpreta D1 -> H4 -> H1 (hierarquia estrita, D1 manda) e devolve
+    bias/strength/premium-discount/liquidez, sem decidir entrada.
+
+    Determinística, sem API, sem banco, sem Telegram, sem efeitos
+    colaterais — só lê as listas de candles recebidas. Reaproveita
+    compute_bias_from_swings() e compute_zona_movel() já existentes,
+    não duplica detector nenhum.
+
+    Se D1 não tiver candles suficientes, devolve bias NEUTRAL com
+    reasons explicando o motivo (nunca inventa contexto).
+    """
+    reasons = []
+
+    if not d1 or len(d1) < (SWING_LOOKBACK * 2 + 5):
+        return {
+            'bias': 'NEUTRAL', 'strength': 'WEAK',
+            'd1_bias': 'neutro', 'h4_bias': 'neutro', 'h1_bias': 'neutro',
+            'premium_discount': {'state': 'EQUILIBRIUM', 'value': None},
+            'liquidity': {'buy_side': None, 'sell_side': None, 'nearest_target': None, 'nearest_target_side': None},
+            'alignment': {'aligned': False, 'score': 0},
+            'long_allowed': True, 'short_allowed': True,
+            'reasons': ['D1 sem candles suficientes — narrativa não pôde ser calculada, contexto neutro por padrão'],
+        }
+
+    d1_bias = compute_bias_from_swings(d1)
+    h4_bias = compute_bias_from_swings(h4) if h4 else 'neutro'
+    h1_bias = compute_bias_from_swings(h1) if h1 else 'neutro'
+
+    # ── Hierarquia D1 > H4 > H1 — D1 nunca é sobrescrito, só enfraquecido ──
+    if d1_bias == 'neutro':
+        bias_final = 'NEUTRAL'
+        strength = 'WEAK'
+        reasons.append('D1 sem bias estrutural definido — contexto neutro')
+    elif h4_bias != 'neutro' and h4_bias != d1_bias:
+        # H4 contradiz D1 — conflito relevante
+        if h1_bias == h4_bias:
+            bias_final = 'NEUTRAL'
+            strength = 'WEAK'
+            reasons.append(f'D1={d1_bias} mas H4 e H1 concordam em {h4_bias} — conflito forte, contexto neutralizado')
+        else:
+            bias_final = 'LONG' if d1_bias == 'alta' else 'SHORT'
+            strength = 'WEAK'
+            reasons.append(f'D1={d1_bias} contrariado por H4={h4_bias} — bias mantido por hierarquia, mas fraco, não liberar entrada forte')
+    else:
+        bias_final = 'LONG' if d1_bias == 'alta' else 'SHORT'
+        if h1_bias == d1_bias:
+            strength = 'STRONG'
+            reasons.append(f'D1={d1_bias}, H4 confirma, H1 confirma — alinhamento total')
+        else:
+            strength = 'MODERATE'
+            reasons.append(f'D1={d1_bias}, H4 confirma, H1={h1_bias} diverge — confirmação parcial')
+
+    # ── Premium / Discount — range estrutural do D1 (Donchian), não candle isolado ──
+    donch = compute_zona_movel(d1, lookback=min(HTF_PREMIUM_DISCOUNT_LOOKBACK, len(d1)))
+    premium_discount = {'state': 'EQUILIBRIUM', 'value': None}
+    liquidity = {'buy_side': None, 'sell_side': None, 'nearest_target': None, 'nearest_target_side': None}
+
+    if donch:
+        preco_atual = d1[-1]['c']
+        top, bottom, eq = donch['top'], donch['bottom'], (donch['top'] + donch['bottom']) / 2
+        largura = (top - bottom) or 1
+        posicao_pct = (preco_atual - bottom) / largura  # 0 = bottom, 1 = top
+        premium_discount['value'] = round(posicao_pct, 4)
+
+        banda = HTF_EQUILIBRIUM_BUFFER_PCT
+        if posicao_pct >= 0.5 + banda:
+            premium_discount['state'] = 'PREMIUM'
+        elif posicao_pct <= 0.5 - banda:
+            premium_discount['state'] = 'DISCOUNT'
+        else:
+            premium_discount['state'] = 'EQUILIBRIUM'
+
+        liquidity['buy_side'] = top
+        liquidity['sell_side'] = bottom
+        dist_top = abs(top - preco_atual)
+        dist_bottom = abs(preco_atual - bottom)
+        if dist_top <= dist_bottom:
+            liquidity['nearest_target'] = top
+            liquidity['nearest_target_side'] = 'buy_side'
+        else:
+            liquidity['nearest_target'] = bottom
+            liquidity['nearest_target_side'] = 'sell_side'
+
+        if bias_final == 'LONG' and premium_discount['state'] == 'PREMIUM':
+            reasons.append('Contexto LONG mas preço em Premium — preferir aguardar Discount/Equilíbrio antes de perseguir')
+        elif bias_final == 'SHORT' and premium_discount['state'] == 'DISCOUNT':
+            reasons.append('Contexto SHORT mas preço em Discount — preferir aguardar Premium/Equilíbrio antes de perseguir')
+
+    alignment_score = sum([
+        1 if d1_bias != 'neutro' else 0,
+        1 if h4_bias == d1_bias and d1_bias != 'neutro' else 0,
+        1 if h1_bias == d1_bias and d1_bias != 'neutro' else 0,
+    ])
+    alignment = {'aligned': alignment_score == 3, 'score': alignment_score}
+
+    # ── Autorização de direção — só bloqueia o lado CONTRA um contexto forte/moderado ──
+    long_allowed = True
+    short_allowed = True
+    if bias_final == 'LONG' and strength in ('STRONG', 'MODERATE'):
+        short_allowed = False
+    elif bias_final == 'SHORT' and strength in ('STRONG', 'MODERATE'):
+        long_allowed = False
+
+    return {
+        'bias': bias_final,
+        'strength': strength,
+        'd1_bias': d1_bias, 'h4_bias': h4_bias, 'h1_bias': h1_bias,
+        'premium_discount': premium_discount,
+        'liquidity': liquidity,
+        'alignment': alignment,
+        'long_allowed': long_allowed,
+        'short_allowed': short_allowed,
+        'reasons': reasons,
+    }
+
+
 def rsi_extremo_no_candle(exec_candles, idx):
     closes = [c['c'] for c in exec_candles[:idx + 1]]
     if len(closes) < 15:

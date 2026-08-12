@@ -8,7 +8,7 @@ import time
 import random
 import requests
 import json
-from flask import Blueprint, jsonify, current_app
+from flask import Blueprint, jsonify, current_app, request
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 
@@ -2675,7 +2675,108 @@ def init_gates_vortex_db(db_file):
                 alerted INTEGER DEFAULT 0
             )
         ''')
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS scalp_gates_vortex_diagnostico (
+                pair TEXT,
+                categoria TEXT,
+                contagem INTEGER DEFAULT 0,
+                ultimo_motivo TEXT,
+                updated_at INTEGER,
+                PRIMARY KEY (pair, categoria)
+            )
+        ''')
         conn.commit()
+
+
+# ── Classificação do motivo em categoria de gargalo ─────────────────────
+# Cada ciclo do gates_vortex termina com um `motivo` (texto livre). Isso
+# classifica esse texto num "balde" fixo, pra dar contagem real de ONDE
+# o pipeline está travando mais — sem isso, "não veio sinal" é um
+# palpite; com isso, vira um número.
+
+_CATEGORIAS_MOTIVO_GATES_VORTEX = [
+    ('hora_toxica', 'horário tóxico'),
+    ('dados_obsoletos', 'dados obsoletos'),
+    ('candles_insuficientes', 'candles insuficientes'),
+    ('sem_bias', 'calcular Midnight Open'),
+    ('sfp_breakout_cancelado', 'breakout_cancela_analise'),
+    ('sem_sfp', 'sem_sfp_ainda'),
+    ('sem_sfp', 'sem_liquidez_mapeada'),
+    ('sem_sfp', 'sem_candles_sfp'),
+    ('padrao_fraco', 'padrão de rejeição fraco'),
+    ('sem_candles_mss', 'pra validar MSS'),
+    ('sem_mss', 'sem MSS de corpo forte'),
+    ('sem_fvg', 'sem FVG real após a expansão'),
+    ('risco_invalido', 'risco calculado inválido'),
+    ('gates_reprovados', 'falhou nos gates'),
+    ('em_cooldown', 'em cooldown'),
+]
+
+
+def _classificar_motivo_gates_vortex(motivo):
+    if not motivo:
+        return 'sem_motivo'
+    if motivo == 'entrada_confirmada':
+        return 'sinal_disparado'
+    for categoria, chave in _CATEGORIAS_MOTIVO_GATES_VORTEX:
+        if chave in motivo:
+            return categoria
+    return 'outro'
+
+
+def _registrar_diagnostico_gates_vortex(db_file, pair, motivo):
+    categoria = _classificar_motivo_gates_vortex(motivo)
+    try:
+        with sqlite3.connect(db_file) as conn:
+            conn.execute('''
+                INSERT INTO scalp_gates_vortex_diagnostico (pair, categoria, contagem, ultimo_motivo, updated_at)
+                VALUES (?, ?, 1, ?, ?)
+                ON CONFLICT(pair, categoria) DO UPDATE SET
+                    contagem = contagem + 1,
+                    ultimo_motivo = excluded.ultimo_motivo,
+                    updated_at = excluded.updated_at
+            ''', (pair, categoria, motivo, int(time.time())))
+            conn.commit()
+    except Exception as e:
+        print(f"[scalp_engine gates_vortex] erro ao registrar diagnóstico de {pair}: {e}")
+
+
+def diagnostico_gates_vortex_report(db_file, pair=None):
+    try:
+        with sqlite3.connect(db_file) as conn:
+            cursor = conn.cursor()
+            if pair:
+                cursor.execute('''
+                    SELECT pair, categoria, contagem, ultimo_motivo, updated_at
+                    FROM scalp_gates_vortex_diagnostico WHERE pair=?
+                ''', (pair,))
+            else:
+                cursor.execute('''
+                    SELECT pair, categoria, contagem, ultimo_motivo, updated_at
+                    FROM scalp_gates_vortex_diagnostico
+                ''')
+            rows = cursor.fetchall()
+    except Exception as e:
+        return {'erro': str(e)}
+
+    por_par = {}
+    total_geral = {}
+    for p, categoria, contagem, ultimo_motivo, updated_at in rows:
+        por_par.setdefault(p, []).append({
+            'categoria': categoria, 'contagem': contagem,
+            'ultimo_motivo': ultimo_motivo, 'updated_at': updated_at,
+        })
+        total_geral[categoria] = total_geral.get(categoria, 0) + contagem
+
+    for p in por_par:
+        por_par[p].sort(key=lambda x: x['contagem'], reverse=True)
+
+    ranking_geral = sorted(
+        [{'categoria': c, 'contagem': n} for c, n in total_geral.items()],
+        key=lambda x: x['contagem'], reverse=True,
+    )
+
+    return {'por_par': por_par, 'ranking_geral': ranking_geral}
 
 
 def _save_gates_vortex_signal(db_file, pair, exec_tf_label, resultado, alerted):
@@ -4160,9 +4261,11 @@ def process_pair_gates_vortex_com_explicacao(db_file, pair, candles_por_tf, exec
                                                send_telegram_fn=None):
     resolver_expirados_gates_vortex(db_file, pair)
     resultado = process_pair_gates_vortex(db_file, pair, candles_por_tf, exec_tf_label, send_telegram_fn)
+    _registrar_diagnostico_gates_vortex(db_file, pair, resultado.get('motivo'))
     exec_candles_ref = candles_por_tf.get('M5') or candles_por_tf.get('M1')
     salvar_explicacao_ultimo_sinal(db_file, 'gates_vortex', pair, resultado, exec_candles=exec_candles_ref)
     return resultado
+
 
 
 
@@ -4205,3 +4308,19 @@ def explicacao_ultimo(modo, pair):
     if not row:
         return jsonify({"erro": f"nenhum sinal com explicacao ainda para {pair}/{modo}"}), 404
     return jsonify(json.loads(row[0]))
+
+
+@explicacao_bp.route("/scalp_gates_vortex/diagnostico", methods=["GET"])
+def diagnostico_gates_vortex():
+    """
+    Mostra ONDE o pipeline do gates_vortex está travando mais, por par e
+    no geral — contagem real, não achismo. 'pair' opcional na query
+    string filtra por um par só (ex: ?pair=BTCUSD).
+    """
+    pair = request.args.get('pair')
+    try:
+        report = diagnostico_gates_vortex_report(_db_file_explicacao(), pair=pair)
+    except Exception as e:
+        return jsonify({"erro": str(e)}), 500
+    return jsonify(report)
+

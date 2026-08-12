@@ -4708,6 +4708,27 @@ CENARIOS_RR_FIXOS = [(0.5, 0.5), (0.75, 0.5), (1.0, 0.5), (1.5, 0.75), (2.0, 1.0
 RR_MAX_LOOKAHEAD_CANDLES = 50
 
 
+def _medir_movimento_durante_candle(candle_evento, direcao_permitida, entry):
+    """
+    Investigação 1 — mede o MFE/MAE que já aconteceu DENTRO do próprio
+    candle do SFP (do open até o extremo do candle), ANTES mesmo do close
+    (que é o ENTRY). Serve só pra comparar com o MFE/MAE pós-entry — não
+    muda ENTRY, não muda nada da decisão. Testa a hipótese: "o candle SFP
+    já consumiu boa parte do movimento favorável antes do close acontecer".
+    """
+    open_candle = candle_evento['o']
+    if direcao_permitida == 'baixa':
+        mfe_durante = max(0, open_candle - candle_evento['l'])
+        mae_durante = max(0, candle_evento['h'] - open_candle)
+    else:
+        mfe_durante = max(0, candle_evento['h'] - open_candle)
+        mae_durante = max(0, open_candle - candle_evento['l'])
+    return {
+        'mfe_durante_pct': round(mfe_durante / entry * 100, 4),
+        'mae_durante_pct': round(mae_durante / entry * 100, 4),
+    }
+
+
 def _avaliar_qualidade_sfp_evento(m15, idx_evento, direcao_permitida, entry):
     """
     Fase 2 — mede o comportamento REAL do preço depois de 1 SFP confirmado:
@@ -4774,6 +4795,158 @@ def _percentil(valores_ordenados, p):
     idx = min(idx, len(valores_ordenados) - 1)
     return round(valores_ordenados[idx], 4)
 
+
+
+def _qualidade_primeiro_vs_repetido(eventos_sfp):
+    """
+    SEGUNDO da investigação — separa PRIMEIRO_SFP (evento independente,
+    abre um cluster novo) de SFP_REPETIDO (continuação de um cluster já
+    em andamento), e calcula a MESMA agregação de qualidade
+    (_agregar_qualidade_fase2, sem alterar) só nos primeiros. Isso testa
+    o Cenário A da hipótese: será que só os repetidos são ruins?
+    """
+    marcados = _marcar_primeiro_ou_repetido(eventos_sfp)
+    primeiros = [e for e in marcados if e['posicao_no_cluster'] == 'primeiro']
+    repetidos = [e for e in marcados if e['posicao_no_cluster'] == 'repetido']
+    return {
+        'primeiro_sfp': _agregar_qualidade_fase2(primeiros),
+        'sfp_repetido': _agregar_qualidade_fase2(repetidos),
+    }
+
+
+def _qualidade_por_direcao(eventos_sfp):
+    """QUARTO da investigação — separa LONG (alta) de SHORT (baixa),
+    mesma agregação já existente, sem lógica nova."""
+    longs = [e for e in eventos_sfp if e.get('direcao') == 'alta']
+    shorts = [e for e in eventos_sfp if e.get('direcao') == 'baixa']
+    return {
+        'LONG': _agregar_qualidade_fase2(longs),
+        'SHORT': _agregar_qualidade_fase2(shorts),
+    }
+
+
+def _comparar_movimento_intra_vs_pos_entry(eventos_sfp, horizonte_referencia=20):
+    """
+    Monta a tabela pedida na Investigação 1: MFE/MAE que já aconteceu
+    DENTRO do candle SFP (antes do close/entry) vs MFE/MAE medido DEPOIS
+    do entry (horizonte de referência, default 20 candles). Testa a
+    hipótese "o candle já consumiu o movimento antes da entrada real".
+    """
+    if not eventos_sfp:
+        return {'total_sfp': 0}
+
+    mfe_durante = sorted(e['mfe_durante_pct'] for e in eventos_sfp if 'mfe_durante_pct' in e)
+    mae_durante = sorted(e['mae_durante_pct'] for e in eventos_sfp if 'mae_durante_pct' in e)
+    mfe_pos = sorted(e['horizontes'][horizonte_referencia]['mfe_pct'] for e in eventos_sfp if e.get('horizontes', {}).get(horizonte_referencia))
+    mae_pos = sorted(e['horizontes'][horizonte_referencia]['mae_pct'] for e in eventos_sfp if e.get('horizontes', {}).get(horizonte_referencia))
+
+    def media(lista):
+        return round(sum(lista) / len(lista), 4) if lista else None
+
+    def com_percentis(lista):
+        return {
+            'medio': media(lista), 'p25': _percentil(lista, 25),
+            'p50': _percentil(lista, 50), 'p75': _percentil(lista, 75),
+        }
+
+    return {
+        'total_sfp': len(eventos_sfp),
+        'horizonte_referencia_candles': horizonte_referencia,
+        'mfe_durante_sfp': com_percentis(mfe_durante),
+        'mae_durante_sfp': com_percentis(mae_durante),
+        'mfe_pos_entry': com_percentis(mfe_pos),
+        'mae_pos_entry': com_percentis(mae_pos),
+        'mfe_durante_sfp_medio_pct': media(mfe_durante),
+        'mae_durante_sfp_medio_pct': media(mae_durante),
+        'mfe_pos_entry_medio_pct': media(mfe_pos),
+        'mae_pos_entry_medio_pct': media(mae_pos),
+    }
+
+
+def _marcar_primeiro_ou_repetido(eventos_sfp, horizonte_candles=20, intervalo_ms=900000):
+    """
+    Reaproveita EXATAMENTE a mesma regra causal do _agrupar_clusters_sfp
+    (mesma janela, mesmo encadeamento) só pra marcar cada evento como
+    'primeiro' (abre um cluster novo) ou 'repetido' (continua um cluster
+    já em andamento). Não é lógica nova — é a mesma decisão de
+    clustering, só devolvendo a lista de eventos com uma tag a mais.
+    """
+    if not eventos_sfp:
+        return []
+    eventos_ordenados = sorted(eventos_sfp, key=lambda e: e['timestamp'])
+    janela_ms = horizonte_candles * intervalo_ms
+    marcados = []
+    ultimo_do_cluster_atual = None
+    for e in eventos_ordenados:
+        if ultimo_do_cluster_atual is None or (e['timestamp'] - ultimo_do_cluster_atual) > janela_ms:
+            marcados.append({**e, 'posicao_no_cluster': 'primeiro'})
+        else:
+            marcados.append({**e, 'posicao_no_cluster': 'repetido'})
+        ultimo_do_cluster_atual = e['timestamp']
+    return marcados
+
+
+def _agrupar_clusters_sfp(eventos_sfp, horizonte_candles=20, intervalo_ms=900000):
+    """
+    Investigação 2 — CLUSTER_CAUSAL (confirmado com teste, não é retrospectivo):
+    cada evento só é comparado com o ÚLTIMO evento já incluído no cluster
+    atual (já ocorrido no passado) — encadeamento sequencial. Provado que
+    processar os eventos 1 por 1 (como chegariam ao vivo) dá o MESMO
+    resultado que processar tudo de uma vez. Não remove nenhum evento
+    original, só reorganiza pra análise.
+
+    Distância máxima entre SFPs no mesmo cluster: horizonte_candles (20).
+    Cluster encerra quando aparece um evento além dessa distância do
+    último membro — só se sabe isso quando esse próximo evento chega.
+    """
+    if not eventos_sfp:
+        return {'total_clusters': 0, 'sfp_por_cluster_medio': None,
+                'sfp_por_cluster_mediana': None, 'maior_cluster': 0,
+                'primeiro_sfp_do_cluster': 0, 'sfp_repetido': 0, 'clusters': []}
+
+    eventos_ordenados = sorted(eventos_sfp, key=lambda e: e['timestamp'])
+    janela_ms = horizonte_candles * intervalo_ms
+    clusters = []
+    cluster_atual = [eventos_ordenados[0]]
+
+    for e in eventos_ordenados[1:]:
+        ultimo_no_cluster = cluster_atual[-1]
+        if e['timestamp'] - ultimo_no_cluster['timestamp'] <= janela_ms:
+            cluster_atual.append(e)
+        else:
+            clusters.append(cluster_atual)
+            cluster_atual = [e]
+    clusters.append(cluster_atual)
+
+    tamanhos = [len(c) for c in clusters]
+    tamanhos_ordenados = sorted(tamanhos)
+    mediana = tamanhos_ordenados[len(tamanhos_ordenados) // 2] if tamanhos_ordenados else None
+
+    clusters_resumo = []
+    for c in clusters:
+        direcoes = list(set(e['direcao'] for e in c))
+        clusters_resumo.append({
+            'primeiro_sfp_ts': c[0]['timestamp'], 'ultimo_sfp_ts': c[-1]['timestamp'],
+            'tamanho': len(c),
+            'direcao': direcoes[0] if len(direcoes) == 1 else 'mista',
+        })
+
+    total_sfp = len(eventos_ordenados)
+    primeiro_sfp_do_cluster = len(clusters)  # cada cluster tem exatamente 1 "primeiro"
+    sfp_repetido = total_sfp - primeiro_sfp_do_cluster  # o resto são continuações do mesmo cluster
+
+    return {
+        'metodologia': 'CLUSTER_CAUSAL — cada decisão usa só o último evento já ocorrido, '
+                        'confirmado com teste (streaming == batch). Distância máxima: '
+                        f'{horizonte_candles} candles do último membro do cluster.',
+        'total_clusters': len(clusters),
+        'sfp_por_cluster_medio': round(sum(tamanhos) / len(tamanhos), 2) if tamanhos else None,
+        'sfp_por_cluster_mediana': mediana,
+        'maior_cluster': max(tamanhos) if tamanhos else 0,
+        'primeiro_sfp_do_cluster': primeiro_sfp_do_cluster,
+        'sfp_repetido': sfp_repetido,
+        'clusters': clusters_resumo,
+    }
 
 
 def _detectar_sobreposicao_sfp(eventos_sfp, horizonte_candles=20, intervalo_ms=900000):
@@ -4955,12 +5128,14 @@ def replay_comparar_referencias_liquidez(pair, dias_historico=30, forward_lookah
                         nivel_liq = liquidez['high'] if direcao_permitida == 'baixa' else liquidez['low']
                         distancia_pre_sweep_pct = round(abs(nivel_liq - entry) / entry * 100, 4)
                         qualidade_detalhada = _avaliar_qualidade_sfp_evento(m15, idx_evento, direcao_permitida, entry)
+                        movimento_intra_candle = _medir_movimento_durante_candle(candle_evento, direcao_permitida, entry)
                         if qualidade_detalhada:
                             resultado_por_ref[ref_nome].setdefault('eventos_sfp', []).append({
                                 'pair': pair, 'timestamp': candle_evento['t'], 'direcao': direcao_permitida,
                                 'referencia': ref_nome, 'nivel_liquidez': round(nivel_liq, 6),
                                 'entry': round(entry, 6), 'high': candle_evento['h'], 'low': candle_evento['l'],
                                 'close': candle_evento['c'], 'distancia_pre_sweep_pct': distancia_pre_sweep_pct,
+                                **movimento_intra_candle,
                                 **qualidade_detalhada,
                             })
                 # SEM break — cada candle M15 do dia é seu próprio ponto de
@@ -5032,6 +5207,10 @@ def replay_comparar_referencias_liquidez(pair, dias_historico=30, forward_lookah
             'mae_medio_pct': mae_medio_calc,
             'qualidade_fase2': _agregar_qualidade_fase2(dados.get('eventos_sfp', [])),
             'sobreposicao_sfp': _detectar_sobreposicao_sfp(dados.get('eventos_sfp', [])),
+            'clusters_sfp': _agrupar_clusters_sfp(dados.get('eventos_sfp', [])),
+            'movimento_intra_candle_vs_pos_entry': _comparar_movimento_intra_vs_pos_entry(dados.get('eventos_sfp', [])),
+            'qualidade_por_posicao_no_cluster': _qualidade_primeiro_vs_repetido(dados.get('eventos_sfp', [])),
+            'qualidade_por_direcao': _qualidade_por_direcao(dados.get('eventos_sfp', [])),
         }
 
     return {

@@ -2366,6 +2366,132 @@ def validar_sfp_estrito(candles_sfp, liquidez, direcao_permitida):
     return None, 'sem_sfp_ainda'
 
 
+def _diagnostico_detalhado_sfp(candles_sfp, liquidez, direcao_permitida, tf_label):
+    """
+    Observador puro — roda em paralelo à validar_sfp_estrito, sem alterar
+    NENHUM comportamento de decisão. Responde objetivamente aos Casos A-E:
+    A) nunca tocou a liquidez, B) tocou mas não fechou de volta (sweep sem
+    reclaim), C) fechou além (breakout), D) varreu e voltou (SFP), E) nem
+    isso — candles insuficientes.
+    """
+    diag = {
+        'timeframe': tf_label, 'high_liq': None, 'low_liq': None, 'cutoff_ts': None,
+        'candles_analisados': 0, 'maior_high': None, 'menor_low': None,
+        'tocou_high_liq': False, 'tocou_low_liq': False,
+        'fechou_fora_high': False, 'fechou_fora_low': False,
+        'fechou_de_volta_high': False, 'fechou_de_volta_low': False,
+        'caso': None, 'candle_responsavel': None,
+    }
+    if not liquidez or not candles_sfp:
+        diag['caso'] = 'E_sem_dados'
+        return diag
+
+    cutoff_ts = liquidez.get('cutoff_ts')
+    high_liq, low_liq = liquidez['high'], liquidez['low']
+    candles_pos = [c for c in candles_sfp if cutoff_ts is None or c['t'] > cutoff_ts]
+
+    diag.update({'high_liq': high_liq, 'low_liq': low_liq, 'cutoff_ts': cutoff_ts,
+                 'candles_analisados': len(candles_pos)})
+    if not candles_pos:
+        diag['caso'] = 'E_sem_candles_apos_cutoff'
+        return diag
+
+    diag['maior_high'] = max(c['h'] for c in candles_pos)
+    diag['menor_low'] = min(c['l'] for c in candles_pos)
+
+    lado_relevante = 'high' if direcao_permitida == 'baixa' else 'low'
+    nivel = high_liq if lado_relevante == 'high' else low_liq
+
+    for c in candles_pos:
+        if lado_relevante == 'high':
+            if c['h'] > nivel:
+                diag['tocou_high_liq'] = True
+                if c['c'] > nivel:
+                    diag['fechou_fora_high'] = True
+                    diag['caso'] = 'C_breakout_confirmado'
+                    diag['candle_responsavel'] = {'t': c['t'], 'h': c['h'], 'l': c['l'], 'c': c['c']}
+                    return diag
+                else:
+                    diag['fechou_de_volta_high'] = True
+                    diag['caso'] = 'D_sfp_confirmado'
+                    diag['candle_responsavel'] = {'t': c['t'], 'h': c['h'], 'l': c['l'], 'c': c['c']}
+                    return diag
+        else:
+            if c['l'] < nivel:
+                diag['tocou_low_liq'] = True
+                if c['c'] < nivel:
+                    diag['fechou_fora_low'] = True
+                    diag['caso'] = 'C_breakout_confirmado'
+                    diag['candle_responsavel'] = {'t': c['t'], 'h': c['h'], 'l': c['l'], 'c': c['c']}
+                    return diag
+                else:
+                    diag['fechou_de_volta_low'] = True
+                    diag['caso'] = 'D_sfp_confirmado'
+                    diag['candle_responsavel'] = {'t': c['t'], 'h': c['h'], 'l': c['l'], 'c': c['c']}
+                    return diag
+
+    diag['caso'] = 'A_nunca_tocou' if not diag['tocou_high_liq'] and not diag['tocou_low_liq'] else 'B_tocou_sem_reclaim'
+    return diag
+
+
+def init_sfp_diagnostico_db(db_file):
+    try:
+        with sqlite3.connect(db_file) as conn:
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS scalp_gates_vortex_sfp_diagnostico (
+                    pair TEXT PRIMARY KEY,
+                    direcao_permitida TEXT,
+                    bias_context TEXT,
+                    payload_json TEXT,
+                    updated_at INTEGER
+                )
+            ''')
+            conn.commit()
+    except Exception as e:
+        print(f"[scalp_engine sfp_diag] erro ao criar tabela: {e}")
+
+
+def _registrar_diagnostico_sfp(db_file, pair, direcao_permitida, bias_context, diag):
+    init_sfp_diagnostico_db(db_file)
+    try:
+        with sqlite3.connect(db_file) as conn:
+            conn.execute('''
+                INSERT INTO scalp_gates_vortex_sfp_diagnostico (pair, direcao_permitida, bias_context, payload_json, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(pair) DO UPDATE SET
+                    direcao_permitida=excluded.direcao_permitida,
+                    bias_context=excluded.bias_context,
+                    payload_json=excluded.payload_json,
+                    updated_at=excluded.updated_at
+            ''', (pair, direcao_permitida, bias_context, json.dumps(diag, ensure_ascii=False), int(time.time())))
+            conn.commit()
+    except Exception as e:
+        print(f"[scalp_engine sfp_diag] erro ao registrar {pair}: {e}")
+
+
+def sfp_diagnostico_report(db_file, pair=None):
+    init_sfp_diagnostico_db(db_file)
+    try:
+        with sqlite3.connect(db_file) as conn:
+            cursor = conn.cursor()
+            if pair:
+                cursor.execute('SELECT pair, direcao_permitida, bias_context, payload_json, updated_at FROM scalp_gates_vortex_sfp_diagnostico WHERE pair=?', (pair,))
+            else:
+                cursor.execute('SELECT pair, direcao_permitida, bias_context, payload_json, updated_at FROM scalp_gates_vortex_sfp_diagnostico')
+            rows = cursor.fetchall()
+    except Exception as e:
+        return {'erro': str(e)}
+
+    resultado = {}
+    for p, direcao, bias_context, payload_json, updated_at in rows:
+        resultado[p] = {
+            'direcao_permitida': direcao, 'bias_context': bias_context,
+            'diagnostico': json.loads(payload_json), 'updated_at': updated_at,
+        }
+    return resultado
+
+
+
 def validar_sfp_cascata_tf(candles_por_tf, liquidez, direcao_permitida):
     """
     Tenta achar o SFP em cascata: M15 primeiro (sweep mais confiável,
@@ -2908,6 +3034,18 @@ def process_pair_gates_vortex(db_file, pair, candles_por_tf, exec_tf_label='M5',
     # ── SFP contra liquidez (sessão anterior ou 3-7 dias) ──
     liquidez = compute_liquidez_referencia(pair, candles_por_tf)
     sfp, motivo_sfp, tf_sfp_usado = validar_sfp_cascata_tf(candles_por_tf, liquidez, direcao_permitida)
+
+    # Diagnóstico observacional — roda sempre, não influencia em nada a
+    # decisão acima. Só grava fatos objetivos (Casos A-E) pra investigar
+    # se o gargalo real é 'nunca tocou' vs 'tocou sem reclaim' vs 'breakout'.
+    try:
+        tf_diag_label = tf_sfp_usado or 'M15'
+        candles_diag = candles_por_tf.get(tf_diag_label) or candles_por_tf.get('M15') or candles_por_tf.get('M5')
+        diag = _diagnostico_detalhado_sfp(candles_diag, liquidez, direcao_permitida, tf_diag_label)
+        _registrar_diagnostico_sfp(db_file, pair, direcao_permitida, bias_context, diag)
+    except Exception as e:
+        print(f"[scalp_engine gates_vortex] erro no diagnóstico observacional de {pair}: {e}")
+
     if not sfp:
         resultado['motivo'] = f'Bias {bias_context}, {motivo_sfp}'
         return resultado
@@ -4346,4 +4484,21 @@ def diagnostico_gates_vortex():
     except Exception as e:
         return jsonify({"erro": str(e)}), 500
     return jsonify(report)
+
+
+@explicacao_bp.route("/scalp_gates_vortex/diagnostico_sfp", methods=["GET"])
+def diagnostico_sfp_gates_vortex():
+    """
+    Estado mais recente e detalhado da análise de SFP por par: liquidez
+    calculada, se tocou, se fechou fora, se voltou, candle responsável.
+    Responde objetivamente os Casos A-E (nunca tocou / tocou sem reclaim /
+    breakout / SFP confirmado / sem dados). 'pair' opcional filtra 1 par.
+    """
+    pair = request.args.get('pair')
+    try:
+        report = sfp_diagnostico_report(_db_file_explicacao(), pair=pair)
+    except Exception as e:
+        return jsonify({"erro": str(e)}), 500
+    return jsonify(report)
+
 

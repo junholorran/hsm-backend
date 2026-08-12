@@ -4701,6 +4701,172 @@ def _fetch_bybit_klines_historico(symbol, interval, dias_historico):
     return todos
 
 
+HORIZONTES_CANDLES = [1, 3, 5, 10, 20]
+NIVEIS_ALVO_FAVORAVEL_PCT = [0.25, 0.50, 0.75, 1.00, 1.50, 2.00]
+NIVEIS_ALVO_ADVERSO_PCT = [0.25, 0.50, 0.75, 1.00]
+CENARIOS_RR_FIXOS = [(0.5, 0.5), (0.75, 0.5), (1.0, 0.5), (1.5, 0.75), (2.0, 1.0)]  # (tp_pct, sl_pct)
+RR_MAX_LOOKAHEAD_CANDLES = 50
+
+
+def _avaliar_qualidade_sfp_evento(m15, idx_evento, direcao_permitida, entry):
+    """
+    Fase 2 — mede o comportamento REAL do preço depois de 1 SFP confirmado:
+    - MFE/MAE em vários horizontes (1/3/5/10/20 candles à frente)
+    - Cenários de TP/SL fixos: qual bate primeiro, candle a candle
+    - Se TP e SL forem tocados no MESMO candle, não dá pra saber a ordem
+      intrabar de verdade — marca AMBIGUO em vez de inventar um resultado
+    """
+    max_horizonte = max(HORIZONTES_CANDLES)
+    janela_max = m15[idx_evento + 1: idx_evento + 1 + max(max_horizonte, RR_MAX_LOOKAHEAD_CANDLES)]
+    if not janela_max:
+        return None
+
+    horizontes_resultado = {}
+    for h in HORIZONTES_CANDLES:
+        janela_h = janela_max[:h]
+        if not janela_h:
+            horizontes_resultado[h] = None
+            continue
+        if direcao_permitida == 'baixa':
+            mfe = max(0, entry - min(c['l'] for c in janela_h))
+            mae = max(0, max(c['h'] for c in janela_h) - entry)
+        else:
+            mfe = max(0, max(c['h'] for c in janela_h) - entry)
+            mae = max(0, entry - min(c['l'] for c in janela_h))
+        horizontes_resultado[h] = {
+            'mfe_pct': round(mfe / entry * 100, 4),
+            'mae_pct': round(mae / entry * 100, 4),
+        }
+
+    cenarios_resultado = {}
+    for tp_pct, sl_pct in CENARIOS_RR_FIXOS:
+        if direcao_permitida == 'baixa':
+            tp_nivel = entry * (1 - tp_pct / 100)
+            sl_nivel = entry * (1 + sl_pct / 100)
+        else:
+            tp_nivel = entry * (1 + tp_pct / 100)
+            sl_nivel = entry * (1 - sl_pct / 100)
+
+        outcome = 'NENHUM'
+        for c in janela_max[:RR_MAX_LOOKAHEAD_CANDLES]:
+            if direcao_permitida == 'baixa':
+                bateu_tp, bateu_sl = c['l'] <= tp_nivel, c['h'] >= sl_nivel
+            else:
+                bateu_tp, bateu_sl = c['h'] >= tp_nivel, c['l'] <= sl_nivel
+            if bateu_tp and bateu_sl:
+                outcome = 'AMBIGUO'
+                break
+            elif bateu_tp:
+                outcome = 'TP'
+                break
+            elif bateu_sl:
+                outcome = 'SL'
+                break
+        cenarios_resultado[f'{tp_pct}/{sl_pct}'] = outcome
+
+    return {'horizontes': horizontes_resultado, 'cenarios_rr': cenarios_resultado}
+
+
+def _percentil(valores_ordenados, p):
+    if not valores_ordenados:
+        return None
+    idx = int(len(valores_ordenados) * p / 100)
+    idx = min(idx, len(valores_ordenados) - 1)
+    return round(valores_ordenados[idx], 4)
+
+
+
+def _detectar_sobreposicao_sfp(eventos_sfp, horizonte_candles=20, intervalo_ms=900000):
+    """
+    Só MEDE — não remove nem resolve nada. Verifica se existem vários SFPs
+    antes de terminar o horizonte de `horizonte_candles` de um SFP
+    anterior (mesma referência). Ordenado por timestamp, busca early-exit
+    (para assim que o próximo evento já passa da janela).
+    """
+    if not eventos_sfp:
+        return {'total_sfp': 0, 'eventos_sobrepostos': 0, 'taxa_sobreposicao_pct': None}
+
+    eventos_ordenados = sorted(eventos_sfp, key=lambda e: e['timestamp'])
+    janela_ms = horizonte_candles * intervalo_ms
+    n = len(eventos_ordenados)
+    sobrepostos = 0
+
+    for i in range(n):
+        limite = eventos_ordenados[i]['timestamp'] + janela_ms
+        for j in range(i + 1, n):
+            if eventos_ordenados[j]['timestamp'] > limite:
+                break
+            sobrepostos += 1
+            break  # só precisa saber que existe PELO MENOS 1 sobreposição
+
+    return {
+        'total_sfp': n,
+        'eventos_sobrepostos': sobrepostos,
+        'taxa_sobreposicao_pct': round(100 * sobrepostos / n, 1),
+    }
+
+
+def _agregar_qualidade_fase2(eventos_sfp, horizonte_referencia=20):
+    """
+    Transforma a lista de eventos SFP individuais (Fase 2) na tabela
+    resumida: MFE/MAE médio+mediano+percentis, taxa de atingir cada alvo
+    favorável/adverso (medido no horizonte de referência, default 20
+    candles), e expectancy real por cenário de TP/SL fixo — não usa
+    rr_proxy_medio_das_razoes (marcado NAO_VALIDADA), calcula expectancy
+    direto dos resultados TP/SL/AMBIGUO/NENHUM.
+    """
+    if not eventos_sfp:
+        return {'total_sfp': 0}
+
+    mfes = sorted(e['horizontes'][horizonte_referencia]['mfe_pct'] for e in eventos_sfp if e['horizontes'].get(horizonte_referencia))
+    maes = sorted(e['horizontes'][horizonte_referencia]['mae_pct'] for e in eventos_sfp if e['horizontes'].get(horizonte_referencia))
+
+    def media(lista):
+        return round(sum(lista) / len(lista), 4) if lista else None
+
+    def mediana(lista_ordenada):
+        return _percentil(lista_ordenada, 50)
+
+    taxas_favoravel = {}
+    for alvo in NIVEIS_ALVO_FAVORAVEL_PCT:
+        atingiram = sum(1 for m in mfes if m >= alvo)
+        taxas_favoravel[f'{alvo}%'] = round(100 * atingiram / len(mfes), 1) if mfes else None
+
+    taxas_adverso = {}
+    for alvo in NIVEIS_ALVO_ADVERSO_PCT:
+        sofreram = sum(1 for m in maes if m >= alvo)
+        taxas_adverso[f'{alvo}%'] = round(100 * sofreram / len(maes), 1) if maes else None
+
+    cenarios_agregados = {}
+    for tp_pct, sl_pct in CENARIOS_RR_FIXOS:
+        chave = f'{tp_pct}/{sl_pct}'
+        outcomes = [e['cenarios_rr'][chave] for e in eventos_sfp if chave in e.get('cenarios_rr', {})]
+        n_win = outcomes.count('TP')   # TP bateu primeiro = WIN
+        n_loss = outcomes.count('SL')  # SL bateu primeiro = LOSS
+        n_ambiguo = outcomes.count('AMBIGUO')  # TP e SL no MESMO candle — fica separado, não conta no win/loss
+        n_nenhum = outcomes.count('NENHUM')
+        n_resolvidos = n_win + n_loss  # AMBIGUO e NENHUM ficam FORA da estatística principal
+        win_rate = round(n_win / n_resolvidos, 3) if n_resolvidos else None
+        loss_rate = round(1 - win_rate, 3) if win_rate is not None else None
+        expectancy_pct = round((win_rate * tp_pct) - (loss_rate * sl_pct), 4) if win_rate is not None else None
+        cenarios_agregados[chave] = {
+            'WIN': n_win, 'LOSS': n_loss, 'AMBIGUO': n_ambiguo, 'NENHUM': n_nenhum,
+            'win_rate': win_rate, 'loss_rate': loss_rate, 'expectancy_pct': expectancy_pct,
+        }
+
+    return {
+        'total_sfp': len(eventos_sfp),
+        'horizonte_referencia_candles': horizonte_referencia,
+        'mfe_medio_pct': media(mfes), 'mfe_mediano_pct': mediana(mfes),
+        'mfe_p25_pct': _percentil(mfes, 25), 'mfe_p50_pct': _percentil(mfes, 50), 'mfe_p75_pct': _percentil(mfes, 75),
+        'mae_medio_pct': media(maes), 'mae_mediano_pct': mediana(maes),
+        'mae_p25_pct': _percentil(maes, 25), 'mae_p50_pct': _percentil(maes, 50), 'mae_p75_pct': _percentil(maes, 75),
+        'taxa_atingir_alvo_favoravel': taxas_favoravel,
+        'taxa_sofrer_alvo_adverso': taxas_adverso,
+        'cenarios_rr_fixos': cenarios_agregados,
+    }
+
+
 def replay_comparar_referencias_liquidez(pair, dias_historico=30, forward_lookahead=20):
     """
     Orquestra o replay: pra cada dia do histórico, pra cada uma das 4
@@ -4772,8 +4938,8 @@ def replay_comparar_referencias_liquidez(pair, dias_historico=30, forward_lookah
                     idx_evento = m15.index(candle_evento) if candle_evento in m15 else None
                     if idx_evento is not None:
                         janela_forward = m15[idx_evento + 1: idx_evento + 1 + forward_lookahead]
+                        entry = candle_evento['c']
                         if janela_forward:
-                            entry = candle_evento['c']
                             if direcao_permitida == 'baixa':
                                 mfe = max(0, entry - min(c['l'] for c in janela_forward))
                                 mae = max(0, max(c['h'] for c in janela_forward) - entry)
@@ -4784,6 +4950,18 @@ def replay_comparar_referencias_liquidez(pair, dias_historico=30, forward_lookah
                                 'dia': str(dia_atual), 'mfe_pct': round(mfe / entry * 100, 3),
                                 'mae_pct': round(mae / entry * 100, 3),
                                 'rr_proxy': round(mfe / mae, 2) if mae > 0 else None,
+                            })
+
+                        nivel_liq = liquidez['high'] if direcao_permitida == 'baixa' else liquidez['low']
+                        distancia_pre_sweep_pct = round(abs(nivel_liq - entry) / entry * 100, 4)
+                        qualidade_detalhada = _avaliar_qualidade_sfp_evento(m15, idx_evento, direcao_permitida, entry)
+                        if qualidade_detalhada:
+                            resultado_por_ref[ref_nome].setdefault('eventos_sfp', []).append({
+                                'pair': pair, 'timestamp': candle_evento['t'], 'direcao': direcao_permitida,
+                                'referencia': ref_nome, 'nivel_liquidez': round(nivel_liq, 6),
+                                'entry': round(entry, 6), 'high': candle_evento['h'], 'low': candle_evento['l'],
+                                'close': candle_evento['c'], 'distancia_pre_sweep_pct': distancia_pre_sweep_pct,
+                                **qualidade_detalhada,
                             })
                 # SEM break — cada candle M15 do dia é seu próprio ponto de
                 # observação (candle a candle, não só a abertura do dia).
@@ -4814,7 +4992,21 @@ def replay_comparar_referencias_liquidez(pair, dias_historico=30, forward_lookah
 
         qualidade = dados['sfps_qualidade']
         rr_validos = [q['rr_proxy'] for q in qualidade if q['rr_proxy'] is not None]
-        rr_medio = round(sum(rr_validos) / len(rr_validos), 2) if rr_validos else None
+        # rr_proxy_medio = média das RAZÕES individuais (mfe/mae por caso) —
+        # estatisticamente frágil: 1 caso com mae≈0 já domina a média inteira.
+        # Mantido só por transparência, mas marcado NAO_VALIDADA — não usar
+        # pra concluir nada até substituir por métrica mais robusta.
+        rr_medio_fragil = round(sum(rr_validos) / len(rr_validos), 2) if rr_validos else None
+
+        mfe_medio_calc = round(sum(q['mfe_pct'] for q in qualidade) / len(qualidade), 3) if qualidade else None
+        mae_medio_calc = round(sum(q['mae_pct'] for q in qualidade) / len(qualidade), 3) if qualidade else None
+        # Razão das médias (mfe_médio / mae_médio) — muito mais robusta a outliers
+        rr_razao_das_medias = round(mfe_medio_calc / mae_medio_calc, 2) if (mfe_medio_calc and mae_medio_calc and mae_medio_calc > 0) else None
+        # Mediana das razões individuais — também robusta, não deixa 1 outlier dominar
+        rr_mediana = None
+        if rr_validos:
+            rr_ordenados = sorted(rr_validos)
+            rr_mediana = round(rr_ordenados[len(rr_ordenados) // 2], 2)
 
         relatorio[ref_nome] = {
             'amostras': total,
@@ -4833,9 +5025,13 @@ def replay_comparar_referencias_liquidez(pair, dias_historico=30, forward_lookah
             'distancia_mediana_pct': dist_mediana,
             'distancia_maxima_pct': dist_maxima,
             'sfps_encontrados': len(qualidade),
-            'rr_proxy_medio': rr_medio,
-            'mfe_medio_pct': round(sum(q['mfe_pct'] for q in qualidade) / len(qualidade), 3) if qualidade else None,
-            'mae_medio_pct': round(sum(q['mae_pct'] for q in qualidade) / len(qualidade), 3) if qualidade else None,
+            'rr_proxy_medio_das_razoes': {'valor': rr_medio_fragil, 'status': 'NAO_VALIDADA', 'motivo': 'média de razões individuais mfe/mae — 1 caso com mae baixo já domina o resultado, não usar pra concluir nada'},
+            'rr_razao_das_medias': rr_razao_das_medias,
+            'rr_mediana_das_razoes': rr_mediana,
+            'mfe_medio_pct': mfe_medio_calc,
+            'mae_medio_pct': mae_medio_calc,
+            'qualidade_fase2': _agregar_qualidade_fase2(dados.get('eventos_sfp', [])),
+            'sobreposicao_sfp': _detectar_sobreposicao_sfp(dados.get('eventos_sfp', [])),
         }
 
     return {
@@ -4851,6 +5047,26 @@ def replay_comparar_referencias_liquidez(pair, dias_historico=30, forward_lookah
                             'amostras independentes — o reclaim é confirmado no próprio '
                             'candle do sweep (sweep + fechamento de volta no mesmo candle '
                             'fechado = SFP). Os dois números do relatório sempre baterão.',
+            'TOUCH_SWEEP': 'TOUCH (>=) e SWEEP (>) batem praticamente sempre com dado real '
+                            '— não é bug de contador nem estados sobrescritos. Com preço '
+                            'contínuo (float), a chance de high/low bater EXATAMENTE igual '
+                            'ao nível de liquidez é matematicamente próxima de zero. '
+                            'Confirmado com teste isolado (ver auditoria). TOUCH_TO_SWEEP '
+                            'sempre vai ficar perto de 1.0 nesse formato de dado.',
+            'RR_PROXY': 'rr_proxy_medio_das_razoes usa média das razões individuais '
+                        '(mfe/mae por caso) — estatisticamente frágil, 1 caso com mae baixo '
+                        'já domina o resultado. Marcado NAO_VALIDADA. Usar '
+                        'rr_razao_das_medias ou rr_mediana_das_razoes, mais robustos.',
+            'ENTRY': 'ENTRY = close (fechamento) do candle onde o SFP foi confirmado '
+                     '(sweep + reclaim no mesmo candle). NÃO é abertura do candle seguinte '
+                     '— uma única metodologia, sem mistura.',
+            'AMBIGUO_TP_SL': 'Se TP e SL forem tocados no MESMO candle (high>=TP e low<=SL '
+                              'juntos), o resultado fica AMBIGUO — não dá pra saber qual '
+                              'bateu primeiro sem dado intrabar. AMBIGUO e NENHUM ficam '
+                              'FORA do win_rate/loss_rate/expectancy (só WIN+LOSS contam).',
+            'SOBREPOSICAO_SFP': 'sobreposicao_sfp só MEDE se existe outro SFP dentro dos '
+                                 '20 candles seguintes de um SFP anterior (mesma referência) '
+                                 '— não remove nem resolve nada automaticamente.',
         },
         'por_referencia': relatorio,
     }

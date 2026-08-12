@@ -47,7 +47,7 @@ MONTE_CARLO_GATE_ATIVO = True
 
 MODOS_ATIVOS = {
     '4camadas': True,                # réplica intencional da Vortex — mesma lógica de entrada, sem trava
-    'gates_vortex': True,            # motor restrito — 8 passos + 6 gates, com trava de contradição
+    'gates_vortex': True,            # motor restrito — 8 passos + 7 gates, com trava de contradição
 }
 
 
@@ -2500,7 +2500,7 @@ def formatar_saida_kairos_json(resultado):
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# PIPELINE DE GATES (A-F) — "modelo avançado da Vortex", com uma diferença
+# PIPELINE DE GATES (A-G) — "modelo avançado da Vortex", com uma diferença
 # de propósito: o Gate C (Monte Carlo) usa a simulação REAL que já existe
 # no engine (compute_monte_carlo), não um número decorativo. Se a Vortex
 # mostra 91% fixo, aqui o número é o que a simulação realmente calcular
@@ -2697,10 +2697,51 @@ def _save_gates_vortex_signal(db_file, pair, exec_tf_label, resultado, alerted):
         print(f"[scalp_engine gates_vortex] erro ao salvar sinal de {pair}: {e}")
 
 
+GATES_VORTEX_EXPIRED_MAX_HOURS = 24
+
+
+def resolver_expirados_gates_vortex(db_file, pair):
+    """
+    Estado explícito de ciclo de vida do sinal — antes só existia
+    'pendente' -> 'win'/'loss' via gerenciar_trades_abertos (genérico,
+    usado por vários modos). Aqui fecha o terceiro estado real: um sinal
+    do gates_vortex que passou de GATES_VORTEX_EXPIRED_MAX_HOURS sem
+    bater TP nem SL vira 'expired' — não fica pendente pra sempre, e não
+    é contabilizado como se ainda estivesse esperando resolução.
+    """
+    try:
+        with sqlite3.connect(db_file) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT id, created_at FROM scalp_gates_vortex_signal_state
+                WHERE pair=? AND alerted=1 AND (resultado_final IS NULL OR resultado_final='pendente')
+            ''', (pair,))
+            pendentes = cursor.fetchall()
+
+        if not pendentes:
+            return
+
+        now = int(time.time())
+        max_age_seg = GATES_VORTEX_EXPIRED_MAX_HOURS * 3600
+        for signal_id, created_at in pendentes:
+            if (now - created_at) > max_age_seg:
+                try:
+                    with sqlite3.connect(db_file) as conn:
+                        conn.execute(
+                            "UPDATE scalp_gates_vortex_signal_state SET resultado_final='expired' WHERE id=?",
+                            (signal_id,)
+                        )
+                        conn.commit()
+                except Exception as e:
+                    print(f"[scalp_engine gates_vortex] erro ao expirar sinal {signal_id}: {e}")
+    except Exception as e:
+        print(f"[scalp_engine gates_vortex] erro ao checar expirados de {pair}: {e}")
+
+
 def process_pair_gates_vortex(db_file, pair, candles_por_tf, exec_tf_label='M5', send_telegram_fn=None):
     """
     Pipeline completo de Gates A-F. Só retorna SIGNAL_DISPARADO quando
-    TODOS os 6 gates passarem. Reaproveita Bias/SFP/MSS/FVG do modo
+    TODOS os 7 gates passarem. Reaproveita Bias/SFP/MSS/FVG do modo
     'sfp_liquidez' e as camadas de score do modo '4camadas' — não
     duplica lógica, só monta os gates por cima do que já existe.
     """
@@ -2897,7 +2938,7 @@ def process_pair_gates_vortex(db_file, pair, candles_por_tf, exec_tf_label='M5',
         msg += f"✅ TP1: {resultado['tp1']} (RR {resultado['risco_recompensa']})\n"
         if resultado['tp2']:
             msg += f"✅ TP2: {resultado['tp2']}\n"
-        msg += "\n<i>Todos os 6 gates confirmados (A-F).</i>"
+        msg += "\n<i>Todos os 7 gates confirmados (A-G).</i>"
         send_telegram_fn(msg)
     elif em_cooldown:
         restante_min = (GATES_COOLDOWN_SECONDS - segundos_desde) // 60
@@ -3426,7 +3467,7 @@ def _stats_de_uma_tabela(db_file, tabela):
     except Exception as e:
         return {'erro': str(e), 'wins': 0, 'losses': 0, 'pendentes': 0}
 
-    wins = losses = pendentes = 0
+    wins = losses = pendentes = expirados = 0
     wins_long = wins_short = losses_long = losses_short = 0
     for resultado, count, direcao in rows:
         if resultado == 'win':
@@ -3441,6 +3482,8 @@ def _stats_de_uma_tabela(db_file, tabela):
                 losses_long += count
             else:
                 losses_short += count
+        elif resultado == 'expired':
+            expirados += count
         else:
             pendentes += count
 
@@ -3453,7 +3496,7 @@ def _stats_de_uma_tabela(db_file, tabela):
     win_rate_short = round(100 * wins_short / total_short, 1) if total_short > 0 else None
 
     return {
-        'wins': wins, 'losses': losses, 'pendentes': pendentes,
+        'wins': wins, 'losses': losses, 'pendentes': pendentes, 'expirados': expirados,
         'total_resolvidos': total_resolvidos, 'win_rate_pct': win_rate,
         'long': {'wins': wins_long, 'losses': losses_long, 'win_rate_pct': win_rate_long},
         'short': {'wins': wins_short, 'losses': losses_short, 'win_rate_pct': win_rate_short},
@@ -4115,10 +4158,12 @@ def process_pair_4camadas_com_explicacao(db_file, pair, d1_candles, h4_candles, 
 
 def process_pair_gates_vortex_com_explicacao(db_file, pair, candles_por_tf, exec_tf_label='M5',
                                                send_telegram_fn=None):
+    resolver_expirados_gates_vortex(db_file, pair)
     resultado = process_pair_gates_vortex(db_file, pair, candles_por_tf, exec_tf_label, send_telegram_fn)
     exec_candles_ref = candles_por_tf.get('M5') or candles_por_tf.get('M1')
     salvar_explicacao_ultimo_sinal(db_file, 'gates_vortex', pair, resultado, exec_candles=exec_candles_ref)
     return resultado
+
 
 
 explicacao_bp = Blueprint("explicacao_bp", __name__)

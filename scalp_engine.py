@@ -2724,8 +2724,30 @@ def _classificar_motivo_gates_vortex(motivo):
     return 'outro'
 
 
+def _garantir_tabela_diagnostico_gates_vortex(db_file):
+    """Cria a tabela se ela não existir, sem depender de init_gates_vortex_db
+    ter rodado no arranque do app.py — auto-blindado, chamado toda vez que
+    a tabela é usada (INSERT ou SELECT)."""
+    try:
+        with sqlite3.connect(db_file) as conn:
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS scalp_gates_vortex_diagnostico (
+                    pair TEXT,
+                    categoria TEXT,
+                    contagem INTEGER DEFAULT 0,
+                    ultimo_motivo TEXT,
+                    updated_at INTEGER,
+                    PRIMARY KEY (pair, categoria)
+                )
+            ''')
+            conn.commit()
+    except Exception as e:
+        print(f"[scalp_engine gates_vortex] erro ao garantir tabela de diagnóstico: {e}")
+
+
 def _registrar_diagnostico_gates_vortex(db_file, pair, motivo):
     categoria = _classificar_motivo_gates_vortex(motivo)
+    _garantir_tabela_diagnostico_gates_vortex(db_file)
     try:
         with sqlite3.connect(db_file) as conn:
             conn.execute('''
@@ -2742,6 +2764,7 @@ def _registrar_diagnostico_gates_vortex(db_file, pair, motivo):
 
 
 def diagnostico_gates_vortex_report(db_file, pair=None):
+    _garantir_tabela_diagnostico_gates_vortex(db_file)
     try:
         with sqlite3.connect(db_file) as conn:
             cursor = conn.cursor()

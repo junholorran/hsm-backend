@@ -41,6 +41,10 @@ SCALP_CASCATA_STATUS = {}  # pair -> {'result': {...}, 'updated_at': int}
 STATUS_4CAMADAS = {}  # pair -> {'result': {...}, 'updated_at': int}
 STATUS_GATES_VORTEX = {}  # pair -> {'result': {...}, 'updated_at': int}
 
+# ── NOVO: status da camada de narrativa HTF (D1/H4/H1) — contexto,
+# não gatilho. Calculado uma vez por ciclo em run_live_cycle. ──
+HTF_NARRATIVE_STATUS = {}  # pair -> {'result': {...}, 'updated_at': int}
+
 CACHE_WINDOW_SECONDS = 15 * 60  # 15 minutos
 
 RE_SCORE = re.compile(r'SCORE\s*OPERACIONAL\s*:[^\d]*(\d{1,3})\s*/\s*100', re.IGNORECASE)
@@ -290,7 +294,6 @@ cascade_engine.init_cascade_multi_tf_db(DB_FILE)
 scalp_engine.init_scalp_db(DB_FILE)
 scalp_engine.init_explicacao_db(DB_FILE)
 app.register_blueprint(scalp_engine.explicacao_bp)
-
 
 ICT_SYSTEM_PROMPT = (
     "Es um mentor institucional ICT (Inner Circle Trader) e SMC de elite, com "
@@ -1033,7 +1036,12 @@ LIVE_SYMBOL_MAP = {
     'FILUSD': 'FILUSDT', 'HBARUSD': 'HBARUSDT', 'ICPUSD': 'ICPUSDT',
     'LTCUSD': 'LTCUSDT', 'ATOMUSD': 'ATOMUSDT', 'ENSUSD': 'ENSUSDT', 'FETUSD': 'FETUSDT',
 }
-LIVE_TF_INTERVALS = {'W': 'W', 'D1': 'D', 'H4': '240', 'H1': '60', 'M15': '15', 'M5': '5'}
+# ── CORREÇÃO M1: adicionado 'M1': '1'. Antes, M1 nunca era buscado no
+# loop principal de run_live_cycle — só era buscado à parte quando
+# exec_tf=='M1', e nesse caminho o resultado NUNCA era gravado em
+# candles_por_tf_cache. Resultado: candles_por_tf_gates['M1'] chegava
+# sempre None no gates_vortex, mesmo com exec_tf='M1' configurado. ──
+LIVE_TF_INTERVALS = {'W': 'W', 'D1': 'D', 'H4': '240', 'H1': '60', 'M15': '15', 'M5': '5', 'M1': '1'}
 AUTO_ALERT_SCORE_THRESHOLD = 65
 
 LIVE_TF_CANDLE_LIMIT = {
@@ -1345,6 +1353,23 @@ def run_live_cycle(pair, interval_min):
         except Exception as e:
             print(f"[cascade_engine] erro no ciclo multi-tf de {pair}: {e}")
 
+    # ── HTF NARRATIVE — camada de CONTEXTO (D1 > H4 > H1), calculada uma
+    # única vez por ciclo, antes dos modos de scalp. Não gera gatilho,
+    # não substitui nada: só interpreta bias/strength/Premium-Discount/
+    # liquidez pra filtrar o sinal depois. Determinística, sem
+    # API/DB/Telegram — ver compute_htf_narrative em scalp_engine.py. ──
+    htf_narrative = None
+    if 'D1' in candles_por_tf_cache:
+        try:
+            htf_narrative = scalp_engine.compute_htf_narrative(
+                candles_por_tf_cache.get('D1'),
+                candles_por_tf_cache.get('H4'),
+                candles_por_tf_cache.get('H1'),
+            )
+            HTF_NARRATIVE_STATUS[pair] = {'result': htf_narrative, 'updated_at': int(time.time())}
+        except Exception as e:
+            print(f"[htf_narrative] erro no ciclo de {pair}: {e}")
+
     scalp_result = None
     exec_tf = None
     try:
@@ -1357,7 +1382,15 @@ def run_live_cycle(pair, interval_min):
             if exec_tf in candles_por_tf_cache:
                 exec_candles = candles_por_tf_cache[exec_tf]
             elif exec_tf == 'M1':
+                # Fallback defensivo: só é alcançado se, por algum motivo,
+                # 'M1' não veio do loop principal acima (ex.: falha
+                # pontual da Bybit nesse TF específico). Como 'M1' agora
+                # está em LIVE_TF_INTERVALS, o caminho normal já preenche
+                # candles_por_tf_cache['M1'] antes de chegar aqui — mas
+                # gravamos de novo por segurança, fechando de vez o bug
+                # original (o resultado nunca era salvo no cache).
                 exec_candles = fetch_bybit_klines(symbol, '1', DEFAULT_CANDLE_LIMIT)
+                candles_por_tf_cache['M1'] = exec_candles
             else:
                 exec_candles = None
 
@@ -1393,7 +1426,31 @@ def run_live_cycle(pair, interval_min):
                         STATUS_4CAMADAS[pair] = {'result': resultado_4cam, 'updated_at': int(time.time())}
                         scalp_result = resultado_4cam
 
-                        if resultado_4cam.get('sinal') and not resultado_4cam.get('em_cooldown'):
+                        # ── FILTRO HTF NARRATIVE — pós-filtro. Não gera
+                        # gatilho novo, não duplica lógica do 4camadas: só
+                        # bloqueia o sinal se for CONTRA um contexto HTF
+                        # STRONG/MODERATE. Se a narrativa não pôde ser
+                        # calculada, não bloqueia nada (fail-open, nunca
+                        # trava o sistema por causa dela). ──
+                        sinal_permitido = True
+                        if resultado_4cam.get('sinal') and htf_narrative:
+                            direcao_sinal = resultado_4cam.get('direcao')
+                            if direcao_sinal == 'alta' and not htf_narrative.get('long_allowed', True):
+                                sinal_permitido = False
+                                resultado_4cam['bloqueado_por_htf'] = True
+                                resultado_4cam['motivo_bloqueio_htf'] = (
+                                    f"HTF Narrative bloqueou LONG (bias={htf_narrative.get('bias')}, "
+                                    f"strength={htf_narrative.get('strength')})"
+                                )
+                            elif direcao_sinal == 'baixa' and not htf_narrative.get('short_allowed', True):
+                                sinal_permitido = False
+                                resultado_4cam['bloqueado_por_htf'] = True
+                                resultado_4cam['motivo_bloqueio_htf'] = (
+                                    f"HTF Narrative bloqueou SHORT (bias={htf_narrative.get('bias')}, "
+                                    f"strength={htf_narrative.get('strength')})"
+                                )
+
+                        if resultado_4cam.get('sinal') and not resultado_4cam.get('em_cooldown') and sinal_permitido:
                             save_scalp_signal_to_journal(
                                 pair, '4 Camadas', exec_tf,
                                 resultado_4cam.get('direcao'),
@@ -1423,7 +1480,28 @@ def run_live_cycle(pair, interval_min):
                         STATUS_GATES_VORTEX[pair] = {'result': resultado_gates, 'updated_at': int(time.time())}
                         scalp_result = resultado_gates
 
-                        if resultado_gates.get('sinal') and not resultado_gates.get('em_cooldown'):
+                        # ── FILTRO HTF NARRATIVE — idêntico ao do
+                        # 4camadas. Não substitui GATE_A_MTF_ALIGNMENT,
+                        # complementa como camada de contexto adicional. ──
+                        sinal_permitido = True
+                        if resultado_gates.get('sinal') and htf_narrative:
+                            direcao_sinal = resultado_gates.get('direcao')
+                            if direcao_sinal == 'alta' and not htf_narrative.get('long_allowed', True):
+                                sinal_permitido = False
+                                resultado_gates['bloqueado_por_htf'] = True
+                                resultado_gates['motivo_bloqueio_htf'] = (
+                                    f"HTF Narrative bloqueou LONG (bias={htf_narrative.get('bias')}, "
+                                    f"strength={htf_narrative.get('strength')})"
+                                )
+                            elif direcao_sinal == 'baixa' and not htf_narrative.get('short_allowed', True):
+                                sinal_permitido = False
+                                resultado_gates['bloqueado_por_htf'] = True
+                                resultado_gates['motivo_bloqueio_htf'] = (
+                                    f"HTF Narrative bloqueou SHORT (bias={htf_narrative.get('bias')}, "
+                                    f"strength={htf_narrative.get('strength')})"
+                                )
+
+                        if resultado_gates.get('sinal') and not resultado_gates.get('em_cooldown') and sinal_permitido:
                             save_scalp_signal_to_journal(
                                 pair, 'Gates Vortex', 'M1',
                                 resultado_gates.get('direcao'),
@@ -2101,6 +2179,22 @@ def scalp_gates_vortex_status():
         if pair:
             return jsonify(STATUS_GATES_VORTEX.get(pair, {}))
         return jsonify(STATUS_GATES_VORTEX)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/scalp_htf_narrative/status', methods=['GET'])
+def scalp_htf_narrative_status():
+    """
+    NOVO endpoint — expõe o resultado da camada de narrativa HTF
+    (D1/H4/H1) calculada em run_live_cycle, por par. Útil pra ver no
+    frontend por que um sinal foi bloqueado/liberado pelo contexto.
+    """
+    try:
+        pair = request.args.get('pair')
+        if pair:
+            return jsonify(HTF_NARRATIVE_STATUS.get(pair, {}))
+        return jsonify(HTF_NARRATIVE_STATUS)
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 

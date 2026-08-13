@@ -2216,6 +2216,136 @@ def scalp_htf_narrative_status():
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/scalp_htf_narrative/replay', methods=['GET'])
+def scalp_htf_narrative_replay():
+    """
+    NOVO — roda a HTF Narrative SOB DEMANDA com dados reais da Bybit,
+    sem precisar esperar o scalp_watch já ter rodado um ciclo live.
+
+    Devolve:
+    - narrativa_atual: compute_htf_narrative() completo (D1+H4+H1) com
+      os candles mais recentes disponíveis;
+    - walk_forward_d1_bias: o bias do D1 dia-a-dia nos últimos `dias`,
+      calculado de forma causal (cada dia só usa candles até aquele
+      dia, nunca os de depois) — serve pra ver se a leitura de bias
+      está reagindo a mudanças reais de estrutura ou travada.
+
+    Uso: /scalp_htf_narrative/replay?pair=BTCUSD&dias=30&confirm=RODAR_REPLAY
+    """
+    try:
+        pair = request.args.get('pair')
+        dias = int(request.args.get('dias', 30))
+        confirm = request.args.get('confirm')
+        if not pair:
+            return jsonify({'erro': 'pair obrigatório'}), 400
+        if confirm != 'RODAR_REPLAY':
+            return jsonify({'erro': "confirme com confirm=RODAR_REPLAY"}), 400
+
+        symbol = LIVE_SYMBOL_MAP.get(pair, pair.replace('USD', 'USDT'))
+        limit_d1 = min(dias + 120, 1000)
+        d1 = fetch_bybit_klines(symbol, 'D', limit_d1)
+        h4 = fetch_bybit_klines(symbol, '240', 300)
+        h1 = fetch_bybit_klines(symbol, '60', 300)
+
+        narrativa_atual = scalp_engine.compute_htf_narrative(d1, h4, h1)
+
+        min_candles = scalp_engine.SWING_LOOKBACK * 2 + 5
+        walk = []
+        for i in range(min_candles, len(d1)):
+            sub_d1 = d1[:i + 1]
+            r = scalp_engine.compute_htf_narrative(sub_d1, None, None)
+            walk.append({
+                'data': datetime.fromtimestamp(sub_d1[-1]['t'] / 1000, tz=timezone.utc).strftime('%Y-%m-%d'),
+                'close': sub_d1[-1]['c'],
+                'd1_bias': r['d1_bias'],
+                'premium_discount': r['premium_discount']['state'],
+                'posicao_no_range_pct': r['premium_discount']['value'],
+            })
+        walk = walk[-dias:]
+
+        mudancas_de_bias = sum(
+            1 for i in range(1, len(walk)) if walk[i]['d1_bias'] != walk[i - 1]['d1_bias']
+        )
+
+        return jsonify({
+            'pair': pair,
+            'dias_solicitados': dias,
+            'candles_d1_disponiveis': len(d1),
+            'narrativa_atual': narrativa_atual,
+            'walk_forward_d1_bias': walk,
+            'diagnostico': {
+                'mudancas_de_bias_no_periodo': mudancas_de_bias,
+                'nota': (
+                    'Se mudancas_de_bias_no_periodo for 0 em 30 dias, o bias D1 '
+                    'ficou travado o período todo (pode ser tendência real forte, ou '
+                    'sinal de que a leitura não está reagindo). Se mudar a cada poucos '
+                    'dias, pode estar sensível demais (ruído). Compare com o gráfico real.'
+                ),
+            },
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/scalp_sfp_cluster/status', methods=['GET'])
+def scalp_sfp_cluster_status():
+    """
+    NOVO — mostra os clusters de SFP REAIS já persistidos pelo
+    gates_vortex ao vivo (tabela scalp_sfp_cluster_events). Não busca
+    nada da Bybit, só lê o que o classify_sfp_causal já gravou —
+    é literalmente o estado real que está bloqueando/liberando sinais.
+
+    Uso: /scalp_sfp_cluster/status?pair=BTCUSD
+    """
+    try:
+        pair = request.args.get('pair')
+        scalp_engine.init_sfp_cluster_db(DB_FILE)
+        with sqlite3.connect(DB_FILE) as conn:
+            cursor = conn.cursor()
+            if pair:
+                cursor.execute('''
+                    SELECT pair, direcao, timestamp, reference_level, created_at
+                    FROM scalp_sfp_cluster_events WHERE pair=?
+                    ORDER BY direcao, timestamp ASC
+                ''', (pair,))
+            else:
+                cursor.execute('''
+                    SELECT pair, direcao, timestamp, reference_level, created_at
+                    FROM scalp_sfp_cluster_events
+                    ORDER BY pair, direcao, timestamp ASC
+                ''')
+            rows = cursor.fetchall()
+
+        agrupado = {}
+        for p, direcao, ts, ref, created_at in rows:
+            chave = f"{p}_{direcao}"
+            agrupado.setdefault(chave, []).append({'timestamp': ts, 'reference_level': ref})
+
+        resultado = {}
+        for chave, eventos in agrupado.items():
+            p, direcao = chave.rsplit('_', 1)
+            marcados = scalp_engine._marcar_primeiro_ou_repetido(
+                [{'timestamp': e['timestamp'], 'direcao': direcao} for e in eventos],
+                horizonte_candles=20, intervalo_ms=900000,
+            )
+            n_first = sum(1 for m in marcados if m['posicao_no_cluster'] == 'primeiro')
+            n_repeated = len(marcados) - n_first
+            resultado.setdefault(p, {})[direcao] = {
+                'total_eventos': len(eventos),
+                'first_sfp': n_first,
+                'repeated_sfp': n_repeated,
+                'ultimo_evento_ts': eventos[-1]['timestamp'] if eventos else None,
+                'ultimo_evento_data': (
+                    datetime.fromtimestamp(eventos[-1]['timestamp'] / 1000, tz=timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
+                    if eventos else None
+                ),
+            }
+
+        return jsonify({'clusters_por_par': resultado})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/scalp/history', methods=['GET'])
 def scalp_history_route():
     try:

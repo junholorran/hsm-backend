@@ -1458,6 +1458,15 @@ def run_live_cycle(pair, interval_min):
                                 resultado_4cam.get('entry'), resultado_4cam.get('sl'), resultado_4cam.get('tp'),
                                 resultado_4cam.get('motivo'),
                             )
+
+                        # ── LOG EXPLICATIVO — só quando há sinal (permitido
+                        # ou bloqueado); não loga cada ciclo "aguardando"
+                        # pra não poluir (spec seção 23). ──
+                        if resultado_4cam.get('sinal'):
+                            try:
+                                print(scalp_engine.build_signal_log(pair, '4 Camadas', htf_narrative, resultado_4cam))
+                            except Exception as e:
+                                print(f"[log] erro ao formatar log 4camadas de {pair}: {e}")
                     except Exception as e:
                         print(f"[scalp_engine 4camadas] erro no ciclo de {pair}: {e}")
 
@@ -1509,6 +1518,14 @@ def run_live_cycle(pair, interval_min):
                                 resultado_gates.get('entry'), resultado_gates.get('sl'), resultado_gates.get('tp1'),
                                 resultado_gates.get('motivo'),
                             )
+
+                        # ── LOG EXPLICATIVO — mesma regra do 4camadas: só
+                        # loga quando há sinal (permitido ou bloqueado). ──
+                        if resultado_gates.get('sinal'):
+                            try:
+                                print(scalp_engine.build_signal_log(pair, 'Gates Vortex', htf_narrative, resultado_gates))
+                            except Exception as e:
+                                print(f"[log] erro ao formatar log gates_vortex de {pair}: {e}")
                     except Exception as e:
                         print(f"[scalp_engine gates_vortex] erro no ciclo de {pair}: {e}")
 

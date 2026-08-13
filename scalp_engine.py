@@ -3220,6 +3220,31 @@ def process_pair_gates_vortex(db_file, pair, candles_por_tf, exec_tf_label='M5',
         return resultado
     resultado['tf_sfp_usado'] = tf_sfp_usado
 
+    # ── SFP CAUSAL — bloqueia entrada se este SFP for REPETIDO dentro de
+    # um cluster ainda ativo (mesmo evento de liquidez, só mais um
+    # candle testando de novo). Só o PRIMEIRO SFP do cluster gera sinal;
+    # os repetidos atualizam o estado mas não disparam entrada nem
+    # Telegram — evita bombardear com sinais que são o mesmo evento
+    # estrutural repetido (auditoria mostrou 92-96% de sobreposição). ──
+    try:
+        cluster_info = classify_sfp_causal(
+            db_file, pair, direcao_permitida,
+            event_ts=sfp.get('t'), reference_level=sfp.get('nivel'),
+            tf_label=tf_sfp_usado or 'M15',
+        )
+        resultado['sfp_cluster'] = cluster_info
+        if cluster_info.get('is_repeated_sfp'):
+            resultado['motivo'] = (
+                f"SFP repetido dentro do cluster ativo (posição {cluster_info.get('sfp_position')} "
+                f"do cluster {cluster_info.get('cluster_id')}) — bloqueado, só o primeiro SFP do "
+                f"cluster gera sinal"
+            )
+            return resultado
+    except Exception as e:
+        print(f"[scalp_engine gates_vortex] erro no SFP causal de {pair}: {e}")
+        # Fail-open: erro na camada de proteção extra não derruba o
+        # pipeline principal — segue sem bloqueio de cluster.
+
     # ── Validação do gatilho de rejeição ────────────────────────────────
     # O padrão precisa pertencer ao EVENTO que gerou a tese (SFP), não ao
     # último candle disponível. Antes, um SFP antigo podia ser confirmado e
@@ -4626,6 +4651,78 @@ def process_pair_gates_vortex_com_explicacao(db_file, pair, candles_por_tf, exec
 
 
 
+def build_signal_log(pair, modo_label, htf_narrative, resultado):
+    """
+    Log explicativo legível (spec seção 23) — usado tanto pro console
+    quanto como corpo da mensagem de Telegram. Não duplica nenhum
+    detector: só formata o que já está calculado em htf_narrative
+    (compute_htf_narrative) e resultado (process_pair_4camadas /
+    process_pair_gates_vortex). Não deve ser chamado a cada candle —
+    só quando há sinal, bloqueio HTF ou bloqueio de cluster SFP
+    (ver call sites em app.py), pra não poluir o log.
+    """
+    linhas = []
+    direcao_raw = resultado.get('direcao')
+    direcao_label = 'LONG' if direcao_raw == 'alta' else 'SHORT' if direcao_raw == 'baixa' else None
+
+    bloqueado = bool(resultado.get('bloqueado_por_htf')) or bool(
+        (resultado.get('sfp_cluster') or {}).get('is_repeated_sfp')
+    )
+
+    if resultado.get('sinal') and not bloqueado:
+        emoji = '📈' if direcao_raw == 'alta' else '📉'
+        linhas.append(f"🔥 SIGNAL {direcao_label}")
+        linhas.append("")
+        linhas.append(pair)
+        linhas.append(f"Mode: {modo_label}")
+        if htf_narrative:
+            linhas.append(f"D1: {(htf_narrative.get('d1_bias') or 'neutro').upper()}")
+            linhas.append(f"H4: {(htf_narrative.get('h4_bias') or 'neutro').upper()}")
+            linhas.append(f"H1: {(htf_narrative.get('h1_bias') or 'neutro').upper()}")
+        tf_sfp = resultado.get('tf_sfp_usado')
+        if tf_sfp:
+            linhas.append(f"{tf_sfp}: SWEEP + CHoCH")
+        linhas.append("")
+        entry = resultado.get('entry')
+        sl = resultado.get('sl')
+        tp = resultado.get('tp') or resultado.get('tp1')
+        linhas.append(f"Entry: {entry}")
+        linhas.append(f"SL: {sl}")
+        linhas.append(f"TP: {tp}")
+        try:
+            if entry is not None and sl is not None and tp is not None and float(entry) != float(sl):
+                rr = abs(float(tp) - float(entry)) / abs(float(entry) - float(sl))
+                linhas.append(f"RR: {rr:.2f}")
+        except (TypeError, ValueError, ZeroDivisionError):
+            pass
+        linhas.append(f"Score: {resultado.get('score', 0)}/100")
+        cluster = resultado.get('sfp_cluster')
+        if cluster:
+            linhas.append(f"Cluster: {cluster.get('cluster_id')}")
+            linhas.append(f"Event: {cluster.get('cluster_last_event')}")
+        return "\n".join(linhas)
+
+    # ── Bloqueado ──
+    linhas.append(pair)
+    if htf_narrative:
+        linhas.append(
+            f"D1={htf_narrative.get('d1_bias', 'neutro')} "
+            f"H4={htf_narrative.get('h4_bias', 'neutro')} "
+            f"H1={htf_narrative.get('h1_bias', 'neutro')} "
+            f"| bias={htf_narrative.get('bias')} strength={htf_narrative.get('strength')}"
+        )
+    if resultado.get('bloqueado_por_htf'):
+        linhas.append(f"❌ {resultado.get('motivo_bloqueio_htf', 'bloqueado pelo contexto HTF')}")
+    elif resultado.get('sfp_cluster', {}).get('is_repeated_sfp'):
+        cluster = resultado['sfp_cluster']
+        linhas.append(f"❌ SFP repetido (posição {cluster.get('sfp_position')} do cluster {cluster.get('cluster_id')})")
+    elif resultado.get('motivo'):
+        linhas.append(f"⏳ {resultado.get('motivo')}")
+    else:
+        linhas.append("⏳ aguardando")
+    return "\n".join(linhas)
+
+
 explicacao_bp = Blueprint("explicacao_bp", __name__)
 
 
@@ -5142,6 +5239,116 @@ def _agrupar_clusters_sfp(eventos_sfp, horizonte_candles=20, intervalo_ms=900000
         'primeiro_sfp_do_cluster': primeiro_sfp_do_cluster,
         'sfp_repetido': sfp_repetido,
         'clusters': clusters_resumo,
+    }
+
+
+# ── SFP CAUSAL EM TEMPO REAL — bloqueia entrada em SFP repetido dentro
+# do cluster ativo. Reaproveita _marcar_primeiro_ou_repetido/
+# _agrupar_clusters_sfp (mesma regra já auditada: cada evento só compara
+# com o ÚLTIMO evento já ocorrido do mesmo par+direção, distância máxima
+# de 20 candles) — só adiciona persistência em DB pra funcionar entre
+# ciclos live (o histórico não cabe inteiro em memória a cada chamada). ──
+
+TF_LABEL_INTERVALO_MS = {
+    'D1': 86400000, 'H4': 14400000, 'H1': 3600000,
+    'M15': 900000, 'M5': 300000, 'M1': 60000,
+}
+
+
+def init_sfp_cluster_db(db_file):
+    try:
+        with sqlite3.connect(db_file) as conn:
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS scalp_sfp_cluster_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    pair TEXT NOT NULL,
+                    direcao TEXT NOT NULL,
+                    timestamp INTEGER NOT NULL,
+                    reference_level REAL,
+                    created_at INTEGER,
+                    UNIQUE(pair, direcao, timestamp)
+                )
+            ''')
+            conn.execute('''
+                CREATE INDEX IF NOT EXISTS idx_sfp_cluster_pair_dir_ts
+                ON scalp_sfp_cluster_events(pair, direcao, timestamp)
+            ''')
+            conn.commit()
+    except Exception as e:
+        print(f"[scalp_engine sfp_cluster] erro ao criar tabela: {e}")
+
+
+def classify_sfp_causal(db_file, pair, direcao, event_ts, reference_level=None, tf_label='M15'):
+    """
+    Classifica um evento de SFP como PRIMEIRO ou REPETIDO do cluster,
+    de forma 100% causal — só usa eventos já persistidos com
+    timestamp <= event_ts, nunca olha pra frente.
+
+    Idempotente: reprocessar o MESMO event_ts (o mesmo SFP detectado de
+    novo em ciclos live seguintes, antes do preço se mover) devolve
+    sempre a mesma classificação, sem inflar o cluster.
+
+    Retorna dict com cluster_id, is_first_sfp, is_repeated_sfp,
+    sfp_position (posição do evento dentro do cluster, 1-based),
+    cluster_start, cluster_last_event, total_eventos_pair_direcao.
+    """
+    init_sfp_cluster_db(db_file)
+    intervalo_ms = TF_LABEL_INTERVALO_MS.get(tf_label, 900000)
+
+    try:
+        with sqlite3.connect(db_file) as conn:
+            conn.execute('''
+                INSERT OR IGNORE INTO scalp_sfp_cluster_events
+                    (pair, direcao, timestamp, reference_level, created_at)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (pair, direcao, event_ts, reference_level, int(time.time())))
+            conn.commit()
+
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT timestamp FROM scalp_sfp_cluster_events
+                WHERE pair=? AND direcao=? AND timestamp<=?
+                ORDER BY timestamp ASC
+            ''', (pair, direcao, event_ts))
+            rows = cursor.fetchall()
+    except Exception as e:
+        print(f"[scalp_engine sfp_cluster] erro ao classificar {pair}/{direcao}: {e}")
+        # Fail-open: se o DB falhar, trata como primeiro (não bloqueia
+        # o sistema por causa de uma camada de proteção extra).
+        return {
+            'cluster_id': None, 'is_first_sfp': True, 'is_repeated_sfp': False,
+            'sfp_position': 1, 'cluster_start': event_ts, 'cluster_last_event': event_ts,
+            'total_eventos_pair_direcao': 1, 'erro': str(e),
+        }
+
+    eventos = [{'timestamp': ts, 'direcao': direcao} for (ts,) in rows]
+    marcados = _marcar_primeiro_ou_repetido(eventos, horizonte_candles=20, intervalo_ms=intervalo_ms)
+
+    # marcados está ordenado por timestamp; o evento atual é o último
+    # (já que filtramos timestamp<=event_ts e ele é o próprio máximo).
+    atual = marcados[-1]
+    is_first = atual['posicao_no_cluster'] == 'primeiro'
+
+    # Reconstrói o cluster do evento atual (mesma regra de encadeamento)
+    # pra achar cluster_start e sfp_position.
+    cluster_start = event_ts
+    sfp_position = 1
+    for i in range(len(marcados) - 1, -1, -1):
+        if marcados[i]['posicao_no_cluster'] == 'primeiro':
+            cluster_start = marcados[i]['timestamp']
+            sfp_position = len(marcados) - i
+            break
+
+    cluster_id = f"{pair}_{direcao}_{cluster_start}"
+
+    return {
+        'cluster_id': cluster_id,
+        'is_first_sfp': is_first,
+        'is_repeated_sfp': not is_first,
+        'sfp_position': sfp_position,
+        'cluster_start': cluster_start,
+        'cluster_last_event': event_ts,
+        'total_eventos_pair_direcao': len(marcados),
     }
 
 

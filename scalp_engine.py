@@ -2890,10 +2890,18 @@ GATE_D_MIN_OBS = 1
 GATE_D_MIN_FVGS = 1
 
 
-def esta_em_hora_toxica_estrita(candles_referencia):
+def esta_em_hora_toxica_estrita(candles_referencia, pair=None):
     """Horas tóxicas exatas do pipeline de Gates (07:00 e 23:00 UTC) —
     separado da lógica de killzone (bônus) já usada nos outros modos,
-    porque aqui o requisito é BLOQUEAR, não só somar/subtrair pontos."""
+    porque aqui o requisito é BLOQUEAR, não só somar/subtrair pontos.
+
+    Só se aplica a XAU/metal — o conceito de "troca de sessão com baixa
+    liquidez" vem do fechamento/abertura de sessões tradicionais
+    (Londres/NY), que não existe em cripto (mercado 24/7, sem fechamento
+    de sessão real). Pra cripto, esse bloqueio nunca se aplica.
+    """
+    if pair is not None and get_asset_class(pair) == 'crypto':
+        return False
     if not candles_referencia:
         return False
     dt = datetime.fromtimestamp(candles_referencia[-1]['t'] / 1000, tz=timezone.utc)
@@ -3189,8 +3197,9 @@ def process_pair_gates_vortex(db_file, pair, candles_por_tf, exec_tf_label='M5',
         resultado['motivo'] = f'dados obsoletos — candle mais recente com mais de {GATES_STALENESS_MAX_SEG}s'
         return resultado
 
-    # ── Hora tóxica ──
-    if esta_em_hora_toxica_estrita(candles_gatilho):
+    # ── Hora tóxica (só bloqueia XAU/metal — cripto é 24/7, não tem
+    # troca de sessão que esvazie liquidez) ──
+    if esta_em_hora_toxica_estrita(candles_gatilho, pair=pair):
         resultado['motivo'] = 'horário tóxico (troca de sessão/baixa liquidez) — sinal bloqueado'
         return resultado
 
@@ -3410,18 +3419,26 @@ def process_pair_gates_vortex(db_file, pair, candles_por_tf, exec_tf_label='M5',
 
     _save_gates_vortex_signal(db_file, pair, exec_tf_label, resultado, alerted=not em_cooldown)
 
+    # ── Mensagem SEMPRE montada aqui (mesmo conteúdo rico de antes:
+    # tipo de ordem, Edge MC%, TP2, confirmação dos 7 gates), guardada em
+    # resultado['telegram_msg'] pra quem chamar decidir se/quando enviar
+    # (app.py manda só depois do filtro HTF — ver run_live_cycle). Isso
+    # substitui o antigo send_telegram_fn(msg) direto daqui, que mandava
+    # ANTES de qualquer filtro de contexto rodar. ──
+    arrow = '📈' if direcao_permitida == 'alta' else '📉'
+    label = 'COMPRA' if direcao_permitida == 'alta' else 'VENDA'
+    tipo_ordem = 'BUY LIMIT' if direcao_permitida == 'alta' else 'SELL LIMIT'
+    msg = f"🚦 <b>Gates Vortex — {pair}</b>\n\n"
+    msg += f"{arrow} <b>{label}</b> | Score: {score}/100 | Edge MC: {prob_acerto}% (simulação, não calibrada)\n"
+    msg += f"📍 <b>Ordem LIMITE ({tipo_ordem}) em {resultado['entry']}</b> — não é a mercado, espera o preço voltar ali (50% do FVG)\n"
+    msg += f"🛑 Stop: {resultado['sl']}\n"
+    msg += f"✅ TP1: {resultado['tp1']} (RR {resultado['risco_recompensa']})\n"
+    if resultado['tp2']:
+        msg += f"✅ TP2: {resultado['tp2']}\n"
+    msg += "\n<i>Todos os 7 gates confirmados (A-G).</i>"
+    resultado['telegram_msg'] = msg
+
     if send_telegram_fn and not em_cooldown:
-        arrow = '📈' if direcao_permitida == 'alta' else '📉'
-        label = 'COMPRA' if direcao_permitida == 'alta' else 'VENDA'
-        tipo_ordem = 'BUY LIMIT' if direcao_permitida == 'alta' else 'SELL LIMIT'
-        msg = f"🚦 <b>Gates Vortex — {pair}</b>\n\n"
-        msg += f"{arrow} <b>{label}</b> | Score: {score}/100 | Edge MC: {prob_acerto}% (simulação, não calibrada)\n"
-        msg += f"📍 <b>Ordem LIMITE ({tipo_ordem}) em {resultado['entry']}</b> — não é a mercado, espera o preço voltar ali (50% do FVG)\n"
-        msg += f"🛑 Stop: {resultado['sl']}\n"
-        msg += f"✅ TP1: {resultado['tp1']} (RR {resultado['risco_recompensa']})\n"
-        if resultado['tp2']:
-            msg += f"✅ TP2: {resultado['tp2']}\n"
-        msg += "\n<i>Todos os 7 gates confirmados (A-G).</i>"
         send_telegram_fn(msg)
     elif em_cooldown:
         restante_min = (GATES_COOLDOWN_SECONDS - segundos_desde) // 60
@@ -4379,20 +4396,25 @@ def process_pair_4camadas(db_file, pair, d1_candles, h4_candles, h1_candles, exe
 
     _save_4camadas_signal(db_file, pair, exec_tf_label, resultado, alerted=not em_cooldown)
 
+    # ── Mensagem SEMPRE montada aqui (breakdown completo por camada),
+    # guardada em resultado['telegram_msg'] — mesma lógica do
+    # gates_vortex acima, quem chama decide se/quando enviar. ──
+    arrow = '📈' if direcao_final == 'alta' else '📉'
+    label = 'COMPRA' if direcao_final == 'alta' else 'VENDA'
+    tipo_ordem = 'BUY LIMIT' if direcao_final == 'alta' else 'SELL LIMIT'
+    msg = f"🔶 <b>Sinal 4 Camadas — {pair}</b>\n\n"
+    msg += f"{arrow} <b>{label}</b> | TF execução: {exec_tf_label}\n"
+    msg += f"📍 <b>Ordem LIMITE ({tipo_ordem}) em {resultado['entry']}</b> — protege contra slippage entre o sinal e a execução\n"
+    msg += f"🛑 Stop: {resultado['sl']}\n✅ TP: {resultado['tp']}\n\n"
+    msg += f"<b>Score Total: {score_total}/100</b>\n"
+    msg += f"• Regime&MTF: {pts_regime}/30 (viés contexto: {det_regime.get('viés_contexto')})\n"
+    msg += f"• Estrutura SMC: {pts_estrutura}/30 (estrutura: {det_estrutura.get('estrutura')}, zona: {det_estrutura.get('zona_pd')})\n"
+    msg += f"• Gatilho&Energia: {pts_gatilho}/25 (padrão: {det_gatilho.get('padrao_candle')})\n"
+    msg += f"• Confluências: {pts_confluencias}/15\n\n"
+    msg += "⚠️ <i>Modo experimental — réplica intencional da lógica do concorrente, sem gate de contradição entre camadas.</i>"
+    resultado['telegram_msg'] = msg
+
     if send_telegram_fn and not em_cooldown:
-        arrow = '📈' if direcao_final == 'alta' else '📉'
-        label = 'COMPRA' if direcao_final == 'alta' else 'VENDA'
-        tipo_ordem = 'BUY LIMIT' if direcao_final == 'alta' else 'SELL LIMIT'
-        msg = f"🔶 <b>Sinal 4 Camadas — {pair}</b>\n\n"
-        msg += f"{arrow} <b>{label}</b> | TF execução: {exec_tf_label}\n"
-        msg += f"📍 <b>Ordem LIMITE ({tipo_ordem}) em {resultado['entry']}</b> — protege contra slippage entre o sinal e a execução\n"
-        msg += f"🛑 Stop: {resultado['sl']}\n✅ TP: {resultado['tp']}\n\n"
-        msg += f"<b>Score Total: {score_total}/100</b>\n"
-        msg += f"• Regime&MTF: {pts_regime}/30 (viés contexto: {det_regime.get('viés_contexto')})\n"
-        msg += f"• Estrutura SMC: {pts_estrutura}/30 (estrutura: {det_estrutura.get('estrutura')}, zona: {det_estrutura.get('zona_pd')})\n"
-        msg += f"• Gatilho&Energia: {pts_gatilho}/25 (padrão: {det_gatilho.get('padrao_candle')})\n"
-        msg += f"• Confluências: {pts_confluencias}/15\n\n"
-        msg += "⚠️ <i>Modo experimental — réplica intencional da lógica do concorrente, sem gate de contradição entre camadas.</i>"
         send_telegram_fn(msg)
     elif em_cooldown:
         restante_min = (COOLDOWN_4CAMADAS_SECONDS - segundos_desde) // 60

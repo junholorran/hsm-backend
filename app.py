@@ -1421,7 +1421,13 @@ def run_live_cycle(pair, interval_min):
                             candles_por_tf_cache.get('H1'),
                             exec_candles,
                             exec_tf,
-                            send_telegram,
+                            None,  # Telegram NUNCA disparado aqui dentro — ver
+                                   # correção abaixo. O envio real só acontece
+                                   # depois do filtro HTF, senão o Telegram sai
+                                   # ANTES do bloqueio HTF conseguir agir
+                                   # (bug real: o send_telegram_fn interno do
+                                   # scalp_engine rodava antes do app.py sequer
+                                   # checar htf_narrative).
                         )
                         STATUS_4CAMADAS[pair] = {'result': resultado_4cam, 'updated_at': int(time.time())}
                         scalp_result = resultado_4cam
@@ -1458,10 +1464,19 @@ def run_live_cycle(pair, interval_min):
                                 resultado_4cam.get('entry'), resultado_4cam.get('sl'), resultado_4cam.get('tp'),
                                 resultado_4cam.get('motivo'),
                             )
+                            # ── TELEGRAM — disparado SÓ AQUI, depois do
+                            # filtro HTF já ter decidido. Corrige o bug em
+                            # que o Telegram saía de dentro do
+                            # process_pair_4camadas, antes de qualquer
+                            # checagem de contexto HTF existir. ──
+                            try:
+                                send_telegram(scalp_engine.build_signal_log(pair, '4 Camadas', htf_narrative, resultado_4cam))
+                            except Exception as e:
+                                print(f"[telegram] erro ao enviar sinal 4camadas de {pair}: {e}")
 
-                        # ── LOG EXPLICATIVO — só quando há sinal (permitido
-                        # ou bloqueado); não loga cada ciclo "aguardando"
-                        # pra não poluir (spec seção 23). ──
+                        # ── LOG EXPLICATIVO (console) — só quando há sinal
+                        # (permitido ou bloqueado); não loga cada ciclo
+                        # "aguardando" pra não poluir (spec seção 23). ──
                         if resultado_4cam.get('sinal'):
                             try:
                                 print(scalp_engine.build_signal_log(pair, '4 Camadas', htf_narrative, resultado_4cam))
@@ -1484,7 +1499,9 @@ def run_live_cycle(pair, interval_min):
                         resultado_gates = scalp_engine.process_pair_gates_vortex_com_explicacao(
                             DB_FILE, pair, candles_por_tf_gates,
                             exec_tf_label='M1',
-                            send_telegram_fn=send_telegram,
+                            send_telegram_fn=None,  # ver nota no bloco do
+                                                     # 4camadas acima — mesmo
+                                                     # bug, mesma correção.
                         )
                         STATUS_GATES_VORTEX[pair] = {'result': resultado_gates, 'updated_at': int(time.time())}
                         scalp_result = resultado_gates
@@ -1518,9 +1535,18 @@ def run_live_cycle(pair, interval_min):
                                 resultado_gates.get('entry'), resultado_gates.get('sl'), resultado_gates.get('tp1'),
                                 resultado_gates.get('motivo'),
                             )
+                            # ── TELEGRAM — disparado SÓ AQUI, depois do
+                            # filtro HTF. Mesma correção do 4camadas: antes
+                            # o Telegram saía de dentro do
+                            # process_pair_gates_vortex, antes do app.py
+                            # sequer checar htf_narrative. ──
+                            try:
+                                send_telegram(scalp_engine.build_signal_log(pair, 'Gates Vortex', htf_narrative, resultado_gates))
+                            except Exception as e:
+                                print(f"[telegram] erro ao enviar sinal gates_vortex de {pair}: {e}")
 
-                        # ── LOG EXPLICATIVO — mesma regra do 4camadas: só
-                        # loga quando há sinal (permitido ou bloqueado). ──
+                        # ── LOG EXPLICATIVO (console) — mesma regra do
+                        # 4camadas: só loga quando há sinal. ──
                         if resultado_gates.get('sinal'):
                             try:
                                 print(scalp_engine.build_signal_log(pair, 'Gates Vortex', htf_narrative, resultado_gates))

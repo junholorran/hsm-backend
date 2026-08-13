@@ -1470,7 +1470,15 @@ def run_live_cycle(pair, interval_min):
                             # process_pair_4camadas, antes de qualquer
                             # checagem de contexto HTF existir. ──
                             try:
-                                send_telegram(scalp_engine.build_signal_log(pair, '4 Camadas', htf_narrative, resultado_4cam))
+                                msg_telegram = resultado_4cam.get('telegram_msg') or scalp_engine.build_signal_log(pair, '4 Camadas', htf_narrative, resultado_4cam)
+                                if htf_narrative:
+                                    msg_telegram += (
+                                        f"\n\n📊 <i>Contexto HTF: D1={htf_narrative.get('d1_bias','neutro').upper()} "
+                                        f"H4={htf_narrative.get('h4_bias','neutro').upper()} "
+                                        f"H1={htf_narrative.get('h1_bias','neutro').upper()} "
+                                        f"| {htf_narrative.get('bias')}/{htf_narrative.get('strength')}</i>"
+                                    )
+                                send_telegram(msg_telegram)
                             except Exception as e:
                                 print(f"[telegram] erro ao enviar sinal 4camadas de {pair}: {e}")
 
@@ -1541,7 +1549,21 @@ def run_live_cycle(pair, interval_min):
                             # process_pair_gates_vortex, antes do app.py
                             # sequer checar htf_narrative. ──
                             try:
-                                send_telegram(scalp_engine.build_signal_log(pair, 'Gates Vortex', htf_narrative, resultado_gates))
+                                msg_telegram = resultado_gates.get('telegram_msg') or scalp_engine.build_signal_log(pair, 'Gates Vortex', htf_narrative, resultado_gates)
+                                if htf_narrative:
+                                    msg_telegram += (
+                                        f"\n\n📊 <i>Contexto HTF: D1={htf_narrative.get('d1_bias','neutro').upper()} "
+                                        f"H4={htf_narrative.get('h4_bias','neutro').upper()} "
+                                        f"H1={htf_narrative.get('h1_bias','neutro').upper()} "
+                                        f"| {htf_narrative.get('bias')}/{htf_narrative.get('strength')}</i>"
+                                    )
+                                cluster = resultado_gates.get('sfp_cluster')
+                                if cluster:
+                                    msg_telegram += (
+                                        f"\n🧩 <i>Cluster SFP: {cluster.get('cluster_id')} "
+                                        f"(posição {cluster.get('sfp_position')}, primeiro do cluster)</i>"
+                                    )
+                                send_telegram(msg_telegram)
                             except Exception as e:
                                 print(f"[telegram] erro ao enviar sinal gates_vortex de {pair}: {e}")
 

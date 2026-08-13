@@ -2378,6 +2378,26 @@ def init_sfp_liquidez_db(db_file):
             )
         ''')
         conn.commit()
+        # ── FIX (13/08): gerenciar_trades_abertos() é genérica e roda pra
+        # TODAS as tabelas de MODOS_SCALP, esperando as colunas tp,
+        # be_movido, parcial_feita em cada uma. Esta tabela só tinha
+        # tp1/tp2 (sem "tp") e não tinha be_movido/parcial_feita —
+        # causava "no such column" toda vez que o gerenciador rodava
+        # pra este modo. Adiciona as colunas que faltam; "tp" é
+        # preenchida no INSERT (ver _save_sfp_liquidez_signal) com o
+        # valor de tp1, que é o alvo primário usado pra resolver
+        # win/loss. ──
+        for alter_sql in [
+            "ALTER TABLE scalp_sfp_liquidez_signal_state ADD COLUMN tp REAL",
+            "ALTER TABLE scalp_sfp_liquidez_signal_state ADD COLUMN be_movido INTEGER DEFAULT 0",
+            "ALTER TABLE scalp_sfp_liquidez_signal_state ADD COLUMN parcial_feita INTEGER DEFAULT 0",
+            "ALTER TABLE scalp_sfp_liquidez_signal_state ADD COLUMN status_gestao TEXT DEFAULT ''",
+        ]:
+            try:
+                conn.execute(alter_sql)
+                conn.commit()
+            except Exception:
+                pass
 
 
 def _save_sfp_liquidez_signal(db_file, pair, exec_tf_label, resultado, alerted):
@@ -2386,12 +2406,12 @@ def _save_sfp_liquidez_signal(db_file, pair, exec_tf_label, resultado, alerted):
         with sqlite3.connect(db_file) as conn:
             conn.execute('''
                 INSERT INTO scalp_sfp_liquidez_signal_state
-                    (id, pair, created_at, exec_tf, direcao, entry, sl, tp1, tp2, bias_context, alerted)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (id, pair, created_at, exec_tf, direcao, entry, sl, tp, tp1, tp2, bias_context, alerted)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 signal_id, pair, int(time.time()), exec_tf_label,
                 resultado['direcao'], resultado['entry'], resultado['sl'],
-                resultado['tp1'], resultado['tp2'], resultado.get('bias_context'),
+                resultado.get('tp1'), resultado['tp1'], resultado['tp2'], resultado.get('bias_context'),
                 1 if alerted else 0,
             ))
             conn.commit()
@@ -2989,6 +3009,23 @@ def init_gates_vortex_db(db_file):
             )
         ''')
         conn.commit()
+        # ── FIX (13/08): mesma causa do fix em init_sfp_liquidez_db —
+        # gerenciar_trades_abertos() espera tp/be_movido/parcial_feita
+        # em TODA tabela de MODOS_SCALP. Esta tabela só tinha tp1/tp2.
+        # "tp" é preenchida no INSERT (ver _save_gates_vortex_signal)
+        # com o valor de tp1 (alvo primário, usado pra resolver
+        # win/loss e pra BE/parcial). ──
+        for alter_sql in [
+            "ALTER TABLE scalp_gates_vortex_signal_state ADD COLUMN tp REAL",
+            "ALTER TABLE scalp_gates_vortex_signal_state ADD COLUMN be_movido INTEGER DEFAULT 0",
+            "ALTER TABLE scalp_gates_vortex_signal_state ADD COLUMN parcial_feita INTEGER DEFAULT 0",
+            "ALTER TABLE scalp_gates_vortex_signal_state ADD COLUMN status_gestao TEXT DEFAULT ''",
+        ]:
+            try:
+                conn.execute(alter_sql)
+                conn.commit()
+            except Exception:
+                pass
 
 
 # ── Classificação do motivo em categoria de gargalo ─────────────────────
@@ -3111,12 +3148,12 @@ def _save_gates_vortex_signal(db_file, pair, exec_tf_label, resultado, alerted):
         with sqlite3.connect(db_file) as conn:
             conn.execute('''
                 INSERT INTO scalp_gates_vortex_signal_state
-                    (id, pair, created_at, exec_tf, direcao, score, entry, sl, tp1, tp2, alerted)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (id, pair, created_at, exec_tf, direcao, score, entry, sl, tp, tp1, tp2, alerted)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 signal_id, pair, int(time.time()), exec_tf_label,
                 resultado['direcao'], resultado['score'],
-                resultado['entry'], resultado['sl'], resultado['tp1'], resultado['tp2'],
+                resultado['entry'], resultado['sl'], resultado.get('tp1'), resultado['tp1'], resultado['tp2'],
                 1 if alerted else 0,
             ))
             conn.commit()
@@ -4175,6 +4212,20 @@ def init_4camadas_db(db_file):
             )
         ''')
         conn.commit()
+        # ── FIX (13/08): mesma causa dos fixes acima — esta tabela já
+        # tinha "tp", mas faltavam be_movido/parcial_feita/status_gestao,
+        # que gerenciar_trades_abertos() usa pra TODAS as tabelas de
+        # MODOS_SCALP. ──
+        for alter_sql in [
+            "ALTER TABLE scalp_4camadas_signal_state ADD COLUMN be_movido INTEGER DEFAULT 0",
+            "ALTER TABLE scalp_4camadas_signal_state ADD COLUMN parcial_feita INTEGER DEFAULT 0",
+            "ALTER TABLE scalp_4camadas_signal_state ADD COLUMN status_gestao TEXT DEFAULT ''",
+        ]:
+            try:
+                conn.execute(alter_sql)
+                conn.commit()
+            except Exception:
+                pass
 
 
 def _camada_regime_mtf(d1_candles, h4_candles, h1_candles):

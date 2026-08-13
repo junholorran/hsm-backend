@@ -293,6 +293,21 @@ cascade_engine.init_cascade_signal_db(DB_FILE)
 cascade_engine.init_cascade_multi_tf_db(DB_FILE)
 scalp_engine.init_scalp_db(DB_FILE)
 scalp_engine.init_explicacao_db(DB_FILE)
+# ── FIX (13/08): faltavam estas 5 chamadas de inicialização de tabela.
+# Sem elas, scalp_gates_vortex_signal_state, scalp_4camadas_signal_state,
+# scalp_sfp_liquidez_signal_state e as tabelas de diagnóstico/cluster de
+# SFP nunca eram criadas no boot — só existiam se algum código auto-
+# blindado (tipo _garantir_tabela_diagnostico_gates_vortex) criasse por
+# conta própria em algum caminho específico. gerenciar_trades_abertos()
+# e process_pair_gates_vortex()/process_pair_4camadas() tentavam ler/
+# gravar nessas tabelas todo ciclo e falhavam com "no such table" — é
+# exatamente o erro visto no log do Railway. Bug pré-existente, não
+# relacionado à remoção do filtro de horário tóxico. ──
+scalp_engine.init_gates_vortex_db(DB_FILE)
+scalp_engine.init_4camadas_db(DB_FILE)
+scalp_engine.init_sfp_liquidez_db(DB_FILE)
+scalp_engine.init_sfp_diagnostico_db(DB_FILE)
+scalp_engine.init_sfp_cluster_db(DB_FILE)
 app.register_blueprint(scalp_engine.explicacao_bp)
 
 ICT_SYSTEM_PROMPT = (

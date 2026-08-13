@@ -3279,6 +3279,47 @@ def process_pair_gates_vortex(db_file, pair, candles_por_tf, exec_tf_label='M5',
             tf_label=tf_sfp_usado or 'M15',
         )
         resultado['sfp_cluster'] = cluster_info
+
+        # ── TELEMETRIA (13/08) — só coleta, não decide nada. Roda pra
+        # TODO SFP confirmado (bloqueado como repetido ou não), porque
+        # o objetivo é justamente comparar primeiro vs repetido depois.
+        # htf_context e premium_discount_state aqui são cálculos
+        # PARALELOS e redundantes aos que os Gates A/G fazem mais
+        # adiante — de propósito, pra não compartilhar estado com a
+        # decisão real e garantir que travar essa telemetria nunca
+        # altera nenhum gate. Reaproveita só as funções já existentes
+        # (compute_htf_narrative, compute_premium_discount), sem lógica
+        # nova de contexto. ──
+        try:
+            htf_context_telemetria = compute_htf_narrative(
+                candles_d1, candles_por_tf.get('H4'), candles_h1,
+            )
+        except Exception:
+            htf_context_telemetria = None
+
+        premium_discount_telemetria = None
+        try:
+            pd_ref_telemetria = candles_d1 or candles_h1 or candles_gatilho
+            pd_lb_telemetria = min(20, len(pd_ref_telemetria)) if pd_ref_telemetria else 0
+            pd_zone_telemetria = compute_premium_discount(pd_ref_telemetria, lookback=pd_lb_telemetria) if pd_ref_telemetria else None
+            if pd_zone_telemetria:
+                preco_atual_telemetria = candles_gatilho[-1]['c']
+                premium_discount_telemetria = 'PREMIUM' if preco_atual_telemetria > pd_zone_telemetria['equilibrium'] else 'DISCOUNT'
+        except Exception:
+            premium_discount_telemetria = None
+
+        try:
+            _registrar_telemetria_sfp(
+                db_file, pair, direcao_permitida,
+                event_ts=sfp.get('t'), tf_label=tf_sfp_usado or 'M15',
+                cluster_info=cluster_info,
+                htf_context=htf_context_telemetria,
+                premium_discount_state=premium_discount_telemetria,
+                bias_context=bias_context,
+            )
+        except Exception as e:
+            print(f"[scalp_engine sfp_telemetria] erro ao registrar {pair}: {e}")
+
         if cluster_info.get('is_repeated_sfp'):
             resultado['motivo'] = (
                 f"SFP repetido dentro do cluster ativo (posição {cluster_info.get('sfp_position')} "
@@ -4852,6 +4893,26 @@ def diagnostico_gates_vortex():
     return jsonify(report)
 
 
+@explicacao_bp.route("/scalp_gates_vortex/sfp_telemetria", methods=["GET"])
+def sfp_telemetria_endpoint():
+    """
+    Telemetria crua de cada SFP confirmado (bloqueado como repetido ou
+    não) — cluster_id, sfp_position, cluster_size_so_far,
+    candles_since_first_sfp/previous_sfp, contexto HTF e premium/
+    discount no momento do evento. Só coleta, não influencia nenhuma
+    decisão do gates_vortex (ver comentário em process_pair_gates_vortex).
+    'pair' opcional filtra 1 par. 'limit' controla quantos registros
+    (default 200, mais recentes primeiro).
+    """
+    pair = request.args.get('pair')
+    limit = int(request.args.get('limit', 200))
+    try:
+        report = sfp_telemetria_report(_db_file_explicacao(), pair=pair, limit=limit)
+    except Exception as e:
+        return jsonify({"erro": str(e)}), 500
+    return jsonify(report)
+
+
 @explicacao_bp.route("/scalp_gates_vortex/diagnostico_sfp", methods=["GET"])
 def diagnostico_sfp_gates_vortex():
     """
@@ -5364,6 +5425,15 @@ def classify_sfp_causal(db_file, pair, direcao, event_ts, reference_level=None, 
     Retorna dict com cluster_id, is_first_sfp, is_repeated_sfp,
     sfp_position (posição do evento dentro do cluster, 1-based),
     cluster_start, cluster_last_event, total_eventos_pair_direcao.
+
+    Campos de TELEMETRIA (13/08, markup "SFP causal — instrumentação"):
+    candles_since_first_sfp, candles_since_previous_sfp e
+    cluster_size_so_far — puramente aditivos, calculados em cima do
+    MESMO encadeamento causal já usado pra decidir is_first/is_repeated
+    acima. Não influenciam is_first_sfp/is_repeated_sfp nem nenhuma
+    outra decisão — é reaproveitamento de dado que a função já calcula
+    (marcados, cluster_start, sfp_position), só exposto pra quem quiser
+    registrar/analisar depois.
     """
     init_sfp_cluster_db(db_file)
     intervalo_ms = TF_LABEL_INTERVALO_MS.get(tf_label, 900000)
@@ -5414,14 +5484,205 @@ def classify_sfp_causal(db_file, pair, direcao, event_ts, reference_level=None, 
 
     cluster_id = f"{pair}_{direcao}_{cluster_start}"
 
+    # ── Telemetria adicional (não decide nada, só descreve) ──
+    # candles_since_first_sfp: distância (em candles do tf_label) entre
+    # o evento atual e o início do cluster a que ele pertence.
+    candles_since_first_sfp = round((event_ts - cluster_start) / intervalo_ms, 2)
+
+    # candles_since_previous_sfp: distância até o evento imediatamente
+    # anterior JÁ PERSISTIDO (marcados[-2], se existir) — None se este
+    # for o primeiro evento já visto pra esse pair+direção (não só o
+    # primeiro do cluster, o primeiro de todos).
+    candles_since_previous_sfp = None
+    if len(marcados) >= 2:
+        candles_since_previous_sfp = round((event_ts - marcados[-2]['timestamp']) / intervalo_ms, 2)
+
+    # cluster_size_so_far: quantos membros o cluster atual já teve ATÉ
+    # este evento (mesmo valor de sfp_position — é o mesmo dado, só com
+    # nome mais explícito pro propósito de telemetria). NÃO é o tamanho
+    # final do cluster (isso só se sabe olhando pra frente, o que
+    # quebraria a causalidade) — é sempre "tamanho observado até agora".
+    cluster_size_so_far = sfp_position
+
     return {
         'cluster_id': cluster_id,
+        'cluster_direction': direcao,
         'is_first_sfp': is_first,
         'is_repeated_sfp': not is_first,
         'sfp_position': sfp_position,
+        'cluster_size_so_far': cluster_size_so_far,
+        'candles_since_first_sfp': candles_since_first_sfp,
+        'candles_since_previous_sfp': candles_since_previous_sfp,
         'cluster_start': cluster_start,
         'cluster_last_event': event_ts,
         'total_eventos_pair_direcao': len(marcados),
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# TELEMETRIA DE SFP (13/08) — camada de COLETA/DIAGNÓSTICO, conforme
+# markup "Evolução do SFP Causal". Regra absoluta desta fase: estes
+# campos são só instrumentação — não podem mudar sinal, ENTRY, SL, TP,
+# cooldown, classify_sfp_causal() nem CLUSTER_CAUSAL. Cada linha aqui é
+# 1 evento de SFP já confirmado (bloqueado ou não), com o contexto de
+# cluster + HTF + premium/discount no momento em que ele foi visto —
+# nada disso é reaproveitado pra decisão em process_pair_gates_vortex.
+# ═══════════════════════════════════════════════════════════════════════
+
+def _garantir_tabela_sfp_telemetria(db_file):
+    """Auto-blindado como o resto do diagnóstico do gates_vortex — não
+    depende de nenhuma chamada de init no boot do app.py (essa foi
+    exatamente a causa dos bugs anteriores de 'no such table')."""
+    try:
+        with sqlite3.connect(db_file) as conn:
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS scalp_gates_vortex_sfp_telemetria (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    pair TEXT NOT NULL,
+                    direcao TEXT NOT NULL,
+                    event_ts INTEGER NOT NULL,
+                    tf_label TEXT,
+                    cluster_id TEXT,
+                    cluster_direction TEXT,
+                    sfp_position INTEGER,
+                    cluster_size_so_far INTEGER,
+                    is_first_sfp INTEGER,
+                    is_repeated_sfp INTEGER,
+                    candles_since_first_sfp REAL,
+                    candles_since_previous_sfp REAL,
+                    htf_bias TEXT,
+                    htf_strength TEXT,
+                    htf_alignment INTEGER,
+                    premium_discount_state TEXT,
+                    bias_context TEXT,
+                    created_at INTEGER,
+                    UNIQUE(pair, direcao, event_ts)
+                )
+            ''')
+            conn.execute('''
+                CREATE INDEX IF NOT EXISTS idx_sfp_telemetria_pair_dir
+                ON scalp_gates_vortex_sfp_telemetria(pair, direcao)
+            ''')
+            conn.commit()
+    except Exception as e:
+        print(f"[scalp_engine sfp_telemetria] erro ao criar tabela: {e}")
+
+
+def _registrar_telemetria_sfp(db_file, pair, direcao, event_ts, tf_label, cluster_info,
+                               htf_context=None, premium_discount_state=None, bias_context=None):
+    """
+    Grava 1 linha de telemetria por evento de SFP — idempotente via
+    UNIQUE(pair, direcao, event_ts) + INSERT OR IGNORE, igual ao padrão
+    já usado em scalp_sfp_cluster_events (reprocessar o mesmo SFP em
+    ciclos live seguintes não duplica a linha). Fail-open: qualquer erro
+    aqui é só logado, nunca propaga pro pipeline principal.
+    """
+    _garantir_tabela_sfp_telemetria(db_file)
+    htf_context = htf_context or {}
+    try:
+        with sqlite3.connect(db_file) as conn:
+            conn.execute('''
+                INSERT OR IGNORE INTO scalp_gates_vortex_sfp_telemetria
+                    (pair, direcao, event_ts, tf_label, cluster_id, cluster_direction,
+                     sfp_position, cluster_size_so_far, is_first_sfp, is_repeated_sfp,
+                     candles_since_first_sfp, candles_since_previous_sfp,
+                     htf_bias, htf_strength, htf_alignment, premium_discount_state,
+                     bias_context, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                pair, direcao, event_ts, tf_label,
+                cluster_info.get('cluster_id'), cluster_info.get('cluster_direction'),
+                cluster_info.get('sfp_position'), cluster_info.get('cluster_size_so_far'),
+                1 if cluster_info.get('is_first_sfp') else 0,
+                1 if cluster_info.get('is_repeated_sfp') else 0,
+                cluster_info.get('candles_since_first_sfp'), cluster_info.get('candles_since_previous_sfp'),
+                htf_context.get('bias'), htf_context.get('strength'),
+                1 if htf_context.get('alignment', {}).get('aligned') else 0 if htf_context.get('alignment') else None,
+                premium_discount_state, bias_context, int(time.time()),
+            ))
+            conn.commit()
+    except Exception as e:
+        print(f"[scalp_engine sfp_telemetria] erro ao registrar {pair}/{direcao}: {e}")
+
+
+def sfp_telemetria_report(db_file, pair=None, limit=200):
+    """
+    Consulta a telemetria bruta, com bucket de sfp_position e
+    cluster_size_so_far já agrupados (seções 5-6 do markup), pra dar
+    exemplos reais e permitir cruzar por WIN/LOSS depois — sem calcular
+    nenhum score, só devolvendo os dados crus + contagens.
+    """
+    _garantir_tabela_sfp_telemetria(db_file)
+    try:
+        with sqlite3.connect(db_file) as conn:
+            cursor = conn.cursor()
+            cols = (
+                "pair, direcao, event_ts, tf_label, cluster_id, cluster_direction, "
+                "sfp_position, cluster_size_so_far, is_first_sfp, is_repeated_sfp, "
+                "candles_since_first_sfp, candles_since_previous_sfp, "
+                "htf_bias, htf_strength, htf_alignment, premium_discount_state, "
+                "bias_context, created_at"
+            )
+            if pair:
+                cursor.execute(
+                    f"SELECT {cols} FROM scalp_gates_vortex_sfp_telemetria WHERE pair=? "
+                    f"ORDER BY event_ts DESC LIMIT ?",
+                    (pair, limit)
+                )
+            else:
+                cursor.execute(
+                    f"SELECT {cols} FROM scalp_gates_vortex_sfp_telemetria "
+                    f"ORDER BY event_ts DESC LIMIT ?",
+                    (limit,)
+                )
+            nomes_col = [c.strip() for c in cols.split(',')]
+            rows = [dict(zip(nomes_col, row)) for row in cursor.fetchall()]
+    except Exception as e:
+        return {'erro': str(e)}
+
+    def bucket_position(pos):
+        if pos is None:
+            return 'desconhecido'
+        if pos == 1:
+            return '1_primeiro'
+        if pos in (2,):
+            return '2'
+        if pos == 3:
+            return '3'
+        if 4 <= pos <= 5:
+            return '4-5'
+        if 6 <= pos <= 10:
+            return '6-10'
+        return '10+'
+
+    def bucket_size(n):
+        if n is None:
+            return 'desconhecido'
+        if n == 1:
+            return '1'
+        if 2 <= n <= 3:
+            return '2-3'
+        if 4 <= n <= 5:
+            return '4-5'
+        if 6 <= n <= 10:
+            return '6-10'
+        if 11 <= n <= 20:
+            return '11-20'
+        return '21+'
+
+    contagem_por_posicao = {}
+    contagem_por_tamanho = {}
+    for r in rows:
+        bp = bucket_position(r.get('sfp_position'))
+        bs = bucket_size(r.get('cluster_size_so_far'))
+        contagem_por_posicao[bp] = contagem_por_posicao.get(bp, 0) + 1
+        contagem_por_tamanho[bs] = contagem_por_tamanho.get(bs, 0) + 1
+
+    return {
+        'total_registros': len(rows),
+        'contagem_por_bucket_posicao': contagem_por_posicao,
+        'contagem_por_bucket_tamanho_ate_agora': contagem_por_tamanho,
+        'registros': rows,
     }
 
 

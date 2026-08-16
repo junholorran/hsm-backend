@@ -6455,15 +6455,17 @@ def replay_gates_reprovados(pair, dias_historico=30):
     d1_bruto = _fetch_bybit_klines_historico(symbol, 'D', dias_historico + 20)
     m15_bruto = _fetch_bybit_klines_historico(symbol, '15', dias_historico + 3)
     m5_bruto = _fetch_bybit_klines_historico(symbol, '5', dias_historico + 2)
+    h1_bruto = _fetch_bybit_klines_historico(symbol, '60', dias_historico + 3)
 
     d1, validacao_d1 = _validar_e_limpar_candles(d1_bruto, 'D')
     m15, validacao_m15 = _validar_e_limpar_candles(m15_bruto, '15')
     m5, validacao_m5 = _validar_e_limpar_candles(m5_bruto, '5')
+    h1, validacao_h1 = _validar_e_limpar_candles(h1_bruto, '60')
 
-    if len(d1) < 15 or len(m5) < 100:
+    if len(d1) < 15 or len(m5) < 100 or len(h1) < 20:
         return {
-            'erro': f'dados históricos insuficientes pra {pair} (D1={len(d1)}, M5={len(m5)})',
-            'validacao_d1': validacao_d1, 'validacao_m5': validacao_m5,
+            'erro': f'dados históricos insuficientes pra {pair} (D1={len(d1)}, M5={len(m5)}, H1={len(h1)})',
+            'validacao_d1': validacao_d1, 'validacao_m5': validacao_m5, 'validacao_h1': validacao_h1,
         }
 
     # ── db_file temporário e descartável — NUNCA o banco de produção ──
@@ -6476,7 +6478,7 @@ def replay_gates_reprovados(pair, dias_historico=30):
     try:
         for i in range(len(m5)):
             ts_corte = m5[i]['t']
-            candles_por_tf = _montar_candles_por_tf_ate(d1, None, None, m15, m5[:i + 1], None, ts_corte)
+            candles_por_tf = _montar_candles_por_tf_ate(d1, None, h1, m15, m5[:i + 1], None, ts_corte)
 
             try:
                 agora_ts_historico = (ts_corte / 1000) + GATES_REPROVADOS_EXEC_TF_SEG
@@ -6544,14 +6546,14 @@ def replay_gates_reprovados(pair, dias_historico=30):
     return {
         'pair': pair, 'dias_historico': dias_historico,
         'dados_historicos': {
-            'candles_d1': len(d1), 'candles_m5': len(m5),
+            'candles_d1': len(d1), 'candles_m5': len(m5), 'candles_h1': len(h1),
             'primeiro_ts_m5': primeiro_ts_m5, 'ultimo_ts_m5': ultimo_ts_m5,
             'duracao_coberta_horas': duracao_horas, 'duracao_coberta_dias': duracao_dias,
             'intervalo_m5_medido_segundos': intervalo_medido_seg,
             'intervalo_m5_confirmado_5min': intervalo_medido_seg == 300 if intervalo_medido_seg is not None else None,
             'gaps_m5': validacao_m5.get('gaps'), 'candle_em_formacao_removido_m5': validacao_m5.get('candle_em_formacao_removido'),
         },
-        'validacao_dados': {'D1': validacao_d1, 'M5': validacao_m5},
+        'validacao_dados': {'D1': validacao_d1, 'M5': validacao_m5, 'H1': validacao_h1},
         'oportunidades_brutas_antes_dedup': todas_ocorrencias_brutas,
         'oportunidades_unicas_apos_dedup': len(oportunidades),
         'reavaliacoes_repetidas': todas_ocorrencias_brutas - len(oportunidades),

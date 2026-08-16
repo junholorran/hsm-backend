@@ -3259,7 +3259,7 @@ def resolver_expirados_gates_vortex(db_file, pair):
         print(f"[scalp_engine gates_vortex] erro ao checar expirados de {pair}: {e}")
 
 
-def process_pair_gates_vortex(db_file, pair, candles_por_tf, exec_tf_label='M5', send_telegram_fn=None, agora_ts=None):
+def process_pair_gates_vortex(db_file, pair, candles_por_tf, exec_tf_label='M5', send_telegram_fn=None, agora_ts=None, debug_gates=False):
     """
     Pipeline completo de Gates A-F. Só retorna SIGNAL_DISPARADO quando
     TODOS os 7 gates passarem. Reaproveita Bias/SFP/MSS/FVG do modo
@@ -3546,6 +3546,59 @@ def process_pair_gates_vortex(db_file, pair, candles_por_tf, exec_tf_label='M5',
     }
     resultado['gates'] = gates
     resultado['zona_pd'] = zona_pd
+
+    # ── DEBUG opcional (item aprovado do ticket) — OBSERVACIONAL PURO.
+    # REGRA ESTRITA: NÃO recombina AND/OR de nenhum gate em lugar
+    # nenhum. Só LÊ os operandos crus exatamente como já existem no
+    # ponto onde gate_a/gate_b/gate_c são montados logo abaixo (essa
+    # leitura acontece DEPOIS de gate_a/gate_b/gate_c já estarem
+    # calculados pela produção — resultado_gate_X_real é sempre a
+    # MESMA variável gate_X que decide o pipeline, nunca uma cópia
+    # recalculada). Cada operando aqui é a mesma variável/expressão
+    # atômica (sem AND/OR) que já existe no código de gate_a/gate_b/
+    # gate_c logo abaixo — não crio nenhuma condição composta nova.
+    # Existe porque resultado['entry']/['sl']/etc. só são escritos no
+    # dict público dentro do bloco de SUCESSO (resultado.update({...})
+    # mais abaixo) — no branch de gates_reprovados eles ficam None
+    # mesmo que os valores locais já tenham sido calculados. Roda só
+    # quando debug_gates=True (nunca em produção — fica False por
+    # default, resultado idêntico a antes). Só ADICIONA uma chave nova
+    # ao dict, não modifica nenhum valor existente nem altera o fluxo
+    # de execução. ──
+    if debug_gates:
+        resultado['_debug_gate_inputs'] = {
+            'entry_local': round(entry, 6) if entry is not None else None,
+            'sl_local': round(sl, 6) if sl is not None else None,
+            'tp1_local': round(tp1, 6) if tp1 is not None else None,
+            'tp2_local': round(tp2, 6) if tp2 is not None else None,
+            'direcao_local': direcao_permitida,
+            'gate_a_operandos': {
+                # Operandos ATÔMICOS de gate_a (nenhum AND/OR aqui — só
+                # os valores crus que a expressão original usa):
+                #   gate_a = (bias_d1==direcao_permitida OR mtf_alinhado) AND (mss['direcao']==direcao_permitida)
+                'bias_d1': det_regime.get('bias_d1'),
+                'direcao_permitida': direcao_permitida,
+                'mtf_alinhado': det_regime.get('mtf_alinhado'),
+                'mss_direcao': mss.get('direcao') if mss else None,
+                'mss_presente': mss is not None,
+                'resultado_gate_a_real': gate_a,  # a MESMA variável que decide o pipeline, não recalculada
+            },
+            'gate_b_operandos': {
+                # Operandos atômicos de gate_b (sem recombinar AND):
+                #   gate_b = bool(sfp) and bool(mss) and bool(entry_zone) and atr_ok
+                'sfp': sfp, 'mss': mss, 'entry_zone': entry_zone,
+                'atr_ok': atr_ok, 'atr_multiplo': round(atr_multiplo, 4) if atr_multiplo is not None else None,
+                'resultado_gate_b_real': gate_b,
+            },
+            'gate_c_operandos': {
+                # Operandos atômicos de gate_c (sem recombinar OR/AND):
+                #   gate_c = (not MONTE_CARLO_GATE_ATIVO) or (prob_acerto is not None and prob_acerto >= GATE_C_MONTE_CARLO_MIN_PROB)
+                'monte_carlo_gate_ativo': MONTE_CARLO_GATE_ATIVO,
+                'prob_acerto': prob_acerto,
+                'gate_c_min_prob_exigido': GATE_C_MONTE_CARLO_MIN_PROB,
+                'resultado_gate_c_real': gate_c,
+            },
+        }
 
     if not all(gates.values()):
         falhos = [nome for nome, ok in gates.items() if not ok]
@@ -6349,20 +6402,74 @@ def _montar_candles_por_tf_ate(d1, h4, h1, m15, m5, m1, ts_corte_ms):
     }
 
 
-def _identidade_oportunidade_gates_reprovados(pair, resultado):
+def _reconstruir_identidade_temporal_gates(avaliacoes_ordenadas):
     """
-    Chave de deduplicação de uma oportunidade gates_reprovados. Mesmo
-    princípio já usado no dedup de sfp_breakout_cancelado (evitar
-    contar a mesma reavaliação várias vezes): se entry/sl/direção
-    baterem exatamente entre ciclos consecutivos, é a mesma
-    oportunidade sendo reavaliada, não uma nova.
+    Reconstrói a identidade temporal das avaliações de gates_reprovados
+    SEM inventar dedup por janela arbitrária. Cada avaliação já vem com
+    entry/sl/tp1/tp2/direcao REAIS (capturados via debug_gates=True,
+    direto dos valores locais de process_pair_gates_vortex(), não do
+    dict público que fica None nesse branch).
+
+    Calcula, pra cada avaliação: distância em segundos até a anterior,
+    se mudou direção/entry/SL em relação à anterior.
+
+    Depois agrupa em clusters SOMENTE quando avaliações CONSECUTIVAS no
+    tempo têm entry+sl+direção IDÊNTICOS — isso não é uma janela de N
+    candles, é uma checagem de igualdade real entre vizinhos diretos.
+    Se a identidade mudar (mesmo que só um pouco), o cluster fecha ali
+    e um novo começa. Isso é o mesmo princípio causal de
+    classify_sfp_causal(), mas comparando IDENTIDADE, não só tempo.
+
+    Retorna (avaliacoes_com_delta, clusters).
     """
-    return (
-        pair,
-        resultado.get('direcao'),
-        round(resultado.get('entry'), 6) if resultado.get('entry') is not None else None,
-        round(resultado.get('sl'), 6) if resultado.get('sl') is not None else None,
-    )
+    avaliacoes_com_delta = []
+    anterior = None
+    for av in avaliacoes_ordenadas:
+        delta_seg = None
+        mudou_direcao = mudou_entry = mudou_sl = None
+        if anterior is not None:
+            delta_seg = round((av['ts_corte'] - anterior['ts_corte']) / 1000, 1)
+            mudou_direcao = av['direcao'] != anterior['direcao']
+            mudou_entry = av['entry'] != anterior['entry']
+            mudou_sl = av['sl'] != anterior['sl']
+        avaliacoes_com_delta.append({
+            **av,
+            'delta_segundos_desde_anterior': delta_seg,
+            'mudou_direcao_vs_anterior': mudou_direcao,
+            'mudou_entry_vs_anterior': mudou_entry,
+            'mudou_sl_vs_anterior': mudou_sl,
+        })
+        anterior = av
+
+    clusters = []
+    cluster_atual = None
+    for av in avaliacoes_com_delta:
+        identidade = (av['direcao'], av['entry'], av['sl'])
+        identidade_valida = av['entry'] is not None and av['sl'] is not None and av['direcao'] is not None
+        if cluster_atual is not None and cluster_atual['identidade'] == identidade and identidade_valida:
+            cluster_atual['tamanho'] += 1
+            cluster_atual['ultimo_ts'] = av['ts_corte']
+            cluster_atual['gates_reprovados_por_avaliacao'].append(av['gates_reprovados_lista'])
+        else:
+            if cluster_atual is not None:
+                clusters.append(cluster_atual)
+            cluster_atual = {
+                'identidade': identidade,
+                'identidade_valida': identidade_valida,
+                'direcao': av['direcao'], 'entry': av['entry'], 'sl': av['sl'],
+                'tp1': av['tp1'], 'tp2': av['tp2'],
+                'primeiro_ts': av['ts_corte'], 'ultimo_ts': av['ts_corte'],
+                'tamanho': 1,
+                'gates_reprovados_por_avaliacao': [av['gates_reprovados_lista']],
+            }
+    if cluster_atual is not None:
+        clusters.append(cluster_atual)
+
+    for c in clusters:
+        del c['identidade']  # tupla auxiliar, não serializa bem em JSON
+        c['duracao_segundos'] = round((c['ultimo_ts'] - c['primeiro_ts']) / 1000, 1)
+
+    return avaliacoes_com_delta, clusters
 
 
 def _resolver_tp_sl_futuro(candles_gatilho_futuros, direcao, entry, sl, tp1, tp2, max_candles):
@@ -6472,7 +6579,6 @@ def replay_gates_reprovados(pair, dias_historico=30):
     tmp_fd, tmp_db_path = tempfile.mkstemp(suffix='.db', prefix=f'shadow_gates_reprovados_{pair}_')
     os.close(tmp_fd)
 
-    oportunidades_vistas = {}  # chave dedup -> primeira ocorrência registrada
     todas_ocorrencias_brutas = 0
 
     # ── DETALHE DOS GATES A-G — instrumentação pura. resultado['gates']
@@ -6491,6 +6597,32 @@ def replay_gates_reprovados(pair, dias_historico=30):
         'G_PREMIUM_DISCOUNT': {'aprovados': 0, 'reprovados': 0},
     }
     combinacoes_reprovacao = {}  # tupla ordenada de gates que falharam -> contagem
+
+    # ── Agregado por OPERANDO isolado dos gates A/B/C (item aprovado
+    # do ticket) — cada chave é uma comparação/leitura ATÔMICA de um
+    # único operando cru, nunca uma combinação AND/OR de vários. Serve
+    # pra responder "quantas vezes cada pedacinho individual bateu",
+    # sem nunca reimplementar a lógica composta do gate. ──
+    from collections import defaultdict
+    operandos_agregado = {
+        'A': {
+            'bias_d1_igual_direcao_permitida': defaultdict(int),
+            'mtf_alinhado': defaultdict(int),
+            'mss_direcao_igual_direcao_permitida': defaultdict(int),
+            'mss_presente': defaultdict(int),
+        },
+        'B': {
+            'sfp_presente': defaultdict(int),
+            'mss_presente': defaultdict(int),
+            'entry_zone_presente': defaultdict(int),
+            'atr_ok': defaultdict(int),
+        },
+        'C': {
+            'prob_acerto_existe': defaultdict(int),
+            'prob_acerto_atinge_threshold': defaultdict(int),
+            'monte_carlo_gate_ativo': defaultdict(int),
+        },
+    }
 
     # ── FUNIL — instrumentação pura, só contagem. Não decide nada, não
     # altera process_pair_gates_vortex() nem nenhuma função de produção.
@@ -6549,7 +6681,7 @@ def replay_gates_reprovados(pair, dias_historico=30):
                 agora_ts_historico = (ts_corte / 1000) + GATES_REPROVADOS_EXEC_TF_SEG
                 resultado = process_pair_gates_vortex(
                     tmp_db_path, pair, candles_por_tf, exec_tf_label='M5',
-                    agora_ts=agora_ts_historico,
+                    agora_ts=agora_ts_historico, debug_gates=True,
                 )
             except Exception:
                 continue
@@ -6564,14 +6696,59 @@ def replay_gates_reprovados(pair, dias_historico=30):
             gates_dict = resultado.get('gates')
             if gates_dict:
                 gates_reprovados_lista = [g for g, ok in gates_dict.items() if not ok]
+                # ── Valores REAIS: resultado['entry']/['sl']/etc. ficam
+                # None no branch de gates_reprovados (produção só
+                # escreve esses campos no branch de sucesso). Os
+                # valores locais verdadeiros vêm de
+                # resultado['_debug_gate_inputs'], só presente porque
+                # chamamos com debug_gates=True (opt-in, produção nunca
+                # ativa isso). ──
+                debug_info = resultado.get('_debug_gate_inputs') or {}
+                entry_real = debug_info.get('entry_local')
+                sl_real = debug_info.get('sl_local')
+                tp1_real = debug_info.get('tp1_local')
+                tp2_real = debug_info.get('tp2_local')
+                direcao_real = debug_info.get('direcao_local')
+                gate_a_op = debug_info.get('gate_a_operandos') or {}
+                gate_b_op = debug_info.get('gate_b_operandos') or {}
+                gate_c_op = debug_info.get('gate_c_operandos') or {}
                 gates_avaliacoes_brutas.append({
-                    'ts_corte': ts_corte, 'direcao': resultado.get('direcao'),
-                    'entry': resultado.get('entry'), 'sl': resultado.get('sl'),
-                    'tp1': resultado.get('tp1'), 'tp2': resultado.get('tp2'),
+                    'ts_corte': ts_corte, 'idx_m5': i, 'direcao': direcao_real,
+                    'entry': entry_real, 'sl': sl_real,
+                    'tp1': tp1_real, 'tp2': tp2_real,
                     'gates': dict(gates_dict),
                     'gates_reprovados_lista': gates_reprovados_lista,
                     'motivo': motivo,
+                    'gate_a_operandos': gate_a_op,
+                    'gate_b_operandos': gate_b_op,
+                    'gate_c_operandos': gate_c_op,
                 })
+                # ── Agregado por OPERANDO (não por combinação lógica) —
+                # cada linha abaixo é uma COMPARAÇÃO DIRETA e isolada
+                # entre 2 valores crus já capturados, sem recombinar
+                # AND/OR de várias condições. Serve só pra contar
+                # quantas vezes cada operando individual bateu/não
+                # bateu, não pra decidir nada. ──
+                if gate_a_op:
+                    _cmp_bias = gate_a_op.get('bias_d1') == gate_a_op.get('direcao_permitida')
+                    _cmp_mtf = bool(gate_a_op.get('mtf_alinhado'))
+                    _cmp_mss_dir = (gate_a_op.get('mss_direcao') == gate_a_op.get('direcao_permitida'))
+                    operandos_agregado['A']['bias_d1_igual_direcao_permitida'][_cmp_bias] += 1
+                    operandos_agregado['A']['mtf_alinhado'][_cmp_mtf] += 1
+                    operandos_agregado['A']['mss_direcao_igual_direcao_permitida'][_cmp_mss_dir] += 1
+                    operandos_agregado['A']['mss_presente'][bool(gate_a_op.get('mss_presente'))] += 1
+                if gate_b_op:
+                    operandos_agregado['B']['sfp_presente'][bool(gate_b_op.get('sfp'))] += 1
+                    operandos_agregado['B']['mss_presente'][bool(gate_b_op.get('mss'))] += 1
+                    operandos_agregado['B']['entry_zone_presente'][bool(gate_b_op.get('entry_zone'))] += 1
+                    operandos_agregado['B']['atr_ok'][bool(gate_b_op.get('atr_ok'))] += 1
+                if gate_c_op:
+                    _prob = gate_c_op.get('prob_acerto')
+                    _threshold = gate_c_op.get('gate_c_min_prob_exigido')
+                    operandos_agregado['C']['prob_acerto_existe'][_prob is not None] += 1
+                    if _prob is not None and _threshold is not None:
+                        operandos_agregado['C']['prob_acerto_atinge_threshold'][_prob >= _threshold] += 1
+                    operandos_agregado['C']['monte_carlo_gate_ativo'][bool(gate_c_op.get('monte_carlo_gate_ativo'))] += 1
                 for g, ok in gates_dict.items():
                     if g not in gates_agregado:
                         gates_agregado[g] = {'aprovados': 0, 'reprovados': 0}
@@ -6644,26 +6821,59 @@ def replay_gates_reprovados(pair, dias_historico=30):
                 continue
 
             todas_ocorrencias_brutas += 1
-            chave = _identidade_oportunidade_gates_reprovados(pair, resultado)
-            if chave not in oportunidades_vistas:
-                oportunidades_vistas[chave] = {
-                    'pair': pair, 'ts_evento': ts_corte, 'direcao': resultado.get('direcao'),
-                    'entry': resultado.get('entry'), 'sl': resultado.get('sl'),
-                    'tp1': resultado.get('tp1'), 'tp2': resultado.get('tp2'),
-                    'gates': resultado.get('gates'), 'motivo': motivo,
-                    'idx_m5': i,
-                }
     finally:
         try:
             os.remove(tmp_db_path)
         except Exception:
             pass
 
-    oportunidades = list(oportunidades_vistas.values())
+    # ── IDENTIDADE TEMPORAL + CLUSTERS (item aprovado do ticket) ──
+    # Filtra só as avaliações que reprovaram nos gates (mesmo universo
+    # de todas_ocorrencias_brutas), já em ordem cronológica (o loop
+    # acima é sequencial). NÃO deduplica por janela de candles — só
+    # agrupa avaliações CONSECUTIVAS que têm entry+sl+direção
+    # IDÊNTICOS entre si (ver _reconstruir_identidade_temporal_gates).
+    avaliacoes_gates_reprovados_brutas = [
+        av for av in gates_avaliacoes_brutas if 'falhou nos gates' in av['motivo']
+    ]
+    avaliacoes_com_delta, clusters_por_identidade = _reconstruir_identidade_temporal_gates(
+        avaliacoes_gates_reprovados_brutas
+    )
+
+    # ── "oportunidades" pra resolução de TP/SL downstream: 1
+    # REPRESENTANTE por cluster de identidade real (a primeira
+    # avaliação de cada cluster), não as N reavaliações do mesmo
+    # cluster. Clusters sem identidade válida (entry/sl ausentes) são
+    # excluídos da resolução de TP/SL e reportados à parte. ──
+    oportunidades = []
+    clusters_sem_identidade_valida = 0
+    for idx_cluster, c in enumerate(clusters_por_identidade):
+        if not c['identidade_valida']:
+            clusters_sem_identidade_valida += 1
+            continue
+        primeira_av = next(
+            av for av in avaliacoes_gates_reprovados_brutas
+            if av['ts_corte'] == c['primeiro_ts'] and av['direcao'] == c['direcao']
+            and av['entry'] == c['entry'] and av['sl'] == c['sl']
+        )
+        oportunidades.append({
+            'pair': pair, 'ts_evento': c['primeiro_ts'], 'direcao': c['direcao'],
+            'entry': c['entry'], 'sl': c['sl'], 'tp1': c['tp1'], 'tp2': c['tp2'],
+            'idx_m5': primeira_av['idx_m5'], 'cluster_tamanho': c['tamanho'],
+        })
+
+    # ── "oportunidades" (representante por cluster) fica pronta, mas
+    # a resolução de TP/SL/win-rate downstream é SUSPENSA nesta
+    # rodada, por pedido explícito: ainda não decidimos a regra de
+    # dedup definitiva, só reconstruímos a identidade temporal + os
+    # clusters por igualdade real. clusters_por_identidade continua
+    # disponível no relatório como dado observacional. ──
 
     # ── Resolver TP/SL/AMBIGUO/NENHUM nos 3 horizontes, sem lookahead ──
+    # SUSPENSO nesta rodada (ver nota acima) — lista fica vazia de
+    # propósito, sem consumir 'oportunidades' ainda.
     resultados_por_horizonte = {h: [] for h in GATES_REPROVADOS_HORIZONTES_CANDLES}
-    for op in oportunidades:
+    for op in []:
         if op['entry'] is None or op['sl'] is None:
             continue
         idx = op['idx_m5']
@@ -6705,16 +6915,27 @@ def replay_gates_reprovados(pair, dias_historico=30):
         },
         'validacao_dados': {'D1': validacao_d1, 'M5': validacao_m5, 'H1': validacao_h1},
         'oportunidades_brutas_antes_dedup': todas_ocorrencias_brutas,
-        'oportunidades_unicas_apos_dedup': len(oportunidades),
-        'reavaliacoes_repetidas': todas_ocorrencias_brutas - len(oportunidades),
-        'taxa_repeticao': round(todas_ocorrencias_brutas / len(oportunidades), 2) if oportunidades else None,
+        'oportunidades_unicas_apos_dedup': None,
+        'clusters_por_identidade_real_preliminar': len(clusters_por_identidade),
+        'clusters_sem_identidade_valida': clusters_sem_identidade_valida,
+        'reavaliacoes_repetidas': None,
+        'taxa_repeticao': None,
         'oportunidades_long': n_long, 'oportunidades_short': n_short,
         'nota_metodologica': (
             'Réplica exata da lógica de produção: process_pair_gates_vortex() foi chamado sem '
             'alteração, contra db_file temporário/descartável, andando candle a candle no '
             'histórico real (sem lookahead — cada chamada só enxerga candles com t <= ts_corte). '
-            'Cada oportunidade única foi deduplicada por (pair, direção, entry, sl) para não '
-            'contar a mesma reavaliação como evento novo. sfp_breakout_cancelado NÃO É '
+            'ATENÇÃO: nesta rodada, a regra de dedup/oportunidades_unicas AINDA NÃO foi decidida '
+            '— "oportunidades_unicas_apos_dedup" fica None de propósito. O que existe é '
+            '"clusters_por_identidade_real_preliminar": um agrupamento OBSERVACIONAL de '
+            'avaliações CONSECUTIVAS com entry+sl+direção IDÊNTICOS entre si (não uma janela de '
+            'candles arbitrária) — ver "identidade_temporal_eventos" e "clusters_detalhe" para os '
+            'dados crus. O cálculo de TP/SL/win-rate por horizonte foi SUSPENSO nesta rodada, até '
+            'a regra de dedup ser aprovada com base nesses dados. Os valores de entry/sl/tp1/tp2 '
+            'usados aqui são os LOCAIS reais (via debug_gates=True), não os do dict público de '
+            'process_pair_gates_vortex() — que ficam None no branch de gates_reprovados por '
+            'característica já existente da função (resultado.update() só roda no branch de '
+            'sucesso), não por falha desta instrumentação. sfp_breakout_cancelado NÃO É '
             'backtestável nesta metodologia (sem entry/sl coerente) e não aparece neste relatório.'
         ),
         'validacao_causal_h1': {
@@ -6742,6 +6963,37 @@ def replay_gates_reprovados(pair, dias_historico=30):
                 {'gates_reprovados': list(k), 'ocorrencias': v}
                 for k, v in sorted(combinacoes_reprovacao.items(), key=lambda x: -x[1])
             ],
+            'operandos_agregado_por_subcondicao': {
+                gate_letra: {
+                    nome_operando: {
+                        'true': contagem.get(True, 0),
+                        'false': contagem.get(False, 0),
+                    }
+                    for nome_operando, contagem in operandos.items()
+                }
+                for gate_letra, operandos in operandos_agregado.items()
+            },
+        },
+        'identidade_temporal_eventos': {
+            'nota': (
+                'Cada item = 1 avaliação BRUTA (não dedupada) que reprovou nos gates, em ordem '
+                'cronológica, com entry/sl/tp1/tp2/direção REAIS (valores locais capturados via '
+                'debug_gates=True, não os campos públicos que ficam None nesse branch).'
+            ),
+            'total_avaliacoes_gates_reprovados': len(avaliacoes_com_delta),
+            'avaliacoes': avaliacoes_com_delta,
+        },
+        'clusters_detalhe': {
+            'nota': (
+                'Cada cluster = sequência de avaliações CONSECUTIVAS com entry+sl+direção '
+                'IDÊNTICOS entre si. NÃO é uma janela de candles arbitrária — é igualdade real '
+                'entre vizinhos diretos no tempo. Quando a identidade muda (mesmo que só um '
+                'gate a mais reprove, por exemplo), o cluster fecha e um novo começa. Dado '
+                'observacional/preliminar — a decisão de dedup definitivo ainda não foi tomada.'
+            ),
+            'total_clusters': len(clusters_por_identidade),
+            'clusters_sem_identidade_valida': clusters_sem_identidade_valida,
+            'clusters': clusters_por_identidade,
         },
         'por_horizonte': relatorio_por_horizonte,
     }

@@ -6475,6 +6475,23 @@ def replay_gates_reprovados(pair, dias_historico=30):
     oportunidades_vistas = {}  # chave dedup -> primeira ocorrência registrada
     todas_ocorrencias_brutas = 0
 
+    # ── DETALHE DOS GATES A-G — instrumentação pura. resultado['gates']
+    # já é retornado por process_pair_gates_vortex() sem alteração
+    # nenhuma (é o mesmo dict usado pra decidir SIGNAL_DISPARADO vs
+    # gates_reprovados em produção); aqui só LEMOS e agregamos, não
+    # recalculamos nem alteramos nenhum gate. ──
+    gates_avaliacoes_brutas = []  # 1 entrada por CICLO (não dedupado) em que os gates foram avaliados
+    gates_agregado = {
+        'A_MTF_ALIGNMENT': {'aprovados': 0, 'reprovados': 0},
+        'B_TRIGGER': {'aprovados': 0, 'reprovados': 0},
+        'C_MONTE_CARLO': {'aprovados': 0, 'reprovados': 0},
+        'D_SMC_QUALITY': {'aprovados': 0, 'reprovados': 0},
+        'E_MIN_RR': {'aprovados': 0, 'reprovados': 0},
+        'F_ICHIMOKU_INFO': {'aprovados': 0, 'reprovados': 0},
+        'G_PREMIUM_DISCOUNT': {'aprovados': 0, 'reprovados': 0},
+    }
+    combinacoes_reprovacao = {}  # tupla ordenada de gates que falharam -> contagem
+
     # ── FUNIL — instrumentação pura, só contagem. Não decide nada, não
     # altera process_pair_gates_vortex() nem nenhuma função de produção.
     # Cada chamada cai em EXATAMENTE uma categoria (retorno antecipado
@@ -6538,6 +6555,33 @@ def replay_gates_reprovados(pair, dias_historico=30):
                 continue
 
             motivo = resultado.get('motivo') or ''
+
+            # ── DETALHE DOS GATES A-G — captura o dict já retornado por
+            # process_pair_gates_vortex() (não alterado, não recalculado).
+            # Roda pra qualquer ciclo em que os gates foram avaliados
+            # (gates_reprovados, sinal_disparado ou em_cooldown), não só
+            # nos reprovados, pra ter o quadro completo. ──
+            gates_dict = resultado.get('gates')
+            if gates_dict:
+                gates_reprovados_lista = [g for g, ok in gates_dict.items() if not ok]
+                gates_avaliacoes_brutas.append({
+                    'ts_corte': ts_corte, 'direcao': resultado.get('direcao'),
+                    'entry': resultado.get('entry'), 'sl': resultado.get('sl'),
+                    'tp1': resultado.get('tp1'), 'tp2': resultado.get('tp2'),
+                    'gates': dict(gates_dict),
+                    'gates_reprovados_lista': gates_reprovados_lista,
+                    'motivo': motivo,
+                })
+                for g, ok in gates_dict.items():
+                    if g not in gates_agregado:
+                        gates_agregado[g] = {'aprovados': 0, 'reprovados': 0}
+                    if ok:
+                        gates_agregado[g]['aprovados'] += 1
+                    else:
+                        gates_agregado[g]['reprovados'] += 1
+                if gates_reprovados_lista:
+                    combo = tuple(sorted(gates_reprovados_lista))
+                    combinacoes_reprovacao[combo] = combinacoes_reprovacao.get(combo, 0) + 1
 
             # ── Tally do funil (item 3 do ticket) — leitura pura dos
             # campos já retornados por process_pair_gates_vortex(), sem
@@ -6685,6 +6729,20 @@ def replay_gates_reprovados(pair, dias_historico=30):
             'amostras_primeiros_e_ultimos_ciclos': amostras_causais_h1,
         },
         'funil': funil,
+        'gates_detalhe': {
+            'avaliacoes_brutas': gates_avaliacoes_brutas,
+            'total_avaliacoes': len(gates_avaliacoes_brutas),
+            'agregado_por_gate': gates_agregado,
+            'combinacao_mais_frequente_reprovacao': (
+                {'gates_reprovados': list(max(combinacoes_reprovacao.items(), key=lambda x: x[1])[0]),
+                 'ocorrencias': max(combinacoes_reprovacao.items(), key=lambda x: x[1])[1]}
+                if combinacoes_reprovacao else None
+            ),
+            'todas_combinacoes_reprovacao': [
+                {'gates_reprovados': list(k), 'ocorrencias': v}
+                for k, v in sorted(combinacoes_reprovacao.items(), key=lambda x: -x[1])
+            ],
+        },
         'por_horizonte': relatorio_por_horizonte,
     }
 

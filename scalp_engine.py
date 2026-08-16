@@ -6475,10 +6475,58 @@ def replay_gates_reprovados(pair, dias_historico=30):
     oportunidades_vistas = {}  # chave dedup -> primeira ocorrência registrada
     todas_ocorrencias_brutas = 0
 
+    # ── FUNIL — instrumentação pura, só contagem. Não decide nada, não
+    # altera process_pair_gates_vortex() nem nenhuma função de produção.
+    # Cada chamada cai em EXATAMENTE uma categoria (retorno antecipado
+    # mutuamente exclusivo no código real), então a contagem por
+    # categoria JÁ É o funil — não precisa reimplementar a lógica de
+    # decisão pra saber onde cada candle "morreu". ──
+    funil = {
+        'candles_m5_processados': 0,
+        'staleness_rejeitados': 0,
+        'candles_insuficientes': 0,
+        'hora_toxica': 0,
+        'sem_bias': 0,
+        'bias_acima_midnight_open': 0,
+        'bias_abaixo_midnight_open': 0,
+        'bias_neutro': 0,  # sempre 0 nesta versão do Kairos — compute_bias_midnight_open_estrito() é binário (alta/baixa), nunca devolve neutro; campo mantido só pra satisfazer o formato do relatório pedido, com esta nota explícita
+        'sfp_candidatos': 0,   # == bias_avaliado (todo ciclo que passou do bias tenta achar SFP)
+        'sfp_confirmados': 0,  # tf_sfp_usado presente no resultado, independente do que acontece depois
+        'sfp_repetido_cluster': 0,
+        'padrao_fraco': 0,
+        'mss_confirmados': 0,
+        'sem_mss': 0,
+        'fvg_encontrados': 0,
+        'sem_fvg': 0,
+        'risco_invalido': 0,
+        'setups_com_entry_sl_tp': 0,
+        'gates_avaliados': 0,
+        'gates_reprovados': 0,
+        'sinais_aprovados': 0,
+        'em_cooldown': 0,
+        'outro_motivo_nao_classificado': 0,
+    }
+    # Validação causal do H1 — prova que nenhum candle H1 futuro (t >
+    # ts_corte) jamais entrou em candles_por_tf['H1'] em nenhum ciclo.
+    violacoes_causais_h1 = 0
+    amostras_causais_h1 = []  # guarda só os primeiros/últimos ciclos, pra não inflar o relatório
+
     try:
         for i in range(len(m5)):
             ts_corte = m5[i]['t']
             candles_por_tf = _montar_candles_por_tf_ate(d1, None, h1, m15, m5[:i + 1], None, ts_corte)
+            funil['candles_m5_processados'] += 1
+
+            # ── Validação causal do H1 (item 1 do ticket) ──
+            h1_visivel = candles_por_tf.get('H1') or []
+            ultimo_h1_t = h1_visivel[-1]['t'] if h1_visivel else None
+            if ultimo_h1_t is not None and ultimo_h1_t > ts_corte:
+                violacoes_causais_h1 += 1
+            if i < 3 or i >= len(m5) - 3:
+                amostras_causais_h1.append({
+                    'ts_corte': ts_corte, 'ultimo_h1_t': ultimo_h1_t,
+                    'quantidade_h1_visivel': len(h1_visivel),
+                })
 
             try:
                 agora_ts_historico = (ts_corte / 1000) + GATES_REPROVADOS_EXEC_TF_SEG
@@ -6490,6 +6538,64 @@ def replay_gates_reprovados(pair, dias_historico=30):
                 continue
 
             motivo = resultado.get('motivo') or ''
+
+            # ── Tally do funil (item 3 do ticket) — leitura pura dos
+            # campos já retornados por process_pair_gates_vortex(), sem
+            # nenhuma lógica de decisão nova. ──
+            if 'candles insuficientes' in motivo:
+                funil['candles_insuficientes'] += 1
+            elif 'dados obsoletos' in motivo:
+                funil['staleness_rejeitados'] += 1
+            elif 'horário tóxico' in motivo:
+                funil['hora_toxica'] += 1
+            elif 'calcular Midnight Open' in motivo:
+                funil['sem_bias'] += 1
+            else:
+                # bias foi avaliado com sucesso nesse ciclo
+                if 'ACIMA_MIDNIGHT_OPEN' in motivo:
+                    funil['bias_acima_midnight_open'] += 1
+                elif 'ABAIXO_MIDNIGHT_OPEN' in motivo:
+                    funil['bias_abaixo_midnight_open'] += 1
+                funil['sfp_candidatos'] += 1
+
+                sfp_confirmado_neste_ciclo = resultado.get('tf_sfp_usado') is not None
+                if sfp_confirmado_neste_ciclo:
+                    funil['sfp_confirmados'] += 1
+
+                if 'breakout_cancela_analise' in motivo:
+                    pass  # sem_sfp — bias inverteu antes do SFP se formar, já contado em sfp_candidatos
+                elif 'sem_sfp_ainda' in motivo or 'sem_liquidez_mapeada' in motivo or 'sem_candles_sfp' in motivo:
+                    pass  # idem — SFP nunca confirmou
+                elif 'SFP repetido dentro do cluster' in motivo:
+                    funil['sfp_repetido_cluster'] += 1
+                elif 'padrão de rejeição fraco' in motivo:
+                    funil['padrao_fraco'] += 1
+                elif 'pra validar MSS' in motivo or 'sem MSS de corpo forte' in motivo:
+                    funil['sem_mss'] += 1
+                elif 'sem FVG real após a expansão' in motivo:
+                    funil['mss_confirmados'] += 1
+                    funil['sem_fvg'] += 1
+                elif 'risco calculado inválido' in motivo:
+                    funil['mss_confirmados'] += 1
+                    funil['fvg_encontrados'] += 1
+                    funil['risco_invalido'] += 1
+                elif 'falhou nos gates' in motivo:
+                    funil['mss_confirmados'] += 1
+                    funil['fvg_encontrados'] += 1
+                    funil['setups_com_entry_sl_tp'] += 1
+                    funil['gates_avaliados'] += 1
+                    funil['gates_reprovados'] += 1
+                elif motivo == 'entrada_confirmada' or 'entrada_confirmada, mas em cooldown' in motivo:
+                    funil['mss_confirmados'] += 1
+                    funil['fvg_encontrados'] += 1
+                    funil['setups_com_entry_sl_tp'] += 1
+                    funil['gates_avaliados'] += 1
+                    funil['sinais_aprovados'] += 1
+                    if 'em cooldown' in motivo:
+                        funil['em_cooldown'] += 1
+                elif motivo:
+                    funil['outro_motivo_nao_classificado'] += 1
+
             if 'falhou nos gates' not in motivo:
                 continue
 
@@ -6567,6 +6673,18 @@ def replay_gates_reprovados(pair, dias_historico=30):
             'contar a mesma reavaliação como evento novo. sfp_breakout_cancelado NÃO É '
             'backtestável nesta metodologia (sem entry/sl coerente) e não aparece neste relatório.'
         ),
+        'validacao_causal_h1': {
+            'violacoes_causais_h1': violacoes_causais_h1,
+            'h1_100_por_cento_causal': violacoes_causais_h1 == 0,
+            'nota': (
+                'violacoes_causais_h1 conta quantos ciclos tiveram o último candle H1 visível '
+                'com timestamp POSTERIOR ao ts_corte do ciclo (o que seria lookahead). Deve ser '
+                'sempre 0 — _montar_candles_por_tf_ate() filtra H1 por t <= ts_corte_ms, igual '
+                'aos demais timeframes.'
+            ),
+            'amostras_primeiros_e_ultimos_ciclos': amostras_causais_h1,
+        },
+        'funil': funil,
         'por_horizonte': relatorio_por_horizonte,
     }
 
@@ -6723,6 +6841,18 @@ def replay_gates_reprovados_todos_pares(dias_historico=7, pares=None):
         total_long += r.get('oportunidades_long', 0) or 0
         total_short += r.get('oportunidades_short', 0) or 0
 
+    # ── Agregação do FUNIL completo, somando todos os pares — item 3/4
+    # do ticket. Cada campo é soma direta dos contadores por par (só
+    # leitura, nenhuma lógica de decisão nova). ──
+    funil_agregado = {}
+    violacoes_causais_h1_total = 0
+    for p, r in resultados_por_pair.items():
+        if 'erro' in r:
+            continue
+        for chave, valor in (r.get('funil') or {}).items():
+            funil_agregado[chave] = funil_agregado.get(chave, 0) + (valor or 0)
+        violacoes_causais_h1_total += (r.get('validacao_causal_h1') or {}).get('violacoes_causais_h1', 0) or 0
+
     # ── Agregação combinada por horizonte, juntando as oportunidades de
     # TODOS os pares que tiveram dados válidos — para ter uma amostra
     # estatisticamente mais robusta que par por par isolado. ──
@@ -6764,6 +6894,11 @@ def replay_gates_reprovados_todos_pares(dias_historico=7, pares=None):
             'oportunidades_long_total': total_long,
             'oportunidades_short_total': total_short,
         },
+        'validacao_causal_h1_todos_pares': {
+            'violacoes_causais_h1_total': violacoes_causais_h1_total,
+            'h1_100_por_cento_causal_em_todos_os_pares': violacoes_causais_h1_total == 0,
+        },
+        'funil_agregado_todos_pares': funil_agregado,
         'agregado_por_horizonte_todos_pares': agregado_por_horizonte,
         'nota_metodologica': (
             'Cada par foi processado de forma totalmente independente, chamando '

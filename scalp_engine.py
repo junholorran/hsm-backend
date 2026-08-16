@@ -2501,6 +2501,50 @@ def compute_liquidez_referencia(pair, candles_por_tf):
     }
 
 
+def _garantir_tabela_audit_breakout_cancel(db_file):
+    """Cria a tabela de auditoria se não existir. Auto-blindada."""
+    try:
+        with sqlite3.connect(db_file) as conn:
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS audit_breakout_cancel (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    pair TEXT NOT NULL,
+                    cycle_ts INTEGER NOT NULL,
+                    candle_event_ts INTEGER,
+                    bias TEXT,
+                    midnight_open REAL,
+                    high_liq REAL,
+                    low_liq REAL,
+                    motivo TEXT
+                )
+            ''')
+            conn.commit()
+    except Exception as e:
+        print(f"[scalp_engine audit_breakout] erro ao criar tabela: {e}")
+
+
+def _registrar_audit_breakout_cancel(db_file, pair, cycle_ts, candle_event_ts, bias,
+                                      midnight_open, high_liq, low_liq, motivo):
+    """
+    Auditoria PURA — 1 linha por ciclo em que breakout_cancela_analise for
+    o motivo. SEM dedup (proposital nesta fase). SEM UPSERT (INSERT
+    simples — cada chamada é uma linha nova, mesmo repetindo candle_event_ts).
+    Não decide nada, não é lida por nenhuma outra função do pipeline.
+    Fail-open: erro aqui só é logado, nunca propaga.
+    """
+    _garantir_tabela_audit_breakout_cancel(db_file)
+    try:
+        with sqlite3.connect(db_file) as conn:
+            conn.execute('''
+                INSERT INTO audit_breakout_cancel
+                    (pair, cycle_ts, candle_event_ts, bias, midnight_open, high_liq, low_liq, motivo)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (pair, cycle_ts, candle_event_ts, bias, midnight_open, high_liq, low_liq, motivo))
+            conn.commit()
+    except Exception as e:
+        print(f"[scalp_engine audit_breakout] erro ao registrar {pair}: {e}")
+
+
 def validar_sfp_estrito(candles_sfp, liquidez, direcao_permitida):
     """Valida SFP sem auto-referência e sem aceitar SFP invalidado depois.
 
@@ -2510,7 +2554,7 @@ def validar_sfp_estrito(candles_sfp, liquidez, direcao_permitida):
     Assim o engine pode usar o SFP mais recente que ainda esteja válido.
     """
     if not liquidez:
-        return None, 'sem_liquidez_mapeada'
+        return None, 'sem_liquidez_mapeada', None
 
     cutoff_ts = liquidez.get('cutoff_ts')
     candles_pos = [c for c in candles_sfp if cutoff_ts is None or c['t'] >= cutoff_ts]
@@ -2520,7 +2564,7 @@ def validar_sfp_estrito(candles_sfp, liquidez, direcao_permitida):
     for c in candles_pos:
         if direcao_permitida == 'baixa':
             if c['c'] > high_liq:
-                return None, 'breakout_cancela_analise'
+                return None, 'breakout_cancela_analise', c['t']
             if c['h'] > high_liq and c['c'] < high_liq:
                 ultimo_sfp = {
                     'tipo': 'SFP_venda', 'nivel': high_liq,
@@ -2528,7 +2572,7 @@ def validar_sfp_estrito(candles_sfp, liquidez, direcao_permitida):
                 }
         elif direcao_permitida == 'alta':
             if c['c'] < low_liq:
-                return None, 'breakout_cancela_analise'
+                return None, 'breakout_cancela_analise', c['t']
             if c['l'] < low_liq and c['c'] > low_liq:
                 ultimo_sfp = {
                     'tipo': 'SFP_compra', 'nivel': low_liq,
@@ -2536,8 +2580,8 @@ def validar_sfp_estrito(candles_sfp, liquidez, direcao_permitida):
                 }
 
     if ultimo_sfp:
-        return ultimo_sfp, 'sfp_confirmado'
-    return None, 'sem_sfp_ainda'
+        return ultimo_sfp, 'sfp_confirmado', None
+    return None, 'sem_sfp_ainda', None
 
 
 def _diagnostico_detalhado_sfp(candles_sfp, liquidez, direcao_permitida, tf_label):
@@ -2673,7 +2717,11 @@ def validar_sfp_cascata_tf(candles_por_tf, liquidez, direcao_permitida):
     maximiza oportunidade sem abrir mão de tentar o TF mais limpo
     primeiro. Se qualquer TF confirmar breakout real, cancela na hora
     (não faz sentido procurar SFP num nível que já foi rompido de vez).
-    Retorna (sfp, motivo, timeframe_usado).
+    Retorna (sfp, motivo, timeframe_usado, candle_ts_evento) — o 4º valor
+    é o timestamp do candle que causou 'breakout_cancela_analise' (só
+    usado nesse caminho; None nos demais), capturado direto na origem em
+    validar_sfp_estrito(), sem redescoberta posterior. Instrumentação
+    pura — não influencia nenhuma decisão do pipeline.
     """
     ordem_tfs = ['M15', 'M5', 'M1']
     ultimo_motivo = 'sem_candles_sfp'
@@ -2683,17 +2731,17 @@ def validar_sfp_cascata_tf(candles_por_tf, liquidez, direcao_permitida):
         if not candles_tf:
             continue
 
-        sfp, motivo = validar_sfp_estrito(candles_tf, liquidez, direcao_permitida)
+        sfp, motivo, candle_ts_evento = validar_sfp_estrito(candles_tf, liquidez, direcao_permitida)
 
         if sfp:
-            return sfp, motivo, tf_label
+            return sfp, motivo, tf_label, candle_ts_evento
 
         if motivo == 'breakout_cancela_analise':
-            return None, motivo, tf_label
+            return None, motivo, tf_label, candle_ts_evento
 
         ultimo_motivo = motivo
 
-    return None, ultimo_motivo, None
+    return None, ultimo_motivo, None, None
 
 
 # ── PASSO 3: MSS confirmado no M1, com corpo forte ──────────────────────
@@ -3248,7 +3296,7 @@ def process_pair_gates_vortex(db_file, pair, candles_por_tf, exec_tf_label='M5',
 
     # ── SFP contra liquidez (sessão anterior ou 3-7 dias) ──
     liquidez = compute_liquidez_referencia(pair, candles_por_tf)
-    sfp, motivo_sfp, tf_sfp_usado = validar_sfp_cascata_tf(candles_por_tf, liquidez, direcao_permitida)
+    sfp, motivo_sfp, tf_sfp_usado, candle_ts_breakout = validar_sfp_cascata_tf(candles_por_tf, liquidez, direcao_permitida)
 
     # Diagnóstico observacional — roda sempre, não influencia em nada a
     # decisão acima. Só grava fatos objetivos (Casos A-E) pra investigar
@@ -3260,6 +3308,24 @@ def process_pair_gates_vortex(db_file, pair, candles_por_tf, exec_tf_label='M5',
         _registrar_diagnostico_sfp(db_file, pair, direcao_permitida, bias_context, diag)
     except Exception as e:
         print(f"[scalp_engine gates_vortex] erro no diagnóstico observacional de {pair}: {e}")
+
+    # ── AUDITORIA — só grava quando motivo_sfp == 'breakout_cancela_analise'.
+    # Não decide nada, não altera nenhuma variável usada pelo restante do
+    # pipeline. Fail-open: erro aqui nunca derruba o fluxo principal.
+    try:
+        if motivo_sfp == 'breakout_cancela_analise':
+            _registrar_audit_breakout_cancel(
+                db_file, pair,
+                cycle_ts=int(time.time()),
+                candle_event_ts=candle_ts_breakout,
+                bias=bias_context,
+                midnight_open=midnight_open,
+                high_liq=liquidez.get('high') if liquidez else None,
+                low_liq=liquidez.get('low') if liquidez else None,
+                motivo=motivo_sfp,
+            )
+    except Exception as e:
+        print(f"[scalp_engine audit_breakout] erro ao registrar auditoria de {pair}: {e}")
 
     if not sfp:
         resultado['motivo'] = f'Bias {bias_context}, {motivo_sfp}'
@@ -3559,11 +3625,6 @@ def formatar_saida_gates_json(resultado):
         },
         'gates_validacao': resultado.get('gates'),
     }
-
-
-
-
-
 
 
 def _save_filtro_shadow(db_file, pair, exec_tf_label, direcao, score, entry, sl, tp, filtros_bloqueados):

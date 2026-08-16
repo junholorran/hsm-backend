@@ -2979,7 +2979,7 @@ def esta_em_hora_toxica_estrita(candles_referencia, pair=None):
 GATES_STALENESS_MAX_SEG = 90  # antes 30 — realista pro ciclo em lote (7-9 pares, várias chamadas cada)
 
 
-def dados_obsoletos(candles, max_latencia_seg=GATES_STALENESS_MAX_SEG, intervalo_candle_seg=60):
+def dados_obsoletos(candles, max_latencia_seg=GATES_STALENESS_MAX_SEG, intervalo_candle_seg=60, agora_ts=None):
     """
     Staleness — descarta a análise se o FECHAMENTO estimado do candle
     mais recente já tem mais de `max_latencia_seg` de idade.
@@ -2989,11 +2989,20 @@ def dados_obsoletos(candles, max_latencia_seg=GATES_STALENESS_MAX_SEG, intervalo
     mesmo em tempo real perfeito — medir direto da abertura reprovava
     quase todo ciclo à toa. Agora soma a duração do candle
     (`intervalo_candle_seg`) antes de comparar.
+
+    `agora_ts` — parâmetro OPCIONAL, só para uso em replay histórico.
+    Em produção nunca é passado (fica None) e o comportamento é
+    IDÊNTICO ao de sempre: usa time.time() (relógio real). Só quando
+    um chamador explicitamente passa agora_ts (ex: replay andando
+    candle a candle no passado), a função usa esse timestamp histórico
+    no lugar do relógio da máquina — porque comparar time.time() (hoje)
+    contra um candle de semanas atrás sempre dava "obsoleto", o que
+    inviabilizava qualquer replay sem alterar nenhuma regra de negócio.
     """
     if not candles:
         return True
     fechamento_estimado = candles[-1]['t'] / 1000 + intervalo_candle_seg
-    agora = time.time()
+    agora = agora_ts if agora_ts is not None else time.time()
     return (agora - fechamento_estimado) > max_latencia_seg
 
 
@@ -3250,7 +3259,7 @@ def resolver_expirados_gates_vortex(db_file, pair):
         print(f"[scalp_engine gates_vortex] erro ao checar expirados de {pair}: {e}")
 
 
-def process_pair_gates_vortex(db_file, pair, candles_por_tf, exec_tf_label='M5', send_telegram_fn=None):
+def process_pair_gates_vortex(db_file, pair, candles_por_tf, exec_tf_label='M5', send_telegram_fn=None, agora_ts=None):
     """
     Pipeline completo de Gates A-F. Só retorna SIGNAL_DISPARADO quando
     TODOS os 7 gates passarem. Reaproveita Bias/SFP/MSS/FVG do modo
@@ -3278,7 +3287,7 @@ def process_pair_gates_vortex(db_file, pair, candles_por_tf, exec_tf_label='M5',
         return resultado
 
     # ── Staleness ──
-    if dados_obsoletos(candles_gatilho, intervalo_candle_seg=intervalo_gatilho_seg):
+    if dados_obsoletos(candles_gatilho, intervalo_candle_seg=intervalo_gatilho_seg, agora_ts=agora_ts):
         resultado['motivo'] = f'dados obsoletos — candle mais recente com mais de {GATES_STALENESS_MAX_SEG}s'
         return resultado
 
@@ -6288,6 +6297,355 @@ def replay_comparar_referencias_liquidez(pair, dias_historico=30, forward_lookah
         },
         'por_referencia': relatorio,
     }
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# SHADOW/REPLAY — gates_reprovados (Fase 1)
+#
+# Investigação de telemetria pura: "as oportunidades que o Kairos
+# rejeitou por falha em algum gate A-G teriam dado TP ou SL?"
+#
+# NÃO altera nenhuma função de produção. NÃO é chamado por nenhum ciclo
+# automático. Reaproveita process_pair_gates_vortex() de verdade (mesma
+# lógica de bias/SFP/MSS/FVG/gates), mas SEMPRE com um db_file temporário
+# e descartável — nunca com o banco de produção. Os resultados de cada
+# oportunidade (entry/sl/tp1/tp2/direção/gates) são lidos do dict de
+# retorno, não de nenhuma tabela.
+#
+# Ambiguidade resolvida (documentada, não inventada): não existe
+# histórico persistido de eventos gates_reprovados com entry/sl/tp
+# (scalp_gates_vortex_diagnostico só guarda contador agregado). Por
+# isso o replay recalcula retroativamente, candle a candle, usando
+# candles históricos reais da Bybit — mesmo padrão de
+# replay_comparar_referencias_liquidez().
+# ═══════════════════════════════════════════════════════════════════════
+
+import tempfile
+import os
+
+
+GATES_REPROVADOS_HORIZONTES_CANDLES = [20, 50, 100]
+GATES_REPROVADOS_EXEC_TF_MS = 300000  # M5 — mesmo timeframe de gatilho da produção
+GATES_REPROVADOS_EXEC_TF_SEG = 300    # mesmo valor em segundos, pra alimentar agora_ts em dados_obsoletos()
+
+
+def _montar_candles_por_tf_ate(d1, h4, h1, m15, m5, m1, ts_corte_ms):
+    """
+    Monta o dict candles_por_tf exatamente no formato que
+    process_pair_gates_vortex() espera, mas só com candles cujo
+    timestamp de ABERTURA é <= ts_corte_ms — ou seja, só o que já
+    tinha fechado (ou estava fechando) naquele ponto do histórico.
+    Isso é o que garante ausência de lookahead: nenhuma função de
+    produção enxerga candle futuro.
+    """
+    def corta(candles):
+        if not candles:
+            return candles
+        return [c for c in candles if c['t'] <= ts_corte_ms]
+
+    return {
+        'D1': corta(d1), 'H4': corta(h4), 'H1': corta(h1),
+        'M15': corta(m15), 'M5': corta(m5), 'M1': corta(m1),
+    }
+
+
+def _identidade_oportunidade_gates_reprovados(pair, resultado):
+    """
+    Chave de deduplicação de uma oportunidade gates_reprovados. Mesmo
+    princípio já usado no dedup de sfp_breakout_cancelado (evitar
+    contar a mesma reavaliação várias vezes): se entry/sl/direção
+    baterem exatamente entre ciclos consecutivos, é a mesma
+    oportunidade sendo reavaliada, não uma nova.
+    """
+    return (
+        pair,
+        resultado.get('direcao'),
+        round(resultado.get('entry'), 6) if resultado.get('entry') is not None else None,
+        round(resultado.get('sl'), 6) if resultado.get('sl') is not None else None,
+    )
+
+
+def _resolver_tp_sl_futuro(candles_gatilho_futuros, direcao, entry, sl, tp1, tp2, max_candles):
+    """
+    Réplica do padrão já usado em _avaliar_qualidade_sfp_evento(): anda
+    candle a candle nos candles FUTUROS reais (nunca usa preço do
+    momento em que o replay roda), verifica qual nível é atingido
+    primeiro. Sem lookahead: só olha pra frente do candle de entrada,
+    nunca usa resultado futuro pra decidir se o setup existia.
+
+    Se TP e SL forem tocados no MESMO candle, marca AMBIGUO (não
+    inventa ordem intrabar). Se nada for tocado dentro de max_candles,
+    marca NENHUM.
+    """
+    janela = candles_gatilho_futuros[:max_candles]
+    if not janela:
+        return {'resultado': 'NENHUM', 'candles_ate_resolucao': None, 'mfe_pct': 0.0, 'mae_pct': 0.0}
+
+    mfe = 0.0
+    mae = 0.0
+
+    for idx, c in enumerate(janela):
+        if direcao == 'alta':
+            avanco = c['h'] - entry
+            recuo = entry - c['l']
+        else:
+            avanco = entry - c['l']
+            recuo = c['h'] - entry
+        mfe = max(mfe, avanco)
+        mae = max(mae, recuo)
+
+        if direcao == 'alta':
+            bateu_sl = c['l'] <= sl
+            bateu_tp1 = tp1 is not None and c['h'] >= tp1
+            bateu_tp2 = tp2 is not None and c['h'] >= tp2
+        else:
+            bateu_sl = c['h'] >= sl
+            bateu_tp1 = tp1 is not None and c['l'] <= tp1
+            bateu_tp2 = tp2 is not None and c['l'] <= tp2
+
+        if bateu_sl and (bateu_tp1 or bateu_tp2):
+            return {
+                'resultado': 'AMBIGUO', 'candles_ate_resolucao': idx + 1,
+                'mfe_pct': round(mfe / entry * 100, 4), 'mae_pct': round(mae / entry * 100, 4),
+            }
+        if bateu_tp2:
+            return {
+                'resultado': 'TP2', 'candles_ate_resolucao': idx + 1,
+                'mfe_pct': round(mfe / entry * 100, 4), 'mae_pct': round(mae / entry * 100, 4),
+            }
+        if bateu_tp1:
+            return {
+                'resultado': 'TP1', 'candles_ate_resolucao': idx + 1,
+                'mfe_pct': round(mfe / entry * 100, 4), 'mae_pct': round(mae / entry * 100, 4),
+            }
+        if bateu_sl:
+            return {
+                'resultado': 'SL', 'candles_ate_resolucao': idx + 1,
+                'mfe_pct': round(mfe / entry * 100, 4), 'mae_pct': round(mae / entry * 100, 4),
+            }
+
+    return {
+        'resultado': 'NENHUM', 'candles_ate_resolucao': None,
+        'mfe_pct': round(mfe / entry * 100, 4), 'mae_pct': round(mae / entry * 100, 4),
+    }
+
+
+def replay_gates_reprovados(pair, dias_historico=30):
+    """
+    Shadow/replay da Fase 1: varre o histórico real do par, chamando
+    process_pair_gates_vortex() (função de PRODUÇÃO, sem alteração)
+    contra um db_file TEMPORÁRIO e descartável a cada M5 fechado, e
+    coleta toda ocorrência cuja resultado['motivo'] contenha 'falhou
+    nos gates' (== categoria gates_reprovados). Cada oportunidade única
+    (dedup por pair+direção+entry+sl) é levada adiante nos horizontes
+    de 20/50/100 candles M5, usando só candles futuros reais.
+
+    NÃO escreve em nenhuma tabela de produção. NÃO é chamado por nenhum
+    ciclo automático. NÃO altera process_pair_gates_vortex() nem
+    qualquer outra função de produção.
+    """
+    symbol_map = {
+        'BTCUSD': 'BTCUSDT', 'ETHUSD': 'ETHUSDT', 'SOLUSD': 'SOLUSDT', 'XRPUSD': 'XRPUSDT',
+        'LINKUSD': 'LINKUSDT', 'ADAUSD': 'ADAUSDT', 'AVAXUSD': 'AVAXUSDT', 'BNBUSD': 'BNBUSDT',
+        'AAVEUSD': 'AAVEUSDT', 'NEARUSD': 'NEARUSDT', 'PENDLEUSD': 'PENDLEUSDT', 'INJUSD': 'INJUSDT',
+        'ONDOUSD': 'ONDOUSDT',
+    }
+    symbol = symbol_map.get(pair.upper(), pair.upper().replace('USD', 'USDT'))
+
+    d1_bruto = _fetch_bybit_klines_historico(symbol, 'D', dias_historico + 20)
+    m15_bruto = _fetch_bybit_klines_historico(symbol, '15', dias_historico + 3)
+    m5_bruto = _fetch_bybit_klines_historico(symbol, '5', dias_historico + 2)
+
+    d1, validacao_d1 = _validar_e_limpar_candles(d1_bruto, 'D')
+    m15, validacao_m15 = _validar_e_limpar_candles(m15_bruto, '15')
+    m5, validacao_m5 = _validar_e_limpar_candles(m5_bruto, '5' if '5' in INTERVALO_MS_POR_LABEL else '15')
+
+    if len(d1) < 15 or len(m5) < 100:
+        return {
+            'erro': f'dados históricos insuficientes pra {pair} (D1={len(d1)}, M5={len(m5)})',
+            'validacao_d1': validacao_d1, 'validacao_m5': validacao_m5,
+        }
+
+    # ── db_file temporário e descartável — NUNCA o banco de produção ──
+    tmp_fd, tmp_db_path = tempfile.mkstemp(suffix='.db', prefix=f'shadow_gates_reprovados_{pair}_')
+    os.close(tmp_fd)
+
+    oportunidades_vistas = {}  # chave dedup -> primeira ocorrência registrada
+    todas_ocorrencias_brutas = 0
+
+    try:
+        for i in range(len(m5)):
+            ts_corte = m5[i]['t']
+            candles_por_tf = _montar_candles_por_tf_ate(d1, None, None, m15, m5[:i + 1], None, ts_corte)
+
+            try:
+                agora_ts_historico = (ts_corte / 1000) + GATES_REPROVADOS_EXEC_TF_SEG
+                resultado = process_pair_gates_vortex(
+                    tmp_db_path, pair, candles_por_tf, exec_tf_label='M5',
+                    agora_ts=agora_ts_historico,
+                )
+            except Exception:
+                continue
+
+            motivo = resultado.get('motivo') or ''
+            if 'falhou nos gates' not in motivo:
+                continue
+
+            todas_ocorrencias_brutas += 1
+            chave = _identidade_oportunidade_gates_reprovados(pair, resultado)
+            if chave not in oportunidades_vistas:
+                oportunidades_vistas[chave] = {
+                    'pair': pair, 'ts_evento': ts_corte, 'direcao': resultado.get('direcao'),
+                    'entry': resultado.get('entry'), 'sl': resultado.get('sl'),
+                    'tp1': resultado.get('tp1'), 'tp2': resultado.get('tp2'),
+                    'gates': resultado.get('gates'), 'motivo': motivo,
+                    'idx_m5': i,
+                }
+    finally:
+        try:
+            os.remove(tmp_db_path)
+        except Exception:
+            pass
+
+    oportunidades = list(oportunidades_vistas.values())
+
+    # ── Resolver TP/SL/AMBIGUO/NENHUM nos 3 horizontes, sem lookahead ──
+    resultados_por_horizonte = {h: [] for h in GATES_REPROVADOS_HORIZONTES_CANDLES}
+    for op in oportunidades:
+        if op['entry'] is None or op['sl'] is None:
+            continue
+        idx = op['idx_m5']
+        candles_futuros = m5[idx + 1:]
+        for h in GATES_REPROVADOS_HORIZONTES_CANDLES:
+            res = _resolver_tp_sl_futuro(
+                candles_futuros, op['direcao'], op['entry'], op['sl'], op['tp1'], op['tp2'], h,
+            )
+            resultados_por_horizonte[h].append({**op, **res})
+
+    relatorio_por_horizonte = {}
+    for h, lista in resultados_por_horizonte.items():
+        relatorio_por_horizonte[f'{h}_candles_M5'] = _agregar_relatorio_gates_reprovados(lista)
+
+    return {
+        'pair': pair, 'dias_historico': dias_historico,
+        'validacao_dados': {'D1': validacao_d1, 'M5': validacao_m5},
+        'oportunidades_brutas_antes_dedup': todas_ocorrencias_brutas,
+        'oportunidades_unicas_apos_dedup': len(oportunidades),
+        'taxa_repeticao': round(todas_ocorrencias_brutas / len(oportunidades), 2) if oportunidades else None,
+        'nota_metodologica': (
+            'Réplica exata da lógica de produção: process_pair_gates_vortex() foi chamado sem '
+            'alteração, contra db_file temporário/descartável, andando candle a candle no '
+            'histórico real (sem lookahead — cada chamada só enxerga candles com t <= ts_corte). '
+            'Cada oportunidade única foi deduplicada por (pair, direção, entry, sl) para não '
+            'contar a mesma reavaliação como evento novo. sfp_breakout_cancelado NÃO É '
+            'backtestável nesta metodologia (sem entry/sl coerente) e não aparece neste relatório.'
+        ),
+        'por_horizonte': relatorio_por_horizonte,
+    }
+
+
+def _agregar_relatorio_gates_reprovados(lista_resultados):
+    if not lista_resultados:
+        return {'amostra': 0, 'nota': 'AMOSTRA INSUFICIENTE PARA CONCLUSÃO'}
+
+    n = len(lista_resultados)
+    n_tp1 = sum(1 for r in lista_resultados if r['resultado'] == 'TP1')
+    n_tp2 = sum(1 for r in lista_resultados if r['resultado'] == 'TP2')
+    n_sl = sum(1 for r in lista_resultados if r['resultado'] == 'SL')
+    n_ambiguo = sum(1 for r in lista_resultados if r['resultado'] == 'AMBIGUO')
+    n_nenhum = sum(1 for r in lista_resultados if r['resultado'] == 'NENHUM')
+
+    n_win = n_tp1 + n_tp2
+    n_resolvidos = n_win + n_sl
+    win_rate = round(100 * n_win / n_resolvidos, 1) if n_resolvidos else None
+    loss_rate = round(100 - win_rate, 1) if win_rate is not None else None
+
+    mfes = sorted(r['mfe_pct'] for r in lista_resultados)
+    maes = sorted(r['mae_pct'] for r in lista_resultados)
+    mfe_medio = round(sum(mfes) / len(mfes), 4) if mfes else None
+    mae_medio = round(sum(maes) / len(maes), 4) if maes else None
+    mfe_mediano = _percentil(mfes, 50)
+    mae_mediano = _percentil(maes, 50)
+
+    # Expectancy com RR real do próprio setup (TP1), sem inventar RR
+    rrs_win = []
+    for r in lista_resultados:
+        if r['resultado'] in ('TP1', 'SL') and r['entry'] is not None and r['sl'] is not None and r['tp1'] is not None:
+            risco = abs(r['entry'] - r['sl'])
+            retorno_tp1 = abs(r['tp1'] - r['entry'])
+            if risco > 0:
+                rrs_win.append(retorno_tp1 / risco)
+    rr_medio_tp1 = round(sum(rrs_win) / len(rrs_win), 2) if rrs_win else None
+    expectancy_tp1 = None
+    if win_rate is not None and rr_medio_tp1 is not None:
+        wr = win_rate / 100
+        expectancy_tp1 = round((wr * rr_medio_tp1) - (1 - wr), 4)
+
+    por_direcao = {}
+    for direcao in ('alta', 'baixa'):
+        sub = [r for r in lista_resultados if r.get('direcao') == direcao]
+        if not sub:
+            continue
+        sub_win = sum(1 for r in sub if r['resultado'] in ('TP1', 'TP2'))
+        sub_sl = sum(1 for r in sub if r['resultado'] == 'SL')
+        sub_resolvidos = sub_win + sub_sl
+        por_direcao[direcao] = {
+            'eventos': len(sub), 'win': sub_win, 'loss': sub_sl,
+            'win_rate_pct': round(100 * sub_win / sub_resolvidos, 1) if sub_resolvidos else None,
+        }
+
+    por_pair = {}
+    for r in lista_resultados:
+        p = r['pair']
+        por_pair.setdefault(p, {'eventos': 0, 'win': 0, 'loss': 0})
+        por_pair[p]['eventos'] += 1
+        if r['resultado'] in ('TP1', 'TP2'):
+            por_pair[p]['win'] += 1
+        elif r['resultado'] == 'SL':
+            por_pair[p]['loss'] += 1
+    for p, v in por_pair.items():
+        resolv = v['win'] + v['loss']
+        v['win_rate_pct'] = round(100 * v['win'] / resolv, 1) if resolv else None
+
+    return {
+        'amostra': n,
+        'amostra_suficiente': n >= 30,
+        'nota': None if n >= 30 else 'AMOSTRA INSUFICIENTE PARA CONCLUSÃO',
+        'TP1': n_tp1, 'TP2': n_tp2, 'SL': n_sl, 'AMBIGUO': n_ambiguo, 'NENHUM': n_nenhum,
+        'win_rate_pct': win_rate, 'loss_rate_pct': loss_rate,
+        'ambiguidade_pct': round(100 * n_ambiguo / n, 1),
+        'expirado_pct': round(100 * n_nenhum / n, 1),
+        'rr_medio_tp1': rr_medio_tp1,
+        'expectancy_tp1': expectancy_tp1,
+        'mfe_medio_pct': mfe_medio, 'mae_medio_pct': mae_medio,
+        'mfe_mediano_pct': mfe_mediano, 'mae_mediano_pct': mae_mediano,
+        'por_direcao': por_direcao,
+        'por_pair': por_pair,
+    }
+
+
+@explicacao_bp.route("/scalp_gates_vortex/replay_gates_reprovados", methods=["GET"])
+def replay_gates_reprovados_endpoint():
+    """
+    Fase 1 do shadow/replay de oportunidades recusadas — categoria
+    gates_reprovados apenas. Ferramenta de ANÁLISE, fora do pipeline de
+    produção. Pesado (varre candle a candle todo o histórico), protegido
+    contra chamada acidental.
+    Uso: ?pair=AAVEUSD&dias=30&confirm=RODAR_REPLAY
+    """
+    if request.args.get('confirm') != 'RODAR_REPLAY':
+        return jsonify({
+            "erro": "endpoint pesado, protegido contra chamada acidental",
+            "como_usar": "adiciona &confirm=RODAR_REPLAY na URL, ex: "
+                          "/scalp_gates_vortex/replay_gates_reprovados?pair=AAVEUSD&dias=30&confirm=RODAR_REPLAY",
+        }), 400
+    pair = request.args.get('pair', 'BTCUSD')
+    dias = int(request.args.get('dias', 30))
+    try:
+        report = replay_gates_reprovados(pair, dias_historico=dias)
+    except Exception as e:
+        return jsonify({"erro": str(e)}), 500
+    return jsonify(report)
 
 
 @explicacao_bp.route("/scalp_gates_vortex/replay_liquidez", methods=["GET"])

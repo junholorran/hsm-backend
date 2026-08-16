@@ -5238,7 +5238,7 @@ REFERENCIAS_LIQUIDEZ = {
 }
 
 
-INTERVALO_MS_POR_LABEL = {'D': 86400000, '15': 900000, '60': 3600000}
+INTERVALO_MS_POR_LABEL = {'D': 86400000, '15': 900000, '60': 3600000, '5': 300000}
 
 
 def _remover_candle_em_formacao(candles, interval_label):
@@ -5321,7 +5321,7 @@ def _fetch_bybit_klines_historico(symbol, interval, dias_historico):
     limita a 1000 candles por request). Só usado pelo replay — nunca
     pelo pipeline de produção, que recebe candles já prontos de fora.
     """
-    intervalo_ms = {'D': 86400000, '15': 900000, '60': 3600000}.get(interval, 900000)
+    intervalo_ms = {'D': 86400000, '15': 900000, '60': 3600000, '5': 300000}.get(interval, 900000)
     total_candles_necessarios = int((dias_historico * 86400000) / intervalo_ms) + 20
     todos = []
     end_ts = None
@@ -6458,7 +6458,7 @@ def replay_gates_reprovados(pair, dias_historico=30):
 
     d1, validacao_d1 = _validar_e_limpar_candles(d1_bruto, 'D')
     m15, validacao_m15 = _validar_e_limpar_candles(m15_bruto, '15')
-    m5, validacao_m5 = _validar_e_limpar_candles(m5_bruto, '5' if '5' in INTERVALO_MS_POR_LABEL else '15')
+    m5, validacao_m5 = _validar_e_limpar_candles(m5_bruto, '5')
 
     if len(d1) < 15 or len(m5) < 100:
         return {

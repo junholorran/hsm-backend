@@ -3324,6 +3324,17 @@ def process_pair_gates_vortex(db_file, pair, candles_por_tf, exec_tf_label='M5',
                 low_liq=liquidez.get('low') if liquidez else None,
                 motivo=motivo_sfp,
             )
+            # ── Chave de dedup pra persistência (patch): transporta os
+            # dados já calculados acima (pair, direcao_permitida, candle
+            # real do breakout) pra dentro de resultado, sem alterar
+            # nenhum valor existente do dict. Consumida só pelo call
+            # site único de _registrar_diagnostico_gates_vortex, em
+            # process_pair_gates_vortex_com_explicacao().
+            resultado['_breakout_cancel_dedup_key'] = {
+                'pair': pair,
+                'direcao': direcao_permitida,
+                'candle_event_ts': candle_ts_breakout,
+            }
     except Exception as e:
         print(f"[scalp_engine audit_breakout] erro ao registrar auditoria de {pair}: {e}")
 
@@ -4818,7 +4829,30 @@ def process_pair_gates_vortex_com_explicacao(db_file, pair, candles_por_tf, exec
                                                send_telegram_fn=None):
     resolver_expirados_gates_vortex(db_file, pair)
     resultado = process_pair_gates_vortex(db_file, pair, candles_por_tf, exec_tf_label, send_telegram_fn)
-    _registrar_diagnostico_gates_vortex(db_file, pair, resultado.get('motivo'))
+
+    # ── DEDUP de persistência para sfp_breakout_cancelado (patch) ──
+    # validar_sfp_estrito() continua sendo reavaliada a cada ciclo, sem
+    # NENHUMA alteração de lógica. O que muda é só a PERSISTÊNCIA: se o
+    # mesmo evento (pair + direcao + candle_event_ts) já foi registrado
+    # antes, esta reavaliação não incrementa o contador de novo.
+    # Reaproveita o padrão UNIQUE + INSERT OR IGNORE de
+    # classify_sfp_causal() / scalp_sfp_cluster_events. Toda categoria
+    # que NÃO seja breakout_cancela_analise segue exatamente como antes
+    # (chamada incondicional, sem dedup nenhum) — resultado.get(
+    # '_breakout_cancel_dedup_key') só existe quando motivo_sfp foi
+    # 'breakout_cancela_analise' nesse ciclo.
+    dedup_key = resultado.get('_breakout_cancel_dedup_key')
+    if dedup_key:
+        evento_novo = _evento_breakout_cancel_e_novo(
+            db_file, dedup_key['pair'], dedup_key['direcao'], dedup_key['candle_event_ts'],
+        )
+        if evento_novo:
+            _registrar_diagnostico_gates_vortex(db_file, pair, resultado.get('motivo'))
+        # se não for evento novo (mesmo candle já registrado antes),
+        # pula o registro desta reavaliação — não incrementa de novo.
+    else:
+        _registrar_diagnostico_gates_vortex(db_file, pair, resultado.get('motivo'))
+
     exec_candles_ref = candles_por_tf.get('M5') or candles_por_tf.get('M1')
     salvar_explicacao_ultimo_sinal(db_file, 'gates_vortex', pair, resultado, exec_candles=exec_candles_ref)
     return resultado
@@ -5703,6 +5737,91 @@ def classify_sfp_causal(db_file, pair, direcao, event_ts, reference_level=None, 
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# DEDUP DE PERSISTÊNCIA — sfp_breakout_cancelado (correção pontual)
+#
+# Problema confirmado por evidência (audit_breakout_cancel): o mesmo
+# candle/evento de breakout era reavaliado a cada ciclo do engine
+# (validar_sfp_estrito não tem memória entre ciclos, de propósito) e
+# CADA reavaliação incrementava contagem+1 em scalp_gates_vortex_diagnostico
+# via _registrar_diagnostico_gates_vortex — 217+ ocorrências pro MESMO
+# candle_event_ts em produção.
+#
+# Esta correção NÃO toca em validar_sfp_estrito() (a reavaliação a cada
+# ciclo continua acontecendo, sem alteração nenhuma de lógica de
+# detecção). Só evita que a MESMA identidade de evento incremente o
+# contador mais de uma vez — reaproveitando exatamente o padrão UNIQUE +
+# INSERT OR IGNORE que classify_sfp_causal() / scalp_sfp_cluster_events
+# já usa. Identidade do evento = (pair, direcao, candle_event_ts).
+#
+# A tabela audit_breakout_cancel (auditoria bruta, sem dedup) continua
+# existindo e gravando cada reavaliação, sem alteração — ela é a prova
+# permanente de que o mecanismo de reavaliação existe, e serve pra
+# validar esta correção depois do deploy.
+# ═══════════════════════════════════════════════════════════════════════
+
+def init_breakout_cancel_dedup_db(db_file):
+    """Cria a tabela de dedup se não existir. Mesmo schema-padrão de
+    scalp_sfp_cluster_events (UNIQUE(pair, direcao, timestamp))."""
+    try:
+        with sqlite3.connect(db_file) as conn:
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS scalp_breakout_cancel_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    pair TEXT NOT NULL,
+                    direcao TEXT NOT NULL,
+                    candle_event_ts INTEGER NOT NULL,
+                    created_at INTEGER,
+                    UNIQUE(pair, direcao, candle_event_ts)
+                )
+            ''')
+            conn.execute('''
+                CREATE INDEX IF NOT EXISTS idx_breakout_cancel_events_pair_dir
+                ON scalp_breakout_cancel_events(pair, direcao)
+            ''')
+            conn.commit()
+    except Exception as e:
+        print(f"[scalp_engine breakout_cancel_dedup] erro ao criar tabela: {e}")
+
+
+def _evento_breakout_cancel_e_novo(db_file, pair, direcao, candle_event_ts):
+    """
+    Dedup de persistência para o evento 'breakout_cancela_analise', no
+    mesmo padrão de classify_sfp_causal() / scalp_sfp_cluster_events
+    (UNIQUE + INSERT OR IGNORE). Identidade do evento = (pair, direcao,
+    candle_event_ts) — o candle REAL que causou o breakout (capturado em
+    validar_sfp_estrito(), não o timestamp do ciclo/polling.
+
+    Retorna True se esta é a PRIMEIRA vez que este evento é visto (o
+    INSERT aconteceu de fato) — o chamador deve registrar a telemetria
+    normalmente. Retorna False se o evento já tinha sido registrado
+    antes (reavaliação do mesmo candle num ciclo posterior) — o
+    chamador deve pular o registro desta vez, sem incrementar de novo.
+
+    Fail-open: se o DB falhar, trata como evento novo — não bloqueia a
+    telemetria por causa de uma camada de proteção extra.
+    """
+    if candle_event_ts is None:
+        # Sem candle_event_ts real não há como deduplicar com segurança;
+        # deixa passar como novo (mesmo comportamento de antes do patch).
+        return True
+
+    init_breakout_cancel_dedup_db(db_file)
+    try:
+        with sqlite3.connect(db_file) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT OR IGNORE INTO scalp_breakout_cancel_events
+                    (pair, direcao, candle_event_ts, created_at)
+                VALUES (?, ?, ?, ?)
+            ''', (pair, direcao, candle_event_ts, int(time.time())))
+            conn.commit()
+            return cursor.rowcount > 0
+    except Exception as e:
+        print(f"[scalp_engine breakout_cancel_dedup] erro ao verificar evento {pair}/{direcao}: {e}")
+        return True
+
+
+
 # TELEMETRIA DE SFP (13/08) — camada de COLETA/DIAGNÓSTICO, conforme
 # markup "Evolução do SFP Causal". Regra absoluta desta fase: estes
 # campos são só instrumentação — não podem mudar sinal, ENTRY, SL, TP,

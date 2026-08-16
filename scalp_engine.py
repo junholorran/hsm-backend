@@ -6526,12 +6526,37 @@ def replay_gates_reprovados(pair, dias_historico=30):
     for h, lista in resultados_por_horizonte.items():
         relatorio_por_horizonte[f'{h}_candles_M5'] = _agregar_relatorio_gates_reprovados(lista)
 
+    n_long = sum(1 for op in oportunidades if op.get('direcao') == 'alta')
+    n_short = sum(1 for op in oportunidades if op.get('direcao') == 'baixa')
+
+    primeiro_ts_m5 = m5[0]['t'] if m5 else None
+    ultimo_ts_m5 = m5[-1]['t'] if m5 else None
+    duracao_horas = round((ultimo_ts_m5 - primeiro_ts_m5) / 3600000, 2) if (primeiro_ts_m5 and ultimo_ts_m5) else None
+    duracao_dias = round(duracao_horas / 24, 2) if duracao_horas is not None else None
+
+    # Confirmação empírica do intervalo real (mediana da diferença entre
+    # candles consecutivos) — não assume, mede o dado de verdade.
+    intervalo_medido_seg = None
+    if len(m5) >= 2:
+        diffs = sorted((m5[i]['t'] - m5[i - 1]['t']) / 1000 for i in range(1, len(m5)))
+        intervalo_medido_seg = diffs[len(diffs) // 2]
+
     return {
         'pair': pair, 'dias_historico': dias_historico,
+        'dados_historicos': {
+            'candles_d1': len(d1), 'candles_m5': len(m5),
+            'primeiro_ts_m5': primeiro_ts_m5, 'ultimo_ts_m5': ultimo_ts_m5,
+            'duracao_coberta_horas': duracao_horas, 'duracao_coberta_dias': duracao_dias,
+            'intervalo_m5_medido_segundos': intervalo_medido_seg,
+            'intervalo_m5_confirmado_5min': intervalo_medido_seg == 300 if intervalo_medido_seg is not None else None,
+            'gaps_m5': validacao_m5.get('gaps'), 'candle_em_formacao_removido_m5': validacao_m5.get('candle_em_formacao_removido'),
+        },
         'validacao_dados': {'D1': validacao_d1, 'M5': validacao_m5},
         'oportunidades_brutas_antes_dedup': todas_ocorrencias_brutas,
         'oportunidades_unicas_apos_dedup': len(oportunidades),
+        'reavaliacoes_repetidas': todas_ocorrencias_brutas - len(oportunidades),
         'taxa_repeticao': round(todas_ocorrencias_brutas / len(oportunidades), 2) if oportunidades else None,
+        'oportunidades_long': n_long, 'oportunidades_short': n_short,
         'nota_metodologica': (
             'Réplica exata da lógica de produção: process_pair_gates_vortex() foi chamado sem '
             'alteração, contra db_file temporário/descartável, andando candle a candle no '
@@ -6643,6 +6668,133 @@ def replay_gates_reprovados_endpoint():
     dias = int(request.args.get('dias', 30))
     try:
         report = replay_gates_reprovados(pair, dias_historico=dias)
+    except Exception as e:
+        return jsonify({"erro": str(e)}), 500
+    return jsonify(report)
+
+
+PARES_MONITORADOS_REPLAY = [
+    'BTCUSD', 'ETHUSD', 'SOLUSD', 'XRPUSD', 'LINKUSD', 'ADAUSD',
+    'AVAXUSD', 'BNBUSD', 'AAVEUSD', 'NEARUSD', 'PENDLEUSD', 'INJUSD', 'ONDOUSD',
+]
+
+
+def replay_gates_reprovados_todos_pares(dias_historico=7, pares=None):
+    """
+    Roda replay_gates_reprovados() (SEM ALTERAÇÃO NENHUMA) em sequência
+    para cada par da lista, e agrega os resultados. Cada par é 100%
+    independente — erro num par não derruba os demais (fica registrado
+    em 'erro' dentro do resultado daquele par específico).
+
+    Mesma metodologia, mesmas garantias de segurança de
+    replay_gates_reprovados(): db_file temporário/descartável por
+    chamada, sem lookahead, sem tocar produção, sem Telegram, sem sinal
+    real. Esta função só ORQUESTRA múltiplas chamadas — não duplica
+    nenhuma lógica de replay nem de produção.
+    """
+    pares = pares or PARES_MONITORADOS_REPLAY
+    resultados_por_pair = {}
+
+    total_brutas = 0
+    total_unicas = 0
+    total_long = 0
+    total_short = 0
+    pares_com_erro = []
+    pares_com_dados_insuficientes = []
+
+    for p in pares:
+        try:
+            r = replay_gates_reprovados(p, dias_historico=dias_historico)
+        except Exception as e:
+            resultados_por_pair[p] = {'erro': str(e)}
+            pares_com_erro.append(p)
+            continue
+
+        resultados_por_pair[p] = r
+
+        if 'erro' in r:
+            pares_com_dados_insuficientes.append(p)
+            continue
+
+        total_brutas += r.get('oportunidades_brutas_antes_dedup', 0) or 0
+        total_unicas += r.get('oportunidades_unicas_apos_dedup', 0) or 0
+        total_long += r.get('oportunidades_long', 0) or 0
+        total_short += r.get('oportunidades_short', 0) or 0
+
+    # ── Agregação combinada por horizonte, juntando as oportunidades de
+    # TODOS os pares que tiveram dados válidos — para ter uma amostra
+    # estatisticamente mais robusta que par por par isolado. ──
+    agregado_por_horizonte = {}
+    for h in GATES_REPROVADOS_HORIZONTES_CANDLES:
+        chave_h = f'{h}_candles_M5'
+        n_tp1 = n_tp2 = n_sl = n_amb = n_nen = 0
+        for p, r in resultados_por_pair.items():
+            if 'erro' in r:
+                continue
+            bloco = r.get('por_horizonte', {}).get(chave_h, {})
+            n_tp1 += bloco.get('TP1', 0) or 0
+            n_tp2 += bloco.get('TP2', 0) or 0
+            n_sl += bloco.get('SL', 0) or 0
+            n_amb += bloco.get('AMBIGUO', 0) or 0
+            n_nen += bloco.get('NENHUM', 0) or 0
+
+        n_amostra = n_tp1 + n_tp2 + n_sl + n_amb + n_nen
+        n_win = n_tp1 + n_tp2
+        n_resolvidos = n_win + n_sl
+        win_rate = round(100 * n_win / n_resolvidos, 1) if n_resolvidos else None
+
+        agregado_por_horizonte[chave_h] = {
+            'amostra_total_todos_pares': n_amostra,
+            'amostra_suficiente': n_amostra >= 30,
+            'nota': None if n_amostra >= 30 else 'AMOSTRA INSUFICIENTE PARA CONCLUSÃO',
+            'TP1': n_tp1, 'TP2': n_tp2, 'SL': n_sl, 'AMBIGUO': n_amb, 'NENHUM': n_nen,
+            'win_rate_pct': win_rate,
+            'loss_rate_pct': round(100 - win_rate, 1) if win_rate is not None else None,
+        }
+
+    return {
+        'dias_historico': dias_historico,
+        'pares_testados': pares,
+        'pares_com_erro_ou_dados_insuficientes': pares_com_dados_insuficientes + pares_com_erro,
+        'resumo_geral': {
+            'oportunidades_brutas_antes_dedup_total': total_brutas,
+            'oportunidades_unicas_apos_dedup_total': total_unicas,
+            'oportunidades_long_total': total_long,
+            'oportunidades_short_total': total_short,
+        },
+        'agregado_por_horizonte_todos_pares': agregado_por_horizonte,
+        'nota_metodologica': (
+            'Cada par foi processado de forma totalmente independente, chamando '
+            'replay_gates_reprovados() sem nenhuma alteração — mesma metodologia, mesmas '
+            'garantias (db_file temporário por chamada, sem lookahead, sem tocar produção). '
+            'O agregado_por_horizonte_todos_pares soma os resultados de todos os pares com '
+            'dados válidos, para dar uma amostra maior. Detalhe completo de cada par está em '
+            '"resultados_por_pair".'
+        ),
+        'resultados_por_pair': resultados_por_pair,
+    }
+
+
+@explicacao_bp.route("/scalp_gates_vortex/replay_gates_reprovados_todos_pares", methods=["GET"])
+def replay_gates_reprovados_todos_pares_endpoint():
+    """
+    Roda a Fase 1 do shadow/replay (gates_reprovados) em TODOS os pares
+    monitorados de uma vez, e devolve o agregado + detalhe por par.
+    MUITO pesado — roda o replay completo (candle a candle) pra cada um
+    dos ~13 pares em sequência. Pode demorar bastante e arriscar timeout
+    dependendo do limite do servidor. Protegido contra chamada acidental.
+    Uso: ?dias=7&confirm=RODAR_REPLAY_TODOS
+    """
+    if request.args.get('confirm') != 'RODAR_REPLAY_TODOS':
+        return jsonify({
+            "erro": "endpoint MUITO pesado (roda todos os pares em sequência), protegido contra chamada acidental",
+            "como_usar": "adiciona &confirm=RODAR_REPLAY_TODOS na URL, ex: "
+                          "/scalp_gates_vortex/replay_gates_reprovados_todos_pares?dias=7&confirm=RODAR_REPLAY_TODOS",
+            "aviso": "pode demorar vários minutos — considera rodar com dias baixo (ex: 7) primeiro",
+        }), 400
+    dias = int(request.args.get('dias', 7))
+    try:
+        report = replay_gates_reprovados_todos_pares(dias_historico=dias)
     except Exception as e:
         return jsonify({"erro": str(e)}), 500
     return jsonify(report)

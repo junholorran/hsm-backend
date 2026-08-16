@@ -4990,6 +4990,128 @@ def diagnostico_sfp_gates_vortex():
     return jsonify(report)
 
 
+def audit_breakout_cancel_report(db_file):
+    """
+    Roda as 4 análises combinadas sobre audit_breakout_cancel:
+    1) total / únicos / fator de repetição (visão geral)
+    2) por pair
+    3) por bias
+    4) top candles mais repetidos (candle_event_ts com >1 ocorrência)
+
+    Só leitura. Não altera nada, não decide nada, não influencia o
+    pipeline. Se a tabela ainda não existir (nenhum breakout_cancela_analise
+    ocorreu ainda desde o deploy), devolve zeros em vez de erro.
+    """
+    _garantir_tabela_audit_breakout_cancel(db_file)
+    try:
+        with sqlite3.connect(db_file) as conn:
+            cursor = conn.cursor()
+
+            # 1) Visão geral
+            cursor.execute('''
+                SELECT COUNT(*), COUNT(DISTINCT candle_event_ts)
+                FROM audit_breakout_cancel
+            ''')
+            total, unicos = cursor.fetchone()
+            fator_repeticao = round(total / unicos, 2) if unicos else None
+
+            # 2) Por pair
+            cursor.execute('''
+                SELECT pair, COUNT(*) AS total, COUNT(DISTINCT candle_event_ts) AS unicos
+                FROM audit_breakout_cancel
+                GROUP BY pair ORDER BY total DESC
+            ''')
+            por_pair = [
+                {
+                    'pair': p, 'total': t, 'unicos': u,
+                    'fator_repeticao': round(t / u, 2) if u else None,
+                }
+                for p, t, u in cursor.fetchall()
+            ]
+
+            # 3) Por bias
+            cursor.execute('''
+                SELECT bias, COUNT(*) AS total, COUNT(DISTINCT candle_event_ts) AS unicos
+                FROM audit_breakout_cancel
+                GROUP BY bias
+            ''')
+            por_bias = [
+                {
+                    'bias': b, 'total': t, 'unicos': u,
+                    'fator_repeticao': round(t / u, 2) if u else None,
+                }
+                for b, t, u in cursor.fetchall()
+            ]
+
+            # 4) Top candles mais repetidos
+            cursor.execute('''
+                SELECT candle_event_ts, pair, COUNT(*) AS ocorrencias,
+                       MIN(cycle_ts) AS primeiro_ciclo, MAX(cycle_ts) AS ultimo_ciclo
+                FROM audit_breakout_cancel
+                GROUP BY candle_event_ts, pair
+                HAVING COUNT(*) > 1
+                ORDER BY ocorrencias DESC
+                LIMIT 20
+            ''')
+            top_repetidos = [
+                {
+                    'candle_event_ts': ts, 'pair': p, 'ocorrencias': n,
+                    'primeiro_ciclo': primeiro, 'ultimo_ciclo': ultimo,
+                    'intervalo_segundos': (ultimo - primeiro) if (primeiro is not None and ultimo is not None) else None,
+                }
+                for ts, p, n, primeiro, ultimo in cursor.fetchall()
+            ]
+
+    except Exception as e:
+        return {'erro': str(e)}
+
+    # Conclusão automática, só como referência rápida — não substitui
+    # análise manual, mas já indica pra qual lado os números apontam.
+    conclusao = 'C_INCONCLUSIVO_DADOS_INSUFICIENTES'
+    if total and total >= 20:
+        if fator_repeticao is not None:
+            if fator_repeticao >= 3:
+                conclusao = 'A_PROVAVEL_TELEMETRIA_INFLACIONADA'
+            elif fator_repeticao <= 1.3:
+                conclusao = 'B_PROVAVEL_EVENTOS_REAIS'
+            else:
+                conclusao = 'C_INCONCLUSIVO_ZONA_CINZENTA'
+
+    return {
+        'visao_geral': {
+            'total_ocorrencias': total,
+            'candle_event_ts_unicos': unicos,
+            'fator_repeticao': fator_repeticao,
+        },
+        'por_pair': por_pair,
+        'por_bias': por_bias,
+        'top_candles_repetidos': top_repetidos,
+        'conclusao_automatica_referencial': conclusao,
+        'nota': (
+            'Conclusão automática é só um indicador rápido baseado em fator_repeticao '
+            '(>=3 sugere A, <=1.3 sugere B, entre os dois é zona cinzenta C). '
+            'A leitura final continua sendo manual, olhando top_candles_repetidos e '
+            'o contexto de cada pair/bias.'
+        ),
+    }
+
+
+@explicacao_bp.route("/scalp_gates_vortex/audit_breakout_report", methods=["GET"])
+def audit_breakout_report_endpoint():
+    """
+    Endpoint de leitura da tabela audit_breakout_cancel — consolida as
+    4 análises combinadas (total/únicos/fator, por pair, por bias, top
+    candles repetidos) num único JSON. Só leitura, não decide nada, não
+    influencia o pipeline de produção.
+    Uso: GET /scalp_gates_vortex/audit_breakout_report
+    """
+    try:
+        report = audit_breakout_cancel_report(_db_file_explicacao())
+    except Exception as e:
+        return jsonify({"erro": str(e)}), 500
+    return jsonify(report)
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # REPLAY HISTÓRICO — ferramenta de análise, NÃO faz parte do pipeline de
 # produção. Não é chamado por nenhum ciclo automático, não influencia

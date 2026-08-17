@@ -6739,6 +6739,7 @@ def replay_gates_reprovados(pair, dias_historico=30):
     # aprovado do ticket) — chave = texto exato do motivo, valor =
     # quantas vezes apareceu. Puramente observacional. ──
     motivos_nao_classificados_texto = {}
+    sfp_rejeicao_fisica_motivos_texto = {}
 
     # ── DETALHE DOS GATES A-G — instrumentação pura. resultado['gates']
     # já é retornado por process_pair_gates_vortex() sem alteração
@@ -6813,6 +6814,7 @@ def replay_gates_reprovados(pair, dias_historico=30):
         'sinais_aprovados': 0,
         'em_cooldown': 0,
         'outro_motivo_nao_classificado': 0,
+        'sfp_rejeicao_fisica_insuficiente': 0,
     }
     # Validação causal do H1 — prova que nenhum candle H1 futuro (t >
     # ts_corte) jamais entrou em candles_por_tf['H1'] em nenhum ciclo.
@@ -6993,6 +6995,15 @@ def replay_gates_reprovados(pair, dias_historico=30):
                     pass  # idem — SFP nunca confirmou
                 elif 'SFP repetido dentro do cluster' in motivo:
                     funil['sfp_repetido_cluster'] += 1
+                elif 'rejeição física insuficiente no candle do SFP' in motivo:
+                    # ── item aprovado do ticket: promove o motivo já
+                    # confirmado pelo dado real (36/36 do LINK) de
+                    # observacional pra contador oficial do funil.
+                    # Origem: process_pair_gates_vortex(), no if not
+                    # rejeicao_ok: (não alterado). Estágio real: entre
+                    # SFP confirmado e MSS. ──
+                    funil['sfp_rejeicao_fisica_insuficiente'] += 1
+                    sfp_rejeicao_fisica_motivos_texto[motivo] = sfp_rejeicao_fisica_motivos_texto.get(motivo, 0) + 1
                 elif 'padrão de rejeição fraco' in motivo:
                     funil['padrao_fraco'] += 1
                 elif 'pra validar MSS' in motivo or 'sem MSS de corpo forte' in motivo:
@@ -7253,6 +7264,16 @@ def replay_gates_reprovados(pair, dias_historico=30):
                 ),
                 'distribuicao': motivos_nao_classificados_texto,
                 'total': sum(motivos_nao_classificados_texto.values()),
+            },
+            'sfp_rejeicao_fisica_insuficiente_detalhe': {
+                'nota': (
+                    'Distribuição do texto exato (incluindo padrão=X) dos ciclos contados em '
+                    'funil["sfp_rejeicao_fisica_insuficiente"] — mesmo motivo já lido, sem '
+                    'recalcular nada. Estágio: entre SFP confirmado e MSS. Threshold real '
+                    '(rejeicao_ok >= 0.25) permanece intocado, isto é só telemetria.'
+                ),
+                'distribuicao': sfp_rejeicao_fisica_motivos_texto,
+                'total': sum(sfp_rejeicao_fisica_motivos_texto.values()),
             },
         },
         'simulacao_cenarios_gates': {

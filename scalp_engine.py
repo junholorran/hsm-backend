@@ -6735,6 +6735,11 @@ def replay_gates_reprovados(pair, dias_historico=30):
     tfs_divergencia_D = {}
     motivos_diag_quando_real_confirma = {}
 
+    # ── Captura de texto bruto dos motivos não classificados (item
+    # aprovado do ticket) — chave = texto exato do motivo, valor =
+    # quantas vezes apareceu. Puramente observacional. ──
+    motivos_nao_classificados_texto = {}
+
     # ── DETALHE DOS GATES A-G — instrumentação pura. resultado['gates']
     # já é retornado por process_pair_gates_vortex() sem alteração
     # nenhuma (é o mesmo dict usado pra decidir SIGNAL_DISPARADO vs
@@ -7015,6 +7020,12 @@ def replay_gates_reprovados(pair, dias_historico=30):
                         funil['em_cooldown'] += 1
                 elif motivo:
                     funil['outro_motivo_nao_classificado'] += 1
+                    # ── item aprovado do ticket: captura o TEXTO EXATO
+                    # do motivo quando ele não bate com nenhuma
+                    # palavra-chave conhecida. Não altera a
+                    # classificação, não decide nada — só preserva o
+                    # dado bruto pra investigação, em vez de descartá-lo. ──
+                    motivos_nao_classificados_texto[motivo] = motivos_nao_classificados_texto.get(motivo, 0) + 1
 
             if 'falhou nos gates' not in motivo:
                 continue
@@ -7230,6 +7241,18 @@ def replay_gates_reprovados(pair, dias_historico=30):
                 'motivos_reais_quando_D_diverge': motivos_divergencia_D,
                 'timeframes_reais_quando_D_diverge': tfs_divergencia_D,
                 'casos_diag_quando_real_confirma_mas_nao_e_D': motivos_diag_quando_real_confirma,
+            },
+            'motivos_nao_classificados_texto_exato': {
+                'nota': (
+                    'Item aprovado do ticket — captura o TEXTO EXATO de resultado["motivo"] toda '
+                    'vez que um SFP real confirmado (tf_sfp_usado != None) cai no bucket '
+                    'outro_motivo_nao_classificado do funil, ou seja, não bateu com nenhuma '
+                    'palavra-chave conhecida do classificador. Puramente observacional — não '
+                    'altera a classificação nem nenhuma decisão, só preserva o dado bruto que '
+                    'antes era descartado.'
+                ),
+                'distribuicao': motivos_nao_classificados_texto,
+                'total': sum(motivos_nao_classificados_texto.values()),
             },
         },
         'simulacao_cenarios_gates': {
@@ -7643,6 +7666,7 @@ def replay_gates_reprovados_todos_pares_endpoint():
                 'funil': r.get('funil'),
                 'diagnostico_sfp_casos': (r.get('diagnostico_sfp_casos') or {}).get('contagem_por_caso'),
                 'correlacao_diag_vs_decisao_real': (r.get('diagnostico_sfp_casos') or {}).get('correlacao_diag_vs_decisao_real'),
+                'motivos_nao_classificados_texto_exato': (r.get('diagnostico_sfp_casos') or {}).get('motivos_nao_classificados_texto_exato'),
                 'oportunidades_brutas_antes_dedup': r.get('oportunidades_brutas_antes_dedup'),
                 'clusters_por_identidade_real_preliminar': r.get('clusters_por_identidade_real_preliminar'),
                 'validacao_causal_h1': {

@@ -7385,6 +7385,67 @@ def replay_gates_reprovados_todos_pares(dias_historico=7, pares=None):
             'loss_rate_pct': round(100 - win_rate, 1) if win_rate is not None else None,
         }
 
+    # ── Agregação da SIMULAÇÃO DE CENÁRIOS (item aprovado do ticket) —
+    # soma entradas_simuladas/TP1/TP2/SL/AMBIGUO/NENHUM de cada cenário
+    # através de TODOS os pares, e recalcula win_rate/expectancy sobre a
+    # amostra agregada (maior que qualquer par isolado). Nenhum gate é
+    # recalculado — só somamos o que replay_gates_reprovados() já
+    # calculou por par. ──
+    cenarios_agregados = {c: {
+        'entradas_simuladas_total': 0, 'TP1': 0, 'TP2': 0, 'SL': 0, 'AMBIGUO': 0, 'NENHUM': 0,
+        'mfe_soma': 0.0, 'mae_soma': 0.0, 'rr_soma': 0.0, 'rr_n': 0,
+        'pares_com_entrada': [],
+    } for c in CENARIOS_SIMULACAO_GATES}
+
+    for p, r in resultados_por_pair.items():
+        if 'erro' in r:
+            continue
+        cenarios_par = (r.get('simulacao_cenarios_gates') or {}).get('cenarios', {})
+        for nome_cenario, dc in cenarios_par.items():
+            if nome_cenario not in cenarios_agregados:
+                continue
+            ca = cenarios_agregados[nome_cenario]
+            n_entradas = dc.get('entradas_simuladas', 0) or 0
+            ca['entradas_simuladas_total'] += n_entradas
+            ca['TP1'] += dc.get('TP1', 0) or 0
+            ca['TP2'] += dc.get('TP2', 0) or 0
+            ca['SL'] += dc.get('SL', 0) or 0
+            ca['AMBIGUO'] += dc.get('AMBIGUO', 0) or 0
+            ca['NENHUM'] += dc.get('NENHUM', 0) or 0
+            if n_entradas > 0:
+                ca['pares_com_entrada'].append(p)
+            if dc.get('mfe_medio_pct') is not None:
+                ca['mfe_soma'] += dc['mfe_medio_pct'] * n_entradas
+            if dc.get('mae_medio_pct') is not None:
+                ca['mae_soma'] += dc['mae_medio_pct'] * n_entradas
+            if dc.get('rr_medio_realizado') is not None:
+                ca['rr_soma'] += dc['rr_medio_realizado']
+                ca['rr_n'] += 1
+
+    cenarios_agregados_final = {}
+    for nome_cenario, ca in cenarios_agregados.items():
+        n_win = ca['TP1'] + ca['TP2']
+        n_resolvidos = n_win + ca['SL']
+        win_rate = round(100 * n_win / n_resolvidos, 1) if n_resolvidos else None
+        rr_medio = round(ca['rr_soma'] / ca['rr_n'], 2) if ca['rr_n'] else None
+        expectancy = None
+        if win_rate is not None and rr_medio is not None:
+            wr = win_rate / 100
+            expectancy = round((wr * rr_medio) - (1 - wr), 4)
+        cenarios_agregados_final[nome_cenario] = {
+            'entradas_simuladas_total': ca['entradas_simuladas_total'],
+            'pares_com_pelo_menos_1_entrada': ca['pares_com_entrada'],
+            'TP1': ca['TP1'], 'TP2': ca['TP2'], 'SL': ca['SL'],
+            'AMBIGUO': ca['AMBIGUO'], 'NENHUM': ca['NENHUM'],
+            'win_rate_pct': win_rate,
+            'mfe_medio_pct_ponderado': round(ca['mfe_soma'] / ca['entradas_simuladas_total'], 4) if ca['entradas_simuladas_total'] else None,
+            'mae_medio_pct_ponderado': round(ca['mae_soma'] / ca['entradas_simuladas_total'], 4) if ca['entradas_simuladas_total'] else None,
+            'rr_medio_realizado': rr_medio,
+            'expectancy': expectancy,
+            'amostra_suficiente': n_resolvidos >= 30,
+            'nota': None if n_resolvidos >= 30 else 'AMOSTRA INSUFICIENTE PARA CONCLUSÃO',
+        }
+
     return {
         'dias_historico': dias_historico,
         'pares_testados': pares,
@@ -7401,6 +7462,7 @@ def replay_gates_reprovados_todos_pares(dias_historico=7, pares=None):
         },
         'funil_agregado_todos_pares': funil_agregado,
         'agregado_por_horizonte_todos_pares': agregado_por_horizonte,
+        'simulacao_cenarios_agregado_todos_pares': cenarios_agregados_final,
         'nota_metodologica': (
             'Cada par foi processado de forma totalmente independente, chamando '
             'replay_gates_reprovados() sem nenhuma alteração — mesma metodologia, mesmas '
@@ -7418,23 +7480,64 @@ def replay_gates_reprovados_todos_pares_endpoint():
     """
     Roda a Fase 1 do shadow/replay (gates_reprovados) em TODOS os pares
     monitorados de uma vez, e devolve o agregado + detalhe por par.
-    MUITO pesado — roda o replay completo (candle a candle) pra cada um
-    dos ~13 pares em sequência. Pode demorar bastante e arriscar timeout
+    MUITO pesado - roda o replay completo (candle a candle) pra cada um
+    dos ~13 pares em sequencia. Pode demorar bastante e arriscar timeout
     dependendo do limite do servidor. Protegido contra chamada acidental.
     Uso: ?dias=7&confirm=RODAR_REPLAY_TODOS
+    Uso resumido (sem os detalhes por avaliacao/cluster de cada par, so
+    os agregados: funil_agregado_todos_pares, simulacao_cenarios_agregado_
+    todos_pares, e um resumo minimo por par): acrescenta &resumo=true
     """
     if request.args.get('confirm') != 'RODAR_REPLAY_TODOS':
         return jsonify({
-            "erro": "endpoint MUITO pesado (roda todos os pares em sequência), protegido contra chamada acidental",
+            "erro": "endpoint MUITO pesado (roda todos os pares em sequencia), protegido contra chamada acidental",
             "como_usar": "adiciona &confirm=RODAR_REPLAY_TODOS na URL, ex: "
                           "/scalp_gates_vortex/replay_gates_reprovados_todos_pares?dias=7&confirm=RODAR_REPLAY_TODOS",
-            "aviso": "pode demorar vários minutos — considera rodar com dias baixo (ex: 7) primeiro",
+            "aviso": "pode demorar varios minutos - considera rodar com dias baixo (ex: 7) primeiro",
         }), 400
     dias = int(request.args.get('dias', 7))
+    resumo = request.args.get('resumo', 'false').lower() == 'true'
     try:
         report = replay_gates_reprovados_todos_pares(dias_historico=dias)
     except Exception as e:
         return jsonify({"erro": str(e)}), 500
+
+    if resumo:
+        # Filtro puramente de apresentacao - resultados_por_pair vira um
+        # resumo minimo por par (funil + gates_detalhe sem avaliacoes +
+        # simulacao_cenarios_gates sem detalhe_candidatos), sem alterar
+        # nenhum calculo ja feito. Os agregados globais ficam completos.
+        report = dict(report)
+        resultados_por_pair_resumido = {}
+        for p, r in (report.get('resultados_por_pair') or {}).items():
+            if 'erro' in r:
+                resultados_por_pair_resumido[p] = r
+                continue
+            r_resumido = {
+                'pair': r.get('pair'),
+                'dados_historicos': r.get('dados_historicos'),
+                'funil': r.get('funil'),
+                'oportunidades_brutas_antes_dedup': r.get('oportunidades_brutas_antes_dedup'),
+                'clusters_por_identidade_real_preliminar': r.get('clusters_por_identidade_real_preliminar'),
+                'validacao_causal_h1': {
+                    'violacoes_causais_h1': (r.get('validacao_causal_h1') or {}).get('violacoes_causais_h1'),
+                    'h1_100_por_cento_causal': (r.get('validacao_causal_h1') or {}).get('h1_100_por_cento_causal'),
+                },
+            }
+            gd = r.get('gates_detalhe') or {}
+            r_resumido['gates_detalhe_resumo'] = {
+                'agregado_por_gate': gd.get('agregado_por_gate'),
+                'combinacao_mais_frequente_reprovacao': gd.get('combinacao_mais_frequente_reprovacao'),
+                'operandos_agregado_por_subcondicao': gd.get('operandos_agregado_por_subcondicao'),
+            }
+            sc = r.get('simulacao_cenarios_gates') or {}
+            cenarios_resumidos = {}
+            for nome_c, dc in (sc.get('cenarios') or {}).items():
+                cenarios_resumidos[nome_c] = {k: v for k, v in dc.items() if k != 'detalhe_candidatos'}
+            r_resumido['simulacao_cenarios_gates_resumo'] = cenarios_resumidos
+            resultados_por_pair_resumido[p] = r_resumido
+        report['resultados_por_pair'] = resultados_por_pair_resumido
+
     return jsonify(report)
 
 

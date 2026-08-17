@@ -7229,10 +7229,13 @@ def _agregar_relatorio_gates_reprovados(lista_resultados):
 def replay_gates_reprovados_endpoint():
     """
     Fase 1 do shadow/replay de oportunidades recusadas — categoria
-    gates_reprovados apenas. Ferramenta de ANÁLISE, fora do pipeline de
-    produção. Pesado (varre candle a candle todo o histórico), protegido
+    gates_reprovados apenas. Ferramenta de ANALISE, fora do pipeline de
+    producao. Pesado (varre candle a candle todo o historico), protegido
     contra chamada acidental.
     Uso: ?pair=AAVEUSD&dias=30&confirm=RODAR_REPLAY
+    Uso resumido (sem os candles/MSS embutidos em cada avaliacao bruta,
+    so os campos agregados: funil, gates_detalhe sem avaliacoes_brutas,
+    simulacao_cenarios_gates): acrescenta &resumo=true
     """
     if request.args.get('confirm') != 'RODAR_REPLAY':
         return jsonify({
@@ -7242,10 +7245,52 @@ def replay_gates_reprovados_endpoint():
         }), 400
     pair = request.args.get('pair', 'BTCUSD')
     dias = int(request.args.get('dias', 30))
+    resumo = request.args.get('resumo', 'false').lower() == 'true'
     try:
         report = replay_gates_reprovados(pair, dias_historico=dias)
     except Exception as e:
         return jsonify({"erro": str(e)}), 500
+
+    if resumo and 'erro' not in report:
+        # Filtro puramente de apresentacao - remove so os campos
+        # volumosos (candles/MSS embutidos em cada avaliacao bruta),
+        # sem alterar nenhum calculo ja feito.
+        report = dict(report)
+        if 'gates_detalhe' in report:
+            gd = dict(report['gates_detalhe'])
+            gd.pop('avaliacoes_brutas', None)
+            report['gates_detalhe'] = gd
+        if 'identidade_temporal_eventos' in report:
+            ite = dict(report['identidade_temporal_eventos'])
+            avals_enxutas = []
+            for av in ite.get('avaliacoes', []):
+                av_enxuta = {k: v for k, v in av.items() if k not in ('gate_a_operandos', 'gate_b_operandos', 'gate_c_operandos')}
+                for chave_gate in ('gate_a_operandos', 'gate_b_operandos', 'gate_c_operandos'):
+                    dados_gate = av.get(chave_gate)
+                    if dados_gate:
+                        dg = {k: v for k, v in dados_gate.items() if k not in ('mss', 'entry_zone')}
+                        av_enxuta[chave_gate] = dg
+                avals_enxutas.append(av_enxuta)
+            ite['avaliacoes'] = avals_enxutas
+            report['identidade_temporal_eventos'] = ite
+        if 'clusters_detalhe' in report:
+            cd = dict(report['clusters_detalhe'])
+            clusters_enxutos = []
+            for c in cd.get('clusters', []):
+                c_enxuto = {k: v for k, v in c.items() if k != 'gates_reprovados_por_avaliacao'}
+                clusters_enxutos.append(c_enxuto)
+            cd['clusters'] = clusters_enxutos
+            report['clusters_detalhe'] = cd
+        if 'simulacao_cenarios_gates' in report:
+            sc = dict(report['simulacao_cenarios_gates'])
+            cenarios_enxutos = {}
+            for nome_cenario, dados_cenario in sc.get('cenarios', {}).items():
+                dc = {k: v for k, v in dados_cenario.items() if k != 'detalhe_candidatos'}
+                dc['n_candidatos_detalhe_omitido'] = len(dados_cenario.get('detalhe_candidatos', []))
+                cenarios_enxutos[nome_cenario] = dc
+            sc['cenarios'] = cenarios_enxutos
+            report['simulacao_cenarios_gates'] = sc
+
     return jsonify(report)
 
 

@@ -3315,6 +3315,21 @@ def process_pair_gates_vortex(db_file, pair, candles_por_tf, exec_tf_label='M5',
         candles_diag = candles_por_tf.get(tf_diag_label) or candles_por_tf.get('M15') or candles_por_tf.get('M5')
         diag = _diagnostico_detalhado_sfp(candles_diag, liquidez, direcao_permitida, tf_diag_label)
         _registrar_diagnostico_sfp(db_file, pair, direcao_permitida, bias_context, diag)
+        if debug_gates:
+            # ── OBSERVACIONAL PURO — reaproveita o mesmo diag já
+            # calculado acima (não recalcula nada), só expõe no dict de
+            # retorno pra o replay poder agregar por Caso A-E. ──
+            resultado['_debug_sfp_diagnostico'] = {
+                'caso': diag.get('caso'),
+                'tocou_high_liq': diag.get('tocou_high_liq'), 'tocou_low_liq': diag.get('tocou_low_liq'),
+                'fechou_fora_high': diag.get('fechou_fora_high'), 'fechou_fora_low': diag.get('fechou_fora_low'),
+                'fechou_de_volta_high': diag.get('fechou_de_volta_high'), 'fechou_de_volta_low': diag.get('fechou_de_volta_low'),
+                'candles_analisados': diag.get('candles_analisados'),
+                'high_liq': diag.get('high_liq'), 'low_liq': diag.get('low_liq'),
+                'cutoff_ts': diag.get('cutoff_ts'), 'tf_usado': tf_diag_label,
+                'direcao_permitida': direcao_permitida, 'bias_context': bias_context,
+                'motivo_sfp': motivo_sfp,
+            }
     except Exception as e:
         print(f"[scalp_engine gates_vortex] erro no diagnóstico observacional de {pair}: {e}")
 
@@ -6708,6 +6723,10 @@ def replay_gates_reprovados(pair, dias_historico=30):
 
     todas_ocorrencias_brutas = 0
 
+    # ── Agregado do diagnóstico SFP (Casos A-E), item aprovado do
+    # ticket — conta em qual caso cada ciclo caiu, pra TODO ciclo. ──
+    sfp_diagnostico_agregado = {}
+
     # ── DETALHE DOS GATES A-G — instrumentação pura. resultado['gates']
     # já é retornado por process_pair_gates_vortex() sem alteração
     # nenhuma (é o mesmo dict usado pra decidir SIGNAL_DISPARADO vs
@@ -6814,6 +6833,22 @@ def replay_gates_reprovados(pair, dias_historico=30):
                 continue
 
             motivo = resultado.get('motivo') or ''
+
+            # ── DIAGNÓSTICO SFP (Casos A-E) — item aprovado do ticket.
+            # Captura o diag já calculado pela produção (reaproveitando
+            # _diagnostico_detalhado_sfp, existente e não alterada) pra
+            # TODO ciclo, não só os que chegam a gates_reprovados. Serve
+            # pra descobrir onde o funil SFP realmente afunila:
+            # nunca_tocou / tocou_sem_reclaim / breakout / confirmado /
+            # sem_dados. Quando o ciclo nem chegou a calcular SFP
+            # (candles insuficientes, staleness, hora tóxica, sem bias),
+            # não existe diag — contabiliza como 'nao_disponivel'. ──
+            sfp_diag = resultado.get('_debug_sfp_diagnostico')
+            if sfp_diag:
+                caso = sfp_diag.get('caso') or 'caso_desconhecido'
+                sfp_diagnostico_agregado[caso] = sfp_diagnostico_agregado.get(caso, 0) + 1
+            else:
+                sfp_diagnostico_agregado['nao_disponivel'] = sfp_diagnostico_agregado.get('nao_disponivel', 0) + 1
 
             # ── DETALHE DOS GATES A-G — captura o dict já retornado por
             # process_pair_gates_vortex() (não alterado, não recalculado).
@@ -7129,6 +7164,20 @@ def replay_gates_reprovados(pair, dias_historico=30):
             'clusters_sem_identidade_valida': clusters_sem_identidade_valida,
             'clusters': clusters_por_identidade,
         },
+        'diagnostico_sfp_casos': {
+            'nota': (
+                'Diagnóstico causal (Casos A-E, reaproveitando _diagnostico_detalhado_sfp() já '
+                'existente e não alterada) de TODO ciclo, não só os que chegam a gates_reprovados. '
+                'A_nunca_tocou = preço nunca varreu o nível de liquidez de referência. '
+                'B_tocou_sem_reclaim = varreu mas ainda não fechou de volta (sweep em andamento). '
+                'C_breakout_confirmado = fechou além do nível (invalida o SFP daquele lado). '
+                'D_sfp_confirmado = varreu e fechou de volta (SFP válido). '
+                'E_sem_dados / E_sem_candles_apos_cutoff = sem liquidez mapeada ou sem candles '
+                'suficientes pra avaliar. nao_disponivel = ciclo nem chegou a essa etapa (bloqueado '
+                'antes, por staleness/hora tóxica/candles insuficientes/sem bias).'
+            ),
+            'contagem_por_caso': sfp_diagnostico_agregado,
+        },
         'simulacao_cenarios_gates': {
             'nota': (
                 'SIMULAÇÃO/REPLAY PURO — nenhum gate real foi alterado, nenhuma regra de '
@@ -7391,6 +7440,17 @@ def replay_gates_reprovados_todos_pares(dias_historico=7, pares=None):
     # amostra agregada (maior que qualquer par isolado). Nenhum gate é
     # recalculado — só somamos o que replay_gates_reprovados() já
     # calculou por par. ──
+    # ── Agregado do diagnóstico SFP (Casos A-E) por par e global ──
+    diagnostico_sfp_por_pair = {}
+    diagnostico_sfp_global = {}
+    for p, r in resultados_por_pair.items():
+        if 'erro' in r:
+            continue
+        contagem = (r.get('diagnostico_sfp_casos') or {}).get('contagem_por_caso') or {}
+        diagnostico_sfp_por_pair[p] = contagem
+        for caso, n in contagem.items():
+            diagnostico_sfp_global[caso] = diagnostico_sfp_global.get(caso, 0) + n
+
     cenarios_agregados = {c: {
         'entradas_simuladas_total': 0, 'TP1': 0, 'TP2': 0, 'SL': 0, 'AMBIGUO': 0, 'NENHUM': 0,
         'mfe_soma': 0.0, 'mae_soma': 0.0, 'rr_soma': 0.0, 'rr_n': 0,
@@ -7462,6 +7522,8 @@ def replay_gates_reprovados_todos_pares(dias_historico=7, pares=None):
         },
         'funil_agregado_todos_pares': funil_agregado,
         'agregado_por_horizonte_todos_pares': agregado_por_horizonte,
+        'diagnostico_sfp_casos_por_pair': diagnostico_sfp_por_pair,
+        'diagnostico_sfp_casos_global': diagnostico_sfp_global,
         'simulacao_cenarios_agregado_todos_pares': cenarios_agregados_final,
         'nota_metodologica': (
             'Cada par foi processado de forma totalmente independente, chamando '
@@ -7525,6 +7587,7 @@ def replay_gates_reprovados_todos_pares_endpoint():
                 'pair': r.get('pair'),
                 'dados_historicos': r.get('dados_historicos'),
                 'funil': r.get('funil'),
+                'diagnostico_sfp_casos': (r.get('diagnostico_sfp_casos') or {}).get('contagem_por_caso'),
                 'oportunidades_brutas_antes_dedup': r.get('oportunidades_brutas_antes_dedup'),
                 'clusters_por_identidade_real_preliminar': r.get('clusters_por_identidade_real_preliminar'),
                 'validacao_causal_h1': {

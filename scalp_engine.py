@@ -7487,6 +7487,10 @@ def replay_gates_reprovados_todos_pares_endpoint():
     Uso resumido (sem os detalhes por avaliacao/cluster de cada par, so
     os agregados: funil_agregado_todos_pares, simulacao_cenarios_agregado_
     todos_pares, e um resumo minimo por par): acrescenta &resumo=true
+    Uso com subconjunto de pares (para testar antes de rodar todos os 13,
+    ou dividir em lotes menores): acrescenta &pares=BTCUSD,ETHUSD,LINKUSD
+    (sem espaco, separado por virgula). Sem esse parametro, roda os 13
+    pares padrao (PARES_MONITORADOS_REPLAY).
     """
     if request.args.get('confirm') != 'RODAR_REPLAY_TODOS':
         return jsonify({
@@ -7497,8 +7501,12 @@ def replay_gates_reprovados_todos_pares_endpoint():
         }), 400
     dias = int(request.args.get('dias', 7))
     resumo = request.args.get('resumo', 'false').lower() == 'true'
+    pares_param = request.args.get('pares')
+    pares_lista = None
+    if pares_param:
+        pares_lista = [p.strip().upper() for p in pares_param.split(',') if p.strip()]
     try:
-        report = replay_gates_reprovados_todos_pares(dias_historico=dias)
+        report = replay_gates_reprovados_todos_pares(dias_historico=dias, pares=pares_lista)
     except Exception as e:
         return jsonify({"erro": str(e)}), 500
 

@@ -6727,6 +6727,14 @@ def replay_gates_reprovados(pair, dias_historico=30):
     # ticket — conta em qual caso cada ciclo caiu, pra TODO ciclo. ──
     sfp_diagnostico_agregado = {}
 
+    # ── Correlação causal diag.caso vs decisão real (item aprovado) ──
+    correlacao_diag_vs_real = {
+        'D_e_real_confirma': 0, 'D_mas_real_NAO_confirma': 0, 'real_confirma_mas_diag_NAO_e_D': 0,
+    }
+    motivos_divergencia_D = {}
+    tfs_divergencia_D = {}
+    motivos_diag_quando_real_confirma = {}
+
     # ── DETALHE DOS GATES A-G — instrumentação pura. resultado['gates']
     # já é retornado por process_pair_gates_vortex() sem alteração
     # nenhuma (é o mesmo dict usado pra decidir SIGNAL_DISPARADO vs
@@ -6848,7 +6856,36 @@ def replay_gates_reprovados(pair, dias_historico=30):
                 caso = sfp_diag.get('caso') or 'caso_desconhecido'
                 sfp_diagnostico_agregado[caso] = sfp_diagnostico_agregado.get(caso, 0) + 1
             else:
+                caso = None
                 sfp_diagnostico_agregado['nao_disponivel'] = sfp_diagnostico_agregado.get('nao_disponivel', 0) + 1
+
+            # ── CORRELAÇÃO CAUSAL diag.caso vs decisão real (item
+            # aprovado do ticket) — cruza, no MESMO ciclo, o Caso do
+            # diagnóstico observacional (single-tf, primeiro toque) com
+            # o resultado real da cascata M15→M5→M1
+            # (validar_sfp_cascata_tf, via tf_sfp_usado != None). Não
+            # recalcula nada — só lê 2 sinais já existentes no mesmo
+            # resultado. Isso explica objetivamente por que
+            # diagnostico_sfp_casos.D_sfp_confirmado (por ciclo, 1
+            # timeframe fixo, para no primeiro toque) diverge de
+            # funil.sfp_confirmados (cascata real M15→M5→M1, continua
+            # escaneando até achar o SFP mais recente ou um breakout
+            # mais à frente). Roda pra TODO ciclo, independente de ter
+            # diag disponível ou não. ──
+            real_sfp_confirmado_neste_ciclo = resultado.get('tf_sfp_usado') is not None
+            tf_real_usado = resultado.get('tf_sfp_usado')
+            if caso == 'D_sfp_confirmado':
+                if real_sfp_confirmado_neste_ciclo:
+                    correlacao_diag_vs_real['D_e_real_confirma'] += 1
+                else:
+                    correlacao_diag_vs_real['D_mas_real_NAO_confirma'] += 1
+                    motivo_quando_diverge = motivo or 'motivo_vazio'
+                    motivos_divergencia_D[motivo_quando_diverge] = motivos_divergencia_D.get(motivo_quando_diverge, 0) + 1
+                    tfs_divergencia_D[str(tf_real_usado)] = tfs_divergencia_D.get(str(tf_real_usado), 0) + 1
+            elif real_sfp_confirmado_neste_ciclo:
+                # Real confirma mas diag (single-tf, primeiro toque) não viu Caso D
+                correlacao_diag_vs_real['real_confirma_mas_diag_NAO_e_D'] += 1
+                motivos_diag_quando_real_confirma[str(caso)] = motivos_diag_quando_real_confirma.get(str(caso), 0) + 1
 
             # ── DETALHE DOS GATES A-G — captura o dict já retornado por
             # process_pair_gates_vortex() (não alterado, não recalculado).
@@ -7177,6 +7214,23 @@ def replay_gates_reprovados(pair, dias_historico=30):
                 'antes, por staleness/hora tóxica/candles insuficientes/sem bias).'
             ),
             'contagem_por_caso': sfp_diagnostico_agregado,
+            'correlacao_diag_vs_decisao_real': {
+                'nota': (
+                    'Cruza, no MESMO ciclo, o Caso do diagnóstico (single-timeframe, para no '
+                    'primeiro toque) com a decisão real (cascata M15→M5→M1 completa, continua '
+                    'escaneando até achar o SFP mais recente ou um breakout mais à frente na '
+                    'janela). D_e_real_confirma = os dois concordam. D_mas_real_NAO_confirma = '
+                    'diag viu reclaim no primeiro toque, mas a decisão real (que escaneia até o '
+                    'fim da janela) achou outra coisa depois — motivo real registrado em '
+                    'motivos_divergencia_D. real_confirma_mas_diag_NAO_e_D = a decisão real '
+                    'confirmou mas o diag (single-tf fixo) não bateu com Caso D nesse ciclo — '
+                    'geralmente porque tf_sfp_usado real foi diferente do timeframe fixo do diag.'
+                ),
+                'contagem': correlacao_diag_vs_real,
+                'motivos_reais_quando_D_diverge': motivos_divergencia_D,
+                'timeframes_reais_quando_D_diverge': tfs_divergencia_D,
+                'casos_diag_quando_real_confirma_mas_nao_e_D': motivos_diag_quando_real_confirma,
+            },
         },
         'simulacao_cenarios_gates': {
             'nota': (
@@ -7588,6 +7642,7 @@ def replay_gates_reprovados_todos_pares_endpoint():
                 'dados_historicos': r.get('dados_historicos'),
                 'funil': r.get('funil'),
                 'diagnostico_sfp_casos': (r.get('diagnostico_sfp_casos') or {}).get('contagem_por_caso'),
+                'correlacao_diag_vs_decisao_real': (r.get('diagnostico_sfp_casos') or {}).get('correlacao_diag_vs_decisao_real'),
                 'oportunidades_brutas_antes_dedup': r.get('oportunidades_brutas_antes_dedup'),
                 'clusters_por_identidade_real_preliminar': r.get('clusters_por_identidade_real_preliminar'),
                 'validacao_causal_h1': {

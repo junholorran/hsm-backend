@@ -6402,6 +6402,133 @@ def _montar_candles_por_tf_ate(d1, h4, h1, m15, m5, m1, ts_corte_ms):
     }
 
 
+CENARIOS_SIMULACAO_GATES = [
+    'atual', 'sem_F_ICHIMOKU_INFO', 'score_6_de_7', 'score_5_de_7',
+    'sem_A_MTF_ALIGNMENT', 'sem_B_TRIGGER', 'sem_C_MONTE_CARLO',
+]
+
+
+def _passa_cenario_simulado(gates_dict, cenario):
+    """
+    SIMULAÇÃO PURA — combina os booleanos JÁ DECIDIDOS pela produção
+    (gates_dict = resultado['gates'], vindo direto de
+    process_pair_gates_vortex(), sem alteração). NENHUM gate é
+    recalculado aqui — só recombino os 7 resultados finais de formas
+    alternativas, pra medir "e se a regra de combinação fosse outra".
+    Não decide nada em produção, é só análise de replay.
+    """
+    if cenario == 'atual':
+        return all(gates_dict.values())
+    if cenario == 'sem_F_ICHIMOKU_INFO':
+        return all(v for k, v in gates_dict.items() if k != 'F_ICHIMOKU_INFO')
+    if cenario == 'score_6_de_7':
+        return sum(1 for v in gates_dict.values() if v) >= 6
+    if cenario == 'score_5_de_7':
+        return sum(1 for v in gates_dict.values() if v) >= 5
+    if cenario.startswith('sem_'):
+        gate_removido = cenario[len('sem_'):]
+        return all(v for k, v in gates_dict.items() if k != gate_removido)
+    return False
+
+
+def _simular_cenarios_gates(avaliacoes_gates_reprovados_brutas, m5, pair):
+    """
+    Roda os CENARIOS_SIMULACAO_GATES sobre o mesmo conjunto de
+    avaliações já capturado (nenhuma nova chamada a
+    process_pair_gates_vortex(), nenhum gate recalculado). Pra cada
+    cenário: filtra quais avaliações BRUTAS "passariam" sob aquela
+    regra alternativa, reconstrói identidade/clusters (mesmo mecanismo
+    já aprovado, sem janela arbitrária), pega 1 representante por
+    cluster, e resolve TP/SL/AMBIGUO/NENHUM nos candles futuros REAIS
+    (sem lookahead — só candles com t > ts_corte do representante).
+    """
+    resultado_cenarios = {}
+    for cenario in CENARIOS_SIMULACAO_GATES:
+        avals_que_passam = [
+            av for av in avaliacoes_gates_reprovados_brutas
+            if _passa_cenario_simulado(av['gates'], cenario)
+        ]
+        _, clusters = _reconstruir_identidade_temporal_gates(avals_que_passam)
+
+        candidatos = []
+        for c in clusters:
+            if not c['identidade_valida']:
+                continue
+            primeira_av = next(
+                (av for av in avals_que_passam
+                 if av['ts_corte'] == c['primeiro_ts'] and av['direcao'] == c['direcao']
+                 and av['entry'] == c['entry'] and av['sl'] == c['sl']),
+                None,
+            )
+            if primeira_av is None:
+                continue
+            candidatos.append({
+                'direcao': c['direcao'], 'entry': c['entry'], 'sl': c['sl'],
+                'tp1': c['tp1'], 'tp2': c['tp2'], 'ts_corte': c['primeiro_ts'],
+                'idx_m5': primeira_av['idx_m5'],
+                'gates_reprovados_lista_original': primeira_av['gates_reprovados_lista'],
+                'cluster_tamanho_bruto': c['tamanho'],
+            })
+
+        # ── Resolver TP/SL sem lookahead, horizonte único de 20 candles
+        # M5 (suficiente pra medir WIN/LOSS/AMBIGUO/NENHUM; os outros
+        # horizontes já aprovados continuam disponíveis se precisar
+        # ampliar depois). ──
+        resolvidos = []
+        for cand in candidatos:
+            candles_futuros = m5[cand['idx_m5'] + 1:]
+            res = _resolver_tp_sl_futuro(
+                candles_futuros, cand['direcao'], cand['entry'], cand['sl'],
+                cand['tp1'], cand['tp2'], max_candles=20,
+            )
+            resolvidos.append({**cand, **res})
+
+        n = len(resolvidos)
+        n_tp1 = sum(1 for r in resolvidos if r['resultado'] == 'TP1')
+        n_tp2 = sum(1 for r in resolvidos if r['resultado'] == 'TP2')
+        n_sl = sum(1 for r in resolvidos if r['resultado'] == 'SL')
+        n_amb = sum(1 for r in resolvidos if r['resultado'] == 'AMBIGUO')
+        n_nen = sum(1 for r in resolvidos if r['resultado'] == 'NENHUM')
+        n_win = n_tp1 + n_tp2
+        n_resolvidos_binario = n_win + n_sl
+        win_rate = round(100 * n_win / n_resolvidos_binario, 1) if n_resolvidos_binario else None
+
+        mfes = [r['mfe_pct'] for r in resolvidos]
+        maes = [r['mae_pct'] for r in resolvidos]
+        mfe_medio = round(sum(mfes) / len(mfes), 4) if mfes else None
+        mae_medio = round(sum(maes) / len(maes), 4) if maes else None
+
+        rrs = []
+        for r in resolvidos:
+            if r['resultado'] in ('TP1', 'SL') and r['entry'] and r['sl'] and r['tp1']:
+                risco = abs(r['entry'] - r['sl'])
+                retorno = abs(r['tp1'] - r['entry'])
+                if risco > 0:
+                    rrs.append(retorno / risco)
+        rr_medio = round(sum(rrs) / len(rrs), 2) if rrs else None
+        expectancy = None
+        if win_rate is not None and rr_medio is not None:
+            wr = win_rate / 100
+            expectancy = round((wr * rr_medio) - (1 - wr), 4)
+
+        resultado_cenarios[cenario] = {
+            'entradas_simuladas': n,
+            'avaliacoes_brutas_que_passariam': len(avals_que_passam),
+            'TP1': n_tp1, 'TP2': n_tp2, 'SL': n_sl, 'AMBIGUO': n_amb, 'NENHUM': n_nen,
+            'win_rate_pct': win_rate,
+            'mfe_medio_pct': mfe_medio, 'mae_medio_pct': mae_medio,
+            'rr_medio_realizado': rr_medio,
+            'expectancy': expectancy,
+            'expectancy_nota': (
+                None if rr_medio is not None else
+                'RR/expectancy não validável — amostra sem casos TP1/SL suficientes'
+            ),
+            'detalhe_candidatos': resolvidos,
+        }
+    return resultado_cenarios
+
+
+
 def _reconstruir_identidade_temporal_gates(avaliacoes_ordenadas):
     """
     Reconstrói a identidade temporal das avaliações de gates_reprovados
@@ -6840,6 +6967,13 @@ def replay_gates_reprovados(pair, dias_historico=30):
         avaliacoes_gates_reprovados_brutas
     )
 
+    # ── SIMULAÇÃO DE CENÁRIOS (item aprovado do ticket) — puramente
+    # observacional. Não altera nenhum gate real, não recalcula nada,
+    # só recombina os booleanos já decididos pela produção de formas
+    # alternativas, e mede o resultado real (TP/SL, sem lookahead) de
+    # cada cenário. ──
+    cenarios_simulados = _simular_cenarios_gates(avaliacoes_gates_reprovados_brutas, m5, pair)
+
     # ── "oportunidades" pra resolução de TP/SL downstream: 1
     # REPRESENTANTE por cluster de identidade real (a primeira
     # avaliação de cada cluster), não as N reavaliações do mesmo
@@ -6994,6 +7128,18 @@ def replay_gates_reprovados(pair, dias_historico=30):
             'total_clusters': len(clusters_por_identidade),
             'clusters_sem_identidade_valida': clusters_sem_identidade_valida,
             'clusters': clusters_por_identidade,
+        },
+        'simulacao_cenarios_gates': {
+            'nota': (
+                'SIMULAÇÃO/REPLAY PURO — nenhum gate real foi alterado, nenhuma regra de '
+                'produção foi tocada. Cada cenário recombina os booleanos JÁ DECIDIDOS pela '
+                'produção (resultado["gates"], sem recalcular nenhum gate) de uma forma '
+                'alternativa, e mede TP/SL real nos candles futuros (horizonte de 20 candles '
+                'M5, sem lookahead). "atual" deve sempre dar 0 entradas neste relatório, porque '
+                'só avaliações que JÁ reprovaram em produção entram aqui — serve de controle/'
+                'sanity-check da simulação, não é um resultado novo.'
+            ),
+            'cenarios': cenarios_simulados,
         },
         'por_horizonte': relatorio_por_horizonte,
     }

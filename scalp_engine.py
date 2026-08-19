@@ -862,10 +862,18 @@ def compute_zona_movel(candles, lookback=ZONA_MOVEL_LOOKBACK):
     }
 
 
-def compute_lux_structure_bias(candles, swing_size=50):
+def compute_lux_structure_events(candles, swing_size=50):
+    """
+    Núcleo compartilhado da estrutura LuxAlgo (leg/pivot + BOS/CHoCH).
+    Mesma matemática que já existia em compute_lux_structure_bias — só
+    passou a retornar a lista de EVENTOS (não só o bias final), pra
+    poder distinguir BOS de CHoCH e saber o timestamp de cada quebra.
+    Retorna lista de dicts: {'tipo': 'BOS'|'CHoCH', 'direcao': 'alta'|'baixa',
+    'nivel': float, 't': timestamp, 'index': int}
+    """
     n = len(candles)
     if n < swing_size + 5:
-        return 'neutro'
+        return []
 
     legs = [0] * n
     current_leg = 0
@@ -886,6 +894,7 @@ def compute_lux_structure_bias(candles, swing_size=50):
     swing_high_crossed = False
     swing_low_crossed = False
     bias = 'neutro'
+    eventos = []
 
     for i in range(swing_size + 1, n):
         if legs[i] != legs[i - 1]:
@@ -901,13 +910,313 @@ def compute_lux_structure_bias(candles, swing_size=50):
 
         c = candles[i]
         if swing_high_level is not None and not swing_high_crossed and c['c'] > swing_high_level:
+            tipo = 'CHoCH' if bias == 'baixa' else 'BOS'
+            eventos.append({'tipo': tipo, 'direcao': 'alta', 'nivel': swing_high_level, 't': c['t'], 'index': i})
             bias = 'alta'
             swing_high_crossed = True
         if swing_low_level is not None and not swing_low_crossed and c['c'] < swing_low_level:
+            tipo = 'CHoCH' if bias == 'alta' else 'BOS'
+            eventos.append({'tipo': tipo, 'direcao': 'baixa', 'nivel': swing_low_level, 't': c['t'], 'index': i})
             bias = 'baixa'
             swing_low_crossed = True
 
-    return bias
+    return eventos
+
+
+def compute_lux_structure_bias(candles, swing_size=50):
+    """Wrapper fino sobre compute_lux_structure_events — mesmo retorno
+    de sempre ('alta'/'baixa'/'neutro'), preservado pra não quebrar
+    nenhum chamador existente. Zero mudança de comportamento."""
+    eventos = compute_lux_structure_events(candles, swing_size=swing_size)
+    if not eventos:
+        return 'neutro'
+    return eventos[-1]['direcao']
+
+
+def compute_lux_internal_structure(candles, swing_size=5):
+    """
+    Item 1 do ticket — 'estrutura interna' (janela curta, default 5
+    barras), reaproveitando compute_lux_structure_events sem duplicar
+    a lógica. Retorna a lista de eventos (BOS/CHoCH) dessa janela curta.
+    Isso é LUX_INTERNAL_CHoCH — mecanismo separado e paralelo de
+    detect_choch_after_sweep() (SWEEP_BASED_CHoCH), que continua
+    intocado.
+    """
+    return compute_lux_structure_events(candles, swing_size=swing_size)
+
+
+def compute_lux_premium_discount(candles, swing_size=50):
+    """
+    Item 2 do ticket — versão isolada e comparável do Premium/Discount,
+    aproximando o mecanismo real do LuxAlgo (trailing.top/trailing.bottom
+    = extremos desde o ÚLTIMO PIVOT OPOSTO, não janela fixa de N candles).
+    NÃO substitui compute_premium_discount()/compute_zona_movel() — são
+    mantidas intactas pra comparação lado a lado (zona_atual_kairos vs
+    zona_luxalgo).
+
+    Mecanismo: reaproveita compute_lux_structure_events() pra achar os
+    pivots (mesmos pivots que geram BOS/CHoCH), e entre dois eventos de
+    direção oposta consecutivos, calcula o máximo/mínimo real percorrido
+    pelo candles nesse intervalo (equivalente ao trailing.top/bottom que
+    o Pine atualiza barra a barra).
+
+    Retorna: {'top', 'bottom', 'premium_bottom', 'discount_top',
+    'equilibrium_top', 'equilibrium_bottom'} ou None se não houver
+    dados suficientes.
+    """
+    eventos = compute_lux_structure_events(candles, swing_size=swing_size)
+    if not eventos:
+        return None
+
+    ultimo_evento = eventos[-1]
+    idx_inicio = ultimo_evento['index']
+
+    janela = candles[idx_inicio:]
+    if not janela:
+        return None
+
+    top = max(c['h'] for c in janela)
+    bottom = min(c['l'] for c in janela)
+
+    if top == bottom:
+        return None
+
+    return {
+        'top': top, 'bottom': bottom,
+        'premium_bottom': 0.95 * top + 0.05 * bottom,
+        'discount_top': 0.95 * bottom + 0.05 * top,
+        'equilibrium_top': 0.525 * top + 0.475 * bottom,
+        'equilibrium_bottom': 0.525 * bottom + 0.475 * top,
+        'pivot_evento': ultimo_evento,
+    }
+
+
+def classificar_zona_lux(preco, zona):
+    """Classifica um preço como 'premium', 'discount' ou 'equilibrium',
+    usando a zona calculada por compute_lux_premium_discount(). Puramente
+    de leitura, sem efeito colateral."""
+    if not zona:
+        return None
+    if preco >= zona['premium_bottom']:
+        return 'premium'
+    if preco <= zona['discount_top']:
+        return 'discount'
+    return 'equilibrium'
+
+
+def find_open_fvgs_adaptive(exec_candles, lookback=100, extend_bars=1):
+    """
+    Item 3 do ticket — versão isolada do FVG com threshold ADAPTATIVO,
+    replicando drawFairValueGaps() do LuxAlgo: em vez de um gap_pct
+    mínimo fixo (find_open_fvgs() usa MIN_FVG_GAP_PCT=0.0005 fixo),
+    o threshold é a média cumulativa histórica do deslocamento
+    percentual absoluto do candle do meio, multiplicada por 2 —
+    recalculada a cada candle, conforme o histórico acumulado até ali.
+    NÃO substitui find_open_fvgs() — mantida intacta pra comparação
+    (FVG_MODE=legacy vs FVG_MODE=luxalgo).
+    """
+    candles = exec_candles[-lookback:] if len(exec_candles) > lookback else exec_candles
+    n = len(candles)
+    if n < 3:
+        return []
+
+    abertas = []
+    soma_abs_delta_pct = 0.0
+
+    for i in range(1, n - 1):
+        prev, meio, nxt = candles[i - 1], candles[i], candles[i + 1]
+
+        delta_pct = ((meio['c'] - meio['o']) / (meio['o'] * 100)) if meio['o'] else 0.0
+        soma_abs_delta_pct += abs(delta_pct)
+        threshold = (soma_abs_delta_pct / (i + 1)) * 2 if (i + 1) else 0.0
+
+        if nxt['l'] > prev['h'] and meio['c'] > prev['h'] and delta_pct > threshold:
+            top, bottom = nxt['l'], prev['h']
+            preenchida = any(c['l'] <= bottom for c in candles[i + 2:i + 2 + extend_bars + lookback])
+            if not preenchida:
+                abertas.append({
+                    'tipo': 'FVG_bullish', 'top': round(top, 6), 'bottom': round(bottom, 6),
+                    't': meio['t'], 'threshold_usado': round(threshold, 8), 'delta_pct': round(delta_pct, 8),
+                })
+        if nxt['h'] < prev['l'] and meio['c'] < prev['l'] and -delta_pct > threshold:
+            top, bottom = prev['l'], nxt['h']
+            preenchida = any(c['h'] >= top for c in candles[i + 2:i + 2 + extend_bars + lookback])
+            if not preenchida:
+                abertas.append({
+                    'tipo': 'FVG_bearish', 'top': round(top, 6), 'bottom': round(bottom, 6),
+                    't': meio['t'], 'threshold_usado': round(threshold, 8), 'delta_pct': round(delta_pct, 8),
+                })
+
+    return abertas
+
+
+def find_equal_highs_lows_luxalgo(candles, length=3, atr_mult=0.1, atr_period=200):
+    """
+    Item 4 do ticket — mesma lógica de find_equal_highs_lows(), só troca
+    o período do ATR de 14 (Kairos legado) pra 200 (LuxAlgo real).
+    Reaproveita detect_exec_swings() e compute_atr() sem duplicar nada.
+    NÃO substitui find_equal_highs_lows() — mantida intacta.
+    """
+    atr_series = compute_atr(candles, atr_period)
+    atr_atual = next((v for v in reversed(atr_series) if v is not None), None)
+    if not atr_atual:
+        return []
+    swings = detect_exec_swings(candles, lookback=length)
+    grupos = []
+    for s in swings:
+        colocado = False
+        for g in grupos:
+            if s['tipo'] == g['tipo'] and abs(s['valor'] - g['nivel']) < atr_mult * atr_atual:
+                g['pontos'].append(s['valor'])
+                g['nivel'] = sum(g['pontos']) / len(g['pontos'])
+                colocado = True
+                break
+        if not colocado:
+            grupos.append({'tipo': s['tipo'], 'nivel': s['valor'], 'pontos': [s['valor']]})
+    return [
+        {'tipo': 'EQH' if g['tipo'] == 'high' else 'EQL', 'nivel': round(g['nivel'], 6), 'toques': len(g['pontos'])}
+        for g in grupos if len(g['pontos']) >= 2
+    ]
+
+
+def avaliar_legacy_decision_layer(candles_swing, candles_exec):
+    """
+    Espelho de avaliar_vortex_decision_layer(), mas usando SÓ as funções
+    LEGADAS do Kairos (as que já existiam antes deste ticket), pra dar
+    uma comparação maçã-com-maçã contra o caminho LUXALGO/VORTEX:
+      - bias: compute_lux_structure_bias() — ATENÇÃO: essa função JÁ
+        EXISTIA antes deste ticket e já era matematicamente idêntica ao
+        leg() do LuxAlgo (confirmado na auditoria). Por isso o campo
+        'bias' aqui SEMPRE vai bater com o bias do caminho LUXALGO —
+        isso não é bug, é o resultado esperado de uma peça que já
+        estava correta antes de qualquer mudança.
+      - zona: compute_premium_discount()/compute_zona_movel() — janela
+        fixa de 20 candles, split 50/50 (diferente do trailing dinâmico
+        do LuxAlgo).
+      - choch: precisa de um 'sweep' — usa detect_sweep_in_zone() sobre
+        a mesma zona legada, depois detect_choch_after_sweep(). Esse é
+        o mecanismo SWEEP_BASED_CHoCH, oficialmente distinto do
+        LUX_INTERNAL_CHoCH.
+      - fvg: find_open_fvgs() — threshold fixo.
+    Também NUNCA gera entrada — mesma restrição do caminho Vortex,
+    porque SL/TP legado (calcular_sl_estrito) pertence a um pipeline
+    diferente (SFP causal) que não faz parte deste comparativo
+    estrutural. Não decide nada de produção, não chama
+    process_pair_gates_vortex() nem process_pair_4camadas().
+    """
+    resultado = {
+        'decisao': 'SEM_ENTRADA', 'motivo_rejeicao': None,
+        'bias': None, 'zona': None, 'choch': None, 'fvg_candidatos': [],
+        'entry': None, 'sl': None, 'tp': None,
+    }
+
+    bias = compute_lux_structure_bias(candles_swing, swing_size=50)
+    resultado['bias'] = bias
+    if bias == 'neutro':
+        resultado['motivo_rejeicao'] = 'BIAS_FAIL'
+        return resultado
+
+    zona_calc = compute_premium_discount(candles_swing)
+    preco_atual = candles_swing[-1]['c'] if candles_swing else None
+    zona = None
+    if zona_calc and preco_atual is not None:
+        if preco_atual >= zona_calc['equilibrium']:
+            zona = 'premium'
+        else:
+            zona = 'discount'
+    resultado['zona'] = zona
+
+    if bias == 'alta' and zona != 'discount':
+        resultado['motivo_rejeicao'] = 'ZONE_FAIL'
+        return resultado
+    if bias == 'baixa' and zona != 'premium':
+        resultado['motivo_rejeicao'] = 'ZONE_FAIL'
+        return resultado
+
+    sweep = detect_sweep_in_zone(candles_exec, zona_calc) if zona_calc else None
+    choch = detect_choch_after_sweep(candles_exec, sweep) if sweep else None
+    resultado['choch'] = choch
+    if not choch or choch['direcao'] != bias:
+        resultado['motivo_rejeicao'] = 'NO_CHOCH'
+        return resultado
+
+    fvgs = find_open_fvgs(candles_exec)
+    tipo_fvg_desejado = 'FVG_bullish' if bias == 'alta' else 'FVG_bearish'
+    candidatos = [f for f in fvgs if f['tipo'] == tipo_fvg_desejado]
+    resultado['fvg_candidatos'] = candidatos
+
+    if not candidatos:
+        resultado['motivo_rejeicao'] = 'NO_VALID_FVG'
+        return resultado
+
+    resultado['motivo_rejeicao'] = 'FVG_CHOCH_RELATION_UNKNOWN'
+    return resultado
+
+
+def avaliar_vortex_decision_layer(candles_swing, candles_internal, direcao_desejada=None):
+    """
+    Item 9 do ticket — VORTEX DECISION LAYER (camada de composição).
+    Junta bias + zona + CHoCH interno + candidatos de FVG, mas NUNCA
+    gera uma entrada completa, porque:
+      - VORTEX_FVG_CHOCH_RELATION = UNKNOWN (sem evidência de como a
+        Vortex associa um FVG específico a um CHoCH específico)
+      - SL_VORTEX = UNKNOWN (LuxAlgo não calcula SL, e o único exemplo
+        real não é suficiente pra provar uma fórmula)
+      - RR_VORTEX = UNKNOWN (1 amostra só, R:R=2.0 não é regra confirmada)
+    Por isso essa função para no ponto do FVG e retorna os candidatos
+    sem escolher nenhum — é um scaffold de auditoria/telemetria, não
+    um gerador de sinal. Não decide nada de produção, não substitui
+    process_pair_4camadas() nem process_pair_gates_vortex().
+    """
+    resultado = {
+        'decisao': 'SEM_ENTRADA', 'motivo_rejeicao': None,
+        'bias': None, 'zona': None, 'internal_choch': None,
+        'fvg_candidatos': [], 'entry': None, 'sl': None, 'tp': None,
+    }
+
+    bias = compute_lux_structure_bias(candles_swing, swing_size=50)
+    resultado['bias'] = bias
+    if bias == 'neutro':
+        resultado['motivo_rejeicao'] = 'BIAS_FAIL'
+        return resultado
+
+    zona_calc = compute_lux_premium_discount(candles_swing, swing_size=50)
+    preco_atual = candles_swing[-1]['c'] if candles_swing else None
+    zona = classificar_zona_lux(preco_atual, zona_calc) if zona_calc and preco_atual is not None else None
+    resultado['zona'] = zona
+
+    if bias == 'alta' and zona != 'discount':
+        resultado['motivo_rejeicao'] = 'ZONE_FAIL'
+        return resultado
+    if bias == 'baixa' and zona != 'premium':
+        resultado['motivo_rejeicao'] = 'ZONE_FAIL'
+        return resultado
+
+    eventos_internos = compute_lux_internal_structure(candles_internal, swing_size=5)
+    choch_relevante = None
+    for ev in reversed(eventos_internos):
+        if ev['tipo'] == 'CHoCH' and ev['direcao'] == bias:
+            choch_relevante = ev
+            break
+    resultado['internal_choch'] = choch_relevante
+    if not choch_relevante:
+        resultado['motivo_rejeicao'] = 'NO_CHOCH'
+        return resultado
+
+    fvgs = find_open_fvgs_adaptive(candles_internal)
+    tipo_fvg_desejado = 'FVG_bullish' if bias == 'alta' else 'FVG_bearish'
+    candidatos = [f for f in fvgs if f['tipo'] == tipo_fvg_desejado]
+    resultado['fvg_candidatos'] = candidatos
+
+    if not candidatos:
+        resultado['motivo_rejeicao'] = 'NO_VALID_FVG'
+        return resultado
+
+    # ── BLOQUEIO INTENCIONAL — item 8 do ticket. Existem candidatos de
+    # FVG, mas não há regra determinística comprovada pra escolher qual
+    # deles pertence ao "mesmo movimento" do CHoCH interno. Não inventar. ──
+    resultado['motivo_rejeicao'] = 'FVG_CHOCH_RELATION_UNKNOWN'
+    return resultado
 
 
 def compute_premium_discount(exec_candles, lookback=ZONA_MOVEL_LOOKBACK):
@@ -7370,6 +7679,172 @@ def _agregar_relatorio_gates_reprovados(lista_resultados):
         'por_direcao': por_direcao,
         'por_pair': por_pair,
     }
+
+
+def replay_comparativo_luxalgo(pair, dias_historico=7):
+    """
+    Item E do ticket — replay comparativo SOMENTE LEITURA entre 3
+    caminhos, candle a candle, sem lookahead:
+      LEGACY (funções legadas do Kairos) vs LUXALGO-COMPATIBLE
+      (funções novas, isoladas) vs VORTEX_LAYER (composição das
+      funções LuxAlgo).
+    NÃO escreve em nenhuma tabela de produção (nem usa db_file — as
+    3 camadas aqui são funções puras, sem persistência). NÃO chama
+    process_pair_gates_vortex() nem process_pair_4camadas(). NÃO
+    altera nenhum gate, SFP, MSS, SL ou TP existente.
+    Mesmo mecanismo causal já testado em replay_gates_reprovados():
+    cada ciclo só enxerga candles com t <= ts_corte (m5[:i+1]).
+    """
+    symbol_map = {
+        'BTCUSD': 'BTCUSDT', 'ETHUSD': 'ETHUSDT', 'SOLUSD': 'SOLUSDT', 'XRPUSD': 'XRPUSDT',
+        'LINKUSD': 'LINKUSDT', 'ADAUSD': 'ADAUSDT', 'AVAXUSD': 'AVAXUSDT', 'BNBUSD': 'BNBUSDT',
+        'AAVEUSD': 'AAVEUSDT', 'NEARUSD': 'NEARUSDT', 'PENDLEUSD': 'PENDLEUSDT', 'INJUSD': 'INJUSDT',
+        'ONDOUSD': 'ONDOUSDT',
+    }
+    symbol = symbol_map.get(pair.upper(), pair.upper().replace('USD', 'USDT'))
+
+    m5_bruto = _fetch_bybit_klines_historico(symbol, '5', dias_historico + 2)
+    m5, validacao_m5 = _validar_e_limpar_candles(m5_bruto, '5')
+
+    MIN_CANDLES_SWING = 55  # swing_size(50) + folga mínima, mesma exigência de compute_lux_structure_events
+    if len(m5) < MIN_CANDLES_SWING + 10:
+        return {
+            'erro': f'dados históricos insuficientes pra {pair} (M5={len(m5)}, mínimo necessário={MIN_CANDLES_SWING + 10})',
+            'validacao_m5': validacao_m5,
+        }
+
+    total_candles = 0
+    legacy_signals = 0          # ciclos onde legacy chegou a ter fvg_candidatos (mais perto de um "setup")
+    luxalgo_valid_setups = 0    # ciclos onde luxalgo/vortex chegou a ter fvg_candidatos
+    vortex_decisions_nao_unknown = 0  # ciclos onde vortex parou ANTES do bloqueio FVG_CHOCH_RELATION_UNKNOWN
+
+    bias_divergences = 0
+    zone_divergences = 0
+    choch_divergences = 0
+    fvg_divergences = 0
+
+    rejection_reasons_legacy = {}
+    rejection_reasons_luxalgo = {}
+
+    eventos_divergentes = []  # lista de {'t', 'campo', 'legacy', 'luxalgo'}
+
+    MAX_EVENTOS_DIVERGENTES_GUARDADOS = 200  # não deixa a resposta explodir de tamanho
+
+    for i in range(MIN_CANDLES_SWING, len(m5)):
+        ts_corte = m5[i]['t']
+        # ── janela causal: só candles com t <= ts_corte, mesmo padrão
+        # já testado em replay_gates_reprovados (_montar_candles_por_tf_ate) ──
+        candles_ate_agora = m5[:i + 1]
+
+        total_candles += 1
+
+        try:
+            r_legacy = avaliar_legacy_decision_layer(candles_ate_agora, candles_ate_agora)
+        except Exception as e:
+            r_legacy = {'decisao': 'ERRO', 'motivo_rejeicao': f'excecao: {e}', 'bias': None, 'zona': None, 'choch': None, 'fvg_candidatos': []}
+
+        try:
+            r_vortex = avaliar_vortex_decision_layer(candles_ate_agora, candles_ate_agora)
+        except Exception as e:
+            r_vortex = {'decisao': 'ERRO', 'motivo_rejeicao': f'excecao: {e}', 'bias': None, 'zona': None, 'internal_choch': None, 'fvg_candidatos': []}
+
+        if r_legacy.get('fvg_candidatos'):
+            legacy_signals += 1
+        if r_vortex.get('fvg_candidatos'):
+            luxalgo_valid_setups += 1
+        if r_vortex.get('motivo_rejeicao') not in ('FVG_CHOCH_RELATION_UNKNOWN',) and r_vortex.get('fvg_candidatos'):
+            vortex_decisions_nao_unknown += 1
+
+        motivo_legacy = r_legacy.get('motivo_rejeicao') or 'NENHUM'
+        motivo_luxalgo = r_vortex.get('motivo_rejeicao') or 'NENHUM'
+        rejection_reasons_legacy[motivo_legacy] = rejection_reasons_legacy.get(motivo_legacy, 0) + 1
+        rejection_reasons_luxalgo[motivo_luxalgo] = rejection_reasons_luxalgo.get(motivo_luxalgo, 0) + 1
+
+        # ── comparações campo a campo, guardando timestamp de cada divergência ──
+        bias_legacy, bias_lux = r_legacy.get('bias'), r_vortex.get('bias')
+        if bias_legacy != bias_lux:
+            bias_divergences += 1
+            if len(eventos_divergentes) < MAX_EVENTOS_DIVERGENTES_GUARDADOS:
+                eventos_divergentes.append({'t': ts_corte, 'campo': 'bias', 'legacy': bias_legacy, 'luxalgo': bias_lux})
+
+        zona_legacy, zona_lux = r_legacy.get('zona'), r_vortex.get('zona')
+        if zona_legacy != zona_lux:
+            zone_divergences += 1
+            if len(eventos_divergentes) < MAX_EVENTOS_DIVERGENTES_GUARDADOS:
+                eventos_divergentes.append({'t': ts_corte, 'campo': 'zone', 'legacy': zona_legacy, 'luxalgo': zona_lux})
+
+        choch_legacy_existe = r_legacy.get('choch') is not None
+        choch_lux_existe = r_vortex.get('internal_choch') is not None
+        if choch_legacy_existe != choch_lux_existe:
+            choch_divergences += 1
+            if len(eventos_divergentes) < MAX_EVENTOS_DIVERGENTES_GUARDADOS:
+                eventos_divergentes.append({
+                    't': ts_corte, 'campo': 'choch',
+                    'legacy': r_legacy.get('choch'), 'luxalgo': r_vortex.get('internal_choch'),
+                })
+
+        fvg_legacy_n = len(r_legacy.get('fvg_candidatos') or [])
+        fvg_lux_n = len(r_vortex.get('fvg_candidatos') or [])
+        if fvg_legacy_n != fvg_lux_n:
+            fvg_divergences += 1
+            if len(eventos_divergentes) < MAX_EVENTOS_DIVERGENTES_GUARDADOS:
+                eventos_divergentes.append({'t': ts_corte, 'campo': 'fvg_count', 'legacy': fvg_legacy_n, 'luxalgo': fvg_lux_n})
+
+    return {
+        'pair': pair, 'dias_historico': dias_historico,
+        'nota_metodologica': (
+            'Replay SOMENTE LEITURA, sem escrita em produção, sem chamar '
+            'process_pair_gates_vortex() nem process_pair_4camadas(), sem lookahead '
+            '(cada ciclo só enxerga m5[:i+1], mesmo mecanismo causal já validado em '
+            'replay_gates_reprovados). LEGACY usa compute_lux_structure_bias (já '
+            'existente antes deste ticket) + compute_premium_discount (zona fixa 20 '
+            'candles) + detect_sweep_in_zone/detect_choch_after_sweep (SWEEP_BASED) + '
+            'find_open_fvgs (threshold fixo). LUXALGO/VORTEX usa compute_lux_structure_bias '
+            '(mesma função — por isso bias_divergences deve ficar em 0, não é bug) + '
+            'compute_lux_premium_discount (trailing dinâmico) + compute_lux_internal_structure '
+            '(LUX_INTERNAL_CHoCH) + find_open_fvgs_adaptive (threshold adaptativo). Nenhum dos '
+            'dois caminhos gera entry/sl/tp — ambos são scaffolds de auditoria estrutural.'
+        ),
+        'resumo': {
+            'total_candles': total_candles,
+            'legacy_signals': legacy_signals,
+            'luxalgo_valid_setups': luxalgo_valid_setups,
+            'vortex_decisions_com_fvg_candidato': vortex_decisions_nao_unknown,
+            'bias_divergences': bias_divergences,
+            'zone_divergences': zone_divergences,
+            'choch_divergences': choch_divergences,
+            'fvg_divergences': fvg_divergences,
+        },
+        'rejection_reasons': {
+            'legacy': rejection_reasons_legacy,
+            'luxalgo': rejection_reasons_luxalgo,
+        },
+        'eventos_divergentes': eventos_divergentes,
+        'eventos_divergentes_truncado': len(eventos_divergentes) >= MAX_EVENTOS_DIVERGENTES_GUARDADOS,
+    }
+
+
+@explicacao_bp.route("/scalp_gates_vortex/replay_comparativo_luxalgo", methods=["GET"])
+def replay_comparativo_luxalgo_endpoint():
+    """
+    Item E do ticket — endpoint do replay comparativo LEGACY vs
+    LUXALGO vs VORTEX_LAYER. Protegido contra chamada acidental,
+    mesmo padrão dos outros endpoints de replay.
+    Uso: ?pair=ADAUSD&dias=7&confirm=RODAR_REPLAY_COMPARATIVO
+    """
+    if request.args.get('confirm') != 'RODAR_REPLAY_COMPARATIVO':
+        return jsonify({
+            "erro": "endpoint pesado, protegido contra chamada acidental",
+            "como_usar": "adiciona &confirm=RODAR_REPLAY_COMPARATIVO na URL, ex: "
+                          "/scalp_gates_vortex/replay_comparativo_luxalgo?pair=ADAUSD&dias=7&confirm=RODAR_REPLAY_COMPARATIVO",
+        }), 400
+    pair = request.args.get('pair', 'BTCUSD')
+    dias = int(request.args.get('dias', 7))
+    try:
+        report = replay_comparativo_luxalgo(pair, dias_historico=dias)
+    except Exception as e:
+        return jsonify({"erro": str(e)}), 500
+    return jsonify(report)
 
 
 @explicacao_bp.route("/scalp_gates_vortex/replay_gates_reprovados", methods=["GET"])

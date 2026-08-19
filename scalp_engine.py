@@ -7681,6 +7681,69 @@ def _agregar_relatorio_gates_reprovados(lista_resultados):
     }
 
 
+def diagnostico_independente_luxalgo(candles_swing, candles_internal):
+    """
+    Diagnóstico SOMENTE LEITURA (item aprovado do ticket) — avalia
+    bias/zone/internal_choch/fvg de forma INDEPENDENTE, SEM
+    short-circuit, pra separar CONDIÇÃO REAL de MOTIVO DE REJEIÇÃO DA
+    ORDEM ATUAL. avaliar_vortex_decision_layer() usa short-circuit
+    (retorna assim que zone_ok falha, nunca chega a testar CHoCH) —
+    essa função aqui testa TODAS as condições sempre, mesmo quando uma
+    anterior já falhou.
+
+    Reaproveita exatamente as mesmas funções já existentes e testadas
+    (compute_lux_structure_bias, compute_lux_premium_discount,
+    classificar_zona_lux, compute_lux_internal_structure,
+    find_open_fvgs_adaptive) — nenhuma delas é alterada. NÃO chama
+    nem altera avaliar_vortex_decision_layer(), avaliar_legacy_
+    decision_layer() ou qualquer função de decisão/produção. Não
+    decide nada, só mede e devolve os 4 booleanos independentes.
+    """
+    resultado = {
+        'bias': None, 'bias_ok': False,
+        'zona': None, 'zone_ok': False,
+        'internal_choch_exists': False, 'internal_choch_evento': None,
+        'valid_fvg_exists': False, 'fvg_candidatos_n': 0,
+    }
+
+    bias = compute_lux_structure_bias(candles_swing, swing_size=50)
+    resultado['bias'] = bias
+    resultado['bias_ok'] = bias in ('alta', 'baixa')
+
+    zona_calc = compute_lux_premium_discount(candles_swing, swing_size=50)
+    preco_atual = candles_swing[-1]['c'] if candles_swing else None
+    zona = classificar_zona_lux(preco_atual, zona_calc) if zona_calc and preco_atual is not None else None
+    resultado['zona'] = zona
+    if bias == 'alta':
+        resultado['zone_ok'] = zona == 'discount'
+    elif bias == 'baixa':
+        resultado['zone_ok'] = zona == 'premium'
+    else:
+        resultado['zone_ok'] = False
+
+    # ── SEM short-circuit — testa CHoCH interno independente do
+    # resultado de zone_ok acima. ──
+    eventos_internos = compute_lux_internal_structure(candles_internal, swing_size=5)
+    choch_relevante = None
+    if bias in ('alta', 'baixa'):
+        for ev in reversed(eventos_internos):
+            if ev['tipo'] == 'CHoCH' and ev['direcao'] == bias:
+                choch_relevante = ev
+                break
+    resultado['internal_choch_exists'] = choch_relevante is not None
+    resultado['internal_choch_evento'] = choch_relevante
+
+    # ── SEM short-circuit — testa FVG independente de zone_ok e de
+    # internal_choch_exists acima. ──
+    fvgs = find_open_fvgs_adaptive(candles_internal)
+    tipo_fvg_desejado = 'FVG_bullish' if bias == 'alta' else ('FVG_bearish' if bias == 'baixa' else None)
+    candidatos = [f for f in fvgs if tipo_fvg_desejado and f['tipo'] == tipo_fvg_desejado]
+    resultado['valid_fvg_exists'] = len(candidatos) > 0
+    resultado['fvg_candidatos_n'] = len(candidatos)
+
+    return resultado
+
+
 def replay_comparativo_luxalgo(pair, dias_historico=7):
     """
     Item E do ticket — replay comparativo SOMENTE LEITURA entre 3
@@ -7730,6 +7793,23 @@ def replay_comparativo_luxalgo(pair, dias_historico=7):
 
     MAX_EVENTOS_DIVERGENTES_GUARDADOS = 200  # não deixa a resposta explodir de tamanho
 
+    # ── Diagnóstico independente (item aprovado do ticket) — sem
+    # short-circuit, mede as 4 condições sempre, separado do motivo de
+    # rejeição da ordem atual (que usa short-circuit). ──
+    diag_agregado = {
+        'total_candles': 0,
+        'bias_ok': 0, 'bias_fail': 0,
+        'premium_discount': {'premium': 0, 'discount': 0, 'equilibrium': 0, 'nao_disponivel': 0},
+        'zone_ok': 0, 'zone_fail': 0,
+        'internal_choch_exists': 0, 'internal_choch_absent': 0,
+        'valid_fvg_exists': 0, 'valid_fvg_absent': 0,
+        'combinations': {
+            'zone_fail_choch_exists': 0, 'zone_fail_choch_absent': 0,
+            'zone_ok_choch_exists': 0, 'zone_ok_choch_absent': 0,
+            'choch_exists_fvg_exists': 0, 'choch_exists_fvg_absent': 0,
+        },
+    }
+
     for i in range(MIN_CANDLES_SWING, len(m5)):
         ts_corte = m5[i]['t']
         # ── janela causal: só candles com t <= ts_corte, mesmo padrão
@@ -7747,6 +7827,61 @@ def replay_comparativo_luxalgo(pair, dias_historico=7):
             r_vortex = avaliar_vortex_decision_layer(candles_ate_agora, candles_ate_agora)
         except Exception as e:
             r_vortex = {'decisao': 'ERRO', 'motivo_rejeicao': f'excecao: {e}', 'bias': None, 'zona': None, 'internal_choch': None, 'fvg_candidatos': []}
+
+        # ── Diagnóstico independente (item aprovado do ticket) — mesma
+        # janela causal candles_ate_agora, sem short-circuit. ──
+        try:
+            diag = diagnostico_independente_luxalgo(candles_ate_agora, candles_ate_agora)
+        except Exception:
+            diag = None
+
+        if diag:
+            diag_agregado['total_candles'] += 1
+            if diag['bias_ok']:
+                diag_agregado['bias_ok'] += 1
+            else:
+                diag_agregado['bias_fail'] += 1
+
+            zona_diag = diag['zona']
+            if zona_diag in ('premium', 'discount', 'equilibrium'):
+                diag_agregado['premium_discount'][zona_diag] += 1
+            else:
+                diag_agregado['premium_discount']['nao_disponivel'] += 1
+
+            if diag['zone_ok']:
+                diag_agregado['zone_ok'] += 1
+            else:
+                diag_agregado['zone_fail'] += 1
+
+            choch_existe = diag['internal_choch_exists']
+            if choch_existe:
+                diag_agregado['internal_choch_exists'] += 1
+            else:
+                diag_agregado['internal_choch_absent'] += 1
+
+            fvg_existe = diag['valid_fvg_exists']
+            if fvg_existe:
+                diag_agregado['valid_fvg_exists'] += 1
+            else:
+                diag_agregado['valid_fvg_absent'] += 1
+
+            # ── Combinações pedidas explicitamente no ticket ──
+            if diag['zone_ok']:
+                if choch_existe:
+                    diag_agregado['combinations']['zone_ok_choch_exists'] += 1
+                else:
+                    diag_agregado['combinations']['zone_ok_choch_absent'] += 1
+            else:
+                if choch_existe:
+                    diag_agregado['combinations']['zone_fail_choch_exists'] += 1
+                else:
+                    diag_agregado['combinations']['zone_fail_choch_absent'] += 1
+
+            if choch_existe:
+                if fvg_existe:
+                    diag_agregado['combinations']['choch_exists_fvg_exists'] += 1
+                else:
+                    diag_agregado['combinations']['choch_exists_fvg_absent'] += 1
 
         if r_legacy.get('fvg_candidatos'):
             legacy_signals += 1
@@ -7821,6 +7956,7 @@ def replay_comparativo_luxalgo(pair, dias_historico=7):
         },
         'eventos_divergentes': eventos_divergentes,
         'eventos_divergentes_truncado': len(eventos_divergentes) >= MAX_EVENTOS_DIVERGENTES_GUARDADOS,
+        'diagnostico_independente': diag_agregado,
     }
 
 

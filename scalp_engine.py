@@ -9133,3 +9133,195 @@ def simular_recencia_choch_todos_pares_iniciar_endpoint():
         "como_consultar": f"/scalp_gates_vortex/replay_comparativo_luxalgo_status/{job_id}",
         "aviso": "MUITO pesado (13 pares em sequência) — pode levar bastante tempo, roda em background sem prazo de conexão",
     })
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# ESTATÍSTICAS ENTRE PARES + BENCHMARK BTC — item aprovado do ticket.
+# Wrapper PURAMENTE ADITIVO sobre simular_recencia_choch_todos_pares()
+# (não alterada) — calcula percentual preservado por par/janela e as
+# estatísticas entre pares (quantos preservam 100%, quantos perdem,
+# pior/mediana/média de preservação), sem recalcular nenhuma
+# simulação, só agregando aritmeticamente o que a função de base já
+# produziu. Destaca BTCUSD como benchmark principal, conforme diretriz.
+# ═══════════════════════════════════════════════════════════════════════
+
+def _percentual_preservado_por_par(resultado_todos_pares):
+    """
+    Puramente aritmético — não chama nenhuma simulação nova. Lê
+    resultados_detalhados_por_pair (já produzido por
+    simular_recencia_choch_todos_pares) e calcula o percentual
+    preservado por par/janela + estatísticas entre pares.
+    """
+    detalhes = resultado_todos_pares.get('resultados_detalhados_por_pair', {})
+    tabela_pct = {}
+    for p, r in detalhes.items():
+        if 'erro' in r:
+            continue
+        tabela_setup = r.get('tabela_setups_atuais_preservados', {})
+        total_current = r.get('total_setups_current', 0) or 0
+        pct_por_janela = {}
+        for label, _ in JANELAS_RECENCIA_HIPOTETICAS:
+            setups_finais = (tabela_setup.get(label) or {}).get('setups_finais')
+            if total_current > 0 and setups_finais is not None:
+                pct_por_janela[label] = round(100 * setups_finais / total_current, 1)
+            else:
+                pct_por_janela[label] = None
+        tabela_pct[p] = pct_por_janela
+
+    estatisticas_entre_pares = {}
+    for label, _ in JANELAS_RECENCIA_HIPOTETICAS:
+        valores = [tabela_pct[p][label] for p in tabela_pct if tabela_pct[p].get(label) is not None]
+        pares_100 = sum(1 for v in valores if v == 100.0)
+        pares_com_perda = sum(1 for v in valores if v is not None and v < 100.0)
+        pior = min(valores) if valores else None
+        pior_par = None
+        if pior is not None:
+            for p in tabela_pct:
+                if tabela_pct[p].get(label) == pior:
+                    pior_par = p
+                    break
+        valores_ordenados = sorted(valores)
+        n = len(valores_ordenados)
+        mediana = None
+        if n:
+            meio = n // 2
+            mediana = valores_ordenados[meio] if n % 2 == 1 else round((valores_ordenados[meio - 1] + valores_ordenados[meio]) / 2, 1)
+        media = round(sum(valores) / n, 1) if n else None
+        estatisticas_entre_pares[label] = {
+            'pares_com_100_por_cento': pares_100,
+            'pares_com_perda': pares_com_perda,
+            'pior_preservacao_pct': pior,
+            'pior_par': pior_par,
+            'mediana_preservacao_pct': mediana,
+            'media_preservacao_pct': media,
+            'total_pares_validos': n,
+        }
+
+    return {
+        'tabela_percentual_preservado_por_par': tabela_pct,
+        'estatisticas_entre_pares_por_janela': estatisticas_entre_pares,
+    }
+
+
+def simular_recencia_choch_todos_pares_com_stats(dias_historico=7, pares=None):
+    """
+    Wrapper aditivo sobre simular_recencia_choch_todos_pares() (NÃO
+    alterada) — chama a função de base uma única vez e agrega, por
+    cima do resultado já calculado, o percentual preservado por
+    par/janela + estatísticas entre pares + tabela BTC destacada como
+    benchmark principal. Não recalcula nenhuma simulação nem toca em
+    nenhuma função de decisão real.
+    """
+    resultado_base = simular_recencia_choch_todos_pares(dias_historico=dias_historico, pares=pares)
+    if 'resultados_detalhados_por_pair' not in resultado_base:
+        return resultado_base
+
+    stats_extra = _percentual_preservado_por_par(resultado_base)
+
+    btc_detalhe = (resultado_base.get('resultados_detalhados_por_pair') or {}).get('BTCUSD', {})
+    btc_tabela_setup = btc_detalhe.get('tabela_setups_atuais_preservados', {})
+    tabela_btc_benchmark = {
+        label: {
+            'setups_finais': (btc_tabela_setup.get(label) or {}).get('setups_finais'),
+            'perdidos_vs_current': (btc_tabela_setup.get(label) or {}).get('perdidos_vs_current'),
+            'percentual_preservado': stats_extra['tabela_percentual_preservado_por_par'].get('BTCUSD', {}).get(label),
+        }
+        for label, _ in JANELAS_RECENCIA_HIPOTETICAS
+    }
+
+    resultado_final = dict(resultado_base)
+    resultado_final['tabela_percentual_preservado_por_par'] = stats_extra['tabela_percentual_preservado_por_par']
+    resultado_final['estatisticas_entre_pares_por_janela'] = stats_extra['estatisticas_entre_pares_por_janela']
+    resultado_final['tabela_btc_benchmark_destacada'] = tabela_btc_benchmark
+    resultado_final['nota_diretriz'] = (
+        'BTC é o benchmark principal (usar tabela_btc_benchmark_destacada para decisão '
+        'primária). Os demais pares servem pra validar generalização — ver '
+        'estatisticas_entre_pares_por_janela (pares_com_100_por_cento, pares_com_perda, '
+        'pior_preservacao_pct, mediana, média). Nenhuma janela foi escolhida automaticamente '
+        'aqui — só agregação estatística pra apoiar a decisão manual.'
+    )
+    return resultado_final
+
+
+def _executar_simulacao_recencia_todos_pares_stats_job(db_file, job_id, dias_historico, pares):
+    """Mesmo padrão dos outros jobs — roda em background, persiste
+    resultado/erro na tabela scalp_replay_jobs."""
+    try:
+        resultado = simular_recencia_choch_todos_pares_com_stats(dias_historico=dias_historico, pares=pares)
+        with sqlite3.connect(db_file) as conn:
+            conn.execute('''
+                UPDATE scalp_replay_jobs
+                SET status='concluido', resultado_json=?, finished_at=?
+                WHERE job_id=?
+            ''', (json.dumps(resultado, ensure_ascii=False), int(time.time()), job_id))
+            conn.commit()
+    except Exception as e:
+        try:
+            with sqlite3.connect(db_file) as conn:
+                conn.execute('''
+                    UPDATE scalp_replay_jobs
+                    SET status='erro', erro=?, finished_at=?
+                    WHERE job_id=?
+                ''', (str(e), int(time.time()), job_id))
+                conn.commit()
+        except Exception as e2:
+            print(f"[scalp_engine replay_jobs] erro ao registrar falha do job {job_id}: {e2}")
+
+
+@explicacao_bp.route("/scalp_gates_vortex/simular_recencia_choch_benchmark_btc_iniciar", methods=["GET"])
+def simular_recencia_choch_benchmark_btc_iniciar_endpoint():
+    """
+    Roda simular_recencia_choch_todos_pares_com_stats() em BACKGROUND
+    — versão com estatísticas entre pares e BTC destacado como
+    benchmark, conforme diretriz aprovada. MUITO pesado (13 pares em
+    sequência, cada um pode levar dezenas de minutos em dias=30).
+    Consultar no MESMO endpoint de status genérico já existente.
+    Uso: ?dias=7&confirm=RODAR_BENCHMARK_BTC (recomendado começar com
+    dias=7 antes de tentar dias=30, dado o custo já medido).
+    Opcional &pares=BTCUSD,ETHUSD,... pra subconjunto.
+    """
+    if request.args.get('confirm') != 'RODAR_BENCHMARK_BTC':
+        return jsonify({
+            "erro": "endpoint MUITO pesado, protegido contra chamada acidental",
+            "como_usar": "adiciona &confirm=RODAR_BENCHMARK_BTC na URL, ex: "
+                          "/scalp_gates_vortex/simular_recencia_choch_benchmark_btc_iniciar?dias=7&confirm=RODAR_BENCHMARK_BTC",
+            "aviso": "recomendado começar com dias=7 (13 pares) antes de tentar dias=30 — "
+                     "o job de BTC sozinho com 30 dias já levou dezenas de minutos",
+        }), 400
+
+    dias = int(request.args.get('dias', 7))
+    pares_param = request.args.get('pares')
+    pares_lista = None
+    if pares_param:
+        pares_lista = [p.strip().upper() for p in pares_param.split(',') if p.strip()]
+
+    db_file = _db_file_explicacao()
+    init_replay_jobs_db(db_file)
+
+    job_id = f"benchmarkbtc_{int(time.time()*1000)}"
+
+    try:
+        with sqlite3.connect(db_file) as conn:
+            conn.execute('''
+                INSERT INTO scalp_replay_jobs (job_id, tipo, pair, dias_historico, status, created_at)
+                VALUES (?, ?, ?, ?, 'rodando', ?)
+            ''', (job_id, 'simular_recencia_choch_todos_pares_com_stats', 'TODOS', dias, int(time.time())))
+            conn.commit()
+    except Exception as e:
+        return jsonify({"erro": f"não foi possível criar o job: {e}"}), 500
+
+    thread = threading.Thread(
+        target=_executar_simulacao_recencia_todos_pares_stats_job,
+        args=(db_file, job_id, dias, pares_lista),
+        daemon=True,
+    )
+    thread.start()
+
+    return jsonify({
+        "job_id": job_id,
+        "status": "iniciado",
+        "dias_historico": dias,
+        "pares": pares_lista or PARES_MONITORADOS_REPLAY,
+        "como_consultar": f"/scalp_gates_vortex/replay_comparativo_luxalgo_status/{job_id}",
+        "aviso": "MUITO pesado — roda em background sem prazo de conexão, mas pode levar bastante tempo",
+    })

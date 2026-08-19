@@ -8931,3 +8931,205 @@ def simular_recencia_choch_iniciar_endpoint():
         "como_consultar": f"/scalp_gates_vortex/replay_comparativo_luxalgo_status/{job_id}",
         "aviso": "roda em background — pode levar alguns minutos, consulte o job_id acima quando quiser",
     })
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# VALIDAÇÃO MULTI-PAR DA RECÊNCIA DO CHoCH — item aprovado do ticket.
+# Orquestra simular_recencia_choch_comparativo() (SEM ALTERAÇÃO
+# NENHUMA) em sequência pra cada par monitorado, e monta a tabela
+# consolidada + destaque de divergência vs BTCUSD (benchmark
+# principal). Não recalcula nenhuma lógica de decisão — só soma/agrega
+# o que cada chamada por par já devolve.
+# ═══════════════════════════════════════════════════════════════════════
+
+def simular_recencia_choch_todos_pares(dias_historico=7, pares=None):
+    """
+    Roda simular_recencia_choch_comparativo() (sem alteração) em
+    sequência pra cada par da lista, e agrega os resultados numa
+    tabela consolidada. Cada par é 100% independente — erro num par
+    não derruba os demais. Mesma metodologia, mesmas garantias de
+    segurança (replay puro, sem lookahead, sem tocar produção).
+    """
+    pares = pares or PARES_MONITORADOS_REPLAY
+    resultados_por_pair = {}
+
+    for p in pares:
+        try:
+            r = simular_recencia_choch_comparativo(p, dias_historico=dias_historico)
+        except Exception as e:
+            resultados_por_pair[p] = {'erro': str(e)}
+            continue
+        resultados_por_pair[p] = r
+
+    tabela_consolidada = {}
+    totais_setups_por_janela = {label: 0 for label, _ in JANELAS_RECENCIA_HIPOTETICAS}
+    choch_validos_totais = {label: 0 for label, _ in JANELAS_RECENCIA_HIPOTETICAS}
+    choch_rejeitados_totais = {label: 0 for label, _ in JANELAS_RECENCIA_HIPOTETICAS}
+    zone_ok_total = 0
+    zone_fail_total = 0
+    total_ciclos_total = 0
+    pares_com_erro = []
+
+    for p, r in resultados_por_pair.items():
+        if 'erro' in r:
+            pares_com_erro.append(p)
+            continue
+
+        tabela_par = r.get('tabela_setups_atuais_preservados', {})
+        tabela_consolidada[p] = {
+            label: (tabela_par.get(label) or {}).get('setups_finais')
+            for label, _ in JANELAS_RECENCIA_HIPOTETICAS
+        }
+
+        ag = r.get('agregados_por_janela', {})
+        for label, _ in JANELAS_RECENCIA_HIPOTETICAS:
+            bloco = ag.get(label, {})
+            totais_setups_por_janela[label] += bloco.get('setups_fvg_choch_relation_unknown', 0) or 0
+            choch_validos_totais[label] += bloco.get('choch_validos', 0) or 0
+            choch_rejeitados_totais[label] += bloco.get('choch_rejeitados_por_idade', 0) or 0
+
+        current_bloco = ag.get('CURRENT', {})
+        zone_ok_total += current_bloco.get('zone_ok', 0) or 0
+        zone_fail_total += current_bloco.get('zone_fail', 0) or 0
+        total_ciclos_total += current_bloco.get('total_ciclos', 0) or 0
+
+    total_current_global = totais_setups_por_janela.get('CURRENT', 0)
+    percentual_preservado_global = {}
+    setups_perdidos_global = {}
+    for label, _ in JANELAS_RECENCIA_HIPOTETICAS:
+        n = totais_setups_por_janela[label]
+        percentual_preservado_global[label] = round(100 * n / total_current_global, 1) if total_current_global else None
+        setups_perdidos_global[label] = total_current_global - n
+
+    # ── Destaque de divergência vs BTCUSD (benchmark principal),
+    # pedido explícito do ticket — puramente comparativo, não decide
+    # qual janela usar. ──
+    divergencia_vs_btc = {}
+    btc_tabela = tabela_consolidada.get('BTCUSD', {})
+    if btc_tabela:
+        for p, tabela_p in tabela_consolidada.items():
+            if p == 'BTCUSD':
+                continue
+            diffs = {}
+            for label, _ in JANELAS_RECENCIA_HIPOTETICAS:
+                btc_v = btc_tabela.get(label)
+                p_v = tabela_p.get(label)
+                if btc_v is not None and p_v is not None:
+                    diffs[label] = p_v - btc_v
+            divergencia_vs_btc[p] = diffs
+
+    return {
+        'dias_historico': dias_historico,
+        'pares_testados': pares,
+        'pares_com_erro': pares_com_erro,
+        'benchmark_principal': 'BTCUSD',
+        'tabela_consolidada_setups_finais_por_par': tabela_consolidada,
+        'consolidado_global': {
+            'total_ciclos_somados_todos_pares': total_ciclos_total,
+            'zone_ok_somado': zone_ok_total,
+            'zone_fail_somado': zone_fail_total,
+            'setups_totais_por_janela': totais_setups_por_janela,
+            'choch_validos_totais_por_janela': choch_validos_totais,
+            'choch_rejeitados_totais_por_janela': choch_rejeitados_totais,
+            'setups_perdidos_vs_current_por_janela': setups_perdidos_global,
+            'percentual_preservado_por_janela': percentual_preservado_global,
+            'nota_distribuicao_idade': (
+                'choch_validos_totais_por_janela e choch_rejeitados_totais_por_janela, somados '
+                'de todos os pares, funcionam como um proxy agregado da distribuição de idade '
+                '(quantos CHoCH sobrevivem em cada corte). Para percentis/estatística de idade '
+                'RAW cruzando todos os pares (como já feito individualmente pra ADAUSD via '
+                'medicao_idade_choch), seria necessário rodar replay_comparativo_luxalgo() '
+                'também por par — não incluído aqui pra não dobrar o tempo de execução; '
+                'disponível como próximo passo se for necessário.'
+            ),
+        },
+        'divergencia_vs_btc_por_par': divergencia_vs_btc,
+        'nota_metodologica': (
+            'Cada par foi processado de forma totalmente independente, chamando '
+            'simular_recencia_choch_comparativo() sem nenhuma alteração — mesma metodologia, '
+            'mesmas garantias (replay puro, sem lookahead, sem tocar produção). Erro num par '
+            'não derruba os demais. Nenhuma janela foi escolhida ou aplicada — só '
+            'orquestração/agregação do que cada chamada por par já calcula.'
+        ),
+        'resultados_detalhados_por_pair': resultados_por_pair,
+    }
+
+
+def _executar_simulacao_recencia_todos_pares_job(db_file, job_id, dias_historico, pares):
+    """Mesmo padrão de _executar_simulacao_recencia_job, só que pra
+    todos os pares — roda em background, persiste resultado/erro."""
+    try:
+        resultado = simular_recencia_choch_todos_pares(dias_historico=dias_historico, pares=pares)
+        with sqlite3.connect(db_file) as conn:
+            conn.execute('''
+                UPDATE scalp_replay_jobs
+                SET status='concluido', resultado_json=?, finished_at=?
+                WHERE job_id=?
+            ''', (json.dumps(resultado, ensure_ascii=False), int(time.time()), job_id))
+            conn.commit()
+    except Exception as e:
+        try:
+            with sqlite3.connect(db_file) as conn:
+                conn.execute('''
+                    UPDATE scalp_replay_jobs
+                    SET status='erro', erro=?, finished_at=?
+                    WHERE job_id=?
+                ''', (str(e), int(time.time()), job_id))
+                conn.commit()
+        except Exception as e2:
+            print(f"[scalp_engine replay_jobs] erro ao registrar falha do job {job_id}: {e2}")
+
+
+@explicacao_bp.route("/scalp_gates_vortex/simular_recencia_choch_todos_pares_iniciar", methods=["GET"])
+def simular_recencia_choch_todos_pares_iniciar_endpoint():
+    """
+    Fase 2 do ticket — inicia simular_recencia_choch_todos_pares() em
+    BACKGROUND (MUITO pesado, roda os 13 pares em sequência). Devolve
+    job_id na hora. Consultar no MESMO endpoint de status genérico já
+    existente: /scalp_gates_vortex/replay_comparativo_luxalgo_status/<job_id>
+    Uso: ?dias=7&confirm=RODAR_SIMULACAO_RECENCIA_TODOS_PARES
+    Opcional &pares=BTCUSD,ETHUSD,... pra rodar um subconjunto.
+    """
+    if request.args.get('confirm') != 'RODAR_SIMULACAO_RECENCIA_TODOS_PARES':
+        return jsonify({
+            "erro": "endpoint MUITO pesado (roda todos os pares em sequência), protegido contra chamada acidental",
+            "como_usar": "adiciona &confirm=RODAR_SIMULACAO_RECENCIA_TODOS_PARES na URL, ex: "
+                          "/scalp_gates_vortex/simular_recencia_choch_todos_pares_iniciar?dias=7&confirm=RODAR_SIMULACAO_RECENCIA_TODOS_PARES",
+        }), 400
+
+    dias = int(request.args.get('dias', 7))
+    pares_param = request.args.get('pares')
+    pares_lista = None
+    if pares_param:
+        pares_lista = [p.strip().upper() for p in pares_param.split(',') if p.strip()]
+
+    db_file = _db_file_explicacao()
+    init_replay_jobs_db(db_file)
+
+    job_id = f"simrecenciatodos_{int(time.time()*1000)}"
+
+    try:
+        with sqlite3.connect(db_file) as conn:
+            conn.execute('''
+                INSERT INTO scalp_replay_jobs (job_id, tipo, pair, dias_historico, status, created_at)
+                VALUES (?, ?, ?, ?, 'rodando', ?)
+            ''', (job_id, 'simular_recencia_choch_todos_pares', 'TODOS', dias, int(time.time())))
+            conn.commit()
+    except Exception as e:
+        return jsonify({"erro": f"não foi possível criar o job: {e}"}), 500
+
+    thread = threading.Thread(
+        target=_executar_simulacao_recencia_todos_pares_job,
+        args=(db_file, job_id, dias, pares_lista),
+        daemon=True,
+    )
+    thread.start()
+
+    return jsonify({
+        "job_id": job_id,
+        "status": "iniciado",
+        "dias_historico": dias,
+        "pares": pares_lista or PARES_MONITORADOS_REPLAY,
+        "como_consultar": f"/scalp_gates_vortex/replay_comparativo_luxalgo_status/{job_id}",
+        "aviso": "MUITO pesado (13 pares em sequência) — pode levar bastante tempo, roda em background sem prazo de conexão",
+    })

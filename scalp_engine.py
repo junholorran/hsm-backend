@@ -7794,6 +7794,11 @@ def replay_comparativo_luxalgo(pair, dias_historico=7):
 
     MAX_EVENTOS_DIVERGENTES_GUARDADOS = 200  # não deixa a resposta explodir de tamanho
 
+    # ── Medição de idade do CHoCH (item aprovado do ticket) — só
+    # medição, não define janela nenhuma. ──
+    medicoes_idade_choch = []
+    validacao_correspondencia_choch = {'ok': 0, 'divergente': 0}
+
     # ── Diagnóstico independente (item aprovado do ticket) — sem
     # short-circuit, mede as 4 condições sempre, separado do motivo de
     # rejeição da ordem atual (que usa short-circuit). ──
@@ -7835,6 +7840,32 @@ def replay_comparativo_luxalgo(pair, dias_historico=7):
             diag = diagnostico_independente_luxalgo(candles_ate_agora, candles_ate_agora)
         except Exception:
             diag = None
+
+        # ── Medição de idade do CHoCH (item aprovado do ticket) — só
+        # roda quando diag existe e diag['internal_choch_exists'] é
+        # True, mesma janela causal (candles_ate_agora), idx_atual =
+        # último índice dessa janela (i, já que candles_ate_agora =
+        # m5[:i+1]). Puramente aditivo, não altera decisão nenhuma. ──
+        if diag and diag.get('internal_choch_exists') and diag.get('bias') in ('alta', 'baixa'):
+            try:
+                medicao = _selecionar_choch_para_medicao(candles_ate_agora, diag['bias'], i)
+            except Exception:
+                medicao = None
+            if medicao:
+                medicoes_idade_choch.append(medicao)
+                # ── Validação pedida no ticket: confirma que o CHoCH
+                # medido aqui é EXATAMENTE o mesmo que diag['internal_
+                # choch_evento'] já reportou (mesma seleção, calculada
+                # de forma independente pra cross-check). ──
+                evento_diag = diag.get('internal_choch_evento') or {}
+                bate = (
+                    evento_diag.get('t') == medicao['choch_ts']
+                    and evento_diag.get('index') == medicao['choch_index']
+                )
+                if bate:
+                    validacao_correspondencia_choch['ok'] += 1
+                else:
+                    validacao_correspondencia_choch['divergente'] += 1
 
         if diag:
             diag_agregado['total_candles'] += 1
@@ -7958,6 +7989,27 @@ def replay_comparativo_luxalgo(pair, dias_historico=7):
         'eventos_divergentes': eventos_divergentes,
         'eventos_divergentes_truncado': len(eventos_divergentes) >= MAX_EVENTOS_DIVERGENTES_GUARDADOS,
         'diagnostico_independente': diag_agregado,
+        'medicao_idade_choch': {
+            'nota': (
+                'Item aprovado do ticket — mede a idade real (em candles e minutos) do CHoCH '
+                'que a implementação atual efetivamente seleciona, SEM aplicar nenhuma janela '
+                'de recência. Objetivo: medir antes de decidir se e qual janela faz sentido.'
+            ),
+            'estatisticas': _agregar_medicao_idade_choch(medicoes_idade_choch),
+            'validacao_correspondencia': {
+                'nota': (
+                    'Confirma que o CHoCH medido aqui é exatamente o mesmo que diagnostico_'
+                    'independente_luxalgo() já reportou em internal_choch_evento (mesmo '
+                    'timestamp e index) — cross-check de que estamos medindo o evento certo, '
+                    'não outro CHoCH qualquer.'
+                ),
+                'ok': validacao_correspondencia_choch['ok'],
+                'divergente': validacao_correspondencia_choch['divergente'],
+            },
+            'amostra_bruta_primeiros_50': medicoes_idade_choch[:50],
+            'amostra_bruta_ultimos_50': medicoes_idade_choch[-50:] if len(medicoes_idade_choch) > 50 else [],
+            'total_medicoes_brutas': len(medicoes_idade_choch),
+        },
     }
 
 
@@ -8510,3 +8562,103 @@ def replay_comparativo_luxalgo_status_endpoint(job_id):
         resposta["nota"] = "ainda processando — tenta consultar de novo em alguns segundos/minutos"
 
     return jsonify(resposta)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# MEDIÇÃO DE RECÊNCIA DO CHoCH — item aprovado do ticket. SOMENTE
+# MEDIÇÃO, não altera nenhuma regra de decisão, não define janela
+# nenhuma. Objetivo: descobrir a idade real (em candles/minutos) do
+# CHoCH que a implementação atual está de fato usando quando diz
+# internal_choch_exists=True, ANTES de decidir se precisa de janela de
+# recência e qual valor usar.
+# ═══════════════════════════════════════════════════════════════════════
+
+def _selecionar_choch_para_medicao(candles_internal, bias, idx_atual):
+    """
+    Reproduz, pra fins de MEDIÇÃO apenas, a MESMA seleção de CHoCH já
+    usada em diagnostico_independente_luxalgo()/avaliar_vortex_
+    decision_layer() — "for ev in reversed(eventos_internos): if
+    tipo==CHoCH e direcao==bias: usa esse, para" — sem alterar nenhuma
+    dessas funções existentes. Reaproveita compute_lux_internal_
+    structure() (não duplica detecção nenhuma, só a seleção/medição).
+    Retorna None se não houver CHoCH na direção do bias (mesmo critério
+    de ausência já usado).
+    """
+    if bias not in ('alta', 'baixa'):
+        return None
+    eventos_internos = compute_lux_internal_structure(candles_internal, swing_size=5)
+    choch_relevante = None
+    for ev in reversed(eventos_internos):
+        if ev['tipo'] == 'CHoCH' and ev['direcao'] == bias:
+            choch_relevante = ev
+            break
+    if not choch_relevante:
+        return None
+
+    candle_atual = candles_internal[idx_atual]
+    idade_em_candles = idx_atual - choch_relevante['index']
+    idade_em_minutos = round((candle_atual['t'] - choch_relevante['t']) / 60000, 2)
+
+    return {
+        'candle_atual_ts': candle_atual['t'],
+        'choch_ts': choch_relevante['t'],
+        'choch_index': choch_relevante['index'],
+        'idx_atual': idx_atual,
+        'idade_em_candles': idade_em_candles,
+        'idade_em_minutos': idade_em_minutos,
+        'direcao_bias': bias,
+        'direcao_choch': choch_relevante['direcao'],
+    }
+
+
+def _agregar_medicao_idade_choch(lista_medicoes):
+    """
+    Agrega as estatísticas obrigatórias do ticket — puramente
+    aritmético sobre a lista de medições já coletadas, não recalcula
+    nenhuma detecção. Distribuição em buckets fixos pedidos:
+    0-5, 6-10, 11-20, 21-50, 51-100, 101-200, 201-500, 501+.
+    """
+    if not lista_medicoes:
+        return {
+            'total_choch_detectados': 0,
+            'nota': 'nenhum CHoCH detectado na amostra — sem estatística possível',
+        }
+
+    idades = sorted(m['idade_em_candles'] for m in lista_medicoes)
+    n = len(idades)
+
+    def media(lista):
+        return round(sum(lista) / len(lista), 2) if lista else None
+
+    buckets_definicao = [
+        ('0-5', 0, 5), ('6-10', 6, 10), ('11-20', 11, 20), ('21-50', 21, 50),
+        ('51-100', 51, 100), ('101-200', 101, 200), ('201-500', 201, 500),
+        ('501+', 501, float('inf')),
+    ]
+    distribuicao = {label: 0 for label, _, _ in buckets_definicao}
+    for idade in idades:
+        for label, minimo, maximo in buckets_definicao:
+            if minimo <= idade <= maximo:
+                distribuicao[label] += 1
+                break
+
+    return {
+        'total_choch_detectados': n,
+        'idade_min': idades[0],
+        'idade_max': idades[-1],
+        'idade_media': media(idades),
+        'idade_mediana': _percentil(idades, 50),
+        'percentil_25': _percentil(idades, 25),
+        'percentil_50': _percentil(idades, 50),
+        'percentil_75': _percentil(idades, 75),
+        'percentil_90': _percentil(idades, 90),
+        'percentil_95': _percentil(idades, 95),
+        'percentil_99': _percentil(idades, 99),
+        'distribuicao_por_bucket_candles': distribuicao,
+        'nota': (
+            'idade_em_candles = idx_atual - choch_index, medido no mesmo array de candles '
+            'passado pra compute_lux_internal_structure() em cada ciclo (candles_ate_agora, '
+            'sem lookahead). NENHUMA janela de recência foi aplicada aqui — esta é a idade '
+            'REAL do CHoCH que a implementação atual efetivamente usa, sem filtro nenhum.'
+        ),
+    }

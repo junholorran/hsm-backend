@@ -8,6 +8,7 @@ import time
 import random
 import requests
 import json
+import threading
 from flask import Blueprint, jsonify, current_app, request
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
@@ -8346,3 +8347,166 @@ def replay_liquidez_endpoint():
     except Exception as e:
         return jsonify({"erro": str(e)}), 500
     return jsonify(report)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# REPLAY EM BACKGROUND — resolve o timeout de conexão HTTP do
+# replay_comparativo_luxalgo (pesado demais pra terminar dentro do
+# limite de uma requisição). NÃO altera replay_comparativo_luxalgo()
+# nem nenhuma outra função existente — só adiciona uma camada de
+# orquestração por cima: inicia a mesma função em background numa
+# thread, persiste o resultado numa tabela isolada (não é tabela de
+# decisão/produção, é só armazenamento de resultado de diagnóstico,
+# mesmo padrão já usado por scalp_gates_vortex_sfp_diagnostico etc.),
+# e devolve um job_id na hora, sem esperar o replay terminar.
+# ═══════════════════════════════════════════════════════════════════════
+
+def init_replay_jobs_db(db_file):
+    """Cria a tabela de jobs de replay em background, se não existir.
+    Auto-blindado — não depende de init no boot do app.py."""
+    try:
+        with sqlite3.connect(db_file) as conn:
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS scalp_replay_jobs (
+                    job_id TEXT PRIMARY KEY,
+                    tipo TEXT,
+                    pair TEXT,
+                    dias_historico INTEGER,
+                    status TEXT DEFAULT 'rodando',
+                    resultado_json TEXT,
+                    erro TEXT,
+                    created_at INTEGER,
+                    finished_at INTEGER
+                )
+            ''')
+            conn.commit()
+    except Exception as e:
+        print(f"[scalp_engine replay_jobs] erro ao criar tabela: {e}")
+
+
+def _executar_replay_comparativo_job(db_file, job_id, pair, dias_historico):
+    """
+    Roda EXATAMENTE replay_comparativo_luxalgo() (função existente, sem
+    nenhuma alteração), só que dentro de uma thread separada — a
+    requisição HTTP que disparou isso já respondeu há muito tempo, essa
+    função roda sozinha em background até terminar (sem prazo de
+    navegador/timeout de conexão). Ao final, grava o resultado (ou o
+    erro) na tabela scalp_replay_jobs. Fail-safe: qualquer exceção aqui
+    é capturada e registrada como status='erro', nunca derruba o
+    processo do servidor.
+    """
+    try:
+        resultado = replay_comparativo_luxalgo(pair, dias_historico=dias_historico)
+        status_final = 'erro' if (isinstance(resultado, dict) and 'erro' in resultado) else 'concluido'
+        with sqlite3.connect(db_file) as conn:
+            conn.execute('''
+                UPDATE scalp_replay_jobs
+                SET status=?, resultado_json=?, finished_at=?
+                WHERE job_id=?
+            ''', (status_final, json.dumps(resultado, ensure_ascii=False), int(time.time()), job_id))
+            conn.commit()
+    except Exception as e:
+        try:
+            with sqlite3.connect(db_file) as conn:
+                conn.execute('''
+                    UPDATE scalp_replay_jobs
+                    SET status='erro', erro=?, finished_at=?
+                    WHERE job_id=?
+                ''', (str(e), int(time.time()), job_id))
+                conn.commit()
+        except Exception as e2:
+            print(f"[scalp_engine replay_jobs] erro ao registrar falha do job {job_id}: {e2}")
+
+
+@explicacao_bp.route("/scalp_gates_vortex/replay_comparativo_luxalgo_iniciar", methods=["GET"])
+def replay_comparativo_luxalgo_iniciar_endpoint():
+    """
+    Inicia replay_comparativo_luxalgo() em BACKGROUND (thread separada)
+    e devolve um job_id IMEDIATAMENTE, sem esperar o replay terminar —
+    resolve o ERR_CONNECTION_CLOSED que acontece quando o replay é
+    pesado demais pra terminar dentro do tempo de uma requisição HTTP.
+    NÃO altera replay_comparativo_luxalgo() nem nenhuma função de
+    decisão/produção — só orquestra a mesma função existente por cima.
+    Uso: ?pair=ADAUSD&dias=7&confirm=RODAR_REPLAY_COMPARATIVO
+    Depois de iniciar, consulta o resultado em:
+    /scalp_gates_vortex/replay_comparativo_luxalgo_status/<job_id>
+    """
+    if request.args.get('confirm') != 'RODAR_REPLAY_COMPARATIVO':
+        return jsonify({
+            "erro": "endpoint pesado, protegido contra chamada acidental",
+            "como_usar": "adiciona &confirm=RODAR_REPLAY_COMPARATIVO na URL, ex: "
+                          "/scalp_gates_vortex/replay_comparativo_luxalgo_iniciar?pair=ADAUSD&dias=7&confirm=RODAR_REPLAY_COMPARATIVO",
+        }), 400
+
+    pair = request.args.get('pair', 'BTCUSD')
+    dias = int(request.args.get('dias', 7))
+    db_file = _db_file_explicacao()
+    init_replay_jobs_db(db_file)
+
+    job_id = f"replaycomp_{pair}_{int(time.time()*1000)}"
+
+    try:
+        with sqlite3.connect(db_file) as conn:
+            conn.execute('''
+                INSERT INTO scalp_replay_jobs (job_id, tipo, pair, dias_historico, status, created_at)
+                VALUES (?, ?, ?, ?, 'rodando', ?)
+            ''', (job_id, 'replay_comparativo_luxalgo', pair, dias, int(time.time())))
+            conn.commit()
+    except Exception as e:
+        return jsonify({"erro": f"não foi possível criar o job: {e}"}), 500
+
+    thread = threading.Thread(
+        target=_executar_replay_comparativo_job,
+        args=(db_file, job_id, pair, dias),
+        daemon=True,
+    )
+    thread.start()
+
+    return jsonify({
+        "job_id": job_id,
+        "status": "iniciado",
+        "pair": pair,
+        "dias_historico": dias,
+        "como_consultar": f"/scalp_gates_vortex/replay_comparativo_luxalgo_status/{job_id}",
+        "aviso": "o replay roda em background — pode levar alguns minutos, consulte o job_id acima quando quiser",
+    })
+
+
+@explicacao_bp.route("/scalp_gates_vortex/replay_comparativo_luxalgo_status/<job_id>", methods=["GET"])
+def replay_comparativo_luxalgo_status_endpoint(job_id):
+    """
+    Consulta o status/resultado de um job iniciado via
+    /scalp_gates_vortex/replay_comparativo_luxalgo_iniciar. Devolve
+    status='rodando' (ainda não terminou), 'concluido' (com o resultado
+    completo em 'resultado') ou 'erro' (com a mensagem em 'erro').
+    Só leitura — não recalcula nada, não altera nenhum job.
+    """
+    db_file = _db_file_explicacao()
+    init_replay_jobs_db(db_file)
+    try:
+        with sqlite3.connect(db_file) as conn:
+            row = conn.execute('''
+                SELECT status, resultado_json, erro, pair, dias_historico, created_at, finished_at
+                FROM scalp_replay_jobs WHERE job_id=?
+            ''', (job_id,)).fetchone()
+    except Exception as e:
+        return jsonify({"erro": str(e)}), 500
+
+    if not row:
+        return jsonify({"erro": f"job_id não encontrado: {job_id}"}), 404
+
+    status, resultado_json, erro, pair, dias, created_at, finished_at = row
+    resposta = {
+        "job_id": job_id, "status": status, "pair": pair, "dias_historico": dias,
+        "created_at": created_at, "finished_at": finished_at,
+    }
+    if status == 'concluido' and resultado_json:
+        resposta["resultado"] = json.loads(resultado_json)
+    elif status == 'erro':
+        resposta["erro"] = erro
+    else:
+        segundos_rodando = int(time.time()) - created_at
+        resposta["segundos_rodando"] = segundos_rodando
+        resposta["nota"] = "ainda processando — tenta consultar de novo em alguns segundos/minutos"
+
+    return jsonify(resposta)

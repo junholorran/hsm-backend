@@ -8662,3 +8662,272 @@ def _agregar_medicao_idade_choch(lista_medicoes):
             'REAL do CHoCH que a implementação atual efetivamente usa, sem filtro nenhum.'
         ),
     }
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# SIMULAÇÃO COMPARATIVA DE RECÊNCIA DO CHoCH — item aprovado do ticket.
+# SOMENTE REPLAY/SIMULAÇÃO, não altera nenhuma regra de decisão real.
+# Testa hipoteticamente 4 janelas de recência (50/100/150/200 candles)
+# lado a lado com o comportamento CURRENT (sem limite, já medido),
+# reaproveitando exatamente as mesmas funções já existentes
+# (compute_lux_structure_bias, compute_lux_premium_discount,
+# classificar_zona_lux, compute_lux_internal_structure,
+# find_open_fvgs_adaptive) — nenhuma delas é alterada. NÃO chama
+# avaliar_vortex_decision_layer() nem process_pair_gates_vortex() nem
+# process_pair_4camadas(). Não decide nada de produção, não escreve em
+# gates, SL, TP, FVG↔CHoCH nem Telegram. Mesmo padrão já aprovado da
+# simulação de cenários de gates (_passa_cenario_simulado/
+# _simular_cenarios_gates) — recombina/filtra o que já é calculado,
+# sem inventar nova detecção.
+# ═══════════════════════════════════════════════════════════════════════
+
+JANELAS_RECENCIA_HIPOTETICAS = [
+    ('CURRENT', None), ('RECENCY_50', 50), ('RECENCY_100', 100),
+    ('RECENCY_150', 150), ('RECENCY_200', 200),
+]
+
+
+def _avaliar_setup_recencia_hipotetica(candles_swing, candles_internal, idx_atual, max_idade_candles=None):
+    """
+    SIMULAÇÃO PURA — reproduz a MESMA cadeia de decisão já usada em
+    avaliar_vortex_decision_layer() (bias -> zona -> CHoCH interno ->
+    FVG), mas testando hipoteticamente um LIMITE DE IDADE do CHoCH
+    (max_idade_candles). max_idade_candles=None reproduz o
+    comportamento CURRENT (sem limite, idêntico ao já medido em
+    medicao_idade_choch). NÃO altera avaliar_vortex_decision_layer()
+    nem nenhuma função de decisão real — é uma função nova, isolada,
+    só chamada por esta simulação comparativa.
+    """
+    resultado = {
+        'bias': None, 'zona': None, 'zone_ok': False,
+        'choch_existe_sem_filtro': False, 'choch_idade': None,
+        'choch_valido_na_janela': False, 'choch_rejeitado_por_idade': False,
+        'fvg_valido': False, 'motivo_rejeicao': None,
+    }
+
+    bias = compute_lux_structure_bias(candles_swing, swing_size=50)
+    resultado['bias'] = bias
+    if bias not in ('alta', 'baixa'):
+        resultado['motivo_rejeicao'] = 'BIAS_FAIL'
+        return resultado
+
+    zona_calc = compute_lux_premium_discount(candles_swing, swing_size=50)
+    preco_atual = candles_swing[-1]['c'] if candles_swing else None
+    zona = classificar_zona_lux(preco_atual, zona_calc) if zona_calc and preco_atual is not None else None
+    resultado['zona'] = zona
+    zone_ok = (zona == 'discount') if bias == 'alta' else (zona == 'premium')
+    resultado['zone_ok'] = zone_ok
+    if not zone_ok:
+        resultado['motivo_rejeicao'] = 'ZONE_FAIL'
+        return resultado
+
+    eventos_internos = compute_lux_internal_structure(candles_internal, swing_size=5)
+    choch_relevante = None
+    for ev in reversed(eventos_internos):
+        if ev['tipo'] == 'CHoCH' and ev['direcao'] == bias:
+            choch_relevante = ev
+            break
+
+    if not choch_relevante:
+        resultado['motivo_rejeicao'] = 'NO_CHOCH'
+        return resultado
+
+    resultado['choch_existe_sem_filtro'] = True
+    idade = idx_atual - choch_relevante['index']
+    resultado['choch_idade'] = idade
+
+    if max_idade_candles is not None and idade > max_idade_candles:
+        resultado['choch_rejeitado_por_idade'] = True
+        resultado['motivo_rejeicao'] = 'NO_CHOCH'  # tratado como ausência dentro da janela hipotética
+        return resultado
+
+    resultado['choch_valido_na_janela'] = True
+
+    fvgs = find_open_fvgs_adaptive(candles_internal)
+    tipo_fvg_desejado = 'FVG_bullish' if bias == 'alta' else 'FVG_bearish'
+    candidatos = [f for f in fvgs if f['tipo'] == tipo_fvg_desejado]
+    resultado['fvg_valido'] = len(candidatos) > 0
+    if not candidatos:
+        resultado['motivo_rejeicao'] = 'NO_VALID_FVG'
+        return resultado
+
+    resultado['motivo_rejeicao'] = 'FVG_CHOCH_RELATION_UNKNOWN'
+    return resultado
+
+
+def simular_recencia_choch_comparativo(pair, dias_historico=7):
+    """
+    Replay SOMENTE LEITURA, candle a candle, sem lookahead (mesmo
+    mecanismo causal já validado). Roda as 5 janelas hipotéticas
+    (CURRENT + RECENCY_50/100/150/200) sobre EXATAMENTE os mesmos
+    ciclos, e compara. Não escreve em produção, não altera nenhuma
+    regra existente.
+    """
+    symbol_map = {
+        'BTCUSD': 'BTCUSDT', 'ETHUSD': 'ETHUSDT', 'SOLUSD': 'SOLUSDT', 'XRPUSD': 'XRPUSDT',
+        'LINKUSD': 'LINKUSDT', 'ADAUSD': 'ADAUSDT', 'AVAXUSD': 'AVAXUSDT', 'BNBUSD': 'BNBUSDT',
+        'AAVEUSD': 'AAVEUSDT', 'NEARUSD': 'NEARUSDT', 'PENDLEUSD': 'PENDLEUSDT', 'INJUSD': 'INJUSDT',
+        'ONDOUSD': 'ONDOUSDT',
+    }
+    symbol = symbol_map.get(pair.upper(), pair.upper().replace('USD', 'USDT'))
+
+    m5_bruto = _fetch_bybit_klines_historico(symbol, '5', dias_historico + 2)
+    m5, validacao_m5 = _validar_e_limpar_candles(m5_bruto, '5')
+
+    MIN_CANDLES_SWING_LOCAL = 55
+    if len(m5) < MIN_CANDLES_SWING_LOCAL + 10:
+        return {
+            'erro': f'dados históricos insuficientes pra {pair} (M5={len(m5)})',
+            'validacao_m5': validacao_m5,
+        }
+
+    agregados = {
+        label: {
+            'total_ciclos': 0, 'choch_validos': 0, 'choch_rejeitados_por_idade': 0,
+            'zone_ok': 0, 'zone_fail': 0, 'fvg_valido': 0, 'fvg_ausente': 0,
+            'setups_fvg_choch_relation_unknown': 0,
+        }
+        for label, _ in JANELAS_RECENCIA_HIPOTETICAS
+    }
+
+    current_setup_idades = []  # idade do CHoCH nos ciclos que hoje chegam a FVG_CHOCH_RELATION_UNKNOWN
+
+    for i in range(MIN_CANDLES_SWING_LOCAL, len(m5)):
+        candles_ate_agora = m5[:i + 1]
+
+        for label, max_idade in JANELAS_RECENCIA_HIPOTETICAS:
+            try:
+                r = _avaliar_setup_recencia_hipotetica(candles_ate_agora, candles_ate_agora, i, max_idade_candles=max_idade)
+            except Exception:
+                continue
+
+            ag = agregados[label]
+            ag['total_ciclos'] += 1
+            if r['zone_ok']:
+                ag['zone_ok'] += 1
+            elif r['bias'] in ('alta', 'baixa'):
+                ag['zone_fail'] += 1
+
+            if r['choch_valido_na_janela']:
+                ag['choch_validos'] += 1
+            elif r['choch_rejeitado_por_idade']:
+                ag['choch_rejeitados_por_idade'] += 1
+
+            if r['choch_valido_na_janela']:
+                if r['fvg_valido']:
+                    ag['fvg_valido'] += 1
+                else:
+                    ag['fvg_ausente'] += 1
+
+            if r['motivo_rejeicao'] == 'FVG_CHOCH_RELATION_UNKNOWN':
+                ag['setups_fvg_choch_relation_unknown'] += 1
+                if label == 'CURRENT':
+                    current_setup_idades.append(r['choch_idade'])
+
+    # ── Tabela pedida: dos setups CURRENT, quantos sobrevivem em cada janela ──
+    tabela_setups_preservados = {}
+    for label, max_idade in JANELAS_RECENCIA_HIPOTETICAS:
+        if max_idade is None:
+            sobreviventes = len(current_setup_idades)
+        else:
+            sobreviventes = sum(1 for idade in current_setup_idades if idade <= max_idade)
+        tabela_setups_preservados[label] = {
+            'setups_finais': sobreviventes,
+            'perdidos_vs_current': len(current_setup_idades) - sobreviventes,
+        }
+
+    return {
+        'pair': pair, 'dias_historico': dias_historico,
+        'nota_metodologica': (
+            'SIMULAÇÃO/REPLAY PURO — nenhuma regra de produção foi tocada. Reutiliza as mesmas '
+            'funções já existentes (compute_lux_structure_bias, compute_lux_premium_discount, '
+            'compute_lux_internal_structure, find_open_fvgs_adaptive), sem alterar nenhuma. '
+            'CURRENT = comportamento sem limite de idade (idêntico ao já medido). RECENCY_N = '
+            'mesmo cenário, só rejeitando o CHoCH quando idade > N candles. "setups_finais" na '
+            'tabela é calculado sobre o MESMO conjunto de ciclos que hoje chegam a '
+            'FVG_CHOCH_RELATION_UNKNOWN no cenário CURRENT — filtrando apenas pela idade do '
+            'CHoCH de cada um (bias/zona/FVG não dependem da recência, então não mudam entre '
+            'cenários para o mesmo ciclo).'
+        ),
+        'agregados_por_janela': agregados,
+        'tabela_setups_atuais_preservados': tabela_setups_preservados,
+        'total_setups_current': len(current_setup_idades),
+    }
+
+
+def _executar_simulacao_recencia_job(db_file, job_id, pair, dias_historico):
+    """Mesmo padrão de _executar_replay_comparativo_job — roda em
+    background, persiste resultado/erro na tabela scalp_replay_jobs."""
+    try:
+        resultado = simular_recencia_choch_comparativo(pair, dias_historico=dias_historico)
+        status_final = 'erro' if (isinstance(resultado, dict) and 'erro' in resultado) else 'concluido'
+        with sqlite3.connect(db_file) as conn:
+            conn.execute('''
+                UPDATE scalp_replay_jobs
+                SET status=?, resultado_json=?, finished_at=?
+                WHERE job_id=?
+            ''', (status_final, json.dumps(resultado, ensure_ascii=False), int(time.time()), job_id))
+            conn.commit()
+    except Exception as e:
+        try:
+            with sqlite3.connect(db_file) as conn:
+                conn.execute('''
+                    UPDATE scalp_replay_jobs
+                    SET status='erro', erro=?, finished_at=?
+                    WHERE job_id=?
+                ''', (str(e), int(time.time()), job_id))
+                conn.commit()
+        except Exception as e2:
+            print(f"[scalp_engine replay_jobs] erro ao registrar falha do job {job_id}: {e2}")
+
+
+@explicacao_bp.route("/scalp_gates_vortex/simular_recencia_choch_iniciar", methods=["GET"])
+def simular_recencia_choch_iniciar_endpoint():
+    """
+    Inicia simular_recencia_choch_comparativo() em BACKGROUND — mesmo
+    padrão do replay comparativo. Devolve job_id na hora. Consultar
+    resultado no MESMO endpoint de status já existente:
+    /scalp_gates_vortex/replay_comparativo_luxalgo_status/<job_id>
+    (o endpoint de status é genérico, lê qualquer job_id da tabela
+    scalp_replay_jobs, não importa o tipo).
+    Uso: ?pair=ADAUSD&dias=7&confirm=RODAR_SIMULACAO_RECENCIA
+    """
+    if request.args.get('confirm') != 'RODAR_SIMULACAO_RECENCIA':
+        return jsonify({
+            "erro": "endpoint pesado, protegido contra chamada acidental",
+            "como_usar": "adiciona &confirm=RODAR_SIMULACAO_RECENCIA na URL, ex: "
+                          "/scalp_gates_vortex/simular_recencia_choch_iniciar?pair=ADAUSD&dias=7&confirm=RODAR_SIMULACAO_RECENCIA",
+        }), 400
+
+    pair = request.args.get('pair', 'ADAUSD')
+    dias = int(request.args.get('dias', 7))
+    db_file = _db_file_explicacao()
+    init_replay_jobs_db(db_file)
+
+    job_id = f"simrecencia_{pair}_{int(time.time()*1000)}"
+
+    try:
+        with sqlite3.connect(db_file) as conn:
+            conn.execute('''
+                INSERT INTO scalp_replay_jobs (job_id, tipo, pair, dias_historico, status, created_at)
+                VALUES (?, ?, ?, ?, 'rodando', ?)
+            ''', (job_id, 'simular_recencia_choch_comparativo', pair, dias, int(time.time())))
+            conn.commit()
+    except Exception as e:
+        return jsonify({"erro": f"não foi possível criar o job: {e}"}), 500
+
+    thread = threading.Thread(
+        target=_executar_simulacao_recencia_job,
+        args=(db_file, job_id, pair, dias),
+        daemon=True,
+    )
+    thread.start()
+
+    return jsonify({
+        "job_id": job_id,
+        "status": "iniciado",
+        "pair": pair,
+        "dias_historico": dias,
+        "como_consultar": f"/scalp_gates_vortex/replay_comparativo_luxalgo_status/{job_id}",
+        "aviso": "roda em background — pode levar alguns minutos, consulte o job_id acima quando quiser",
+    })

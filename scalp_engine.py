@@ -9534,6 +9534,7 @@ def auditar_relevancia_choch(pair, dias_historico=7):
         'setups_perdidos_por_janela': setups_perdidos_por_janela,
         'total_choch_unicos_observados': len(todos_choch_observados),
         'total_setups_current': len(setups_current),
+        'm5_completo': m5,
     }
 
 
@@ -10294,4 +10295,249 @@ def testar_tres_filtros_choch_todos_pares_iniciar_endpoint():
         "pares": pares_lista or PARES_MONITORADOS_REPLAY,
         "como_consultar": f"/scalp_gates_vortex/replay_comparativo_luxalgo_status/{job_id}",
         "aviso": "MUITO pesado — roda em background sem prazo de conexão, mas pode levar bastante tempo",
+    })
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# MFE/MAE CAUSAL — CURRENT vs APENAS_INVALIDADO — item aprovado do
+# ticket (OPÇÃO A). SOMENTE AUDITORIA, sem SL/TP, sem WIN/LOSS, sem
+# regra de entrada/saída nova. Reaproveita a MESMA convenção de MFE/MAE
+# já usada em _avaliar_qualidade_sfp_evento() (LONG: mfe=max(high)-
+# entry, mae=entry-min(low); SHORT: invertido) — só parametrizada com
+# as janelas 20/50 pedidas no ticket, em vez das janelas fixas
+# HORIZONTES_CANDLES já usadas por aquela função (que não é alterada).
+# "entry" aqui é o CLOSE do candle onde o setup foi observado —
+# referência causal pra medir excursão de preço, NÃO é uma ordem de
+# entrada nem SL/TP. Não é lógica de produção, não é chamada por
+# nenhum caminho de produção.
+# ═══════════════════════════════════════════════════════════════════════
+
+JANELAS_MFE_MAE_PADRAO = (20, 50)
+
+
+def _medir_mfe_mae_janela(candles_futuros, direcao, entry, janela):
+    """
+    Mede MFE/MAE numa única janela, reaproveitando exatamente a mesma
+    fórmula já usada em _avaliar_qualidade_sfp_evento() (não duplicada
+    por reimplementação diferente, só reescrita isolada pra aceitar
+    qualquer janela, não só as fixas de HORIZONTES_CANDLES). Se houver
+    menos candles disponíveis que a janela pedida, NÃO inventa dado —
+    devolve None e reporta quantos candles realmente existiam
+    (mesmo padrão de 'horizontes_resultado[h] = None' já usado na
+    função original).
+    """
+    candles_janela = candles_futuros[:janela]
+    disponiveis = len(candles_janela)
+    if disponiveis < janela:
+        return {'mfe_pct': None, 'mae_pct': None, 'candles_disponiveis': disponiveis, 'janela_completa': False}
+
+    if direcao == 'alta':
+        mfe = max(0, max(c['h'] for c in candles_janela) - entry)
+        mae = max(0, entry - min(c['l'] for c in candles_janela))
+    else:  # 'baixa'
+        mfe = max(0, entry - min(c['l'] for c in candles_janela))
+        mae = max(0, max(c['h'] for c in candles_janela) - entry)
+
+    return {
+        'mfe_pct': round(mfe / entry * 100, 4) if entry else None,
+        'mae_pct': round(mae / entry * 100, 4) if entry else None,
+        'candles_disponiveis': disponiveis, 'janela_completa': True,
+    }
+
+
+def _percentil_lista(valores, p):
+    """Reaproveita a mesma lógica de _percentil() já existente
+    (percentil por índice sobre lista ordenada), só aceita a lista
+    não-ordenada e ordena aqui — evita depender da ordem externa."""
+    if not valores:
+        return None
+    return _percentil(sorted(valores), p)
+
+
+def _agregar_mfe_mae(lista_medicoes, janelas):
+    """
+    Agrega MFE/MAE de uma lista de medições (já calculadas por
+    _medir_mfe_mae_janela em cada setup), pra cada janela pedida.
+    Só inclui na estatística os casos com janela_completa=True (mesmo
+    padrão já usado pelo código existente — None não entra na conta),
+    mas reporta explicitamente quantos foram excluídos por candles
+    insuficientes, sem nunca excluir silenciosamente.
+    """
+    resultado = {}
+    for j in janelas:
+        mfe_validos = [m[f'j{j}']['mfe_pct'] for m in lista_medicoes if m[f'j{j}']['janela_completa']]
+        mae_validos = [m[f'j{j}']['mae_pct'] for m in lista_medicoes if m[f'j{j}']['janela_completa']]
+        n_insuficientes = sum(1 for m in lista_medicoes if not m[f'j{j}']['janela_completa'])
+
+        def stats(lst):
+            if not lst:
+                return None
+            return {
+                'media': round(sum(lst) / len(lst), 4),
+                'mediana': _percentil_lista(lst, 50),
+                'p75': _percentil_lista(lst, 75),
+                'p90': _percentil_lista(lst, 90),
+                'n': len(lst),
+            }
+
+        resultado[f'janela_{j}'] = {
+            'mfe': stats(mfe_validos), 'mae': stats(mae_validos),
+            'total_medicoes': len(lista_medicoes),
+            'candles_insuficientes': n_insuficientes,
+            'incluidos_na_estatistica': len(mfe_validos),
+        }
+    return resultado
+
+
+def medir_mfe_mae_choch_filtros(pair, dias_historico=7, janelas=JANELAS_MFE_MAE_PADRAO):
+    """
+    ÚNICA EXECUÇÃO — chama auditar_relevancia_choch() UMA vez (sem
+    alteração de lógica nenhuma, só reaproveita o m5_completo agora
+    exposto no retorno), deriva CURRENT e APENAS_INVALIDADO do MESMO
+    conjunto de setups/candles, e mede MFE/MAE causal pra cada um
+    (entry = close do candle onde o setup foi observado). Sem
+    lookahead: candles_futuros = m5[idx_ciclo+1:], nunca usa candle
+    anterior ou igual ao próprio evento.
+    """
+    resultado_auditoria = auditar_relevancia_choch(pair, dias_historico=dias_historico)
+    if 'erro' in resultado_auditoria:
+        return resultado_auditoria
+
+    m5 = resultado_auditoria.get('m5_completo')
+    setups = resultado_auditoria.get('setups_current', [])
+    if not m5 or not setups:
+        return {'erro': f'sem m5_completo ou setups_current pra {pair} — auditoria não produziu dado suficiente'}
+
+    medicoes = []
+    for s in setups:
+        idx = s['idx_ciclo']
+        direcao = s['direcao']
+        entry_proxy = m5[idx]['c']  # preço no candle do próprio setup — referência causal, NÃO é SL/TP
+        candles_futuros = m5[idx + 1:]  # sem lookahead — só candles estritamente depois do evento
+
+        classif = aplicar_filtro_choch_invalidado(s)  # reaproveita função já testada, não recalcula nada
+
+        med = {
+            'pair': pair, 'idx_ciclo': idx, 'direcao': direcao, 'estado_choch': s['estado_choch'],
+            'filtro_apenas_invalidado': classif, 'entry_proxy': entry_proxy,
+        }
+        for j in janelas:
+            med[f'j{j}'] = _medir_mfe_mae_janela(candles_futuros, direcao, entry_proxy, j)
+        medicoes.append(med)
+
+    # ── Grupos: CURRENT (todos), PRESERVADOS (passa), ELIMINADOS (bloqueado) ──
+    preservados = [m for m in medicoes if m['filtro_apenas_invalidado'] == 'passa']
+    eliminados = [m for m in medicoes if m['filtro_apenas_invalidado'] == 'bloqueado']
+    casos_invalidos = [m for m in medicoes if m['filtro_apenas_invalidado'] == 'caso_invalido']
+
+    def bloco_grupo(lista):
+        long_l = [m for m in lista if m['direcao'] == 'alta']
+        short_l = [m for m in lista if m['direcao'] == 'baixa']
+        return {
+            'n_total': len(lista),
+            'global': _agregar_mfe_mae(lista, janelas),
+            'LONG': {'n': len(long_l), **_agregar_mfe_mae(long_l, janelas)} if long_l else {'n': 0},
+            'SHORT': {'n': len(short_l), **_agregar_mfe_mae(short_l, janelas)} if short_l else {'n': 0},
+        }
+
+    return {
+        'pair': pair, 'dias_historico': dias_historico, 'janelas_analisadas': list(janelas),
+        'total_setups_current': len(setups),
+        'total_preservados_apenas_invalidado': len(preservados),
+        'total_eliminados_apenas_invalidado': len(eliminados),
+        'total_casos_invalidos': len(casos_invalidos),
+        'CURRENT': bloco_grupo(medicoes),
+        'PRESERVADOS': bloco_grupo(preservados),
+        'ELIMINADOS': bloco_grupo(eliminados),
+        'confirmacoes': {
+            'mesma_execucao_confirmado': True,
+            'nota_mesma_execucao': (
+                'CURRENT, PRESERVADOS e ELIMINADOS são todos derivados do MESMO m5_completo e '
+                'do MESMO setups_current, obtidos numa única chamada a auditar_relevancia_choch() '
+                'nesta execução — não há comparação entre execuções diferentes.'
+            ),
+            'sem_lookahead': True,
+            'nota_lookahead': (
+                'entry_proxy = close do candle em idx_ciclo (o próprio candle do setup). '
+                'candles_futuros = m5[idx_ciclo+1:] — estritamente posteriores, nunca inclui o '
+                'candle do evento nem qualquer candle anterior/igual a ele.'
+            ),
+            'exclusao_nao_silenciosa': True,
+            'nota_exclusao': (
+                'Casos com menos candles que a janela pedida (20 ou 50) recebem mfe_pct/mae_pct '
+                '=None e são CONTADOS explicitamente em candles_insuficientes de cada janela — '
+                'nunca descartados sem registro.'
+            ),
+        },
+        'nota_metodologica': (
+            'AUDITORIA/REPLAY SOMENTE — mede MFE/MAE (excursão de preço), NÃO WIN/LOSS, NÃO '
+            'SL/TP, NÃO R:R. Reaproveita a mesma convenção de fórmula já usada em '
+            '_avaliar_qualidade_sfp_evento() (LONG: mfe=max(high)-entry, mae=entry-min(low); '
+            'SHORT: invertido), parametrizada pras janelas 20/50 pedidas. Não altera nenhum '
+            'gate, CHoCH, MSS/BOS, FVG, Premium/Discount, SL, TP ou R:R existente. Não é '
+            'chamada por nenhum caminho de produção.'
+        ),
+    }
+
+
+def _executar_mfe_mae_choch_job(db_file, job_id, pair, dias_historico):
+    try:
+        resultado = medir_mfe_mae_choch_filtros(pair, dias_historico=dias_historico)
+        status_final = 'erro' if (isinstance(resultado, dict) and 'erro' in resultado) else 'concluido'
+        with sqlite3.connect(db_file) as conn:
+            conn.execute('''
+                UPDATE scalp_replay_jobs SET status=?, resultado_json=?, finished_at=? WHERE job_id=?
+            ''', (status_final, json.dumps(resultado, ensure_ascii=False), int(time.time()), job_id))
+            conn.commit()
+    except Exception as e:
+        try:
+            with sqlite3.connect(db_file) as conn:
+                conn.execute('''
+                    UPDATE scalp_replay_jobs SET status='erro', erro=?, finished_at=? WHERE job_id=?
+                ''', (str(e), int(time.time()), job_id))
+                conn.commit()
+        except Exception as e2:
+            print(f"[scalp_engine replay_jobs] erro ao registrar falha do job {job_id}: {e2}")
+
+
+@explicacao_bp.route("/scalp_gates_vortex/medir_mfe_mae_choch_iniciar", methods=["GET"])
+def medir_mfe_mae_choch_iniciar_endpoint():
+    """
+    OPÇÃO A do ticket — mede MFE/MAE causal (janelas 20/50) comparando
+    CURRENT vs PRESERVADOS vs ELIMINADOS pelo filtro APENAS_INVALIDADO,
+    tudo numa ÚNICA execução (mesmo m5, mesmos setups). Roda em
+    BACKGROUND. Consultar no MESMO endpoint de status genérico já
+    existente. NÃO é SL/TP, NÃO é WIN/LOSS.
+    Uso: ?pair=BTCUSD&dias=7&confirm=RODAR_MFE_MAE_CHOCH
+    """
+    if request.args.get('confirm') != 'RODAR_MFE_MAE_CHOCH':
+        return jsonify({
+            "erro": "endpoint pesado, protegido contra chamada acidental",
+            "como_usar": "adiciona &confirm=RODAR_MFE_MAE_CHOCH na URL, ex: "
+                          "/scalp_gates_vortex/medir_mfe_mae_choch_iniciar?pair=BTCUSD&dias=7&confirm=RODAR_MFE_MAE_CHOCH",
+        }), 400
+
+    pair = request.args.get('pair', 'BTCUSD')
+    dias = int(request.args.get('dias', 7))
+    db_file = _db_file_explicacao()
+    init_replay_jobs_db(db_file)
+    job_id = f"mfemaechoch_{pair}_{int(time.time()*1000)}"
+
+    try:
+        with sqlite3.connect(db_file) as conn:
+            conn.execute('''
+                INSERT INTO scalp_replay_jobs (job_id, tipo, pair, dias_historico, status, created_at)
+                VALUES (?, ?, ?, ?, 'rodando', ?)
+            ''', (job_id, 'medir_mfe_mae_choch_filtros', pair, dias, int(time.time())))
+            conn.commit()
+    except Exception as e:
+        return jsonify({"erro": f"não foi possível criar o job: {e}"}), 500
+
+    thread = threading.Thread(target=_executar_mfe_mae_choch_job, args=(db_file, job_id, pair, dias), daemon=True)
+    thread.start()
+
+    return jsonify({
+        "job_id": job_id, "status": "iniciado", "pair": pair, "dias_historico": dias,
+        "como_consultar": f"/scalp_gates_vortex/replay_comparativo_luxalgo_status/{job_id}",
+        "aviso": "roda em background — pode levar alguns minutos",
     })

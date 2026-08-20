@@ -9982,3 +9982,316 @@ def testar_filtro_choch_vivo_todos_pares_iniciar_endpoint():
         "como_consultar": f"/scalp_gates_vortex/replay_comparativo_luxalgo_status/{job_id}",
         "aviso": "MUITO pesado — roda em background sem prazo de conexão, mas pode levar bastante tempo",
     })
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# FILTRO EXPERIMENTAL — APENAS INVALIDADO BLOQUEIA — item aprovado do
+# ticket. SOMENTE TESTE/REPLAY/PAPER, sem deploy, sem alterar produção.
+# NÃO recalcula estrutura nenhuma — reaproveita exclusivamente o campo
+# estado_choch já calculado por auditar_relevancia_choch() e o
+# resultado já produzido por comparar_current_vs_filtro_choch_vivo()
+# (VIVO_MORTO), sem recalcular nenhum dos dois. Não substitui nenhum
+# gate, não altera CHoCH/BOS/MSS/FVG/Premium-Discount/SL/TP/R:R/
+# FVG↔CHoCH. Não é chamado por nenhum caminho de produção.
+# ═══════════════════════════════════════════════════════════════════════
+
+def aplicar_filtro_choch_invalidado(setup):
+    """
+    Classifica um setup JÁ PRODUZIDO por auditar_relevancia_choch()
+    (reaproveita setup['estado_choch'], não recalcula nada) em:
+      - 'passa': estado_choch in (NOVO, RETESTADO, CONSUMIDO)
+      - 'bloqueado': estado_choch == INVALIDADO
+      - 'caso_invalido': estado_choch ausente ou fora do conjunto
+        esperado — NUNCA assumido como morto, conforme instrução
+        explícita do ticket.
+    Diferença única em relação a aplicar_filtro_choch_vivo(): CONSUMIDO
+    passa aqui (não é bloqueado). Só INVALIDADO bloqueia.
+    """
+    estado = setup.get('estado_choch')
+    if estado == 'INVALIDADO':
+        return 'bloqueado'
+    if estado in ('NOVO', 'RETESTADO', 'CONSUMIDO'):
+        return 'passa'
+    return 'caso_invalido'
+
+
+def comparar_tres_filtros_choch(resultado_auditoria):
+    """
+    Reaproveita o resultado JÁ produzido por auditar_relevancia_choch()
+    e por comparar_current_vs_filtro_choch_vivo() (VIVO_MORTO) — NÃO
+    recalcula nenhuma estrutura, NÃO roda replay novo. Monta a
+    comparação de 3 vias: CURRENT vs APENAS_INVALIDADO vs VIVO_MORTO.
+    Nenhum setup original é alterado — cada setup anotado é cópia.
+    """
+    setups = resultado_auditoria.get('setups_current', [])
+
+    def dist_ls(lista):
+        l = sum(1 for s in lista if s.get('direcao') == 'alta')
+        sh = sum(1 for s in lista if s.get('direcao') == 'baixa')
+        return {'LONG': l, 'SHORT': sh, 'outro_ou_ausente': len(lista) - l - sh}
+
+    passa, bloqueado, invalidos = [], [], []
+    setups_anotados_ai = []
+    for s in setups:
+        c = aplicar_filtro_choch_invalidado(s)
+        s2 = dict(s)  # cópia — nunca altera o setup original
+        s2['filtro_apenas_invalidado'] = c
+        setups_anotados_ai.append(s2)
+        if c == 'passa':
+            passa.append(s2)
+        elif c == 'bloqueado':
+            bloqueado.append(s2)
+        else:
+            invalidos.append(s2)
+
+    apenas_invalidado_bloco = {
+        'total_setups': len(setups),
+        'total_preservado': len(passa),
+        'total_eliminado': len(bloqueado),
+        'total_casos_invalidos': len(invalidos),
+        'percentual_preservado': round(100 * len(passa) / len(setups), 1) if setups else None,
+        'distribuicao_long_short_antes': dist_ls(setups),
+        'distribuicao_long_short_depois': dist_ls(passa),
+        'setups_eliminados': bloqueado,
+        'casos_invalidos': invalidos,
+    }
+
+    vm_raw = comparar_current_vs_filtro_choch_vivo(resultado_auditoria)
+    vivo_morto_bloco = {
+        'total_setups': vm_raw['total_setups_current'],
+        'total_preservado': vm_raw['total_vivos_passa_filtro'],
+        'total_eliminado': vm_raw['total_mortos_eliminado_filtro'],
+        'total_casos_invalidos': vm_raw['total_casos_invalidos_nao_classificados'],
+        'percentual_preservado': vm_raw['percentual_preservado_pelo_filtro'],
+        'distribuicao_long_short_antes': vm_raw['distribuicao_long_short_current'],
+        'distribuicao_long_short_depois': vm_raw['distribuicao_long_short_filtro_vivo'],
+    }
+
+    current_bloco = {'total_setups': len(setups), 'distribuicao_long_short': dist_ls(setups)}
+
+    return {
+        'pair': resultado_auditoria.get('pair'),
+        'CURRENT': current_bloco,
+        'APENAS_INVALIDADO': apenas_invalidado_bloco,
+        'VIVO_MORTO': vivo_morto_bloco,
+        'tp_sl_disponivel': False,
+        'nota_tp_sl': (
+            'TP/SL indisponível — avaliar_vortex_decision_layer() nunca gera entry/sl/tp '
+            '(SL_VORTEX/RR_VORTEX permanecem UNKNOWN, bloqueio já vigente). Nenhum backtest '
+            'novo foi criado só para preencher este item.'
+        ),
+        'setups_current_anotados_apenas_invalidado': setups_anotados_ai,
+        'nota_metodologica': (
+            'FILTRO EXPERIMENTAL — reaproveita exclusivamente estado_choch já calculado por '
+            'auditar_relevancia_choch() (causal, sem lookahead, já testado) e o resultado já '
+            'produzido por comparar_current_vs_filtro_choch_vivo(), sem recalcular nenhuma '
+            'estrutura. Não substitui gate nenhum, não altera CHoCH/FVG/Premium-Discount/SL/'
+            'TP/R:R/MSS/BOS, não é chamado por nenhum caminho de produção. APENAS_INVALIDADO: '
+            'só INVALIDADO bloqueia — CONSUMIDO passa (diferença única vs VIVO_MORTO). Estado '
+            'ausente/desconhecido NUNCA é assumido como morto.'
+        ),
+    }
+
+
+def testar_tres_filtros_choch(pair, dias_historico=7):
+    """Roda auditar_relevancia_choch() (SEM ALTERAÇÃO) e aplica os 3
+    filtros comparativos por cima. 1 par."""
+    resultado_auditoria = auditar_relevancia_choch(pair, dias_historico=dias_historico)
+    if 'erro' in resultado_auditoria:
+        return resultado_auditoria
+    return comparar_tres_filtros_choch(resultado_auditoria)
+
+
+def testar_tres_filtros_choch_todos_pares(dias_historico=7, pares=None):
+    """Roda testar_tres_filtros_choch() (sem alteração) pra cada par,
+    agregando os resultados. Erro num par não derruba os demais."""
+    pares = pares or PARES_MONITORADOS_REPLAY
+    resultados_por_pair = {}
+    pares_com_erro = []
+
+    for p in pares:
+        try:
+            r = testar_tres_filtros_choch(p, dias_historico=dias_historico)
+        except Exception as e:
+            r = {'erro': str(e)}
+        resultados_por_pair[p] = r
+        if 'erro' in r:
+            pares_com_erro.append(p)
+
+    def init_acc():
+        return {
+            'total_setups': 0, 'total_preservado': 0, 'total_eliminado': 0,
+            'long_antes': 0, 'short_antes': 0, 'long_depois': 0, 'short_depois': 0,
+            'pares_zero_sinais': [],
+        }
+
+    acc = {'CURRENT': init_acc(), 'APENAS_INVALIDADO': init_acc(), 'VIVO_MORTO': init_acc()}
+
+    for p, r in resultados_por_pair.items():
+        if 'erro' in r:
+            continue
+        acc['CURRENT']['total_setups'] += r['CURRENT']['total_setups']
+        acc['CURRENT']['long_antes'] += r['CURRENT']['distribuicao_long_short']['LONG']
+        acc['CURRENT']['short_antes'] += r['CURRENT']['distribuicao_long_short']['SHORT']
+
+        for chave in ('APENAS_INVALIDADO', 'VIVO_MORTO'):
+            bloco = r[chave]
+            acc[chave]['total_setups'] += bloco['total_setups']
+            acc[chave]['total_preservado'] += bloco['total_preservado']
+            acc[chave]['total_eliminado'] += bloco['total_eliminado']
+            acc[chave]['long_antes'] += bloco['distribuicao_long_short_antes']['LONG']
+            acc[chave]['short_antes'] += bloco['distribuicao_long_short_antes']['SHORT']
+            acc[chave]['long_depois'] += bloco['distribuicao_long_short_depois']['LONG']
+            acc[chave]['short_depois'] += bloco['distribuicao_long_short_depois']['SHORT']
+            if bloco['total_preservado'] == 0:
+                acc[chave]['pares_zero_sinais'].append(p)
+
+    for chave in ('APENAS_INVALIDADO', 'VIVO_MORTO'):
+        total = acc[chave]['total_setups']
+        acc[chave]['percentual_preservado'] = round(100 * acc[chave]['total_preservado'] / total, 1) if total else None
+        acc[chave]['long_eliminados'] = acc[chave]['long_antes'] - acc[chave]['long_depois']
+        acc[chave]['short_eliminados'] = acc[chave]['short_antes'] - acc[chave]['short_depois']
+
+    return {
+        'dias_historico': dias_historico, 'pares_testados': pares, 'pares_com_erro': pares_com_erro,
+        'benchmark_principal': 'BTCUSD',
+        'consolidado_global': acc,
+        'tp_sl_disponivel': False,
+        'nota_tp_sl': 'TP/SL indisponível em todos os pares — mesmo motivo documentado por par.',
+        'nota_metodologica': (
+            'Cada par processado de forma totalmente independente, chamando '
+            'testar_tres_filtros_choch() sem nenhuma alteração — mesma metodologia causal já '
+            'aprovada. Erro num par não derruba os demais. Nenhuma regra foi aplicada à '
+            'produção — comparação puramente experimental, isolada.'
+        ),
+        'resultados_por_pair': resultados_por_pair,
+    }
+
+
+def _executar_tres_filtros_choch_job(db_file, job_id, pair, dias_historico):
+    try:
+        resultado = testar_tres_filtros_choch(pair, dias_historico=dias_historico)
+        status_final = 'erro' if (isinstance(resultado, dict) and 'erro' in resultado) else 'concluido'
+        with sqlite3.connect(db_file) as conn:
+            conn.execute('''
+                UPDATE scalp_replay_jobs SET status=?, resultado_json=?, finished_at=? WHERE job_id=?
+            ''', (status_final, json.dumps(resultado, ensure_ascii=False), int(time.time()), job_id))
+            conn.commit()
+    except Exception as e:
+        try:
+            with sqlite3.connect(db_file) as conn:
+                conn.execute('''
+                    UPDATE scalp_replay_jobs SET status='erro', erro=?, finished_at=? WHERE job_id=?
+                ''', (str(e), int(time.time()), job_id))
+                conn.commit()
+        except Exception as e2:
+            print(f"[scalp_engine replay_jobs] erro ao registrar falha do job {job_id}: {e2}")
+
+
+def _executar_tres_filtros_choch_todos_pares_job(db_file, job_id, dias_historico, pares):
+    try:
+        resultado = testar_tres_filtros_choch_todos_pares(dias_historico=dias_historico, pares=pares)
+        with sqlite3.connect(db_file) as conn:
+            conn.execute('''
+                UPDATE scalp_replay_jobs SET status='concluido', resultado_json=?, finished_at=? WHERE job_id=?
+            ''', (json.dumps(resultado, ensure_ascii=False), int(time.time()), job_id))
+            conn.commit()
+    except Exception as e:
+        try:
+            with sqlite3.connect(db_file) as conn:
+                conn.execute('''
+                    UPDATE scalp_replay_jobs SET status='erro', erro=?, finished_at=? WHERE job_id=?
+                ''', (str(e), int(time.time()), job_id))
+                conn.commit()
+        except Exception as e2:
+            print(f"[scalp_engine replay_jobs] erro ao registrar falha do job {job_id}: {e2}")
+
+
+@explicacao_bp.route("/scalp_gates_vortex/testar_tres_filtros_choch_iniciar", methods=["GET"])
+def testar_tres_filtros_choch_iniciar_endpoint():
+    """
+    Roda testar_tres_filtros_choch() em BACKGROUND, 1 par (CURRENT vs
+    APENAS_INVALIDADO vs VIVO_MORTO). Consultar no MESMO endpoint de
+    status genérico já existente.
+    Uso: ?pair=BTCUSD&dias=7&confirm=RODAR_TRES_FILTROS_CHOCH
+    """
+    if request.args.get('confirm') != 'RODAR_TRES_FILTROS_CHOCH':
+        return jsonify({
+            "erro": "endpoint pesado, protegido contra chamada acidental",
+            "como_usar": "adiciona &confirm=RODAR_TRES_FILTROS_CHOCH na URL, ex: "
+                          "/scalp_gates_vortex/testar_tres_filtros_choch_iniciar?pair=BTCUSD&dias=7&confirm=RODAR_TRES_FILTROS_CHOCH",
+        }), 400
+
+    pair = request.args.get('pair', 'BTCUSD')
+    dias = int(request.args.get('dias', 7))
+    db_file = _db_file_explicacao()
+    init_replay_jobs_db(db_file)
+    job_id = f"tresfiltroschoch_{pair}_{int(time.time()*1000)}"
+
+    try:
+        with sqlite3.connect(db_file) as conn:
+            conn.execute('''
+                INSERT INTO scalp_replay_jobs (job_id, tipo, pair, dias_historico, status, created_at)
+                VALUES (?, ?, ?, ?, 'rodando', ?)
+            ''', (job_id, 'testar_tres_filtros_choch', pair, dias, int(time.time())))
+            conn.commit()
+    except Exception as e:
+        return jsonify({"erro": f"não foi possível criar o job: {e}"}), 500
+
+    thread = threading.Thread(target=_executar_tres_filtros_choch_job, args=(db_file, job_id, pair, dias), daemon=True)
+    thread.start()
+
+    return jsonify({
+        "job_id": job_id, "status": "iniciado", "pair": pair, "dias_historico": dias,
+        "como_consultar": f"/scalp_gates_vortex/replay_comparativo_luxalgo_status/{job_id}",
+        "aviso": "roda em background — pode levar alguns minutos",
+    })
+
+
+@explicacao_bp.route("/scalp_gates_vortex/testar_tres_filtros_choch_todos_pares_iniciar", methods=["GET"])
+def testar_tres_filtros_choch_todos_pares_iniciar_endpoint():
+    """
+    Roda testar_tres_filtros_choch_todos_pares() em BACKGROUND, 13
+    pares. Consultar no MESMO endpoint de status genérico já existente.
+    Uso: ?dias=7&confirm=RODAR_TRES_FILTROS_CHOCH_TODOS_PARES
+    Opcional &pares=BTCUSD,ETHUSD,...
+    """
+    if request.args.get('confirm') != 'RODAR_TRES_FILTROS_CHOCH_TODOS_PARES':
+        return jsonify({
+            "erro": "endpoint MUITO pesado, protegido contra chamada acidental",
+            "como_usar": "adiciona &confirm=RODAR_TRES_FILTROS_CHOCH_TODOS_PARES na URL, ex: "
+                          "/scalp_gates_vortex/testar_tres_filtros_choch_todos_pares_iniciar?dias=7&confirm=RODAR_TRES_FILTROS_CHOCH_TODOS_PARES",
+        }), 400
+
+    dias = int(request.args.get('dias', 7))
+    pares_param = request.args.get('pares')
+    pares_lista = None
+    if pares_param:
+        pares_lista = [p.strip().upper() for p in pares_param.split(',') if p.strip()]
+
+    db_file = _db_file_explicacao()
+    init_replay_jobs_db(db_file)
+    job_id = f"tresfiltroschochtodos_{int(time.time()*1000)}"
+
+    try:
+        with sqlite3.connect(db_file) as conn:
+            conn.execute('''
+                INSERT INTO scalp_replay_jobs (job_id, tipo, pair, dias_historico, status, created_at)
+                VALUES (?, ?, ?, ?, 'rodando', ?)
+            ''', (job_id, 'testar_tres_filtros_choch_todos_pares', 'TODOS', dias, int(time.time())))
+            conn.commit()
+    except Exception as e:
+        return jsonify({"erro": f"não foi possível criar o job: {e}"}), 500
+
+    thread = threading.Thread(
+        target=_executar_tres_filtros_choch_todos_pares_job,
+        args=(db_file, job_id, dias, pares_lista), daemon=True,
+    )
+    thread.start()
+
+    return jsonify({
+        "job_id": job_id, "status": "iniciado", "dias_historico": dias,
+        "pares": pares_lista or PARES_MONITORADOS_REPLAY,
+        "como_consultar": f"/scalp_gates_vortex/replay_comparativo_luxalgo_status/{job_id}",
+        "aviso": "MUITO pesado — roda em background sem prazo de conexão, mas pode levar bastante tempo",
+    })

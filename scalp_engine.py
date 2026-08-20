@@ -10449,6 +10449,7 @@ def medir_mfe_mae_choch_filtros(pair, dias_historico=7, janelas=JANELAS_MFE_MAE_
         'CURRENT': bloco_grupo(medicoes),
         'PRESERVADOS': bloco_grupo(preservados),
         'ELIMINADOS': bloco_grupo(eliminados),
+        'medicoes_raw': medicoes,
         'confirmacoes': {
             'mesma_execucao_confirmado': True,
             'nota_mesma_execucao': (
@@ -10540,4 +10541,165 @@ def medir_mfe_mae_choch_iniciar_endpoint():
         "job_id": job_id, "status": "iniciado", "pair": pair, "dias_historico": dias,
         "como_consultar": f"/scalp_gates_vortex/replay_comparativo_luxalgo_status/{job_id}",
         "aviso": "roda em background — pode levar alguns minutos",
+    })
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# MFE/MAE CAUSAL MULTI-PAR — item aprovado do ticket. Orquestra
+# medir_mfe_mae_choch_filtros() (SEM ALTERAÇÃO NENHUMA) pra cada par,
+# e agrega os dados BRUTOS (medicoes_raw) entre pares pra calcular
+# percentis GLOBAIS corretos — não "média de médias por par", que
+# seria estatisticamente inválido. Cada par continua sendo processado
+# em sua PRÓPRIA execução isolada (mesmo m5, mesmos setups dentro
+# daquele par) — a comparação CURRENT vs PRESERVADOS vs ELIMINADOS
+# nunca mistura candles/setups de execuções diferentes DENTRO de um
+# mesmo par; só o agrupamento estatístico final é entre pares.
+# ═══════════════════════════════════════════════════════════════════════
+
+def _bloco_grupo_mfe_mae_pooled(lista, janelas):
+    """
+    Mesma estrutura/lógica já usada internamente em
+    medir_mfe_mae_choch_filtros() (bloco_grupo), só aplicada a uma
+    lista JÁ AGRUPADA entre pares (pooled), pra estatística global com
+    amostra maior. Reaproveita _agregar_mfe_mae() sem alteração.
+    """
+    long_l = [m for m in lista if m['direcao'] == 'alta']
+    short_l = [m for m in lista if m['direcao'] == 'baixa']
+    return {
+        'n_total': len(lista),
+        'global': _agregar_mfe_mae(lista, janelas),
+        'LONG': {'n': len(long_l), **_agregar_mfe_mae(long_l, janelas)} if long_l else {'n': 0},
+        'SHORT': {'n': len(short_l), **_agregar_mfe_mae(short_l, janelas)} if short_l else {'n': 0},
+    }
+
+
+def medir_mfe_mae_choch_filtros_todos_pares(dias_historico=7, pares=None, janelas=JANELAS_MFE_MAE_PADRAO):
+    """
+    Roda medir_mfe_mae_choch_filtros() (sem alteração) pra cada par,
+    isoladamente (cada par com seu próprio m5/setups, mesma execução
+    interna). Depois agrupa as medições BRUTAS (medicoes_raw) de todos
+    os pares pra calcular estatística global com percentis corretos
+    (não médias de médias). Erro num par não derruba os demais.
+    """
+    pares = pares or PARES_MONITORADOS_REPLAY
+    resultados_por_pair = {}
+    pares_com_erro = []
+    todas_medicoes = []
+
+    for p in pares:
+        try:
+            r = medir_mfe_mae_choch_filtros(p, dias_historico=dias_historico, janelas=janelas)
+        except Exception as e:
+            r = {'erro': str(e)}
+        resultados_por_pair[p] = r
+        if 'erro' in r:
+            pares_com_erro.append(p)
+        else:
+            todas_medicoes.extend(r.get('medicoes_raw', []))
+
+    preservados_global = [m for m in todas_medicoes if m['filtro_apenas_invalidado'] == 'passa']
+    eliminados_global = [m for m in todas_medicoes if m['filtro_apenas_invalidado'] == 'bloqueado']
+    casos_invalidos_global = [m for m in todas_medicoes if m['filtro_apenas_invalidado'] == 'caso_invalido']
+
+    global_report = {
+        'CURRENT': _bloco_grupo_mfe_mae_pooled(todas_medicoes, janelas),
+        'PRESERVADOS': _bloco_grupo_mfe_mae_pooled(preservados_global, janelas),
+        'ELIMINADOS': _bloco_grupo_mfe_mae_pooled(eliminados_global, janelas),
+    }
+
+    return {
+        'dias_historico': dias_historico, 'pares_testados': pares, 'pares_com_erro': pares_com_erro,
+        'janelas_analisadas': list(janelas), 'benchmark_principal': 'BTCUSD',
+        'total_setups_current_global': len(todas_medicoes),
+        'total_preservados_global': len(preservados_global),
+        'total_eliminados_global': len(eliminados_global),
+        'total_casos_invalidos_global': len(casos_invalidos_global),
+        'global': global_report,
+        'resultados_por_pair': resultados_por_pair,
+        'confirmacoes': {
+            'mesma_execucao_por_par_confirmado': True,
+            'nota_mesma_execucao': (
+                'Cada par foi processado em execução própria e isolada (mesmo m5, mesmos '
+                'setups dentro daquele par) — CURRENT vs PRESERVADOS vs ELIMINADOS sempre '
+                'comparados dentro da mesma execução por par, nunca entre execuções '
+                'diferentes. O bloco "global" agrupa (pooled) as medições causais já '
+                'produzidas por cada execução individual, sem re-executar nada, pra '
+                'estatística com amostra maior e percentis estatisticamente corretos.'
+            ),
+            'sem_lookahead': True, 'exclusao_nao_silenciosa': True,
+        },
+        'nota_metodologica': (
+            'Orquestra medir_mfe_mae_choch_filtros() (SEM ALTERAÇÃO) pra cada par — mesma '
+            'metodologia causal já validada no BTC isolado. Erro num par não derruba os '
+            'demais. Não altera nenhuma função de decisão/produção. Nenhuma regra foi '
+            'aplicada à produção.'
+        ),
+    }
+
+
+def _executar_mfe_mae_choch_todos_pares_job(db_file, job_id, dias_historico, pares):
+    try:
+        resultado = medir_mfe_mae_choch_filtros_todos_pares(dias_historico=dias_historico, pares=pares)
+        with sqlite3.connect(db_file) as conn:
+            conn.execute('''
+                UPDATE scalp_replay_jobs SET status='concluido', resultado_json=?, finished_at=? WHERE job_id=?
+            ''', (json.dumps(resultado, ensure_ascii=False), int(time.time()), job_id))
+            conn.commit()
+    except Exception as e:
+        try:
+            with sqlite3.connect(db_file) as conn:
+                conn.execute('''
+                    UPDATE scalp_replay_jobs SET status='erro', erro=?, finished_at=? WHERE job_id=?
+                ''', (str(e), int(time.time()), job_id))
+                conn.commit()
+        except Exception as e2:
+            print(f"[scalp_engine replay_jobs] erro ao registrar falha do job {job_id}: {e2}")
+
+
+@explicacao_bp.route("/scalp_gates_vortex/medir_mfe_mae_choch_todos_pares_iniciar", methods=["GET"])
+def medir_mfe_mae_choch_todos_pares_iniciar_endpoint():
+    """
+    Roda medir_mfe_mae_choch_filtros_todos_pares() em BACKGROUND, 13
+    pares. Consultar no MESMO endpoint de status genérico já existente.
+    Uso: ?dias=7&confirm=RODAR_MFE_MAE_CHOCH_TODOS_PARES
+    Opcional &pares=BTCUSD,ETHUSD,...
+    """
+    if request.args.get('confirm') != 'RODAR_MFE_MAE_CHOCH_TODOS_PARES':
+        return jsonify({
+            "erro": "endpoint MUITO pesado, protegido contra chamada acidental",
+            "como_usar": "adiciona &confirm=RODAR_MFE_MAE_CHOCH_TODOS_PARES na URL, ex: "
+                          "/scalp_gates_vortex/medir_mfe_mae_choch_todos_pares_iniciar?dias=7&confirm=RODAR_MFE_MAE_CHOCH_TODOS_PARES",
+        }), 400
+
+    dias = int(request.args.get('dias', 7))
+    pares_param = request.args.get('pares')
+    pares_lista = None
+    if pares_param:
+        pares_lista = [p.strip().upper() for p in pares_param.split(',') if p.strip()]
+
+    db_file = _db_file_explicacao()
+    init_replay_jobs_db(db_file)
+    job_id = f"mfemaechochtodos_{int(time.time()*1000)}"
+
+    try:
+        with sqlite3.connect(db_file) as conn:
+            conn.execute('''
+                INSERT INTO scalp_replay_jobs (job_id, tipo, pair, dias_historico, status, created_at)
+                VALUES (?, ?, ?, ?, 'rodando', ?)
+            ''', (job_id, 'medir_mfe_mae_choch_filtros_todos_pares', 'TODOS', dias, int(time.time())))
+            conn.commit()
+    except Exception as e:
+        return jsonify({"erro": f"não foi possível criar o job: {e}"}), 500
+
+    thread = threading.Thread(
+        target=_executar_mfe_mae_choch_todos_pares_job,
+        args=(db_file, job_id, dias, pares_lista), daemon=True,
+    )
+    thread.start()
+
+    return jsonify({
+        "job_id": job_id, "status": "iniciado", "dias_historico": dias,
+        "pares": pares_lista or PARES_MONITORADOS_REPLAY,
+        "como_consultar": f"/scalp_gates_vortex/replay_comparativo_luxalgo_status/{job_id}",
+        "aviso": "MUITO pesado — roda em background sem prazo de conexão, mas pode levar bastante tempo",
     })

@@ -9325,3 +9325,366 @@ def simular_recencia_choch_benchmark_btc_iniciar_endpoint():
         "como_consultar": f"/scalp_gates_vortex/replay_comparativo_luxalgo_status/{job_id}",
         "aviso": "MUITO pesado — roda em background sem prazo de conexão, mas pode levar bastante tempo",
     })
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# AUDITORIA DE RELEVÂNCIA DO CHoCH (TOQUE/CONSUMO/INVALIDAÇÃO) — item
+# aprovado do ticket. SOMENTE REPLAY/AUDITORIA, não altera nenhuma
+# regra de produção. Busca no código existente ANTES de inventar:
+# find_open_fvgs()/find_open_fvgs_adaptive() têm 'preenchida' (FVG
+# mitigada) e find_order_blocks_com_mitigacao() tem 'mitigado' — ambos
+# operam sobre ZONAS (top/bottom). O nível de um CHoCH (ev['nivel']) é
+# um preço ÚNICO, não uma zona — nenhuma das duas se aplica diretamente.
+# Por isso as funções abaixo são uma DEFINIÇÃO NOVA DE AUDITORIA,
+# EXPLICITAMENTE EXPERIMENTAL, inspirada no mesmo princípio geométrico
+# já usado (candle tocando um nível) — NÃO é lógica de produção, não é
+# reaproveitamento de detector existente, e é marcada como tal em todo
+# o relatório.
+# ═══════════════════════════════════════════════════════════════════════
+
+def _evento_choch_foi_invalidado(eventos_internos, choch_evento, idx_atual):
+    """
+    Busca, na MESMA lista de eventos já calculada por
+    compute_lux_internal_structure() (não recalcula nada), se existe
+    um evento estrutural (BOS ou CHoCH) de direção OPOSTA à do CHoCH
+    avaliado, ocorrido DEPOIS dele (index > choch_evento['index']) e
+    até idx_atual (nunca depois — sem lookahead). Se existir, o CHoCH
+    original foi estruturalmente superado por um movimento contrário.
+    """
+    for ev in eventos_internos:
+        if ev['index'] <= choch_evento['index']:
+            continue
+        if ev['index'] > idx_atual:
+            continue
+        if ev['tipo'] in ('BOS', 'CHoCH') and ev['direcao'] != choch_evento['direcao']:
+            return True, ev
+    return False, None
+
+
+def _contar_toques_nivel(candles_internal, nivel, idx_inicio, idx_fim):
+    """
+    Conta quantos candles, entre idx_inicio e idx_fim (inclusive),
+    tiveram seu range (low-high) cruzando o nível informado — mesmo
+    princípio geométrico do 'preenchida'/'mitigado' já usados no
+    engine pra zonas, aplicado aqui a um preço único. Sem lookahead:
+    quem chama já garante idx_fim <= idx_atual do ciclo.
+    """
+    toques = 0
+    n = len(candles_internal)
+    for i in range(idx_inicio, idx_fim + 1):
+        if i < 0 or i >= n:
+            continue
+        c = candles_internal[i]
+        if c['l'] <= nivel <= c['h']:
+            toques += 1
+    return toques
+
+
+def classificar_estado_choch_auditoria(candles_internal, eventos_internos, choch_evento, idx_atual):
+    """
+    CLASSIFICAÇÃO EXPERIMENTAL DE AUDITORIA (não é lógica de
+    produção). Regras mutuamente exclusivas, em ordem de prioridade,
+    usando só candles/eventos com index/timestamp <= idx_atual (sem
+    lookahead):
+
+    1. INVALIDADO — existe evento estrutural (BOS ou CHoCH) de direção
+       OPOSTA na mesma estrutura interna, depois do CHoCH avaliado.
+    2. NOVO — nenhum candle entre choch_index+1 e idx_atual tocou
+       (high>=nivel>=low) o nível do CHoCH.
+    3. RETESTADO — tocou o nível exatamente 1 vez, sem invalidação.
+    4. CONSUMIDO — tocou o nível 2+ vezes, sem invalidação.
+
+    'ainda_valido' é um booleano PARALELO (não uma 5ª categoria
+    exclusiva) = not invalidado — ou seja, NOVO/RETESTADO/CONSUMIDO
+    contam todos como "ainda válido"; só INVALIDADO não conta.
+    """
+    idx_choch = choch_evento['index']
+    invalidado, evento_invalidador = _evento_choch_foi_invalidado(eventos_internos, choch_evento, idx_atual)
+    toques = _contar_toques_nivel(candles_internal, choch_evento['nivel'], idx_choch + 1, idx_atual)
+
+    if invalidado:
+        estado = 'INVALIDADO'
+    elif toques == 0:
+        estado = 'NOVO'
+    elif toques == 1:
+        estado = 'RETESTADO'
+    else:
+        estado = 'CONSUMIDO'
+
+    return {
+        'estado': estado,
+        'ainda_valido': not invalidado,
+        'foi_tocado': toques > 0,
+        'numero_de_toques': toques,
+        'foi_invalidado': invalidado,
+        'evento_invalidador': evento_invalidador,
+    }
+
+
+def auditar_relevancia_choch(pair, dias_historico=7):
+    """
+    Replay SOMENTE LEITURA, mesma metodologia causal já aprovada (sem
+    lookahead, candles_ate_agora = m5[:i+1]). Pra cada ciclo com CHoCH
+    interno presente (mesma seleção já usada em diagnostico_
+    independente_luxalgo/avaliar_vortex_decision_layer), classifica o
+    estado (NOVO/RETESTADO/CONSUMIDO/INVALIDADO) e relaciona com os
+    setups CURRENT (mesmo critério de FVG_CHOCH_RELATION_UNKNOWN já
+    usado). Não chama nenhuma função de decisão real, não altera nada.
+    """
+    symbol_map = {
+        'BTCUSD': 'BTCUSDT', 'ETHUSD': 'ETHUSDT', 'SOLUSD': 'SOLUSDT', 'XRPUSD': 'XRPUSDT',
+        'LINKUSD': 'LINKUSDT', 'ADAUSD': 'ADAUSDT', 'AVAXUSD': 'AVAXUSDT', 'BNBUSD': 'BNBUSDT',
+        'AAVEUSD': 'AAVEUSDT', 'NEARUSD': 'NEARUSDT', 'PENDLEUSD': 'PENDLEUSDT', 'INJUSD': 'INJUSDT',
+        'ONDOUSD': 'ONDOUSDT',
+    }
+    symbol = symbol_map.get(pair.upper(), pair.upper().replace('USD', 'USDT'))
+
+    m5_bruto = _fetch_bybit_klines_historico(symbol, '5', dias_historico + 2)
+    m5, validacao_m5 = _validar_e_limpar_candles(m5_bruto, '5')
+
+    MIN_CANDLES_SWING_LOCAL = 55
+    if len(m5) < MIN_CANDLES_SWING_LOCAL + 10:
+        return {'erro': f'dados históricos insuficientes pra {pair} (M5={len(m5)})', 'validacao_m5': validacao_m5}
+
+    todos_choch_observados = []  # 1 registro por (choch_index, direcao) único observado — não por ciclo
+    choch_ja_registrado = set()
+    setups_current = []
+    setups_perdidos_por_janela = {'RECENCY_100': [], 'RECENCY_150': [], 'RECENCY_200': []}
+
+    for i in range(MIN_CANDLES_SWING_LOCAL, len(m5)):
+        candles_ate_agora = m5[:i + 1]
+
+        bias = compute_lux_structure_bias(candles_ate_agora, swing_size=50)
+        if bias not in ('alta', 'baixa'):
+            continue
+
+        eventos_internos = compute_lux_internal_structure(candles_ate_agora, swing_size=5)
+        choch_relevante = None
+        for ev in reversed(eventos_internos):
+            if ev['tipo'] == 'CHoCH' and ev['direcao'] == bias:
+                choch_relevante = ev
+                break
+        if not choch_relevante:
+            continue
+
+        idade = i - choch_relevante['index']
+        chave_choch = (choch_relevante['index'], choch_relevante['direcao'])
+
+        estado_info = classificar_estado_choch_auditoria(candles_ate_agora, eventos_internos, choch_relevante, i)
+
+        if chave_choch not in choch_ja_registrado:
+            choch_ja_registrado.add(chave_choch)
+            todos_choch_observados.append({
+                'pair': pair, 'choch_index': choch_relevante['index'], 'choch_ts': choch_relevante['t'],
+                'choch_nivel': choch_relevante['nivel'], 'direcao': choch_relevante['direcao'],
+                'primeira_idade_observada': idade, 'primeiro_idx_ciclo_observado': i,
+                'estado_na_primeira_observacao': estado_info['estado'],
+            })
+
+        # ── Zona + FVG, mesmo critério já usado em avaliar_vortex_decision_layer ──
+        zona_calc = compute_lux_premium_discount(candles_ate_agora, swing_size=50)
+        preco_atual = candles_ate_agora[-1]['c']
+        zona = classificar_zona_lux(preco_atual, zona_calc) if zona_calc else None
+        zone_ok = (zona == 'discount') if bias == 'alta' else (zona == 'premium')
+        if not zone_ok:
+            continue
+
+        fvgs = find_open_fvgs_adaptive(candles_ate_agora)
+        tipo_fvg_desejado = 'FVG_bullish' if bias == 'alta' else 'FVG_bearish'
+        candidatos_fvg = [f for f in fvgs if f['tipo'] == tipo_fvg_desejado]
+        if not candidatos_fvg:
+            continue
+
+        # ── Chegou até FVG_CHOCH_RELATION_UNKNOWN — é um setup CURRENT ──
+        registro_setup = {
+            'pair': pair, 'candle_event_ts': candles_ate_agora[-1]['t'], 'idx_ciclo': i,
+            'direcao': bias, 'idade_choch': idade,
+            'choch_index': choch_relevante['index'], 'choch_ts': choch_relevante['t'],
+            'choch_nivel': choch_relevante['nivel'],
+            'estado_choch': estado_info['estado'], 'ainda_valido': estado_info['ainda_valido'],
+            'foi_tocado': estado_info['foi_tocado'], 'numero_de_toques': estado_info['numero_de_toques'],
+            'foi_invalidado': estado_info['foi_invalidado'],
+            'evento_invalidador': estado_info['evento_invalidador'],
+            'zona': zona, 'fvg_candidatos_n': len(candidatos_fvg),
+            'fvg_mais_proximo': min(candidatos_fvg, key=lambda f: abs((f['top'] + f['bottom']) / 2 - preco_atual)),
+            'eliminado_por_RECENCY_100': idade > 100,
+            'eliminado_por_RECENCY_150': idade > 150,
+            'eliminado_por_RECENCY_200': idade > 200,
+        }
+        setups_current.append(registro_setup)
+        for label, limite in (('RECENCY_100', 100), ('RECENCY_150', 150), ('RECENCY_200', 200)):
+            if idade > limite:
+                setups_perdidos_por_janela[label].append(registro_setup)
+
+    return {
+        'pair': pair, 'dias_historico': dias_historico,
+        'nota_metodologica': (
+            'SOMENTE REPLAY/AUDITORIA — nenhuma regra de produção foi tocada, nenhum gate, '
+            'CHoCH, FVG, Premium/Discount, SL, TP, R:R ou lógica de sinal foi alterada. Mesma '
+            'metodologia causal já aprovada (sem lookahead — candles_ate_agora = m5[:i+1] em '
+            'cada ciclo, classificar_estado_choch_auditoria() só usa candles/eventos com index '
+            '<= idx_atual do ciclo). A classificação NOVO/RETESTADO/CONSUMIDO/INVALIDADO é uma '
+            'DEFINIÇÃO EXPERIMENTAL DE AUDITORIA — não existe no código de produção um conceito '
+            'equivalente aplicado a um NÍVEL de CHoCH (só existe para ZONAS: FVG "preenchida" e '
+            'Order Block "mitigado"). Não é lógica de produção, não decide nada, não é usada por '
+            'nenhuma função de decisão real.'
+        ),
+        'todos_choch_observados': todos_choch_observados,
+        'setups_current': setups_current,
+        'setups_perdidos_por_janela': setups_perdidos_por_janela,
+        'total_choch_unicos_observados': len(todos_choch_observados),
+        'total_setups_current': len(setups_current),
+    }
+
+
+def _executar_auditoria_relevancia_choch_job(db_file, job_id, pair, dias_historico):
+    """Mesmo padrão dos outros jobs — roda em background, persiste
+    resultado/erro na tabela scalp_replay_jobs."""
+    try:
+        resultado = auditar_relevancia_choch(pair, dias_historico=dias_historico)
+        status_final = 'erro' if (isinstance(resultado, dict) and 'erro' in resultado) else 'concluido'
+        with sqlite3.connect(db_file) as conn:
+            conn.execute('''
+                UPDATE scalp_replay_jobs
+                SET status=?, resultado_json=?, finished_at=?
+                WHERE job_id=?
+            ''', (status_final, json.dumps(resultado, ensure_ascii=False), int(time.time()), job_id))
+            conn.commit()
+    except Exception as e:
+        try:
+            with sqlite3.connect(db_file) as conn:
+                conn.execute('''
+                    UPDATE scalp_replay_jobs
+                    SET status='erro', erro=?, finished_at=?
+                    WHERE job_id=?
+                ''', (str(e), int(time.time()), job_id))
+                conn.commit()
+        except Exception as e2:
+            print(f"[scalp_engine replay_jobs] erro ao registrar falha do job {job_id}: {e2}")
+
+
+def _executar_auditoria_relevancia_choch_todos_pares_job(db_file, job_id, dias_historico, pares):
+    """Roda auditar_relevancia_choch() (sem alteração) em sequência
+    pra cada par, agregando os resultados num único dict. Mesmo padrão
+    de isolamento de erro dos outros jobs multi-par."""
+    pares = pares or PARES_MONITORADOS_REPLAY
+    try:
+        resultados_por_pair = {}
+        for p in pares:
+            try:
+                resultados_por_pair[p] = auditar_relevancia_choch(p, dias_historico=dias_historico)
+            except Exception as e:
+                resultados_por_pair[p] = {'erro': str(e)}
+
+        resultado = {
+            'dias_historico': dias_historico, 'pares_testados': pares,
+            'benchmark_principal': 'BTCUSD',
+            'resultados_por_pair': resultados_por_pair,
+        }
+        with sqlite3.connect(db_file) as conn:
+            conn.execute('''
+                UPDATE scalp_replay_jobs
+                SET status='concluido', resultado_json=?, finished_at=?
+                WHERE job_id=?
+            ''', (json.dumps(resultado, ensure_ascii=False), int(time.time()), job_id))
+            conn.commit()
+    except Exception as e:
+        try:
+            with sqlite3.connect(db_file) as conn:
+                conn.execute('''
+                    UPDATE scalp_replay_jobs
+                    SET status='erro', erro=?, finished_at=?
+                    WHERE job_id=?
+                ''', (str(e), int(time.time()), job_id))
+                conn.commit()
+        except Exception as e2:
+            print(f"[scalp_engine replay_jobs] erro ao registrar falha do job {job_id}: {e2}")
+
+
+@explicacao_bp.route("/scalp_gates_vortex/auditar_relevancia_choch_iniciar", methods=["GET"])
+def auditar_relevancia_choch_iniciar_endpoint():
+    """
+    Roda auditar_relevancia_choch() em BACKGROUND, 1 par. Consultar no
+    MESMO endpoint de status genérico já existente.
+    Uso: ?pair=BTCUSD&dias=7&confirm=RODAR_AUDITORIA_CHOCH
+    """
+    if request.args.get('confirm') != 'RODAR_AUDITORIA_CHOCH':
+        return jsonify({
+            "erro": "endpoint pesado, protegido contra chamada acidental",
+            "como_usar": "adiciona &confirm=RODAR_AUDITORIA_CHOCH na URL, ex: "
+                          "/scalp_gates_vortex/auditar_relevancia_choch_iniciar?pair=BTCUSD&dias=7&confirm=RODAR_AUDITORIA_CHOCH",
+        }), 400
+
+    pair = request.args.get('pair', 'BTCUSD')
+    dias = int(request.args.get('dias', 7))
+    db_file = _db_file_explicacao()
+    init_replay_jobs_db(db_file)
+    job_id = f"auditchoch_{pair}_{int(time.time()*1000)}"
+
+    try:
+        with sqlite3.connect(db_file) as conn:
+            conn.execute('''
+                INSERT INTO scalp_replay_jobs (job_id, tipo, pair, dias_historico, status, created_at)
+                VALUES (?, ?, ?, ?, 'rodando', ?)
+            ''', (job_id, 'auditar_relevancia_choch', pair, dias, int(time.time())))
+            conn.commit()
+    except Exception as e:
+        return jsonify({"erro": f"não foi possível criar o job: {e}"}), 500
+
+    thread = threading.Thread(target=_executar_auditoria_relevancia_choch_job, args=(db_file, job_id, pair, dias), daemon=True)
+    thread.start()
+
+    return jsonify({
+        "job_id": job_id, "status": "iniciado", "pair": pair, "dias_historico": dias,
+        "como_consultar": f"/scalp_gates_vortex/replay_comparativo_luxalgo_status/{job_id}",
+        "aviso": "roda em background — pode levar alguns minutos",
+    })
+
+
+@explicacao_bp.route("/scalp_gates_vortex/auditar_relevancia_choch_todos_pares_iniciar", methods=["GET"])
+def auditar_relevancia_choch_todos_pares_iniciar_endpoint():
+    """
+    Roda auditar_relevancia_choch() em BACKGROUND pra todos os pares.
+    Consultar no MESMO endpoint de status genérico já existente.
+    Uso: ?dias=7&confirm=RODAR_AUDITORIA_CHOCH_TODOS_PARES
+    Opcional &pares=BTCUSD,ETHUSD,...
+    """
+    if request.args.get('confirm') != 'RODAR_AUDITORIA_CHOCH_TODOS_PARES':
+        return jsonify({
+            "erro": "endpoint MUITO pesado, protegido contra chamada acidental",
+            "como_usar": "adiciona &confirm=RODAR_AUDITORIA_CHOCH_TODOS_PARES na URL, ex: "
+                          "/scalp_gates_vortex/auditar_relevancia_choch_todos_pares_iniciar?dias=7&confirm=RODAR_AUDITORIA_CHOCH_TODOS_PARES",
+        }), 400
+
+    dias = int(request.args.get('dias', 7))
+    pares_param = request.args.get('pares')
+    pares_lista = None
+    if pares_param:
+        pares_lista = [p.strip().upper() for p in pares_param.split(',') if p.strip()]
+
+    db_file = _db_file_explicacao()
+    init_replay_jobs_db(db_file)
+    job_id = f"auditchochtodos_{int(time.time()*1000)}"
+
+    try:
+        with sqlite3.connect(db_file) as conn:
+            conn.execute('''
+                INSERT INTO scalp_replay_jobs (job_id, tipo, pair, dias_historico, status, created_at)
+                VALUES (?, ?, ?, ?, 'rodando', ?)
+            ''', (job_id, 'auditar_relevancia_choch_todos_pares', 'TODOS', dias, int(time.time())))
+            conn.commit()
+    except Exception as e:
+        return jsonify({"erro": f"não foi possível criar o job: {e}"}), 500
+
+    thread = threading.Thread(
+        target=_executar_auditoria_relevancia_choch_todos_pares_job,
+        args=(db_file, job_id, dias, pares_lista), daemon=True,
+    )
+    thread.start()
+
+    return jsonify({
+        "job_id": job_id, "status": "iniciado", "dias_historico": dias,
+        "pares": pares_lista or PARES_MONITORADOS_REPLAY,
+        "como_consultar": f"/scalp_gates_vortex/replay_comparativo_luxalgo_status/{job_id}",
+        "aviso": "MUITO pesado — roda em background sem prazo de conexão, mas pode levar bastante tempo",
+    })

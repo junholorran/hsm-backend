@@ -11013,6 +11013,35 @@ def replay_vortex_decision_layer_v2(pair, dias_historico=7, janelas_mfe_mae=JANE
             chaves_vistas.add(chave)
             sinais_unicos.append(s)
 
+    # ── ITEM 6 (auditoria da compressão brutos→únicos) — puramente
+    # aditivo, só CONTA quantas avaliações brutas mapeiam pra cada
+    # sinal único, não altera nenhum critério de dedup/validade. ──
+    contagem_repeticoes = {}
+    for s in sinais_completos_brutos:
+        chave = (s['choch_timestamp'], s['direction'], s['zone_type'])
+        contagem_repeticoes[chave] = contagem_repeticoes.get(chave, 0) + 1
+    repeticoes_por_sinal_unico = [
+        {'choch_timestamp': s['choch_timestamp'], 'direction': s['direction'], 'zone_type': s['zone_type'],
+         'repeticoes': contagem_repeticoes[(s['choch_timestamp'], s['direction'], s['zone_type'])]}
+        for s in sinais_unicos
+    ]
+    lista_repeticoes = [r['repeticoes'] for r in repeticoes_por_sinal_unico]
+    auditoria_dedup = {
+        'total_avaliacoes_brutas': len(sinais_completos_brutos),
+        'total_sinais_estruturalmente_diferentes': len(sinais_unicos),
+        'repeticoes_media_por_sinal': round(sum(lista_repeticoes) / len(lista_repeticoes), 2) if lista_repeticoes else None,
+        'repeticoes_mediana_por_sinal': _percentil(sorted(lista_repeticoes), 50) if lista_repeticoes else None,
+        'repeticoes_min': min(lista_repeticoes) if lista_repeticoes else None,
+        'repeticoes_max': max(lista_repeticoes) if lista_repeticoes else None,
+        'detalhe_por_sinal': repeticoes_por_sinal_unico,
+        'nota': (
+            'Cada "sinal único" já representa um CHoCH estruturalmente diferente (timestamp '
+            'distinto). "repeticoes" = quantos ciclos M5 consecutivos esse MESMO CHoCH '
+            'permaneceu válido (sem invalidação) até ser substituído ou expirado. Não é '
+            'ruído/erro — é o tempo de vida causal de cada setup dentro do replay.'
+        ),
+    }
+
     sinais_long = [s for s in sinais_unicos if s['direction'] == 'LONG']
     sinais_short = [s for s in sinais_unicos if s['direction'] == 'SHORT']
 
@@ -11059,6 +11088,7 @@ def replay_vortex_decision_layer_v2(pair, dias_historico=7, janelas_mfe_mae=JANE
         'funil': funil,
         'distribuicao_motivos_todos_ciclos': distribuicao_motivos,
         'total_sinais_unicos': len(sinais_unicos),
+        'auditoria_dedup': auditoria_dedup,
         'sinais_long': len(sinais_long), 'sinais_short': len(sinais_short),
         'distribuicao_rr': {
             'global': stats_rr(rrs), 'LONG': stats_rr(sorted(s['rr'] for s in sinais_long if s['rr'] is not None)),

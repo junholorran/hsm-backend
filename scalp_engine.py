@@ -5693,16 +5693,23 @@ def _validar_e_limpar_candles(candles_brutos, interval_label):
 
 
 
-def _fetch_bybit_klines_historico(symbol, interval, dias_historico):
+def _fetch_bybit_klines_historico(symbol, interval, dias_historico, fim_ts_ms=None):
     """
     Busca candles históricos direto da Bybit V5, com paginação (a API
     limita a 1000 candles por request). Só usado pelo replay — nunca
     pelo pipeline de produção, que recebe candles já prontos de fora.
+
+    fim_ts_ms — PARÂMETRO OPCIONAL, ADITIVO. Default None preserva
+    100% o comportamento original (janela rolante a partir de "agora",
+    idêntico a antes desta mudança — nenhum chamador existente é
+    afetado). Quando fornecido, ancora o fim da janela nesse timestamp
+    fixo, tornando o período reproduzível (não desloca com o tempo
+    real entre execuções).
     """
     intervalo_ms = {'D': 86400000, '15': 900000, '60': 3600000, '5': 300000}.get(interval, 900000)
     total_candles_necessarios = int((dias_historico * 86400000) / intervalo_ms) + 20
     todos = []
-    end_ts = None
+    end_ts = fim_ts_ms
 
     while len(todos) < total_candles_necessarios:
         url = f'https://api.bybit.com/v5/market/kline?category=linear&symbol={symbol}&interval={interval}&limit=1000'
@@ -10924,7 +10931,10 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
 # process_pair_4camadas() nem avaliar_vortex_decision_layer() (v1).
 # ═══════════════════════════════════════════════════════════════════════
 
-def replay_vortex_decision_layer_v2(pair, dias_historico=7, janelas_mfe_mae=JANELAS_MFE_MAE_PADRAO):
+VORTEX_DECISION_LAYER_V2_VERSAO = 'avaliar_vortex_decision_layer_v2 — pipeline BIAS→ZONA→CHoCH_M5→ENTRY→SL→TP→RR, sem alteração desde a Execução 1/2 de 7 dias'
+
+
+def replay_vortex_decision_layer_v2(pair, dias_historico=7, janelas_mfe_mae=JANELAS_MFE_MAE_PADRAO, fim_ts_ms=None):
     """
     Replay causal completo do pipeline v2 (BIAS→ZONA→CHoCH M5→ENTRY→
     SL→TP→RR). Mesma metodologia já aprovada (fetch único por
@@ -10933,7 +10943,19 @@ def replay_vortex_decision_layer_v2(pair, dias_historico=7, janelas_mfe_mae=JANE
     zone_type) — o mesmo sinal permanece "válido" em vários ciclos
     consecutivos até ser invalidado; reportamos tanto o total bruto de
     avaliações quanto os sinais únicos.
+
+    fim_ts_ms — PARÂMETRO OPCIONAL, ADITIVO (default None = janela
+    rolante a partir de "agora", comportamento idêntico ao das
+    execuções anteriores). Quando fornecido, ancora o fim da janela
+    histórica nesse timestamp fixo (ms) — a janela [inicio, fim] fica
+    reproduzível, não desloca com o tempo real entre execuções. Se não
+    for passado explicitamente, esta função fixa "agora" no início da
+    chamada (int(time.time()*1000)) e registra esse valor no
+    resultado, pra permitir reprodução exata numa chamada futura.
     """
+    if fim_ts_ms is None:
+        fim_ts_ms = int(time.time() * 1000)
+
     symbol_map = {
         'BTCUSD': 'BTCUSDT', 'ETHUSD': 'ETHUSDT', 'SOLUSD': 'SOLUSDT', 'XRPUSD': 'XRPUSDT',
         'LINKUSD': 'LINKUSDT', 'ADAUSD': 'ADAUSDT', 'AVAXUSD': 'AVAXUSDT', 'BNBUSD': 'BNBUSDT',
@@ -10942,13 +10964,21 @@ def replay_vortex_decision_layer_v2(pair, dias_historico=7, janelas_mfe_mae=JANE
     }
     symbol = symbol_map.get(pair.upper(), pair.upper().replace('USD', 'USDT'))
 
-    d1_bruto = _fetch_bybit_klines_historico(symbol, 'D', dias_historico + 20)
-    m15_bruto = _fetch_bybit_klines_historico(symbol, '15', dias_historico + 3)
-    m5_bruto = _fetch_bybit_klines_historico(symbol, '5', dias_historico + 2)
+    d1_bruto = _fetch_bybit_klines_historico(symbol, 'D', dias_historico + 20, fim_ts_ms=fim_ts_ms)
+    m15_bruto = _fetch_bybit_klines_historico(symbol, '15', dias_historico + 3, fim_ts_ms=fim_ts_ms)
+    m5_bruto = _fetch_bybit_klines_historico(symbol, '5', dias_historico + 2, fim_ts_ms=fim_ts_ms)
 
     d1, val_d1 = _validar_e_limpar_candles(d1_bruto, 'D')
     m15, val_m15 = _validar_e_limpar_candles(m15_bruto, '15')
     m5, val_m5 = _validar_e_limpar_candles(m5_bruto, '5')
+
+    # ── Janela fixa explícita: recorta pra [inicio, fim] exatos, mesmo
+    # que a API tenha devolvido candles um pouco além (segurança extra
+    # de reprodutibilidade — não deixa "sobra" contaminar o período). ──
+    inicio_ts_ms = fim_ts_ms - dias_historico * 86400000
+    d1 = [c for c in d1 if inicio_ts_ms <= c['t'] <= fim_ts_ms]
+    m15 = [c for c in m15 if inicio_ts_ms <= c['t'] <= fim_ts_ms]
+    m5 = [c for c in m5 if inicio_ts_ms <= c['t'] <= fim_ts_ms]
 
     MIN_M5_IDX = 60
     if len(m15) < 40 or len(m5) < MIN_M5_IDX + 20:
@@ -11076,6 +11106,20 @@ def replay_vortex_decision_layer_v2(pair, dias_historico=7, janelas_mfe_mae=JANE
 
     return {
         'pair': pair, 'dias_historico': dias_historico,
+        'versao_pipeline': VORTEX_DECISION_LAYER_V2_VERSAO,
+        'janela_fixa': {
+            'data_inicio_ts_ms': inicio_ts_ms,
+            'data_fim_ts_ms': fim_ts_ms,
+            'data_inicio_iso': datetime.fromtimestamp(inicio_ts_ms / 1000, tz=timezone.utc).isoformat(),
+            'data_fim_iso': datetime.fromtimestamp(fim_ts_ms / 1000, tz=timezone.utc).isoformat(),
+            'quantidade_candles_m5': len(m5),
+            'quantidade_candles_m15': len(m15),
+            'quantidade_candles_d1': len(d1),
+            'nota': (
+                'Janela histórica FIXA e reproduzível — para repetir exatamente este período '
+                'numa chamada futura, passe fim_ts_ms=' + str(fim_ts_ms) + ' explicitamente.'
+            ),
+        },
         'nota_metodologica': (
             'REPLAY SOMENTE AUDITORIA — pipeline experimental avaliar_vortex_decision_layer_v2(), '
             'não chamado por nenhum caminho de produção. Não altera CHoCH, FVG, Premium/Discount, '
@@ -11182,9 +11226,9 @@ def replay_vortex_decision_layer_v2_todos_pares(dias_historico=7, pares=None):
     }
 
 
-def _executar_decision_layer_v2_job(db_file, job_id, pair, dias_historico):
+def _executar_decision_layer_v2_job(db_file, job_id, pair, dias_historico, fim_ts_ms=None):
     try:
-        resultado = replay_vortex_decision_layer_v2(pair, dias_historico=dias_historico)
+        resultado = replay_vortex_decision_layer_v2(pair, dias_historico=dias_historico, fim_ts_ms=fim_ts_ms)
         status_final = 'erro' if (isinstance(resultado, dict) and 'erro' in resultado) else 'concluido'
         with sqlite3.connect(db_file) as conn:
             conn.execute('''
@@ -11227,6 +11271,10 @@ def decision_layer_v2_iniciar_endpoint():
     Roda replay_vortex_decision_layer_v2() em BACKGROUND, 1 par.
     Consultar no MESMO endpoint de status genérico já existente.
     Uso: ?pair=BTCUSD&dias=7&confirm=RODAR_DECISION_LAYER_V2
+    Opcional &fim_ts_ms=<timestamp_ms> pra fixar o fim da janela
+    histórica (reproduzível). Sem esse parâmetro, a janela é ancorada
+    no momento exato desta chamada (e o timestamp usado é registrado
+    no resultado, em janela_fixa.data_fim_ts_ms).
     """
     if request.args.get('confirm') != 'RODAR_DECISION_LAYER_V2':
         return jsonify({
@@ -11237,6 +11285,8 @@ def decision_layer_v2_iniciar_endpoint():
 
     pair = request.args.get('pair', 'BTCUSD')
     dias = int(request.args.get('dias', 7))
+    fim_ts_ms_param = request.args.get('fim_ts_ms')
+    fim_ts_ms = int(fim_ts_ms_param) if fim_ts_ms_param else None
     db_file = _db_file_explicacao()
     init_replay_jobs_db(db_file)
     job_id = f"decisionlayerv2_{pair}_{int(time.time()*1000)}"
@@ -11251,7 +11301,9 @@ def decision_layer_v2_iniciar_endpoint():
     except Exception as e:
         return jsonify({"erro": f"não foi possível criar o job: {e}"}), 500
 
-    thread = threading.Thread(target=_executar_decision_layer_v2_job, args=(db_file, job_id, pair, dias), daemon=True)
+    thread = threading.Thread(
+        target=_executar_decision_layer_v2_job, args=(db_file, job_id, pair, dias, fim_ts_ms), daemon=True,
+    )
     thread.start()
 
     return jsonify({

@@ -11141,6 +11141,7 @@ def replay_vortex_decision_layer_v2(pair, dias_historico=7, janelas_mfe_mae=JANE
         'exemplos_sinais_completos': sinais_unicos[:10],
         'mfe_mae_causal': {'global': mfe_mae_global, 'LONG': mfe_mae_long, 'SHORT': mfe_mae_short},
         'sinais_unicos_completos': sinais_unicos,
+        'm5_completo': m5,
     }
 
 
@@ -11360,4 +11361,213 @@ def decision_layer_v2_todos_pares_iniciar_endpoint():
         "pares": pares_lista or PARES_MONITORADOS_REPLAY,
         "como_consultar": f"/scalp_gates_vortex/replay_comparativo_luxalgo_status/{job_id}",
         "aviso": "MUITO pesado — roda em background sem prazo de conexão, mas pode levar bastante tempo",
+    })
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# resolver_resultado_sinais_v2 — item aprovado do ticket. SOMENTE
+# AUDITORIA DE RESULTADO, sem alterar BIAS/ZONA/CHoCH/ENTRY/SL/TP/RR/
+# dedup/metodologia do replay. Reaproveita EXCLUSIVAMENTE
+# replay_vortex_decision_layer_v2() (sem alteração) pra obter os
+# sinais e o m5_completo da MESMA execução, e _resolver_tp_sl_futuro()
+# (já existente, já testada, já trata AMBIGUO sem inventar ordem
+# intrabar) pra determinar o primeiro evento (TP/SL/AMBIGUO/NENHUM)
+# de cada sinal. Não é chamada por nenhum caminho de produção.
+# ═══════════════════════════════════════════════════════════════════════
+
+def resolver_resultado_sinais_v2(pair, dias_historico=30, fim_ts_ms=None):
+    """
+    Roda replay_vortex_decision_layer_v2() (SEM ALTERAÇÃO) e, usando o
+    MESMO m5_completo dessa execução, resolve o primeiro evento
+    (TP/SL/AMBIGUO/NENHUM) de cada sinal único gerado, candle a
+    candle, sem lookahead (só candles com index > idx_m5 do sinal).
+    Reaproveita _resolver_tp_sl_futuro() já existente e testada — não
+    duplica lógica de resolução nova.
+    """
+    resultado_base = replay_vortex_decision_layer_v2(pair, dias_historico=dias_historico, fim_ts_ms=fim_ts_ms)
+    if 'erro' in resultado_base:
+        return resultado_base
+
+    m5 = resultado_base.get('m5_completo')
+    sinais = resultado_base.get('sinais_unicos_completos', [])
+    if not m5 or not sinais:
+        return {'erro': f'sem m5_completo ou sinais pra {pair} — replay base não produziu dado suficiente'}
+
+    auditoria_sinais = []
+    for s in sinais:
+        idx = s['idx_m5']
+        direcao_lower = 'alta' if s['direction'] == 'LONG' else 'baixa'
+        candles_futuros = m5[idx + 1:]  # sem lookahead — estritamente depois do candle de entrada
+
+        res = _resolver_tp_sl_futuro(
+            candles_futuros, direcao_lower, s['entry'], s['sl'], s['tp'], None,
+            max_candles=len(candles_futuros),  # resolve até o fim do dado disponível na janela fixa
+        )
+
+        primeiro_evento = 'TP' if res['resultado'] == 'TP1' else res['resultado']  # TP1 do resolvedor genérico = TP único aqui
+        candles_ate_evento = res['candles_ate_resolucao']
+        timestamp_evento = None
+        if candles_ate_evento is not None and candles_ate_evento - 1 < len(candles_futuros):
+            timestamp_evento = candles_futuros[candles_ate_evento - 1]['t']
+
+        if primeiro_evento == 'TP':
+            r_obtido = s['rr']
+        elif primeiro_evento == 'SL':
+            r_obtido = -1.0
+        else:  # AMBIGUO ou NENHUM — não fabricar resultado
+            r_obtido = None
+
+        auditoria_sinais.append({
+            'pair': pair, 'direction': s['direction'], 'entry': s['entry'], 'sl': s['sl'], 'tp': s['tp'],
+            'rr': s['rr'], 'tp_origem': s['tp_origem'], 'choch_timestamp': s['choch_timestamp'],
+            'primeiro_evento': primeiro_evento, 'timestamp_evento': timestamp_evento,
+            'candles_ate_evento': candles_ate_evento, 'mfe_pct': res['mfe_pct'], 'mae_pct': res['mae_pct'],
+            'r_obtido': r_obtido,
+        })
+
+    def _agregar_grupo(lista):
+        total = len(lista)
+        n_tp = sum(1 for a in lista if a['primeiro_evento'] == 'TP')
+        n_sl = sum(1 for a in lista if a['primeiro_evento'] == 'SL')
+        n_ambiguo = sum(1 for a in lista if a['primeiro_evento'] == 'AMBIGUO')
+        n_nenhum = sum(1 for a in lista if a['primeiro_evento'] == 'NENHUM')
+        n_resolvidos_binario = n_tp + n_sl
+
+        win_rate = round(100 * n_tp / n_resolvidos_binario, 2) if n_resolvidos_binario else None
+        loss_rate = round(100 - win_rate, 2) if win_rate is not None else None
+
+        # ── Visão 1: excluindo AMBIGUOS (e NENHUM, que não é trade completo) ──
+        rs_excluindo_ambiguo = [a['r_obtido'] for a in lista if a['primeiro_evento'] in ('TP', 'SL')]
+        expectancy_excluindo = round(sum(rs_excluindo_ambiguo) / len(rs_excluindo_ambiguo), 4) if rs_excluindo_ambiguo else None
+        media_r_excluindo = expectancy_excluindo
+        mediana_r_excluindo = _percentil(sorted(rs_excluindo_ambiguo), 50) if rs_excluindo_ambiguo else None
+
+        # ── Visão 2: AMBIGUOS tratados como LOSS (-1R); NENHUM continua excluído
+        # (não é trade completo, não houve resolução dentro do dado disponível) ──
+        rs_ambiguo_como_loss = list(rs_excluindo_ambiguo) + [-1.0] * n_ambiguo
+        expectancy_amb_loss = round(sum(rs_ambiguo_como_loss) / len(rs_ambiguo_como_loss), 4) if rs_ambiguo_como_loss else None
+        media_r_amb_loss = expectancy_amb_loss
+        mediana_r_amb_loss = _percentil(sorted(rs_ambiguo_como_loss), 50) if rs_ambiguo_como_loss else None
+        win_rate_amb_loss = round(100 * n_tp / (n_tp + n_sl + n_ambiguo), 2) if (n_tp + n_sl + n_ambiguo) else None
+
+        # ── Sequências máximas de win/loss, em ordem cronológica
+        # (choch_timestamp), usando a visão "ambíguo como loss" (única
+        # visão onde toda avaliação binária tem resultado definido) ──
+        lista_cronologica = sorted(
+            [a for a in lista if a['primeiro_evento'] in ('TP', 'SL', 'AMBIGUO')],
+            key=lambda a: a['choch_timestamp'],
+        )
+        max_win_streak = max_loss_streak = cur_win = cur_loss = 0
+        for a in lista_cronologica:
+            venceu = a['primeiro_evento'] == 'TP'
+            if venceu:
+                cur_win += 1
+                cur_loss = 0
+            else:  # SL ou AMBIGUO tratado como loss pra fins de sequência
+                cur_loss += 1
+                cur_win = 0
+            max_win_streak = max(max_win_streak, cur_win)
+            max_loss_streak = max(max_loss_streak, cur_loss)
+
+        return {
+            'total_sinais': total, 'tp_primeiro': n_tp, 'sl_primeiro': n_sl,
+            'ambiguo': n_ambiguo, 'nenhum_nao_resolvido': n_nenhum,
+            'win_rate_pct_excluindo_ambiguo': win_rate, 'loss_rate_pct_excluindo_ambiguo': loss_rate,
+            'expectancy_R_excluindo_ambiguo': expectancy_excluindo,
+            'media_R_excluindo_ambiguo': media_r_excluindo, 'mediana_R_excluindo_ambiguo': mediana_r_excluindo,
+            'win_rate_pct_ambiguo_como_loss': win_rate_amb_loss,
+            'expectancy_R_ambiguo_como_loss': expectancy_amb_loss,
+            'media_R_ambiguo_como_loss': media_r_amb_loss, 'mediana_R_ambiguo_como_loss': mediana_r_amb_loss,
+            'max_win_streak': max_win_streak, 'max_loss_streak': max_loss_streak,
+        }
+
+    sinais_long = [a for a in auditoria_sinais if a['direction'] == 'LONG']
+    sinais_short = [a for a in auditoria_sinais if a['direction'] == 'SHORT']
+
+    return {
+        'pair': pair, 'dias_historico': dias_historico,
+        'janela_fixa': resultado_base.get('janela_fixa'),
+        'versao_pipeline': resultado_base.get('versao_pipeline'),
+        'total_sinais_auditados': len(auditoria_sinais),
+        'nota_metodologica': (
+            'AUDITORIA DE RESULTADO — reaproveita EXCLUSIVAMENTE replay_vortex_decision_layer_v2() '
+            '(sem alteração nenhuma de BIAS/ZONA/CHoCH/ENTRY/SL/TP/RR/dedup) e '
+            '_resolver_tp_sl_futuro() (já existente e testada, já trata AMBIGUO sem inventar '
+            'ordem intrabar — TP e SL no mesmo candle = AMBIGUO, nunca escolhido '
+            'arbitrariamente). Sem lookahead: cada sinal só usa candles com index > idx_m5 do '
+            'próprio sinal. Resolução vai até o fim do dado disponível na janela fixa — sinais '
+            'sem resolução dentro da janela ficam NENHUM (não fabricado, contado à parte, '
+            'excluído de win/loss/expectancy).'
+        ),
+        'GLOBAL': _agregar_grupo(auditoria_sinais),
+        'LONG': _agregar_grupo(sinais_long),
+        'SHORT': _agregar_grupo(sinais_short),
+        'auditoria_sinais_completa': auditoria_sinais,
+    }
+
+
+def _executar_resolver_resultado_v2_job(db_file, job_id, pair, dias_historico, fim_ts_ms):
+    try:
+        resultado = resolver_resultado_sinais_v2(pair, dias_historico=dias_historico, fim_ts_ms=fim_ts_ms)
+        status_final = 'erro' if (isinstance(resultado, dict) and 'erro' in resultado) else 'concluido'
+        with sqlite3.connect(db_file) as conn:
+            conn.execute('''
+                UPDATE scalp_replay_jobs SET status=?, resultado_json=?, finished_at=? WHERE job_id=?
+            ''', (status_final, json.dumps(resultado, ensure_ascii=False), int(time.time()), job_id))
+            conn.commit()
+    except Exception as e:
+        try:
+            with sqlite3.connect(db_file) as conn:
+                conn.execute('''
+                    UPDATE scalp_replay_jobs SET status='erro', erro=?, finished_at=? WHERE job_id=?
+                ''', (str(e), int(time.time()), job_id))
+                conn.commit()
+        except Exception as e2:
+            print(f"[scalp_engine replay_jobs] erro ao registrar falha do job {job_id}: {e2}")
+
+
+@explicacao_bp.route("/scalp_gates_vortex/resolver_resultado_v2_iniciar", methods=["GET"])
+def resolver_resultado_v2_iniciar_endpoint():
+    """
+    Roda resolver_resultado_sinais_v2() em BACKGROUND. Consultar no
+    MESMO endpoint de status genérico já existente.
+    Uso: ?pair=BTCUSD&dias=30&confirm=RODAR_RESOLVER_RESULTADO_V2
+    Opcional &fim_ts_ms=<timestamp_ms> pra reproduzir exatamente a
+    mesma janela já usada antes (ex: a janela dos 155 sinais de 30
+    dias já gerada — use o fim_ts_ms registrado naquele resultado).
+    """
+    if request.args.get('confirm') != 'RODAR_RESOLVER_RESULTADO_V2':
+        return jsonify({
+            "erro": "endpoint pesado, protegido contra chamada acidental",
+            "como_usar": "adiciona &confirm=RODAR_RESOLVER_RESULTADO_V2 na URL, ex: "
+                          "/scalp_gates_vortex/resolver_resultado_v2_iniciar?pair=BTCUSD&dias=30&confirm=RODAR_RESOLVER_RESULTADO_V2",
+        }), 400
+
+    pair = request.args.get('pair', 'BTCUSD')
+    dias = int(request.args.get('dias', 30))
+    fim_ts_ms_param = request.args.get('fim_ts_ms')
+    fim_ts_ms = int(fim_ts_ms_param) if fim_ts_ms_param else None
+    db_file = _db_file_explicacao()
+    init_replay_jobs_db(db_file)
+    job_id = f"resolverresultadov2_{pair}_{int(time.time()*1000)}"
+
+    try:
+        with sqlite3.connect(db_file) as conn:
+            conn.execute('''
+                INSERT INTO scalp_replay_jobs (job_id, tipo, pair, dias_historico, status, created_at)
+                VALUES (?, ?, ?, ?, 'rodando', ?)
+            ''', (job_id, 'resolver_resultado_sinais_v2', pair, dias, int(time.time())))
+            conn.commit()
+    except Exception as e:
+        return jsonify({"erro": f"não foi possível criar o job: {e}"}), 500
+
+    thread = threading.Thread(
+        target=_executar_resolver_resultado_v2_job, args=(db_file, job_id, pair, dias, fim_ts_ms), daemon=True,
+    )
+    thread.start()
+
+    return jsonify({
+        "job_id": job_id, "status": "iniciado", "pair": pair, "dias_historico": dias, "fim_ts_ms": fim_ts_ms,
+        "como_consultar": f"/scalp_gates_vortex/replay_comparativo_luxalgo_status/{job_id}",
+        "aviso": "roda em background — pode levar alguns minutos",
     })

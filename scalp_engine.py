@@ -10703,3 +10703,579 @@ def medir_mfe_mae_choch_todos_pares_iniciar_endpoint():
         "como_consultar": f"/scalp_gates_vortex/replay_comparativo_luxalgo_status/{job_id}",
         "aviso": "MUITO pesado — roda em background sem prazo de conexão, mas pode levar bastante tempo",
     })
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# avaliar_vortex_decision_layer_v2 — item aprovado do ticket. SOMENTE
+# EXPERIMENTAL/ISOLADO, não é chamada por nenhum caminho de produção.
+# Monta o pipeline completo (BIAS → ZONA → GATILHO → ENTRY → SL → TP)
+# reaproveitando exclusivamente funções já existentes e testadas:
+# compute_lux_structure_bias, find_open_fvgs_adaptive, compute_ema,
+# compute_lux_internal_structure, _evento_choch_foi_invalidado,
+# aplicar_buffer_stop_atr, calcular_tp_dinamico. NÃO duplica nenhuma
+# lógica de detecção já validada. NÃO altera CHoCH, FVG, Premium/
+# Discount, SL/TP existentes, gates ou qualquer função de produção.
+# ═══════════════════════════════════════════════════════════════════════
+
+ZONA_EMA25_ATR_BUFFER_MULT = 0.5  # largura da "zona" EMA25 = ATR*este_mult pra cada lado — EXPERIMENTAL, documentado
+
+
+def _encontrar_toque_zona(candles, zona_top, zona_bottom):
+    """
+    Acha o índice do PRIMEIRO candle, na lista causal fornecida, cujo
+    range (low-high) cruza a zona (zona_bottom<=algo<=zona_top).
+    Reaproveita o mesmo princípio geométrico já usado em
+    _contar_toques_nivel()/detect_sweep_in_zone() — aqui aplicado a
+    uma zona explícita (top/bottom), não recalcula nada novo.
+    """
+    for i, c in enumerate(candles):
+        if c['h'] >= zona_bottom and c['l'] <= zona_top:
+            return i
+    return None
+
+
+def _escolher_zona_entrada_v2(m15_ate_agora, bias):
+    """
+    ZONA — item aprovado do ticket. Procura FVG M15 aberto mais
+    próximo do preço atual, na direção do bias (reaproveita
+    find_open_fvgs_adaptive() sem alteração). Se não houver FVG
+    adequado, usa EMA25 M15 como zona alternativa (largura = ATR*0.5
+    pra cada lado — regra EXPERIMENTAL, documentada explicitamente,
+    não existe no código de produção uma "zona EMA" pronta).
+    Retorna (zona_top, zona_bottom, zona_type, zona_source) ou
+    (None, None, None, motivo_falha).
+    """
+    if len(m15_ate_agora) < 30:
+        return None, None, None, 'M15_INSUFICIENTE'
+
+    preco_atual = m15_ate_agora[-1]['c']
+    fvgs = find_open_fvgs_adaptive(m15_ate_agora)
+    tipo_desejado = 'FVG_bullish' if bias == 'alta' else 'FVG_bearish'
+    candidatos = [f for f in fvgs if f['tipo'] == tipo_desejado]
+
+    if candidatos:
+        # mais próximo do preço atual, entre os candidatos válidos
+        escolhido = min(candidatos, key=lambda f: abs((f['top'] + f['bottom']) / 2 - preco_atual))
+        return escolhido['top'], escolhido['bottom'], 'FVG', 'FVG_M15_mais_proximo'
+
+    # ── Fallback EMA25 M15 — EXPERIMENTAL ──
+    closes_m15 = [c['c'] for c in m15_ate_agora]
+    ema25_series = compute_ema(closes_m15, 25)
+    ema25_atual = next((v for v in reversed(ema25_series) if v is not None), None)
+    if ema25_atual is None:
+        return None, None, None, 'SEM_FVG_E_SEM_EMA25'
+
+    atr_series = compute_atr(m15_ate_agora, 14)
+    atr_atual = next((v for v in reversed(atr_series) if v is not None), None)
+    if not atr_atual or atr_atual <= 0:
+        return None, None, None, 'SEM_FVG_E_SEM_ATR_PARA_ZONA_EMA25'
+
+    largura = atr_atual * ZONA_EMA25_ATR_BUFFER_MULT
+    return ema25_atual + largura, ema25_atual - largura, 'EMA25', 'EMA25_M15_fallback_sem_FVG'
+
+
+def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=None):
+    """
+    Pipeline completo EXPERIMENTAL — BIAS → ZONA → GATILHO → ENTRY →
+    SL → TP. Recebe candles JÁ TRUNCADOS causalmente pelo chamador
+    (m15_ate_agora/m5_ate_agora/d1_ate_agora = candles com t <=
+    ts_corte do ciclo, mesmo padrão já usado em todo o replay
+    aprovado) — esta função não faz nenhum fetch, não decide o corte
+    de tempo, só avalia o que já foi passado. Nunca fabrica sinal: se
+    qualquer etapa falhar, valid=False com failure_reason explícito.
+    """
+    resultado = {
+        'signal': False, 'direction': None, 'bias': None,
+        'zone_type': None, 'zone_top': None, 'zone_bottom': None, 'zone_source': None,
+        'choch_confirmed': False, 'choch_timestamp': None, 'choch_level': None,
+        'entry': None, 'sl': None, 'sl_regra': None, 'tp': None, 'tp_origem': None, 'rr': None,
+        'reason': None, 'timestamp': m5_ate_agora[-1]['t'] if m5_ate_agora else None,
+        'valid': False, 'failure_reason': None,
+    }
+
+    if not m15_ate_agora or not m5_ate_agora:
+        resultado['failure_reason'] = 'CANDLES_INSUFICIENTES'
+        return resultado
+
+    # ── BIAS — reaproveita compute_lux_structure_bias() sem alteração ──
+    bias = compute_lux_structure_bias(m15_ate_agora, swing_size=50)
+    resultado['bias'] = bias
+    if bias not in ('alta', 'baixa'):
+        resultado['failure_reason'] = 'BIAS_FAIL'
+        return resultado
+    resultado['direction'] = 'LONG' if bias == 'alta' else 'SHORT'
+
+    # ── ZONA ──
+    zona_top, zona_bottom, zona_type, zona_info = _escolher_zona_entrada_v2(m15_ate_agora, bias)
+    if zona_top is None:
+        resultado['failure_reason'] = zona_info  # motivo de falha específico
+        return resultado
+    resultado['zone_top'] = round(zona_top, 6)
+    resultado['zone_bottom'] = round(zona_bottom, 6)
+    resultado['zone_type'] = zona_type
+    resultado['zone_source'] = zona_info
+
+    # ── GATILHO: preço precisa ter TOCADO a zona (causal) ──
+    idx_toque = _encontrar_toque_zona(m5_ate_agora, zona_top, zona_bottom)
+    if idx_toque is None:
+        resultado['failure_reason'] = 'PRECO_FORA_DA_ZONA'
+        return resultado
+
+    # ── CHoCH no M5, SÓ a partir do toque (index+1) em diante — é
+    # isso que garante causalidade e "associado à zona": um CHoCH
+    # anterior ao toque simplesmente não aparece nessa janela. ──
+    candles_pos_toque = m5_ate_agora[idx_toque:]
+    if len(candles_pos_toque) < 10:
+        resultado['failure_reason'] = 'CANDLES_INSUFICIENTES_POS_TOQUE'
+        return resultado
+
+    eventos_internos_m5 = compute_lux_internal_structure(candles_pos_toque, swing_size=5)
+    choch_relevante = None
+    for ev in reversed(eventos_internos_m5):
+        if ev['tipo'] == 'CHoCH' and ev['direcao'] == bias:
+            choch_relevante = ev
+            break
+    if not choch_relevante:
+        resultado['failure_reason'] = 'NO_CHOCH_APOS_ZONA'
+        return resultado
+
+    # ── Confirma que o CHoCH não foi invalidado depois (reaproveita
+    # _evento_choch_foi_invalidado(), já existente e testado) ──
+    idx_atual_pos_toque = len(candles_pos_toque) - 1
+    invalidado, evento_invalidador = _evento_choch_foi_invalidado(
+        eventos_internos_m5, choch_relevante, idx_atual_pos_toque
+    )
+    if invalidado:
+        resultado['failure_reason'] = 'CHOCH_INVALIDADO_ANTES_DO_GATILHO'
+        return resultado
+
+    resultado['choch_confirmed'] = True
+    resultado['choch_timestamp'] = choch_relevante['t']
+    resultado['choch_level'] = choch_relevante['nivel']
+
+    # ── ENTRY — close do candle M5 que confirmou o CHoCH ──
+    idx_choch_global = idx_toque + choch_relevante['index']
+    if idx_choch_global >= len(m5_ate_agora):
+        resultado['failure_reason'] = 'INDICE_CHOCH_INVALIDO'
+        return resultado
+    candle_confirmacao = m5_ate_agora[idx_choch_global]
+    entry = candle_confirmacao['c']
+    resultado['entry'] = round(entry, 6)
+
+    # ── SL — regra EXPERIMENTAL declarada explicitamente: o mais
+    # conservador (mais protetor) entre o lado oposto da zona e o
+    # nível do pivot do CHoCH, com buffer via aplicar_buffer_stop_atr
+    # (já existente, não inventa fórmula de buffer nova). ──
+    candles_para_buffer = m5_ate_agora[:idx_choch_global + 1]
+    if bias == 'alta':
+        candidato_zona = zona_bottom
+        candidato_choch = choch_relevante['nivel']
+        nivel_bruto = min(candidato_zona, candidato_choch)  # mais baixo = mais protetor pra LONG
+        regra_sl = 'zona_bottom' if nivel_bruto == candidato_zona else 'choch_pivot'
+        sl = aplicar_buffer_stop_atr(nivel_bruto, 'alta', candles_para_buffer)
+    else:
+        candidato_zona = zona_top
+        candidato_choch = choch_relevante['nivel']
+        nivel_bruto = max(candidato_zona, candidato_choch)  # mais alto = mais protetor pra SHORT
+        regra_sl = 'zona_top' if nivel_bruto == candidato_zona else 'choch_pivot'
+        sl = aplicar_buffer_stop_atr(nivel_bruto, 'baixa', candles_para_buffer)
+
+    resultado['sl_regra'] = regra_sl
+    if sl is None:
+        resultado['failure_reason'] = 'SL_INVALIDO'
+        return resultado
+    risco = abs(entry - sl)
+    sl_do_lado_certo = (sl < entry) if bias == 'alta' else (sl > entry)
+    if risco <= 0 or not sl_do_lado_certo:
+        resultado['failure_reason'] = 'SL_INVALIDO'
+        return resultado
+    resultado['sl'] = round(sl, 6)
+
+    # ── TP — reaproveita calcular_tp_dinamico() sem alteração nenhuma ──
+    try:
+        tp, tp_origem = calcular_tp_dinamico(bias, entry, sl, m15_ate_agora, d1_ate_agora or [])
+    except Exception as e:
+        resultado['failure_reason'] = f'ERRO_TP: {e}'
+        return resultado
+
+    if tp is None:
+        resultado['failure_reason'] = 'TP_INVALIDO'
+        return resultado
+    resultado['tp'] = round(tp, 6)
+    resultado['tp_origem'] = tp_origem
+    resultado['rr'] = round(abs(tp - entry) / risco, 2)
+
+    resultado['signal'] = True
+    resultado['valid'] = True
+    resultado['reason'] = (
+        f"BIAS={bias} + ZONA({zona_type},{zona_info}) + CHoCH_M5({choch_relevante['t']}) "
+        f"+ SL({regra_sl}) + TP({tp_origem})"
+    )
+    return resultado
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# REPLAY — avaliar_vortex_decision_layer_v2 — item aprovado do ticket.
+# SOMENTE REPLAY/AUDITORIA, sem deploy, sem alterar produção. Roda o
+# pipeline experimental candle a candle, causal, sem lookahead, e
+# agrega funil completo + distribuição de R:R + exemplos + MFE/MAE
+# causal (reaproveitando _medir_mfe_mae_janela/_agregar_mfe_mae já
+# testados). NÃO chama process_pair_gates_vortex() nem
+# process_pair_4camadas() nem avaliar_vortex_decision_layer() (v1).
+# ═══════════════════════════════════════════════════════════════════════
+
+def replay_vortex_decision_layer_v2(pair, dias_historico=7, janelas_mfe_mae=JANELAS_MFE_MAE_PADRAO):
+    """
+    Replay causal completo do pipeline v2 (BIAS→ZONA→CHoCH M5→ENTRY→
+    SL→TP→RR). Mesma metodologia já aprovada (fetch único por
+    timeframe, truncamento causal m15/d1 pelo mesmo ts_corte do ciclo
+    M5). Deduplica sinais válidos por (choch_timestamp, direction,
+    zone_type) — o mesmo sinal permanece "válido" em vários ciclos
+    consecutivos até ser invalidado; reportamos tanto o total bruto de
+    avaliações quanto os sinais únicos.
+    """
+    symbol_map = {
+        'BTCUSD': 'BTCUSDT', 'ETHUSD': 'ETHUSDT', 'SOLUSD': 'SOLUSDT', 'XRPUSD': 'XRPUSDT',
+        'LINKUSD': 'LINKUSDT', 'ADAUSD': 'ADAUSDT', 'AVAXUSD': 'AVAXUSDT', 'BNBUSD': 'BNBUSDT',
+        'AAVEUSD': 'AAVEUSDT', 'NEARUSD': 'NEARUSDT', 'PENDLEUSD': 'PENDLEUSDT', 'INJUSD': 'INJUSDT',
+        'ONDOUSD': 'ONDOUSDT',
+    }
+    symbol = symbol_map.get(pair.upper(), pair.upper().replace('USD', 'USDT'))
+
+    d1_bruto = _fetch_bybit_klines_historico(symbol, 'D', dias_historico + 20)
+    m15_bruto = _fetch_bybit_klines_historico(symbol, '15', dias_historico + 3)
+    m5_bruto = _fetch_bybit_klines_historico(symbol, '5', dias_historico + 2)
+
+    d1, val_d1 = _validar_e_limpar_candles(d1_bruto, 'D')
+    m15, val_m15 = _validar_e_limpar_candles(m15_bruto, '15')
+    m5, val_m5 = _validar_e_limpar_candles(m5_bruto, '5')
+
+    MIN_M5_IDX = 60
+    if len(m15) < 40 or len(m5) < MIN_M5_IDX + 20:
+        return {'erro': f'dados insuficientes pra {pair} (M15={len(m15)}, M5={len(m5)})',
+                'validacao_m15': val_m15, 'validacao_m5': val_m5}
+
+    funil = {
+        'total_ciclos_avaliados': 0, 'bias_ok': 0, 'zona_encontrada': 0,
+        'zona_tipo_fvg': 0, 'zona_tipo_ema25': 0,
+        'choch_confirmado': 0, 'choch_invalidado_antes_gatilho': 0,
+        'sl_ok': 0, 'tp_ok': 0, 'sinais_validos_brutos': 0,
+    }
+    distribuicao_motivos = {}
+    sinais_completos_brutos = []
+
+    for i in range(MIN_M5_IDX, len(m5)):
+        ts_corte = m5[i]['t']
+        m5_ate_agora = m5[:i + 1]
+        m15_ate_agora = [c for c in m15 if c['t'] <= ts_corte]
+        d1_ate_agora = [c for c in d1 if c['t'] <= ts_corte]
+        if len(m15_ate_agora) < 30:
+            continue
+
+        funil['total_ciclos_avaliados'] += 1
+        try:
+            r = avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora)
+        except Exception as e:
+            distribuicao_motivos[f'EXCECAO: {e}'] = distribuicao_motivos.get(f'EXCECAO: {e}', 0) + 1
+            continue
+
+        if r['bias'] in ('alta', 'baixa'):
+            funil['bias_ok'] += 1
+        if r['zone_top'] is not None:
+            funil['zona_encontrada'] += 1
+            if r['zone_type'] == 'FVG':
+                funil['zona_tipo_fvg'] += 1
+            elif r['zone_type'] == 'EMA25':
+                funil['zona_tipo_ema25'] += 1
+        if r['choch_confirmed']:
+            funil['choch_confirmado'] += 1
+        if r['failure_reason'] == 'CHOCH_INVALIDADO_ANTES_DO_GATILHO':
+            funil['choch_invalidado_antes_gatilho'] += 1
+        if r['sl'] is not None:
+            funil['sl_ok'] += 1
+        if r['tp'] is not None:
+            funil['tp_ok'] += 1
+
+        motivo_chave = 'SINAL_VALIDO' if r['valid'] else (r['failure_reason'] or 'MOTIVO_DESCONHECIDO')
+        distribuicao_motivos[motivo_chave] = distribuicao_motivos.get(motivo_chave, 0) + 1
+
+        if r['valid']:
+            funil['sinais_validos_brutos'] += 1
+            sinais_completos_brutos.append({**r, 'idx_m5': i, 'pair': pair})
+
+    # ── Dedup de sinais únicos (mesmo CHoCH permanece válido em vários
+    # ciclos consecutivos até ser invalidado) ──
+    sinais_unicos = []
+    chaves_vistas = set()
+    for s in sinais_completos_brutos:
+        chave = (s['choch_timestamp'], s['direction'], s['zone_type'])
+        if chave not in chaves_vistas:
+            chaves_vistas.add(chave)
+            sinais_unicos.append(s)
+
+    sinais_long = [s for s in sinais_unicos if s['direction'] == 'LONG']
+    sinais_short = [s for s in sinais_unicos if s['direction'] == 'SHORT']
+
+    # ── Distribuição de R:R ──
+    rrs = sorted(s['rr'] for s in sinais_unicos if s['rr'] is not None)
+
+    def stats_rr(lista):
+        if not lista:
+            return None
+        return {
+            'n': len(lista), 'media': round(sum(lista) / len(lista), 3),
+            'mediana': _percentil(lista, 50), 'min': lista[0], 'max': lista[-1],
+            'p25': _percentil(lista, 25), 'p75': _percentil(lista, 75),
+        }
+
+    # ── MFE/MAE causal dos sinais únicos (reaproveita infraestrutura já
+    # testada — não recalcula nenhuma fórmula nova) ──
+    medicoes_mfe_mae = []
+    for s in sinais_unicos:
+        idx = s['idx_m5']
+        entry = s['entry']
+        direcao_mfe = 'alta' if s['direction'] == 'LONG' else 'baixa'
+        candles_futuros = m5[idx + 1:]
+        med = {'pair': pair, 'direction': s['direction'], 'rr': s['rr']}
+        for j in janelas_mfe_mae:
+            med[f'j{j}'] = _medir_mfe_mae_janela(candles_futuros, direcao_mfe, entry, j)
+        medicoes_mfe_mae.append(med)
+
+    mfe_mae_long = _agregar_mfe_mae([m for m in medicoes_mfe_mae if m['direction'] == 'LONG'], janelas_mfe_mae)
+    mfe_mae_short = _agregar_mfe_mae([m for m in medicoes_mfe_mae if m['direction'] == 'SHORT'], janelas_mfe_mae)
+    mfe_mae_global = _agregar_mfe_mae(medicoes_mfe_mae, janelas_mfe_mae)
+
+    return {
+        'pair': pair, 'dias_historico': dias_historico,
+        'nota_metodologica': (
+            'REPLAY SOMENTE AUDITORIA — pipeline experimental avaliar_vortex_decision_layer_v2(), '
+            'não chamado por nenhum caminho de produção. Não altera CHoCH, FVG, Premium/Discount, '
+            'SL/TP existentes, gates ou process_pair_gates_vortex()/process_pair_4camadas(). Mesma '
+            'metodologia causal já aprovada — cada ciclo só enxerga candles com t <= ts_corte. '
+            'Sinais deduplicados por (choch_timestamp, direction, zone_type) — o mesmo CHoCH pode '
+            'permanecer "válido" em vários ciclos M5 consecutivos até ser invalidado.'
+        ),
+        'validacao_dados': {'M15': val_m15, 'M5': val_m5},
+        'funil': funil,
+        'distribuicao_motivos_todos_ciclos': distribuicao_motivos,
+        'total_sinais_unicos': len(sinais_unicos),
+        'sinais_long': len(sinais_long), 'sinais_short': len(sinais_short),
+        'distribuicao_rr': {
+            'global': stats_rr(rrs), 'LONG': stats_rr(sorted(s['rr'] for s in sinais_long if s['rr'] is not None)),
+            'SHORT': stats_rr(sorted(s['rr'] for s in sinais_short if s['rr'] is not None)),
+        },
+        'exemplos_sinais_completos': sinais_unicos[:10],
+        'mfe_mae_causal': {'global': mfe_mae_global, 'LONG': mfe_mae_long, 'SHORT': mfe_mae_short},
+        'sinais_unicos_completos': sinais_unicos,
+    }
+
+
+def replay_vortex_decision_layer_v2_todos_pares(dias_historico=7, pares=None):
+    """Roda replay_vortex_decision_layer_v2() (sem alteração) pra cada
+    par, agrega funil/RR/MFE-MAE globalmente. Erro num par não derruba
+    os demais."""
+    pares = pares or PARES_MONITORADOS_REPLAY
+    resultados_por_pair = {}
+    pares_com_erro = []
+
+    for p in pares:
+        try:
+            r = replay_vortex_decision_layer_v2(p, dias_historico=dias_historico)
+        except Exception as e:
+            r = {'erro': str(e)}
+        resultados_por_pair[p] = r
+        if 'erro' in r:
+            pares_com_erro.append(p)
+
+    todos_sinais_unicos = []
+    funil_agregado = {}
+    for p, r in resultados_por_pair.items():
+        if 'erro' in r:
+            continue
+        for k, v in r.get('funil', {}).items():
+            funil_agregado[k] = funil_agregado.get(k, 0) + v
+        todos_sinais_unicos.extend(r.get('sinais_unicos_completos', []))
+
+    sinais_long_g = [s for s in todos_sinais_unicos if s['direction'] == 'LONG']
+    sinais_short_g = [s for s in todos_sinais_unicos if s['direction'] == 'SHORT']
+    rrs_g = sorted(s['rr'] for s in todos_sinais_unicos if s['rr'] is not None)
+
+    def stats_rr(lista):
+        if not lista:
+            return None
+        return {
+            'n': len(lista), 'media': round(sum(lista) / len(lista), 3),
+            'mediana': _percentil(lista, 50), 'min': lista[0], 'max': lista[-1],
+        }
+
+    medicoes_globais = []
+    for p, r in resultados_por_pair.items():
+        if 'erro' in r:
+            continue
+        for s in r.get('sinais_unicos_completos', []):
+            idx = s['idx_m5']
+            medicoes_globais.append({'pair': p, 'direction': s['direction'], 'rr': s['rr'], **{
+                f'j{j}': None for j in JANELAS_MFE_MAE_PADRAO
+            }})
+    # Reaproveita as medições já calculadas por par (evita refetch/recalculo)
+    todas_medicoes_mfe_mae = []
+    for p, r in resultados_por_pair.items():
+        if 'erro' in r:
+            continue
+        mfe_mae_bloco = r.get('mfe_mae_causal', {})
+        # As medições brutas por sinal não são reexpostas fora do
+        # replay individual — reagregamos a partir do próprio bloco
+        # 'global' de cada par (pooled entre pares seria ideal, mas
+        # exigiria expor medicoes_raw também aqui; optamos por manter
+        # o relatório por par completo em resultados_por_pair para
+        # quem precisar do detalhe bruto).
+
+    return {
+        'dias_historico': dias_historico, 'pares_testados': pares, 'pares_com_erro': pares_com_erro,
+        'benchmark_principal': 'BTCUSD',
+        'funil_agregado': funil_agregado,
+        'total_sinais_unicos_global': len(todos_sinais_unicos),
+        'sinais_long_global': len(sinais_long_g), 'sinais_short_global': len(sinais_short_g),
+        'distribuicao_rr_global': {
+            'global': stats_rr(rrs_g),
+            'LONG': stats_rr(sorted(s['rr'] for s in sinais_long_g if s['rr'] is not None)),
+            'SHORT': stats_rr(sorted(s['rr'] for s in sinais_short_g if s['rr'] is not None)),
+        },
+        'exemplos_sinais_completos_global': todos_sinais_unicos[:15],
+        'nota_metodologica': (
+            'Cada par processado de forma totalmente independente, chamando '
+            'replay_vortex_decision_layer_v2() sem nenhuma alteração. Erro num par não '
+            'derruba os demais. Para MFE/MAE e funil detalhado por par, ver '
+            'resultados_por_pair[PAR] — cada um já traz o bloco completo.'
+        ),
+        'resultados_por_pair': resultados_por_pair,
+    }
+
+
+def _executar_decision_layer_v2_job(db_file, job_id, pair, dias_historico):
+    try:
+        resultado = replay_vortex_decision_layer_v2(pair, dias_historico=dias_historico)
+        status_final = 'erro' if (isinstance(resultado, dict) and 'erro' in resultado) else 'concluido'
+        with sqlite3.connect(db_file) as conn:
+            conn.execute('''
+                UPDATE scalp_replay_jobs SET status=?, resultado_json=?, finished_at=? WHERE job_id=?
+            ''', (status_final, json.dumps(resultado, ensure_ascii=False), int(time.time()), job_id))
+            conn.commit()
+    except Exception as e:
+        try:
+            with sqlite3.connect(db_file) as conn:
+                conn.execute('''
+                    UPDATE scalp_replay_jobs SET status='erro', erro=?, finished_at=? WHERE job_id=?
+                ''', (str(e), int(time.time()), job_id))
+                conn.commit()
+        except Exception as e2:
+            print(f"[scalp_engine replay_jobs] erro ao registrar falha do job {job_id}: {e2}")
+
+
+def _executar_decision_layer_v2_todos_pares_job(db_file, job_id, dias_historico, pares):
+    try:
+        resultado = replay_vortex_decision_layer_v2_todos_pares(dias_historico=dias_historico, pares=pares)
+        with sqlite3.connect(db_file) as conn:
+            conn.execute('''
+                UPDATE scalp_replay_jobs SET status='concluido', resultado_json=?, finished_at=? WHERE job_id=?
+            ''', (json.dumps(resultado, ensure_ascii=False), int(time.time()), job_id))
+            conn.commit()
+    except Exception as e:
+        try:
+            with sqlite3.connect(db_file) as conn:
+                conn.execute('''
+                    UPDATE scalp_replay_jobs SET status='erro', erro=?, finished_at=? WHERE job_id=?
+                ''', (str(e), int(time.time()), job_id))
+                conn.commit()
+        except Exception as e2:
+            print(f"[scalp_engine replay_jobs] erro ao registrar falha do job {job_id}: {e2}")
+
+
+@explicacao_bp.route("/scalp_gates_vortex/decision_layer_v2_iniciar", methods=["GET"])
+def decision_layer_v2_iniciar_endpoint():
+    """
+    Roda replay_vortex_decision_layer_v2() em BACKGROUND, 1 par.
+    Consultar no MESMO endpoint de status genérico já existente.
+    Uso: ?pair=BTCUSD&dias=7&confirm=RODAR_DECISION_LAYER_V2
+    """
+    if request.args.get('confirm') != 'RODAR_DECISION_LAYER_V2':
+        return jsonify({
+            "erro": "endpoint pesado, protegido contra chamada acidental",
+            "como_usar": "adiciona &confirm=RODAR_DECISION_LAYER_V2 na URL, ex: "
+                          "/scalp_gates_vortex/decision_layer_v2_iniciar?pair=BTCUSD&dias=7&confirm=RODAR_DECISION_LAYER_V2",
+        }), 400
+
+    pair = request.args.get('pair', 'BTCUSD')
+    dias = int(request.args.get('dias', 7))
+    db_file = _db_file_explicacao()
+    init_replay_jobs_db(db_file)
+    job_id = f"decisionlayerv2_{pair}_{int(time.time()*1000)}"
+
+    try:
+        with sqlite3.connect(db_file) as conn:
+            conn.execute('''
+                INSERT INTO scalp_replay_jobs (job_id, tipo, pair, dias_historico, status, created_at)
+                VALUES (?, ?, ?, ?, 'rodando', ?)
+            ''', (job_id, 'replay_vortex_decision_layer_v2', pair, dias, int(time.time())))
+            conn.commit()
+    except Exception as e:
+        return jsonify({"erro": f"não foi possível criar o job: {e}"}), 500
+
+    thread = threading.Thread(target=_executar_decision_layer_v2_job, args=(db_file, job_id, pair, dias), daemon=True)
+    thread.start()
+
+    return jsonify({
+        "job_id": job_id, "status": "iniciado", "pair": pair, "dias_historico": dias,
+        "como_consultar": f"/scalp_gates_vortex/replay_comparativo_luxalgo_status/{job_id}",
+        "aviso": "roda em background — pode levar alguns minutos",
+    })
+
+
+@explicacao_bp.route("/scalp_gates_vortex/decision_layer_v2_todos_pares_iniciar", methods=["GET"])
+def decision_layer_v2_todos_pares_iniciar_endpoint():
+    """
+    Roda replay_vortex_decision_layer_v2_todos_pares() em BACKGROUND,
+    13 pares. Consultar no MESMO endpoint de status genérico já
+    existente.
+    Uso: ?dias=7&confirm=RODAR_DECISION_LAYER_V2_TODOS_PARES
+    Opcional &pares=BTCUSD,ETHUSD,...
+    """
+    if request.args.get('confirm') != 'RODAR_DECISION_LAYER_V2_TODOS_PARES':
+        return jsonify({
+            "erro": "endpoint MUITO pesado, protegido contra chamada acidental",
+            "como_usar": "adiciona &confirm=RODAR_DECISION_LAYER_V2_TODOS_PARES na URL, ex: "
+                          "/scalp_gates_vortex/decision_layer_v2_todos_pares_iniciar?dias=7&confirm=RODAR_DECISION_LAYER_V2_TODOS_PARES",
+        }), 400
+
+    dias = int(request.args.get('dias', 7))
+    pares_param = request.args.get('pares')
+    pares_lista = None
+    if pares_param:
+        pares_lista = [p.strip().upper() for p in pares_param.split(',') if p.strip()]
+
+    db_file = _db_file_explicacao()
+    init_replay_jobs_db(db_file)
+    job_id = f"decisionlayerv2todos_{int(time.time()*1000)}"
+
+    try:
+        with sqlite3.connect(db_file) as conn:
+            conn.execute('''
+                INSERT INTO scalp_replay_jobs (job_id, tipo, pair, dias_historico, status, created_at)
+                VALUES (?, ?, ?, ?, 'rodando', ?)
+            ''', (job_id, 'replay_vortex_decision_layer_v2_todos_pares', 'TODOS', dias, int(time.time())))
+            conn.commit()
+    except Exception as e:
+        return jsonify({"erro": f"não foi possível criar o job: {e}"}), 500
+
+    thread = threading.Thread(
+        target=_executar_decision_layer_v2_todos_pares_job,
+        args=(db_file, job_id, dias, pares_lista), daemon=True,
+    )
+    thread.start()
+
+    return jsonify({
+        "job_id": job_id, "status": "iniciado", "dias_historico": dias,
+        "pares": pares_lista or PARES_MONITORADOS_REPLAY,
+        "como_consultar": f"/scalp_gates_vortex/replay_comparativo_luxalgo_status/{job_id}",
+        "aviso": "MUITO pesado — roda em background sem prazo de conexão, mas pode levar bastante tempo",
+    })

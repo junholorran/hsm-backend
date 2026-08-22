@@ -11571,3 +11571,191 @@ def resolver_resultado_v2_iniciar_endpoint():
         "como_consultar": f"/scalp_gates_vortex/replay_comparativo_luxalgo_status/{job_id}",
         "aviso": "roda em background — pode levar alguns minutos",
     })
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# resolver_resultado_sinais_v2_todos_pares — item aprovado do ticket.
+# SOMENTE AUDITORIA, sem alterar nenhuma regra da decision layer.
+# Orquestra resolver_resultado_sinais_v2() (SEM ALTERAÇÃO) pra cada
+# par, usando a MESMA janela fixa (fim_ts_ms) do BTCUSD, e consolida.
+# Expectancy/mediana GLOBAL calculada sobre valores R INDIVIDUAIS
+# agrupados entre pares (pooled) — nunca "média das médias por par",
+# mesmo cuidado estatístico já aplicado ao MFE/MAE multi-par.
+# ═══════════════════════════════════════════════════════════════════════
+
+def resolver_resultado_sinais_v2_todos_pares(dias_historico=30, fim_ts_ms=None, pares=None):
+    """
+    Roda resolver_resultado_sinais_v2() (sem alteração) pra cada par
+    da lista, usando a MESMA janela fixa (fim_ts_ms) — permite
+    comparação justa entre pares no mesmo período exato. Erro num par
+    não derruba os demais.
+    """
+    pares = pares or [p for p in PARES_MONITORADOS_REPLAY if p.upper() != 'BTCUSD']
+    resultados_por_pair = {}
+    pares_com_erro = []
+
+    for p in pares:
+        try:
+            r = resolver_resultado_sinais_v2(p, dias_historico=dias_historico, fim_ts_ms=fim_ts_ms)
+        except Exception as e:
+            r = {'erro': str(e)}
+        resultados_por_pair[p] = r
+        if 'erro' in r:
+            pares_com_erro.append(p)
+
+    tabela_por_par = []
+    origem_tp_por_par = {}
+    todos_r_global, todos_r_long, todos_r_short = [], [], []
+
+    for p, r in resultados_por_pair.items():
+        if 'erro' in r:
+            tabela_por_par.append({'pair': p, 'erro': r['erro']})
+            continue
+        g, l, s = r['GLOBAL'], r['LONG'], r['SHORT']
+        tabela_por_par.append({
+            'pair': p, 'sinais': g['total_sinais'], 'long': l['total_sinais'], 'short': s['total_sinais'],
+            'tp': g['tp_primeiro'], 'sl': g['sl_primeiro'], 'ambiguo': g['ambiguo'], 'nenhum': g['nenhum_nao_resolvido'],
+            'wr': g['win_rate_pct_excluindo_ambiguo'], 'expectancy': g['expectancy_R_excluindo_ambiguo'],
+            'mediana_R': g['mediana_R_excluindo_ambiguo'],
+            'long_expectancy': l['expectancy_R_excluindo_ambiguo'], 'short_expectancy': s['expectancy_R_excluindo_ambiguo'],
+        })
+
+        contagem_origem = {}
+        for a in r['auditoria_sinais_completa']:
+            origem = (a['tp_origem'] or 'None').split('(')[0].strip()
+            contagem_origem[origem] = contagem_origem.get(origem, 0) + 1
+            if a['r_obtido'] is not None:
+                todos_r_global.append(a['r_obtido'])
+                if a['direction'] == 'LONG':
+                    todos_r_long.append(a['r_obtido'])
+                else:
+                    todos_r_short.append(a['r_obtido'])
+        origem_tp_por_par[p] = contagem_origem
+
+    def _stats_pooled(lista):
+        if not lista:
+            return {'n': 0, 'expectancy': None, 'mediana': None, 'win_rate_pct': None}
+        vencedores = sum(1 for r in lista if r > 0)
+        return {
+            'n': len(lista), 'expectancy': round(sum(lista) / len(lista), 4),
+            'mediana': _percentil(sorted(lista), 50),
+            'win_rate_pct': round(100 * vencedores / len(lista), 2),
+        }
+
+    consolidado_13_pares = {
+        'global_pooled': _stats_pooled(todos_r_global),
+        'long_pooled': _stats_pooled(todos_r_long),
+        'short_pooled': _stats_pooled(todos_r_short),
+    }
+
+    pares_ok = [t for t in tabela_por_par if 'erro' not in t]
+    pares_expectancy_positiva = [t['pair'] for t in pares_ok if t['expectancy'] is not None and t['expectancy'] > 0]
+    pares_expectancy_negativa = [t['pair'] for t in pares_ok if t['expectancy'] is not None and t['expectancy'] <= 0]
+    pares_long_positiva = [t['pair'] for t in pares_ok if t['long_expectancy'] is not None and t['long_expectancy'] > 0]
+    pares_short_positiva = [t['pair'] for t in pares_ok if t['short_expectancy'] is not None and t['short_expectancy'] > 0]
+
+    # ── Concentração: contribuição de R total (soma, não média) por par,
+    # pra identificar se poucos pares dominam o resultado agregado ──
+    contribuicao_r_total_por_par = []
+    for p, r in resultados_por_pair.items():
+        if 'erro' in r:
+            continue
+        soma_r_par = sum(a['r_obtido'] for a in r['auditoria_sinais_completa'] if a['r_obtido'] is not None)
+        contribuicao_r_total_por_par.append({'pair': p, 'soma_R_total': round(soma_r_par, 3)})
+    contribuicao_r_total_por_par.sort(key=lambda x: x['soma_R_total'], reverse=True)
+    soma_r_geral = sum(c['soma_R_total'] for c in contribuicao_r_total_por_par)
+    if soma_r_geral and abs(soma_r_geral) > 1e-9:
+        for c in contribuicao_r_total_por_par:
+            c['pct_da_soma_total'] = round(100 * c['soma_R_total'] / soma_r_geral, 1)
+
+    return {
+        'dias_historico': dias_historico, 'fim_ts_ms': fim_ts_ms, 'pares_testados': pares,
+        'pares_com_erro': pares_com_erro,
+        'nota_metodologica': (
+            'Orquestra resolver_resultado_sinais_v2() (SEM ALTERAÇÃO) pra cada par, usando a '
+            'MESMA janela fixa do BTCUSD (fim_ts_ms). Expectancy/mediana GLOBAL calculada sobre '
+            'valores R individuais agrupados (pooled) entre pares — não é média das médias por '
+            'par (evita viés de pares com poucos sinais pesarem igual a pares com muitos). Erro '
+            'num par não derruba os demais.'
+        ),
+        'tabela_por_par': tabela_por_par,
+        'origem_tp_por_par': origem_tp_por_par,
+        'consolidado_13_pares': consolidado_13_pares,
+        'pares_expectancy_positiva': pares_expectancy_positiva,
+        'pares_expectancy_negativa': pares_expectancy_negativa,
+        'pares_long_positiva': pares_long_positiva,
+        'pares_short_positiva': pares_short_positiva,
+        'contribuicao_r_total_por_par': contribuicao_r_total_por_par,
+        'resultados_por_pair': resultados_por_pair,
+    }
+
+
+def _executar_resolver_resultado_v2_todos_pares_job(db_file, job_id, dias_historico, fim_ts_ms, pares):
+    try:
+        resultado = resolver_resultado_sinais_v2_todos_pares(dias_historico=dias_historico, fim_ts_ms=fim_ts_ms, pares=pares)
+        with sqlite3.connect(db_file) as conn:
+            conn.execute('''
+                UPDATE scalp_replay_jobs SET status='concluido', resultado_json=?, finished_at=? WHERE job_id=?
+            ''', (json.dumps(resultado, ensure_ascii=False), int(time.time()), job_id))
+            conn.commit()
+    except Exception as e:
+        try:
+            with sqlite3.connect(db_file) as conn:
+                conn.execute('''
+                    UPDATE scalp_replay_jobs SET status='erro', erro=?, finished_at=? WHERE job_id=?
+                ''', (str(e), int(time.time()), job_id))
+                conn.commit()
+        except Exception as e2:
+            print(f"[scalp_engine replay_jobs] erro ao registrar falha do job {job_id}: {e2}")
+
+
+@explicacao_bp.route("/scalp_gates_vortex/resolver_resultado_v2_todos_pares_iniciar", methods=["GET"])
+def resolver_resultado_v2_todos_pares_iniciar_endpoint():
+    """
+    Roda resolver_resultado_sinais_v2_todos_pares() em BACKGROUND, 13
+    pares (por padrão, todos menos BTCUSD). Consultar no MESMO
+    endpoint de status genérico já existente.
+    Uso: ?dias=30&fim_ts_ms=<ts_do_btc>&confirm=RODAR_RESOLVER_RESULTADO_V2_TODOS_PARES
+    Opcional &pares=ETHUSD,SOLUSD,...
+    """
+    if request.args.get('confirm') != 'RODAR_RESOLVER_RESULTADO_V2_TODOS_PARES':
+        return jsonify({
+            "erro": "endpoint MUITO pesado, protegido contra chamada acidental",
+            "como_usar": "adiciona &confirm=RODAR_RESOLVER_RESULTADO_V2_TODOS_PARES na URL, ex: "
+                          "/scalp_gates_vortex/resolver_resultado_v2_todos_pares_iniciar?dias=30&fim_ts_ms=1787320739754&confirm=RODAR_RESOLVER_RESULTADO_V2_TODOS_PARES",
+        }), 400
+
+    dias = int(request.args.get('dias', 30))
+    fim_ts_ms_param = request.args.get('fim_ts_ms')
+    fim_ts_ms = int(fim_ts_ms_param) if fim_ts_ms_param else None
+    pares_param = request.args.get('pares')
+    pares_lista = None
+    if pares_param:
+        pares_lista = [p.strip().upper() for p in pares_param.split(',') if p.strip()]
+
+    db_file = _db_file_explicacao()
+    init_replay_jobs_db(db_file)
+    job_id = f"resolverresultadov2todos_{int(time.time()*1000)}"
+
+    try:
+        with sqlite3.connect(db_file) as conn:
+            conn.execute('''
+                INSERT INTO scalp_replay_jobs (job_id, tipo, pair, dias_historico, status, created_at)
+                VALUES (?, ?, ?, ?, 'rodando', ?)
+            ''', (job_id, 'resolver_resultado_sinais_v2_todos_pares', 'TODOS', dias, int(time.time())))
+            conn.commit()
+    except Exception as e:
+        return jsonify({"erro": f"não foi possível criar o job: {e}"}), 500
+
+    thread = threading.Thread(
+        target=_executar_resolver_resultado_v2_todos_pares_job,
+        args=(db_file, job_id, dias, fim_ts_ms, pares_lista), daemon=True,
+    )
+    thread.start()
+
+    return jsonify({
+        "job_id": job_id, "status": "iniciado", "dias_historico": dias, "fim_ts_ms": fim_ts_ms,
+        "pares": pares_lista or [p for p in PARES_MONITORADOS_REPLAY if p.upper() != 'BTCUSD'],
+        "como_consultar": f"/scalp_gates_vortex/replay_comparativo_luxalgo_status/{job_id}",
+        "aviso": "MUITO pesado — roda em background sem prazo de conexão, mas pode levar bastante tempo",
+    })

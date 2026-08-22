@@ -11759,3 +11759,333 @@ def resolver_resultado_v2_todos_pares_iniciar_endpoint():
         "como_consultar": f"/scalp_gates_vortex/replay_comparativo_luxalgo_status/{job_id}",
         "aviso": "MUITO pesado — roda em background sem prazo de conexão, mas pode levar bastante tempo",
     })
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# PAPER TRADING / FORWARD TEST — avaliar_vortex_decision_layer_v2 —
+# item aprovado do ticket. 100% EXPERIMENTAL, ZERO dinheiro real, ZERO
+# execução de ordens (nenhuma função de envio de ordem existe neste
+# módulo — só leitura de candles públicos + gravação em tabela
+# própria). Reaproveita EXCLUSIVAMENTE avaliar_vortex_decision_layer_v2
+# (SEM ALTERAÇÃO NENHUMA) e _resolver_tp_sl_futuro (já existente e
+# testada) para detectar e resolver sinais. Tabela própria, isolada,
+# nunca compartilhada com nenhum caminho de produção. Nenhuma função
+# de produção (process_pair_gates_vortex, process_pair_4camadas,
+# gerenciar_trades_abertos, etc) é chamada ou alterada por este bloco.
+# ═══════════════════════════════════════════════════════════════════════
+
+PAPER_TRADING_V2_JANELA_LOOKBACK_DIAS = 5  # janela de fetch por tick — pequena, só pra pegar candles recentes
+PAPER_TRADING_V2_EXPIRACAO_DIAS = 15  # EXPERIMENTAL — sinal PENDING por mais tempo que isso vira EXPIRED, documentado
+
+
+def init_paper_trading_v2_db(db_file):
+    """Cria a tabela de paper trading v2, se não existir. Auto-blindada
+    — não depende de init no boot do app.py. Tabela PRÓPRIA e ISOLADA,
+    nunca compartilhada com scalp_replay_jobs, live_signals ou
+    qualquer tabela de produção existente. UNIQUE constraint garante
+    deduplicação a nível de banco — sobrevive a reinício, tick
+    duplicado, candle reprocessado."""
+    try:
+        with sqlite3.connect(db_file) as conn:
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS paper_trading_v2_sinais (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    pair TEXT NOT NULL,
+                    direction TEXT NOT NULL,
+                    choch_timestamp INTEGER NOT NULL,
+                    zone_type TEXT NOT NULL,
+                    zone_source TEXT,
+                    zone_top REAL, zone_bottom REAL,
+                    choch_level REAL,
+                    entry REAL, sl REAL, tp REAL, rr REAL,
+                    tp_origem TEXT, sl_regra TEXT, reason TEXT,
+                    candle_confirmacao_ts INTEGER,
+                    detectado_em INTEGER,
+                    status TEXT DEFAULT 'PENDING',
+                    resultado_timestamp INTEGER,
+                    candles_ate_evento INTEGER,
+                    r_obtido REAL, mfe_pct REAL, mae_pct REAL,
+                    spread_no_sinal TEXT DEFAULT 'NAO_MEDIDO',
+                    updated_at INTEGER,
+                    UNIQUE(pair, choch_timestamp, direction, zone_type)
+                )
+            ''')
+            conn.execute('''
+                CREATE INDEX IF NOT EXISTS idx_paper_v2_status ON paper_trading_v2_sinais(status)
+            ''')
+            conn.execute('''
+                CREATE INDEX IF NOT EXISTS idx_paper_v2_pair ON paper_trading_v2_sinais(pair)
+            ''')
+            conn.commit()
+    except Exception as e:
+        print(f"[paper_trading_v2] erro ao criar tabela: {e}")
+
+
+def paper_trading_v2_tick(pair, db_file, agora_ts_ms=None):
+    """
+    ÚNICO ponto de entrada por par. Busca candles recentes (janela
+    curta — PAPER_TRADING_V2_JANELA_LOOKBACK_DIAS), reavalia os
+    últimos ciclos M5 causalmente com avaliar_vortex_decision_layer_v2
+    (SEM ALTERAÇÃO), grava (INSERT OR IGNORE — dedup garantida pelo
+    UNIQUE constraint da tabela) qualquer sinal novo encontrado como
+    PENDING, e resolve TP/SL/AMBIGUO dos sinais PENDING já existentes
+    desse par usando _resolver_tp_sl_futuro (já existente, testada).
+    Idempotente: rodar o mesmo tick 2x, ou reiniciar o processo, nunca
+    duplica nem corrompe nada — o estado vive só no banco.
+    NUNCA envia ordem pra nenhuma exchange — só lê candles públicos
+    (mesmo _fetch_bybit_klines_historico já usado no replay) e grava
+    na tabela própria.
+    """
+    if agora_ts_ms is None:
+        agora_ts_ms = int(time.time() * 1000)
+
+    symbol_map = {
+        'BTCUSD': 'BTCUSDT', 'ETHUSD': 'ETHUSDT', 'SOLUSD': 'SOLUSDT', 'XRPUSD': 'XRPUSDT',
+        'LINKUSD': 'LINKUSDT', 'ADAUSD': 'ADAUSDT', 'AVAXUSD': 'AVAXUSDT', 'BNBUSD': 'BNBUSDT',
+        'AAVEUSD': 'AAVEUSDT', 'NEARUSD': 'NEARUSDT', 'PENDLEUSD': 'PENDLEUSDT', 'INJUSD': 'INJUSDT',
+        'ONDOUSD': 'ONDOUSDT',
+    }
+    symbol = symbol_map.get(pair.upper(), pair.upper().replace('USD', 'USDT'))
+
+    d1_bruto = _fetch_bybit_klines_historico(symbol, 'D', PAPER_TRADING_V2_JANELA_LOOKBACK_DIAS + 20, fim_ts_ms=agora_ts_ms)
+    m15_bruto = _fetch_bybit_klines_historico(symbol, '15', PAPER_TRADING_V2_JANELA_LOOKBACK_DIAS + 3, fim_ts_ms=agora_ts_ms)
+    m5_bruto = _fetch_bybit_klines_historico(symbol, '5', PAPER_TRADING_V2_JANELA_LOOKBACK_DIAS + 2, fim_ts_ms=agora_ts_ms)
+
+    d1, _ = _validar_e_limpar_candles(d1_bruto, 'D')
+    m15, _ = _validar_e_limpar_candles(m15_bruto, '15')
+    m5, _ = _validar_e_limpar_candles(m5_bruto, '5')
+
+    novos_detectados = 0
+    if len(m15) >= 40 and len(m5) >= 80:
+        # Só reavalia os últimos ciclos (não a janela toda) — a dedup
+        # por UNIQUE constraint garante segurança mesmo reprocessando.
+        idx_inicio = max(60, len(m5) - 300)
+        for i in range(idx_inicio, len(m5)):
+            ts_corte = m5[i]['t']
+            m5_ate_agora = m5[:i + 1]
+            m15_ate_agora = [c for c in m15 if c['t'] <= ts_corte]
+            d1_ate_agora = [c for c in d1 if c['t'] <= ts_corte]
+            if len(m15_ate_agora) < 30:
+                continue
+            try:
+                r = avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora)
+            except Exception:
+                continue
+            if not r['valid']:
+                continue
+            try:
+                with sqlite3.connect(db_file) as conn:
+                    cursor = conn.execute('''
+                        INSERT OR IGNORE INTO paper_trading_v2_sinais (
+                            pair, direction, choch_timestamp, zone_type, zone_source,
+                            zone_top, zone_bottom, choch_level, entry, sl, tp, rr,
+                            tp_origem, sl_regra, reason, candle_confirmacao_ts,
+                            detectado_em, status, spread_no_sinal, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', 'NAO_MEDIDO', ?)
+                    ''', (
+                        pair, r['direction'], r['choch_timestamp'], r['zone_type'], r['zone_source'],
+                        r['zone_top'], r['zone_bottom'], r['choch_level'], r['entry'], r['sl'], r['tp'], r['rr'],
+                        r['tp_origem'], r['sl_regra'], r['reason'], r['timestamp'],
+                        agora_ts_ms, agora_ts_ms,
+                    ))
+                    conn.commit()
+                    if cursor.rowcount > 0:
+                        novos_detectados += 1
+            except Exception as e:
+                print(f"[paper_trading_v2] erro ao gravar sinal de {pair}: {e}")
+
+    # ── Resolver sinais PENDING já existentes desse par ──
+    resolvidos = 0
+    try:
+        with sqlite3.connect(db_file) as conn:
+            conn.row_factory = sqlite3.Row
+            pendentes = conn.execute(
+                "SELECT * FROM paper_trading_v2_sinais WHERE pair=? AND status='PENDING'", (pair,)
+            ).fetchall()
+
+        for sinal in pendentes:
+            idx_candle_entrada = None
+            for j, c in enumerate(m5):
+                if c['t'] == sinal['candle_confirmacao_ts']:
+                    idx_candle_entrada = j
+                    break
+            if idx_candle_entrada is None:
+                # candle de entrada saiu da janela de lookback (par antigo) — não
+                # dá pra resolver com o dado atual, mas não é erro; expira se muito velho
+                idade_dias = (agora_ts_ms - sinal['choch_timestamp']) / 86400000
+                if idade_dias > PAPER_TRADING_V2_EXPIRACAO_DIAS:
+                    with sqlite3.connect(db_file) as conn:
+                        conn.execute(
+                            "UPDATE paper_trading_v2_sinais SET status='EXPIRED', updated_at=? WHERE id=?",
+                            (agora_ts_ms, sinal['id']),
+                        )
+                        conn.commit()
+                continue
+
+            candles_futuros = m5[idx_candle_entrada + 1:]
+            direcao_lower = 'alta' if sinal['direction'] == 'LONG' else 'baixa'
+            res = _resolver_tp_sl_futuro(
+                candles_futuros, direcao_lower, sinal['entry'], sinal['sl'], sinal['tp'], None,
+                max_candles=len(candles_futuros),
+            )
+            evento = 'TP' if res['resultado'] == 'TP1' else res['resultado']
+
+            if evento in ('TP', 'SL', 'AMBIGUO'):
+                r_obtido = sinal['rr'] if evento == 'TP' else (-1.0 if evento == 'SL' else None)
+                ts_evento = None
+                if res['candles_ate_resolucao'] and res['candles_ate_resolucao'] - 1 < len(candles_futuros):
+                    ts_evento = candles_futuros[res['candles_ate_resolucao'] - 1]['t']
+                with sqlite3.connect(db_file) as conn:
+                    conn.execute('''
+                        UPDATE paper_trading_v2_sinais
+                        SET status=?, resultado_timestamp=?, candles_ate_evento=?,
+                            r_obtido=?, mfe_pct=?, mae_pct=?, updated_at=?
+                        WHERE id=?
+                    ''', (evento, ts_evento, res['candles_ate_resolucao'], r_obtido,
+                          res['mfe_pct'], res['mae_pct'], agora_ts_ms, sinal['id']))
+                    conn.commit()
+                resolvidos += 1
+            else:
+                idade_dias = (agora_ts_ms - sinal['choch_timestamp']) / 86400000
+                if idade_dias > PAPER_TRADING_V2_EXPIRACAO_DIAS:
+                    with sqlite3.connect(db_file) as conn:
+                        conn.execute(
+                            "UPDATE paper_trading_v2_sinais SET status='EXPIRED', updated_at=? WHERE id=?",
+                            (agora_ts_ms, sinal['id']),
+                        )
+                        conn.commit()
+    except Exception as e:
+        print(f"[paper_trading_v2] erro ao resolver pendentes de {pair}: {e}")
+
+    return {'pair': pair, 'novos_detectados': novos_detectados, 'resolvidos_neste_tick': resolvidos}
+
+
+def paper_trading_v2_tick_todos_pares(db_file, pares=None, agora_ts_ms=None):
+    """Roda paper_trading_v2_tick() (sem alteração) pra cada par.
+    Erro num par NUNCA derruba os demais nem qualquer outro caminho do
+    sistema — cada par é isolado em seu próprio try/except."""
+    pares = pares or PARES_MONITORADOS_REPLAY
+    resultados = {}
+    for p in pares:
+        try:
+            resultados[p] = paper_trading_v2_tick(p, db_file, agora_ts_ms=agora_ts_ms)
+        except Exception as e:
+            resultados[p] = {'pair': p, 'erro': str(e)}
+    return resultados
+
+
+def paper_trading_v2_relatorio(db_file):
+    """Telemetria completa — SOMENTE LEITURA da tabela própria de
+    paper trading. Nunca escreve, nunca chama V2, nunca envia ordem."""
+    with sqlite3.connect(db_file) as conn:
+        conn.row_factory = sqlite3.Row
+        todos = conn.execute("SELECT * FROM paper_trading_v2_sinais ORDER BY choch_timestamp ASC").fetchall()
+        todos = [dict(r) for r in todos]
+
+    total = len(todos)
+    pendentes = [s for s in todos if s['status'] == 'PENDING']
+    tp = [s for s in todos if s['status'] == 'TP']
+    sl = [s for s in todos if s['status'] == 'SL']
+    ambiguo = [s for s in todos if s['status'] == 'AMBIGUO']
+    expired = [s for s in todos if s['status'] == 'EXPIRED']
+
+    resolvidos = tp + sl
+    rs = [s['r_obtido'] for s in resolvidos if s['r_obtido'] is not None]
+    win_rate = round(100 * len(tp) / len(resolvidos), 2) if resolvidos else None
+    expectancy = round(sum(rs) / len(rs), 4) if rs else None
+    mediana_r = _percentil(sorted(rs), 50) if rs else None
+
+    def bloco_direcao(lista_status):
+        r_dir = [s['r_obtido'] for s in lista_status if s['status'] in ('TP', 'SL') and s['r_obtido'] is not None]
+        wins = sum(1 for s in lista_status if s['status'] == 'TP')
+        losses = sum(1 for s in lista_status if s['status'] == 'SL')
+        n_resolvido = wins + losses
+        return {
+            'sinais': len(lista_status), 'tp': wins, 'sl': losses,
+            'wr': round(100 * wins / n_resolvido, 2) if n_resolvido else None,
+            'expectancy': round(sum(r_dir) / len(r_dir), 4) if r_dir else None,
+            'mediana_R': _percentil(sorted(r_dir), 50) if r_dir else None,
+        }
+
+    long_sinais = [s for s in todos if s['direction'] == 'LONG']
+    short_sinais = [s for s in todos if s['direction'] == 'SHORT']
+
+    por_par = {}
+    for s in todos:
+        por_par.setdefault(s['pair'], []).append(s)
+    resultado_por_par = {p: bloco_direcao(lista) for p, lista in por_par.items()}
+
+    # streaks cronológicos (resolvidos, AMBIGUO conta como loss pra sequência)
+    cronologico = sorted([s for s in todos if s['status'] in ('TP', 'SL', 'AMBIGUO')], key=lambda s: s['choch_timestamp'])
+    max_win, max_loss, cur_win, cur_loss = 0, 0, 0, 0
+    for s in cronologico:
+        if s['status'] == 'TP':
+            cur_win += 1
+            cur_loss = 0
+        else:
+            cur_loss += 1
+            cur_win = 0
+        max_win = max(max_win, cur_win)
+        max_loss = max(max_loss, cur_loss)
+
+    # resultado diário (agrupado por dia UTC do choch_timestamp)
+    resultado_diario = {}
+    for s in resolvidos:
+        dia = datetime.fromtimestamp(s['choch_timestamp'] / 1000, tz=timezone.utc).strftime('%Y-%m-%d')
+        resultado_diario.setdefault(dia, []).append(s['r_obtido'])
+    resultado_diario_agregado = {
+        dia: {'n': len(rs_dia), 'soma_R': round(sum(rs_dia), 3)} for dia, rs_dia in resultado_diario.items()
+    }
+
+    return {
+        'total_sinais': total, 'pendentes': len(pendentes), 'tp': len(tp), 'sl': len(sl),
+        'ambiguo': len(ambiguo), 'expired': len(expired),
+        'win_rate_pct': win_rate, 'expectancy_R': expectancy, 'mediana_R': mediana_r,
+        'max_win_streak': max_win, 'max_loss_streak': max_loss,
+        'LONG': bloco_direcao(long_sinais), 'SHORT': bloco_direcao(short_sinais),
+        'resultado_por_par': resultado_por_par,
+        'resultado_diario': resultado_diario_agregado,
+        'nota_spread': 'spread_no_sinal sempre NAO_MEDIDO — candles Bybit são OHLC, sem bid/ask disponível.',
+        'nota_custos': 'Resultado 100% BRUTO — nenhum fee/slippage/funding foi simulado ou inventado.',
+        'nota_metodologica': (
+            'FORWARD TEST / PAPER TRADING — 100% experimental, ZERO dinheiro real, ZERO ordem '
+            'enviada a qualquer exchange. Reaproveita avaliar_vortex_decision_layer_v2() e '
+            '_resolver_tp_sl_futuro() SEM ALTERAÇÃO NENHUMA. Tabela isolada '
+            '(paper_trading_v2_sinais), nunca compartilhada com produção.'
+        ),
+    }
+
+
+@explicacao_bp.route("/scalp_gates_vortex/paper_trading_v2_tick", methods=["GET"])
+def paper_trading_v2_tick_endpoint():
+    """
+    Roda paper_trading_v2_tick_todos_pares() SINCRONAMENTE (rápido —
+    só janela curta de lookback, não replay histórico completo).
+    Chamar periodicamente (ex: a cada fechamento de M5, via cron
+    externo/Railway scheduled job) para manter o paper trading ativo.
+    NUNCA envia ordem. Uso: ?confirm=RODAR_PAPER_TICK
+    """
+    if request.args.get('confirm') != 'RODAR_PAPER_TICK':
+        return jsonify({
+            "erro": "endpoint protegido contra chamada acidental",
+            "como_usar": "adiciona &confirm=RODAR_PAPER_TICK na URL",
+        }), 400
+
+    db_file = _db_file_explicacao()
+    init_paper_trading_v2_db(db_file)
+    try:
+        resultado = paper_trading_v2_tick_todos_pares(db_file)
+        return jsonify({"status": "ok", "resultados_por_par": resultado})
+    except Exception as e:
+        return jsonify({"erro": f"erro no tick de paper trading: {e}"}), 500
+
+
+@explicacao_bp.route("/scalp_gates_vortex/paper_trading_v2_relatorio", methods=["GET"])
+def paper_trading_v2_relatorio_endpoint():
+    """Telemetria completa do paper trading — somente leitura."""
+    db_file = _db_file_explicacao()
+    init_paper_trading_v2_db(db_file)
+    try:
+        return jsonify(paper_trading_v2_relatorio(db_file))
+    except Exception as e:
+        return jsonify({"erro": f"erro ao gerar relatório: {e}"}), 500

@@ -12280,13 +12280,83 @@ def paper_trading_v2_diagnostico_bias_todos_pares(dias_historico=2, fim_ts_ms=No
     }
 
 
-@explicacao_bp.route("/scalp_gates_vortex/paper_trading_v2_diagnostico_bias", methods=["GET"])
-def paper_trading_v2_diagnostico_bias_endpoint():
+def _executar_diagnostico_bias_job(db_file, job_id, dias_historico, fim_ts_ms, pares):
+    try:
+        resultado = paper_trading_v2_diagnostico_bias_todos_pares(dias_historico=dias_historico, fim_ts_ms=fim_ts_ms, pares=pares)
+        with sqlite3.connect(db_file) as conn:
+            conn.execute('''
+                UPDATE scalp_replay_jobs SET status='concluido', resultado_json=?, finished_at=? WHERE job_id=?
+            ''', (json.dumps(resultado, ensure_ascii=False), int(time.time()), job_id))
+            conn.commit()
+    except Exception as e:
+        try:
+            with sqlite3.connect(db_file) as conn:
+                conn.execute('''
+                    UPDATE scalp_replay_jobs SET status='erro', erro=?, finished_at=? WHERE job_id=?
+                ''', (str(e), int(time.time()), job_id))
+                conn.commit()
+        except Exception as e2:
+            print(f"[scalp_engine replay_jobs] erro ao registrar falha do job {job_id}: {e2}")
+
+
+@explicacao_bp.route("/scalp_gates_vortex/paper_trading_v2_diagnostico_bias_iniciar", methods=["GET"])
+def paper_trading_v2_diagnostico_bias_iniciar_endpoint():
     """
     SOMENTE LEITURA — diagnóstico de distribuição de BIAS e funil
     LONG/SHORT nos últimos N dias, mesma janela/metodologia do paper
-    real, sem gravar nada. Uso: ?dias=2&confirm=RODAR_DIAGNOSTICO_BIAS
+    real, sem gravar nada. Roda em BACKGROUND (13 pares × 300 ciclos
+    cada é pesado demais pra síncrono — versão anterior dava timeout).
+    Consultar no MESMO endpoint de status genérico já existente.
+    Uso: ?dias=2&confirm=RODAR_DIAGNOSTICO_BIAS
     Opcional &pares=BTCUSD,ETHUSD,... e &fim_ts_ms=<timestamp>
+    """
+    if request.args.get('confirm') != 'RODAR_DIAGNOSTICO_BIAS':
+        return jsonify({
+            "erro": "endpoint protegido contra chamada acidental",
+            "como_usar": "adiciona &confirm=RODAR_DIAGNOSTICO_BIAS na URL, ex: "
+                          "/scalp_gates_vortex/paper_trading_v2_diagnostico_bias_iniciar?dias=2&confirm=RODAR_DIAGNOSTICO_BIAS",
+        }), 400
+
+    dias = int(request.args.get('dias', 2))
+    fim_ts_ms_param = request.args.get('fim_ts_ms')
+    fim_ts_ms = int(fim_ts_ms_param) if fim_ts_ms_param else None
+    pares_param = request.args.get('pares')
+    pares_lista = [p.strip().upper() for p in pares_param.split(',') if p.strip()] if pares_param else None
+
+    db_file = _db_file_explicacao()
+    init_replay_jobs_db(db_file)
+    job_id = f"diagnosticobias_{int(time.time()*1000)}"
+
+    try:
+        with sqlite3.connect(db_file) as conn:
+            conn.execute('''
+                INSERT INTO scalp_replay_jobs (job_id, tipo, pair, dias_historico, status, created_at)
+                VALUES (?, ?, ?, ?, 'rodando', ?)
+            ''', (job_id, 'paper_trading_v2_diagnostico_bias', 'TODOS', dias, int(time.time())))
+            conn.commit()
+    except Exception as e:
+        return jsonify({"erro": f"não foi possível criar o job: {e}"}), 500
+
+    thread = threading.Thread(
+        target=_executar_diagnostico_bias_job, args=(db_file, job_id, dias, fim_ts_ms, pares_lista), daemon=True,
+    )
+    thread.start()
+
+    return jsonify({
+        "job_id": job_id, "status": "iniciado", "dias_historico": dias,
+        "como_consultar": f"/scalp_gates_vortex/replay_comparativo_luxalgo_status/{job_id}",
+        "aviso": "roda em background — pode levar alguns minutos",
+    })
+
+
+@explicacao_bp.route("/scalp_gates_vortex/paper_trading_v2_diagnostico_bias", methods=["GET"])
+def paper_trading_v2_diagnostico_bias_endpoint():
+    """
+    DEPRECATED — versão síncrona antiga, causa timeout com 13 pares.
+    Mantida só pra uso pontual com 1 par (rápido o suficiente pra não
+    estourar timeout). Pra todos os pares, usar a versão
+    _iniciar (background job) acima.
+    Uso: ?dias=2&pares=BTCUSD&confirm=RODAR_DIAGNOSTICO_BIAS
     """
     if request.args.get('confirm') != 'RODAR_DIAGNOSTICO_BIAS':
         return jsonify({

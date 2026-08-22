@@ -11821,6 +11821,114 @@ def init_paper_trading_v2_db(db_file):
     except Exception as e:
         print(f"[paper_trading_v2] erro ao criar tabela: {e}")
 
+    _migrar_colunas_notificacao_paper_v2(db_file)
+
+
+def _migrar_colunas_notificacao_paper_v2(db_file):
+    """
+    Migração ADITIVA, idempotente — adiciona as colunas de controle de
+    notificação (notificado_novo_sinal, notificado_resultado) via
+    ALTER TABLE, se ainda não existirem. IMPORTANTE: na primeira vez
+    que as colunas são criadas (e SÓ nessa vez — detectado pelo
+    ALTER TABLE ter tido sucesso, não falhado por coluna já existir),
+    faz um BACKFILL marcando TODOS os sinais já existentes na tabela
+    como já notificados (notificado_novo_sinal=1, notificado_resultado=1)
+    — isso garante que sinais históricos (ex: os 67 já gravados antes
+    desta feature existir) NUNCA disparam notificação retroativa como
+    se fossem novos, satisfazendo a exigência explícita do ticket.
+    Chamadas subsequentes (colunas já existem) não fazem nada.
+    """
+    coluna_foi_criada_agora = False
+    try:
+        with sqlite3.connect(db_file) as conn:
+            conn.execute('ALTER TABLE paper_trading_v2_sinais ADD COLUMN notificado_novo_sinal INTEGER DEFAULT 0')
+            conn.commit()
+            coluna_foi_criada_agora = True
+    except Exception:
+        pass  # coluna já existe — normal em toda chamada depois da primeira
+
+    try:
+        with sqlite3.connect(db_file) as conn:
+            conn.execute('ALTER TABLE paper_trading_v2_sinais ADD COLUMN notificado_resultado INTEGER DEFAULT 0')
+            conn.commit()
+    except Exception:
+        pass
+
+    if coluna_foi_criada_agora:
+        try:
+            with sqlite3.connect(db_file) as conn:
+                conn.execute('''
+                    UPDATE paper_trading_v2_sinais SET notificado_novo_sinal=1, notificado_resultado=1
+                ''')
+                conn.commit()
+                print("[paper_trading_v2] migração de notificação: sinais históricos marcados como já notificados (evita spam retroativo)")
+        except Exception as e:
+            print(f"[paper_trading_v2] erro no backfill de notificação: {e}")
+
+
+def _paper_trading_v2_enviar_telegram(mensagem):
+    """
+    Envio de notificação Telegram — SECUNDÁRIO, nunca pode derrubar o
+    paper trading. Qualquer falha (token ausente, rede fora, API
+    Telegram indisponível) é engolida e logada, NUNCA propagada.
+    Token/chat_id lidos de variável de ambiente — nunca hardcoded.
+    Prioriza PAPER_TRADING_TELEGRAM_TOKEN/PAPER_TRADING_TELEGRAM_CHAT_ID
+    (canal dedicado, recomendado — evita misturar teste com alertas
+    reais de produção); se não configurados, cai para
+    TELEGRAM_TOKEN/TELEGRAM_CHAT_ID (mesmo canal já usado em produção
+    — só usar se você realmente quiser o paper misturado com alertas
+    reais, o que normalmente NÃO é recomendado).
+    """
+    token = os.environ.get('PAPER_TRADING_TELEGRAM_TOKEN') or os.environ.get('TELEGRAM_TOKEN')
+    chat_id = os.environ.get('PAPER_TRADING_TELEGRAM_CHAT_ID') or os.environ.get('TELEGRAM_CHAT_ID')
+    if not token or not chat_id:
+        return False
+    try:
+        requests.post(
+            f'https://api.telegram.org/bot{token}/sendMessage',
+            json={'chat_id': chat_id, 'text': mensagem, 'parse_mode': 'HTML'},
+            timeout=8,
+        )
+        return True
+    except Exception as e:
+        print(f"[paper_trading_v2] Telegram indisponível, sinal continua salvo normalmente: {e}")
+        return False
+
+
+def _formatar_mensagem_novo_sinal_paper_v2(pair, sinal):
+    ts_str = datetime.fromtimestamp(sinal['choch_timestamp'] / 1000, tz=timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
+    return (
+        f"📝 <b>PAPER TRADING — NOVO SINAL</b>\n"
+        f"Par: {pair}\n"
+        f"Direção: {sinal['direction']}\n"
+        f"Timestamp: {ts_str}\n"
+        f"Entry: {sinal['entry']}\n"
+        f"SL: {sinal['sl']}\n"
+        f"TP: {sinal['tp']}\n"
+        f"R:R: {sinal['rr']}\n"
+        f"Origem do TP: {sinal['tp_origem']}\n"
+        f"Estado: PENDING\n"
+        f"⚠️ 100% experimental — paper trading, zero dinheiro real."
+    )
+
+
+def _formatar_mensagem_resultado_paper_v2(sinal_row, resultado_status, r_obtido, ts_evento_ms):
+    ts_str = datetime.fromtimestamp(ts_evento_ms / 1000, tz=timezone.utc).strftime('%Y-%m-%d %H:%M UTC') if ts_evento_ms else 'N/A'
+    emoji = {'TP': '✅', 'SL': '❌', 'AMBIGUO': '⚠️', 'EXPIRED': '⌛'}.get(resultado_status, 'ℹ️')
+    r_str = f"{r_obtido:+.2f}R" if r_obtido is not None else "N/A"
+    return (
+        f"{emoji} <b>PAPER TRADING — RESULTADO</b>\n"
+        f"Par: {sinal_row['pair']}\n"
+        f"Direção: {sinal_row['direction']}\n"
+        f"Entry: {sinal_row['entry']}\n"
+        f"SL: {sinal_row['sl']}\n"
+        f"TP: {sinal_row['tp']}\n"
+        f"Resultado: {resultado_status}\n"
+        f"R realizado: {r_str}\n"
+        f"Horário da resolução: {ts_str}\n"
+        f"⚠️ 100% experimental — paper trading, zero dinheiro real."
+    )
+
 
 def paper_trading_v2_tick(pair, db_file, agora_ts_ms=None):
     """
@@ -11892,6 +12000,22 @@ def paper_trading_v2_tick(pair, db_file, agora_ts_ms=None):
                     conn.commit()
                     if cursor.rowcount > 0:
                         novos_detectados += 1
+                        # ── NOTIFICAÇÃO (secundária) — o sinal já está
+                        # gravado no banco antes desta linha, então uma
+                        # falha aqui NUNCA compromete a gravação. ──
+                        try:
+                            _paper_trading_v2_enviar_telegram(_formatar_mensagem_novo_sinal_paper_v2(pair, r))
+                        except Exception as e_tg:
+                            print(f"[paper_trading_v2] erro ao notificar novo sinal de {pair}: {e_tg}")
+                        try:
+                            with sqlite3.connect(db_file) as conn2:
+                                conn2.execute(
+                                    "UPDATE paper_trading_v2_sinais SET notificado_novo_sinal=1 WHERE id=?",
+                                    (cursor.lastrowid,),
+                                )
+                                conn2.commit()
+                        except Exception as e_flag:
+                            print(f"[paper_trading_v2] erro ao marcar notificado_novo_sinal de {pair}: {e_flag}")
             except Exception as e:
                 print(f"[paper_trading_v2] erro ao gravar sinal de {pair}: {e}")
 
@@ -11921,6 +12045,20 @@ def paper_trading_v2_tick(pair, db_file, agora_ts_ms=None):
                             (agora_ts_ms, sinal['id']),
                         )
                         conn.commit()
+                    try:
+                        _paper_trading_v2_enviar_telegram(
+                            _formatar_mensagem_resultado_paper_v2(sinal, 'EXPIRED', None, agora_ts_ms)
+                        )
+                    except Exception as e_tg:
+                        print(f"[paper_trading_v2] erro ao notificar EXPIRED de {pair}: {e_tg}")
+                    try:
+                        with sqlite3.connect(db_file) as conn2:
+                            conn2.execute(
+                                "UPDATE paper_trading_v2_sinais SET notificado_resultado=1 WHERE id=?", (sinal['id'],)
+                            )
+                            conn2.commit()
+                    except Exception as e_flag:
+                        print(f"[paper_trading_v2] erro ao marcar notificado_resultado (EXPIRED) de {pair}: {e_flag}")
                 continue
 
             candles_futuros = m5[idx_candle_entrada + 1:]
@@ -11946,6 +12084,22 @@ def paper_trading_v2_tick(pair, db_file, agora_ts_ms=None):
                           res['mfe_pct'], res['mae_pct'], agora_ts_ms, sinal['id']))
                     conn.commit()
                 resolvidos += 1
+                # ── NOTIFICAÇÃO (secundária) — status já atualizado no
+                # banco antes desta linha ──
+                try:
+                    _paper_trading_v2_enviar_telegram(
+                        _formatar_mensagem_resultado_paper_v2(sinal, evento, r_obtido, ts_evento)
+                    )
+                except Exception as e_tg:
+                    print(f"[paper_trading_v2] erro ao notificar resultado de {pair}: {e_tg}")
+                try:
+                    with sqlite3.connect(db_file) as conn2:
+                        conn2.execute(
+                            "UPDATE paper_trading_v2_sinais SET notificado_resultado=1 WHERE id=?", (sinal['id'],)
+                        )
+                        conn2.commit()
+                except Exception as e_flag:
+                    print(f"[paper_trading_v2] erro ao marcar notificado_resultado de {pair}: {e_flag}")
             else:
                 idade_dias = (agora_ts_ms - sinal['choch_timestamp']) / 86400000
                 if idade_dias > PAPER_TRADING_V2_EXPIRACAO_DIAS:
@@ -11955,6 +12109,20 @@ def paper_trading_v2_tick(pair, db_file, agora_ts_ms=None):
                             (agora_ts_ms, sinal['id']),
                         )
                         conn.commit()
+                    try:
+                        _paper_trading_v2_enviar_telegram(
+                            _formatar_mensagem_resultado_paper_v2(sinal, 'EXPIRED', None, agora_ts_ms)
+                        )
+                    except Exception as e_tg:
+                        print(f"[paper_trading_v2] erro ao notificar EXPIRED de {pair}: {e_tg}")
+                    try:
+                        with sqlite3.connect(db_file) as conn2:
+                            conn2.execute(
+                                "UPDATE paper_trading_v2_sinais SET notificado_resultado=1 WHERE id=?", (sinal['id'],)
+                            )
+                            conn2.commit()
+                    except Exception as e_flag:
+                        print(f"[paper_trading_v2] erro ao marcar notificado_resultado (EXPIRED) de {pair}: {e_flag}")
     except Exception as e:
         print(f"[paper_trading_v2] erro ao resolver pendentes de {pair}: {e}")
 

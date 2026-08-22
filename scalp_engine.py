@@ -5,6 +5,7 @@
 
 import sqlite3
 import time
+import os
 import random
 import requests
 import json
@@ -12063,8 +12064,33 @@ def paper_trading_v2_tick_endpoint():
     só janela curta de lookback, não replay histórico completo).
     Chamar periodicamente (ex: a cada fechamento de M5, via cron
     externo/Railway scheduled job) para manter o paper trading ativo.
-    NUNCA envia ordem. Uso: ?confirm=RODAR_PAPER_TICK
+    NUNCA envia ordem.
+
+    PROTEGIDO por segredo — lido da variável de ambiente
+    PAPER_TRADING_TICK_SECRET (nunca hardcoded, nunca versionado).
+    Aceita o segredo via header 'X-Paper-Tick-Secret' (preferencial —
+    não fica em logs de acesso nem em histórico de navegador) ou via
+    query param '&token=' (fallback, pra serviços de cron gratuitos
+    que só suportam URL simples, sem header customizado).
+
+    Uso: ?confirm=RODAR_PAPER_TICK&token=<segredo>
+    ou header: X-Paper-Tick-Secret: <segredo>
+
+    FAIL-CLOSED: se PAPER_TRADING_TICK_SECRET não estiver configurado
+    no ambiente, o endpoint recusa TODAS as chamadas (nunca abre
+    acesso público por omissão).
     """
+    segredo_configurado = os.environ.get('PAPER_TRADING_TICK_SECRET')
+    if not segredo_configurado:
+        return jsonify({
+            "erro": "endpoint desabilitado — variável de ambiente PAPER_TRADING_TICK_SECRET não configurada",
+            "como_resolver": "defina PAPER_TRADING_TICK_SECRET nas variáveis de ambiente do Railway antes de usar este endpoint",
+        }), 503
+
+    segredo_recebido = request.headers.get('X-Paper-Tick-Secret') or request.args.get('token')
+    if not segredo_recebido or segredo_recebido != segredo_configurado:
+        return jsonify({"erro": "não autorizado"}), 401
+
     if request.args.get('confirm') != 'RODAR_PAPER_TICK':
         return jsonify({
             "erro": "endpoint protegido contra chamada acidental",
@@ -12089,3 +12115,194 @@ def paper_trading_v2_relatorio_endpoint():
         return jsonify(paper_trading_v2_relatorio(db_file))
     except Exception as e:
         return jsonify({"erro": f"erro ao gerar relatório: {e}"}), 500
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# paper_trading_v2_diagnostico_bias — item aprovado do ticket. SOMENTE
+# DIAGNÓSTICO/LEITURA — não escreve nada, não altera nenhuma tabela,
+# não decide nada. Reaproveita EXCLUSIVAMENTE
+# avaliar_vortex_decision_layer_v2() (SEM ALTERAÇÃO NENHUMA) sobre a
+# MESMA janela/metodologia que paper_trading_v2_tick usa, mas em vez
+# de gravar sinais, conta a distribuição de BIAS e, pra ciclos com
+# BIAS=SHORT especificamente, em qual etapa cada avaliação parou —
+# exatamente pra responder "existiu BIAS SHORT e, se sim, onde foi
+# eliminado?" sem usar resultado futuro pra decidir nada (cada ciclo
+# é avaliado isoladamente e causalmente, igual ao replay/paper já
+# aprovados).
+# ═══════════════════════════════════════════════════════════════════════
+
+def paper_trading_v2_diagnostico_bias(pair, dias_historico=2, fim_ts_ms=None):
+    """
+    Diagnóstico somente-leitura. Roda EXATAMENTE a mesma janela/
+    metodologia de paper_trading_v2_tick (mesmo fetch, mesmo range de
+    ciclos analisados) mas SEM GRAVAR NADA — só conta e classifica.
+    """
+    if fim_ts_ms is None:
+        fim_ts_ms = int(time.time() * 1000)
+
+    symbol_map = {
+        'BTCUSD': 'BTCUSDT', 'ETHUSD': 'ETHUSDT', 'SOLUSD': 'SOLUSDT', 'XRPUSD': 'XRPUSDT',
+        'LINKUSD': 'LINKUSDT', 'ADAUSD': 'ADAUSDT', 'AVAXUSD': 'AVAXUSDT', 'BNBUSD': 'BNBUSDT',
+        'AAVEUSD': 'AAVEUSDT', 'NEARUSD': 'NEARUSDT', 'PENDLEUSD': 'PENDLEUSDT', 'INJUSD': 'INJUSDT',
+        'ONDOUSD': 'ONDOUSDT',
+    }
+    symbol = symbol_map.get(pair.upper(), pair.upper().replace('USD', 'USDT'))
+
+    d1_bruto = _fetch_bybit_klines_historico(symbol, 'D', dias_historico + 20, fim_ts_ms=fim_ts_ms)
+    m15_bruto = _fetch_bybit_klines_historico(symbol, '15', dias_historico + 3, fim_ts_ms=fim_ts_ms)
+    m5_bruto = _fetch_bybit_klines_historico(symbol, '5', dias_historico + 2, fim_ts_ms=fim_ts_ms)
+
+    d1, _ = _validar_e_limpar_candles(d1_bruto, 'D')
+    m15, _ = _validar_e_limpar_candles(m15_bruto, '15')
+    m5, _ = _validar_e_limpar_candles(m5_bruto, '5')
+
+    if len(m15) < 40 or len(m5) < 80:
+        return {'erro': f'dados insuficientes pra {pair} (M15={len(m15)}, M5={len(m5)})'}
+
+    contagem_bias = {'alta': 0, 'baixa': 0, 'neutro_ou_indefinido': 0}
+    funil_short = {
+        'total_ciclos_bias_short': 0, 'zona_encontrada': 0, 'zona_tipo_fvg': 0, 'zona_tipo_ema25': 0,
+        'choch_confirmado': 0, 'choch_invalidado_antes_gatilho': 0, 'sl_ok': 0, 'tp_ok': 0, 'sinal_valido': 0,
+    }
+    funil_long = {
+        'total_ciclos_bias_long': 0, 'zona_encontrada': 0, 'zona_tipo_fvg': 0, 'zona_tipo_ema25': 0,
+        'choch_confirmado': 0, 'choch_invalidado_antes_gatilho': 0, 'sl_ok': 0, 'tp_ok': 0, 'sinal_valido': 0,
+    }
+    distribuicao_motivos_short = {}
+    exemplos_short_eliminados = []
+
+    idx_inicio = max(60, len(m5) - 300)  # MESMA janela de lookback que paper_trading_v2_tick usa
+    total_ciclos = 0
+    for i in range(idx_inicio, len(m5)):
+        ts_corte = m5[i]['t']
+        m5_ate_agora = m5[:i + 1]
+        m15_ate_agora = [c for c in m15 if c['t'] <= ts_corte]
+        d1_ate_agora = [c for c in d1 if c['t'] <= ts_corte]
+        if len(m15_ate_agora) < 30:
+            continue
+        total_ciclos += 1
+        try:
+            r = avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora)
+        except Exception as e:
+            continue
+
+        if r['bias'] == 'alta':
+            contagem_bias['alta'] += 1
+        elif r['bias'] == 'baixa':
+            contagem_bias['baixa'] += 1
+        else:
+            contagem_bias['neutro_ou_indefinido'] += 1
+            continue
+
+        funil = funil_short if r['bias'] == 'baixa' else funil_long
+        chave_total = 'total_ciclos_bias_short' if r['bias'] == 'baixa' else 'total_ciclos_bias_long'
+        funil[chave_total] += 1
+        if r['zone_top'] is not None:
+            funil['zona_encontrada'] += 1
+            if r['zone_type'] == 'FVG':
+                funil['zona_tipo_fvg'] += 1
+            elif r['zone_type'] == 'EMA25':
+                funil['zona_tipo_ema25'] += 1
+        if r['choch_confirmed']:
+            funil['choch_confirmado'] += 1
+        if r['failure_reason'] == 'CHOCH_INVALIDADO_ANTES_DO_GATILHO':
+            funil['choch_invalidado_antes_gatilho'] += 1
+        if r['sl'] is not None:
+            funil['sl_ok'] += 1
+        if r['tp'] is not None:
+            funil['tp_ok'] += 1
+        if r['valid']:
+            funil['sinal_valido'] += 1
+
+        if r['bias'] == 'baixa':
+            motivo = 'SINAL_VALIDO' if r['valid'] else (r['failure_reason'] or 'MOTIVO_DESCONHECIDO')
+            distribuicao_motivos_short[motivo] = distribuicao_motivos_short.get(motivo, 0) + 1
+            if len(exemplos_short_eliminados) < 5 and not r['valid']:
+                exemplos_short_eliminados.append({
+                    'timestamp': r['timestamp'], 'failure_reason': r['failure_reason'],
+                    'zone_type': r['zone_type'], 'choch_confirmed': r['choch_confirmed'],
+                })
+
+    return {
+        'pair': pair, 'dias_historico': dias_historico, 'fim_ts_ms': fim_ts_ms,
+        'total_ciclos_avaliados': total_ciclos,
+        'contagem_bias': contagem_bias,
+        'funil_bias_short': funil_short,
+        'funil_bias_long': funil_long,
+        'distribuicao_motivos_short': distribuicao_motivos_short,
+        'exemplos_short_eliminados': exemplos_short_eliminados,
+        'nota_metodologica': (
+            'DIAGNÓSTICO SOMENTE-LEITURA — reaproveita avaliar_vortex_decision_layer_v2() SEM '
+            'ALTERAÇÃO NENHUMA, mesma janela/metodologia de paper_trading_v2_tick, mas não '
+            'grava nada em nenhuma tabela. Cada ciclo avaliado isoladamente e causalmente — '
+            'nenhum resultado futuro é usado para decidir se um sinal "deveria" existir.'
+        ),
+    }
+
+
+def paper_trading_v2_diagnostico_bias_todos_pares(dias_historico=2, fim_ts_ms=None, pares=None):
+    """Roda paper_trading_v2_diagnostico_bias() (sem alteração) pra
+    cada par. Erro num par não derruba os demais. Somente leitura."""
+    pares = pares or PARES_MONITORADOS_REPLAY
+    resultados_por_pair = {}
+    pares_com_erro = []
+    contagem_bias_global = {'alta': 0, 'baixa': 0, 'neutro_ou_indefinido': 0}
+    funil_short_global = {
+        'total_ciclos_bias_short': 0, 'zona_encontrada': 0, 'choch_confirmado': 0,
+        'choch_invalidado_antes_gatilho': 0, 'sl_ok': 0, 'tp_ok': 0, 'sinal_valido': 0,
+    }
+
+    for p in pares:
+        try:
+            r = paper_trading_v2_diagnostico_bias(p, dias_historico=dias_historico, fim_ts_ms=fim_ts_ms)
+        except Exception as e:
+            r = {'erro': str(e)}
+        resultados_por_pair[p] = r
+        if 'erro' in r:
+            pares_com_erro.append(p)
+            continue
+        for k in contagem_bias_global:
+            contagem_bias_global[k] += r['contagem_bias'][k]
+        for k in funil_short_global:
+            funil_short_global[k] += r['funil_bias_short'].get(k, 0)
+
+    return {
+        'dias_historico': dias_historico, 'fim_ts_ms': fim_ts_ms, 'pares_testados': pares,
+        'pares_com_erro': pares_com_erro,
+        'contagem_bias_global': contagem_bias_global,
+        'funil_bias_short_global': funil_short_global,
+        'resultados_por_pair': resultados_por_pair,
+        'nota_metodologica': (
+            'Orquestra paper_trading_v2_diagnostico_bias() (SEM ALTERAÇÃO) pra cada par. '
+            'SOMENTE LEITURA — não grava nada, não decide nada, não é chamada por nenhum '
+            'caminho de produção nem pelo paper_trading_v2_tick real.'
+        ),
+    }
+
+
+@explicacao_bp.route("/scalp_gates_vortex/paper_trading_v2_diagnostico_bias", methods=["GET"])
+def paper_trading_v2_diagnostico_bias_endpoint():
+    """
+    SOMENTE LEITURA — diagnóstico de distribuição de BIAS e funil
+    LONG/SHORT nos últimos N dias, mesma janela/metodologia do paper
+    real, sem gravar nada. Uso: ?dias=2&confirm=RODAR_DIAGNOSTICO_BIAS
+    Opcional &pares=BTCUSD,ETHUSD,... e &fim_ts_ms=<timestamp>
+    """
+    if request.args.get('confirm') != 'RODAR_DIAGNOSTICO_BIAS':
+        return jsonify({
+            "erro": "endpoint protegido contra chamada acidental",
+            "como_usar": "adiciona &confirm=RODAR_DIAGNOSTICO_BIAS na URL, ex: "
+                          "/scalp_gates_vortex/paper_trading_v2_diagnostico_bias?dias=2&confirm=RODAR_DIAGNOSTICO_BIAS",
+        }), 400
+
+    dias = int(request.args.get('dias', 2))
+    fim_ts_ms_param = request.args.get('fim_ts_ms')
+    fim_ts_ms = int(fim_ts_ms_param) if fim_ts_ms_param else None
+    pares_param = request.args.get('pares')
+    pares_lista = [p.strip().upper() for p in pares_param.split(',') if p.strip()] if pares_param else None
+
+    try:
+        resultado = paper_trading_v2_diagnostico_bias_todos_pares(dias_historico=dias, fim_ts_ms=fim_ts_ms, pares=pares_lista)
+        return jsonify(resultado)
+    except Exception as e:
+        return jsonify({"erro": f"erro no diagnóstico: {e}"}), 500

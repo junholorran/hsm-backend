@@ -1620,6 +1620,35 @@ def live_scheduler_loop():
         time.sleep(30)
 
 
+# ═══════════════════════════════════════════════════════════════════════
+# PAPER TRADING V2 — SCHEDULER AUTOMÁTICO (aditivo, sem tocar em nada
+# do que já existia acima). Reaproveita exatamente o mesmo padrão do
+# live_scheduler_loop: thread daemon própria, loop com sleep(30), só
+# que com um controle de intervalo interno pra rodar o tick a cada
+# PAPER_TICK_INTERVAL_SECONDS em vez de todo ciclo de 30s. Chama
+# scalp_engine.paper_trading_v2_tick_todos_pares() diretamente (função
+# já existente, sem alteração nenhuma) — não passa pela rota HTTP
+# protegida por secret, é chamada interna do próprio processo.
+# ═══════════════════════════════════════════════════════════════════════
+
+_ultimo_paper_tick_ts = 0
+PAPER_TICK_INTERVAL_SECONDS = 5 * 60  # a cada 5 minutos
+
+
+def paper_tick_scheduler_loop():
+    global _ultimo_paper_tick_ts
+    while True:
+        try:
+            now = int(time.time())
+            if (now - _ultimo_paper_tick_ts) >= PAPER_TICK_INTERVAL_SECONDS:
+                resultado = scalp_engine.paper_trading_v2_tick_todos_pares(DB_FILE)
+                _ultimo_paper_tick_ts = now
+                print(f"[paper_trading_v2] tick automático concluído: {resultado}")
+        except Exception as e:
+            print(f"[paper_trading_v2] erro no tick automático: {e}")
+        time.sleep(30)
+
+
 @app.route('/')
 def index():
     return send_from_directory('.', 'index.html')
@@ -2543,3 +2572,4 @@ def scalp_modos_disponiveis():
 
 
 threading.Thread(target=live_scheduler_loop, daemon=True).start()
+threading.Thread(target=paper_tick_scheduler_loop, daemon=True).start()

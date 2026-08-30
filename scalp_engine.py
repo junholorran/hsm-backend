@@ -3020,7 +3020,6 @@ def sfp_diagnostico_report(db_file, pair=None):
     return resultado
 
 
-
 def validar_sfp_cascata_tf(candles_por_tf, liquidez, direcao_permitida):
     """
     Tenta achar o SFP em cascata: M15 primeiro (sweep mais confiável,
@@ -5246,8 +5245,6 @@ def process_pair_gates_vortex_com_explicacao(db_file, pair, candles_por_tf, exec
     return resultado
 
 
-
-
 def build_signal_log(pair, modo_label, htf_narrative, resultado):
     """
     Log explicativo legível (spec seção 23) — usado tanto pro console
@@ -5487,8 +5484,6 @@ def audit_breakout_cancel_report(db_file):
     except Exception as e:
         return {'erro': str(e)}
 
-    # Conclusão automática, só como referência rápida — não substitui
-    # análise manual, mas já indica pra qual lado os números apontam.
     conclusao = 'C_INCONCLUSIVO_DADOS_INSUFICIENTES'
     if total and total >= 20:
         if fator_repeticao is not None:
@@ -6097,23 +6092,12 @@ def classify_sfp_causal(db_file, pair, direcao, event_ts, reference_level=None, 
     cluster_id = f"{pair}_{direcao}_{cluster_start}"
 
     # ── Telemetria adicional (não decide nada, só descreve) ──
-    # candles_since_first_sfp: distância (em candles do tf_label) entre
-    # o evento atual e o início do cluster a que ele pertence.
     candles_since_first_sfp = round((event_ts - cluster_start) / intervalo_ms, 2)
 
-    # candles_since_previous_sfp: distância até o evento imediatamente
-    # anterior JÁ PERSISTIDO (marcados[-2], se existir) — None se este
-    # for o primeiro evento já visto pra esse pair+direção (não só o
-    # primeiro do cluster, o primeiro de todos).
     candles_since_previous_sfp = None
     if len(marcados) >= 2:
         candles_since_previous_sfp = round((event_ts - marcados[-2]['timestamp']) / intervalo_ms, 2)
 
-    # cluster_size_so_far: quantos membros o cluster atual já teve ATÉ
-    # este evento (mesmo valor de sfp_position — é o mesmo dado, só com
-    # nome mais explícito pro propósito de telemetria). NÃO é o tamanho
-    # final do cluster (isso só se sabe olhando pra frente, o que
-    # quebraria a causalidade) — é sempre "tamanho observado até agora".
     cluster_size_so_far = sfp_position
 
     return {
@@ -6130,29 +6114,6 @@ def classify_sfp_causal(db_file, pair, direcao, event_ts, reference_level=None, 
         'total_eventos_pair_direcao': len(marcados),
     }
 
-
-# ═══════════════════════════════════════════════════════════════════════
-# DEDUP DE PERSISTÊNCIA — sfp_breakout_cancelado (correção pontual)
-#
-# Problema confirmado por evidência (audit_breakout_cancel): o mesmo
-# candle/evento de breakout era reavaliado a cada ciclo do engine
-# (validar_sfp_estrito não tem memória entre ciclos, de propósito) e
-# CADA reavaliação incrementava contagem+1 em scalp_gates_vortex_diagnostico
-# via _registrar_diagnostico_gates_vortex — 217+ ocorrências pro MESMO
-# candle_event_ts em produção.
-#
-# Esta correção NÃO toca em validar_sfp_estrito() (a reavaliação a cada
-# ciclo continua acontecendo, sem alteração nenhuma de lógica de
-# detecção). Só evita que a MESMA identidade de evento incremente o
-# contador mais de uma vez — reaproveitando exatamente o padrão UNIQUE +
-# INSERT OR IGNORE que classify_sfp_causal() / scalp_sfp_cluster_events
-# já usa. Identidade do evento = (pair, direcao, candle_event_ts).
-#
-# A tabela audit_breakout_cancel (auditoria bruta, sem dedup) continua
-# existindo e gravando cada reavaliação, sem alteração — ela é a prova
-# permanente de que o mecanismo de reavaliação existe, e serve pra
-# validar esta correção depois do deploy.
-# ═══════════════════════════════════════════════════════════════════════
 
 def init_breakout_cancel_dedup_db(db_file):
     """Cria a tabela de dedup se não existir. Mesmo schema-padrão de
@@ -6196,8 +6157,6 @@ def _evento_breakout_cancel_e_novo(db_file, pair, direcao, candle_event_ts):
     telemetria por causa de uma camada de proteção extra.
     """
     if candle_event_ts is None:
-        # Sem candle_event_ts real não há como deduplicar com segurança;
-        # deixa passar como novo (mesmo comportamento de antes do patch).
         return True
 
     init_breakout_cancel_dedup_db(db_file)
@@ -6215,16 +6174,6 @@ def _evento_breakout_cancel_e_novo(db_file, pair, direcao, candle_event_ts):
         print(f"[scalp_engine breakout_cancel_dedup] erro ao verificar evento {pair}/{direcao}: {e}")
         return True
 
-
-
-# TELEMETRIA DE SFP (13/08) — camada de COLETA/DIAGNÓSTICO, conforme
-# markup "Evolução do SFP Causal". Regra absoluta desta fase: estes
-# campos são só instrumentação — não podem mudar sinal, ENTRY, SL, TP,
-# cooldown, classify_sfp_causal() nem CLUSTER_CAUSAL. Cada linha aqui é
-# 1 evento de SFP já confirmado (bloqueado ou não), com o contexto de
-# cluster + HTF + premium/discount no momento em que ele foi visto —
-# nada disso é reaproveitado pra decisão em process_pair_gates_vortex.
-# ═══════════════════════════════════════════════════════════════════════
 
 def _garantir_tabela_sfp_telemetria(db_file):
     """Auto-blindado como o resto do diagnóstico do gates_vortex — não
@@ -6601,17 +6550,11 @@ def replay_comparar_referencias_liquidez(pair, dias_historico=30, forward_lookah
 
         qualidade = dados['sfps_qualidade']
         rr_validos = [q['rr_proxy'] for q in qualidade if q['rr_proxy'] is not None]
-        # rr_proxy_medio = média das RAZÕES individuais (mfe/mae por caso) —
-        # estatisticamente frágil: 1 caso com mae≈0 já domina a média inteira.
-        # Mantido só por transparência, mas marcado NAO_VALIDADA — não usar
-        # pra concluir nada até substituir por métrica mais robusta.
         rr_medio_fragil = round(sum(rr_validos) / len(rr_validos), 2) if rr_validos else None
 
         mfe_medio_calc = round(sum(q['mfe_pct'] for q in qualidade) / len(qualidade), 3) if qualidade else None
         mae_medio_calc = round(sum(q['mae_pct'] for q in qualidade) / len(qualidade), 3) if qualidade else None
-        # Razão das médias (mfe_médio / mae_médio) — muito mais robusta a outliers
         rr_razao_das_medias = round(mfe_medio_calc / mae_medio_calc, 2) if (mfe_medio_calc and mae_medio_calc and mae_medio_calc > 0) else None
-        # Mediana das razões individuais — também robusta, não deixa 1 outlier dominar
         rr_mediana = None
         if rr_validos:
             rr_ordenados = sorted(rr_validos)
@@ -6803,10 +6746,6 @@ def _simular_cenarios_gates(avaliacoes_gates_reprovados_brutas, m5, pair):
                 'cluster_tamanho_bruto': c['tamanho'],
             })
 
-        # ── Resolver TP/SL sem lookahead, horizonte único de 20 candles
-        # M5 (suficiente pra medir WIN/LOSS/AMBIGUO/NENHUM; os outros
-        # horizontes já aprovados continuam disponíveis se precisar
-        # ampliar depois). ──
         resolvidos = []
         for cand in candidatos:
             candles_futuros = m5[cand['idx_m5'] + 1:]
@@ -6859,7 +6798,6 @@ def _simular_cenarios_gates(avaliacoes_gates_reprovados_brutas, m5, pair):
             'detalhe_candidatos': resolvidos,
         }
     return resultado_cenarios
-
 
 
 def _reconstruir_identidade_temporal_gates(avaliacoes_ordenadas):
@@ -7041,11 +6979,8 @@ def replay_gates_reprovados(pair, dias_historico=30):
 
     todas_ocorrencias_brutas = 0
 
-    # ── Agregado do diagnóstico SFP (Casos A-E), item aprovado do
-    # ticket — conta em qual caso cada ciclo caiu, pra TODO ciclo. ──
     sfp_diagnostico_agregado = {}
 
-    # ── Correlação causal diag.caso vs decisão real (item aprovado) ──
     correlacao_diag_vs_real = {
         'D_e_real_confirma': 0, 'D_mas_real_NAO_confirma': 0, 'real_confirma_mas_diag_NAO_e_D': 0,
     }
@@ -7053,18 +6988,10 @@ def replay_gates_reprovados(pair, dias_historico=30):
     tfs_divergencia_D = {}
     motivos_diag_quando_real_confirma = {}
 
-    # ── Captura de texto bruto dos motivos não classificados (item
-    # aprovado do ticket) — chave = texto exato do motivo, valor =
-    # quantas vezes apareceu. Puramente observacional. ──
     motivos_nao_classificados_texto = {}
     sfp_rejeicao_fisica_motivos_texto = {}
 
-    # ── DETALHE DOS GATES A-G — instrumentação pura. resultado['gates']
-    # já é retornado por process_pair_gates_vortex() sem alteração
-    # nenhuma (é o mesmo dict usado pra decidir SIGNAL_DISPARADO vs
-    # gates_reprovados em produção); aqui só LEMOS e agregamos, não
-    # recalculamos nem alteramos nenhum gate. ──
-    gates_avaliacoes_brutas = []  # 1 entrada por CICLO (não dedupado) em que os gates foram avaliados
+    gates_avaliacoes_brutas = []
     gates_agregado = {
         'A_MTF_ALIGNMENT': {'aprovados': 0, 'reprovados': 0},
         'B_TRIGGER': {'aprovados': 0, 'reprovados': 0},
@@ -7074,13 +7001,8 @@ def replay_gates_reprovados(pair, dias_historico=30):
         'F_ICHIMOKU_INFO': {'aprovados': 0, 'reprovados': 0},
         'G_PREMIUM_DISCOUNT': {'aprovados': 0, 'reprovados': 0},
     }
-    combinacoes_reprovacao = {}  # tupla ordenada de gates que falharam -> contagem
+    combinacoes_reprovacao = {}
 
-    # ── Agregado por OPERANDO isolado dos gates A/B/C (item aprovado
-    # do ticket) — cada chave é uma comparação/leitura ATÔMICA de um
-    # único operando cru, nunca uma combinação AND/OR de vários. Serve
-    # pra responder "quantas vezes cada pedacinho individual bateu",
-    # sem nunca reimplementar a lógica composta do gate. ──
     from collections import defaultdict
     operandos_agregado = {
         'A': {
@@ -7102,12 +7024,6 @@ def replay_gates_reprovados(pair, dias_historico=30):
         },
     }
 
-    # ── FUNIL — instrumentação pura, só contagem. Não decide nada, não
-    # altera process_pair_gates_vortex() nem nenhuma função de produção.
-    # Cada chamada cai em EXATAMENTE uma categoria (retorno antecipado
-    # mutuamente exclusivo no código real), então a contagem por
-    # categoria JÁ É o funil — não precisa reimplementar a lógica de
-    # decisão pra saber onde cada candle "morreu". ──
     funil = {
         'candles_m5_processados': 0,
         'staleness_rejeitados': 0,
@@ -7116,9 +7032,9 @@ def replay_gates_reprovados(pair, dias_historico=30):
         'sem_bias': 0,
         'bias_acima_midnight_open': 0,
         'bias_abaixo_midnight_open': 0,
-        'bias_neutro': 0,  # sempre 0 nesta versão do Kairos — compute_bias_midnight_open_estrito() é binário (alta/baixa), nunca devolve neutro; campo mantido só pra satisfazer o formato do relatório pedido, com esta nota explícita
-        'sfp_candidatos': 0,   # == bias_avaliado (todo ciclo que passou do bias tenta achar SFP)
-        'sfp_confirmados': 0,  # tf_sfp_usado presente no resultado, independente do que acontece depois
+        'bias_neutro': 0,
+        'sfp_candidatos': 0,
+        'sfp_confirmados': 0,
         'sfp_repetido_cluster': 0,
         'padrao_fraco': 0,
         'mss_confirmados': 0,
@@ -7134,10 +7050,8 @@ def replay_gates_reprovados(pair, dias_historico=30):
         'outro_motivo_nao_classificado': 0,
         'sfp_rejeicao_fisica_insuficiente': 0,
     }
-    # Validação causal do H1 — prova que nenhum candle H1 futuro (t >
-    # ts_corte) jamais entrou em candles_por_tf['H1'] em nenhum ciclo.
     violacoes_causais_h1 = 0
-    amostras_causais_h1 = []  # guarda só os primeiros/últimos ciclos, pra não inflar o relatório
+    amostras_causais_h1 = []
 
     try:
         for i in range(len(m5)):
@@ -7145,7 +7059,6 @@ def replay_gates_reprovados(pair, dias_historico=30):
             candles_por_tf = _montar_candles_por_tf_ate(d1, None, h1, m15, m5[:i + 1], None, ts_corte)
             funil['candles_m5_processados'] += 1
 
-            # ── Validação causal do H1 (item 1 do ticket) ──
             h1_visivel = candles_por_tf.get('H1') or []
             ultimo_h1_t = h1_visivel[-1]['t'] if h1_visivel else None
             if ultimo_h1_t is not None and ultimo_h1_t > ts_corte:
@@ -7167,15 +7080,6 @@ def replay_gates_reprovados(pair, dias_historico=30):
 
             motivo = resultado.get('motivo') or ''
 
-            # ── DIAGNÓSTICO SFP (Casos A-E) — item aprovado do ticket.
-            # Captura o diag já calculado pela produção (reaproveitando
-            # _diagnostico_detalhado_sfp, existente e não alterada) pra
-            # TODO ciclo, não só os que chegam a gates_reprovados. Serve
-            # pra descobrir onde o funil SFP realmente afunila:
-            # nunca_tocou / tocou_sem_reclaim / breakout / confirmado /
-            # sem_dados. Quando o ciclo nem chegou a calcular SFP
-            # (candles insuficientes, staleness, hora tóxica, sem bias),
-            # não existe diag — contabiliza como 'nao_disponivel'. ──
             sfp_diag = resultado.get('_debug_sfp_diagnostico')
             if sfp_diag:
                 caso = sfp_diag.get('caso') or 'caso_desconhecido'
@@ -7184,19 +7088,6 @@ def replay_gates_reprovados(pair, dias_historico=30):
                 caso = None
                 sfp_diagnostico_agregado['nao_disponivel'] = sfp_diagnostico_agregado.get('nao_disponivel', 0) + 1
 
-            # ── CORRELAÇÃO CAUSAL diag.caso vs decisão real (item
-            # aprovado do ticket) — cruza, no MESMO ciclo, o Caso do
-            # diagnóstico observacional (single-tf, primeiro toque) com
-            # o resultado real da cascata M15→M5→M1
-            # (validar_sfp_cascata_tf, via tf_sfp_usado != None). Não
-            # recalcula nada — só lê 2 sinais já existentes no mesmo
-            # resultado. Isso explica objetivamente por que
-            # diagnostico_sfp_casos.D_sfp_confirmado (por ciclo, 1
-            # timeframe fixo, para no primeiro toque) diverge de
-            # funil.sfp_confirmados (cascata real M15→M5→M1, continua
-            # escaneando até achar o SFP mais recente ou um breakout
-            # mais à frente). Roda pra TODO ciclo, independente de ter
-            # diag disponível ou não. ──
             real_sfp_confirmado_neste_ciclo = resultado.get('tf_sfp_usado') is not None
             tf_real_usado = resultado.get('tf_sfp_usado')
             if caso == 'D_sfp_confirmado':
@@ -7208,25 +7099,12 @@ def replay_gates_reprovados(pair, dias_historico=30):
                     motivos_divergencia_D[motivo_quando_diverge] = motivos_divergencia_D.get(motivo_quando_diverge, 0) + 1
                     tfs_divergencia_D[str(tf_real_usado)] = tfs_divergencia_D.get(str(tf_real_usado), 0) + 1
             elif real_sfp_confirmado_neste_ciclo:
-                # Real confirma mas diag (single-tf, primeiro toque) não viu Caso D
                 correlacao_diag_vs_real['real_confirma_mas_diag_NAO_e_D'] += 1
                 motivos_diag_quando_real_confirma[str(caso)] = motivos_diag_quando_real_confirma.get(str(caso), 0) + 1
 
-            # ── DETALHE DOS GATES A-G — captura o dict já retornado por
-            # process_pair_gates_vortex() (não alterado, não recalculado).
-            # Roda pra qualquer ciclo em que os gates foram avaliados
-            # (gates_reprovados, sinal_disparado ou em_cooldown), não só
-            # nos reprovados, pra ter o quadro completo. ──
             gates_dict = resultado.get('gates')
             if gates_dict:
                 gates_reprovados_lista = [g for g, ok in gates_dict.items() if not ok]
-                # ── Valores REAIS: resultado['entry']/['sl']/etc. ficam
-                # None no branch de gates_reprovados (produção só
-                # escreve esses campos no branch de sucesso). Os
-                # valores locais verdadeiros vêm de
-                # resultado['_debug_gate_inputs'], só presente porque
-                # chamamos com debug_gates=True (opt-in, produção nunca
-                # ativa isso). ──
                 debug_info = resultado.get('_debug_gate_inputs') or {}
                 entry_real = debug_info.get('entry_local')
                 sl_real = debug_info.get('sl_local')
@@ -7247,12 +7125,6 @@ def replay_gates_reprovados(pair, dias_historico=30):
                     'gate_b_operandos': gate_b_op,
                     'gate_c_operandos': gate_c_op,
                 })
-                # ── Agregado por OPERANDO (não por combinação lógica) —
-                # cada linha abaixo é uma COMPARAÇÃO DIRETA e isolada
-                # entre 2 valores crus já capturados, sem recombinar
-                # AND/OR de várias condições. Serve só pra contar
-                # quantas vezes cada operando individual bateu/não
-                # bateu, não pra decidir nada. ──
                 if gate_a_op:
                     _cmp_bias = gate_a_op.get('bias_d1') == gate_a_op.get('direcao_permitida')
                     _cmp_mtf = bool(gate_a_op.get('mtf_alinhado'))
@@ -7284,9 +7156,6 @@ def replay_gates_reprovados(pair, dias_historico=30):
                     combo = tuple(sorted(gates_reprovados_lista))
                     combinacoes_reprovacao[combo] = combinacoes_reprovacao.get(combo, 0) + 1
 
-            # ── Tally do funil (item 3 do ticket) — leitura pura dos
-            # campos já retornados por process_pair_gates_vortex(), sem
-            # nenhuma lógica de decisão nova. ──
             if 'candles insuficientes' in motivo:
                 funil['candles_insuficientes'] += 1
             elif 'dados obsoletos' in motivo:
@@ -7296,7 +7165,6 @@ def replay_gates_reprovados(pair, dias_historico=30):
             elif 'calcular Midnight Open' in motivo:
                 funil['sem_bias'] += 1
             else:
-                # bias foi avaliado com sucesso nesse ciclo
                 if 'ACIMA_MIDNIGHT_OPEN' in motivo:
                     funil['bias_acima_midnight_open'] += 1
                 elif 'ABAIXO_MIDNIGHT_OPEN' in motivo:
@@ -7308,18 +7176,12 @@ def replay_gates_reprovados(pair, dias_historico=30):
                     funil['sfp_confirmados'] += 1
 
                 if 'breakout_cancela_analise' in motivo:
-                    pass  # sem_sfp — bias inverteu antes do SFP se formar, já contado em sfp_candidatos
+                    pass
                 elif 'sem_sfp_ainda' in motivo or 'sem_liquidez_mapeada' in motivo or 'sem_candles_sfp' in motivo:
-                    pass  # idem — SFP nunca confirmou
+                    pass
                 elif 'SFP repetido dentro do cluster' in motivo:
                     funil['sfp_repetido_cluster'] += 1
                 elif 'rejeição física insuficiente no candle do SFP' in motivo:
-                    # ── item aprovado do ticket: promove o motivo já
-                    # confirmado pelo dado real (36/36 do LINK) de
-                    # observacional pra contador oficial do funil.
-                    # Origem: process_pair_gates_vortex(), no if not
-                    # rejeicao_ok: (não alterado). Estágio real: entre
-                    # SFP confirmado e MSS. ──
                     funil['sfp_rejeicao_fisica_insuficiente'] += 1
                     sfp_rejeicao_fisica_motivos_texto[motivo] = sfp_rejeicao_fisica_motivos_texto.get(motivo, 0) + 1
                 elif 'padrão de rejeição fraco' in motivo:
@@ -7349,11 +7211,6 @@ def replay_gates_reprovados(pair, dias_historico=30):
                         funil['em_cooldown'] += 1
                 elif motivo:
                     funil['outro_motivo_nao_classificado'] += 1
-                    # ── item aprovado do ticket: captura o TEXTO EXATO
-                    # do motivo quando ele não bate com nenhuma
-                    # palavra-chave conhecida. Não altera a
-                    # classificação, não decide nada — só preserva o
-                    # dado bruto pra investigação, em vez de descartá-lo. ──
                     motivos_nao_classificados_texto[motivo] = motivos_nao_classificados_texto.get(motivo, 0) + 1
 
             if 'falhou nos gates' not in motivo:
@@ -7366,12 +7223,6 @@ def replay_gates_reprovados(pair, dias_historico=30):
         except Exception:
             pass
 
-    # ── IDENTIDADE TEMPORAL + CLUSTERS (item aprovado do ticket) ──
-    # Filtra só as avaliações que reprovaram nos gates (mesmo universo
-    # de todas_ocorrencias_brutas), já em ordem cronológica (o loop
-    # acima é sequencial). NÃO deduplica por janela de candles — só
-    # agrupa avaliações CONSECUTIVAS que têm entry+sl+direção
-    # IDÊNTICOS entre si (ver _reconstruir_identidade_temporal_gates).
     avaliacoes_gates_reprovados_brutas = [
         av for av in gates_avaliacoes_brutas if 'falhou nos gates' in av['motivo']
     ]
@@ -7379,18 +7230,8 @@ def replay_gates_reprovados(pair, dias_historico=30):
         avaliacoes_gates_reprovados_brutas
     )
 
-    # ── SIMULAÇÃO DE CENÁRIOS (item aprovado do ticket) — puramente
-    # observacional. Não altera nenhum gate real, não recalcula nada,
-    # só recombina os booleanos já decididos pela produção de formas
-    # alternativas, e mede o resultado real (TP/SL, sem lookahead) de
-    # cada cenário. ──
     cenarios_simulados = _simular_cenarios_gates(avaliacoes_gates_reprovados_brutas, m5, pair)
 
-    # ── "oportunidades" pra resolução de TP/SL downstream: 1
-    # REPRESENTANTE por cluster de identidade real (a primeira
-    # avaliação de cada cluster), não as N reavaliações do mesmo
-    # cluster. Clusters sem identidade válida (entry/sl ausentes) são
-    # excluídos da resolução de TP/SL e reportados à parte. ──
     oportunidades = []
     clusters_sem_identidade_valida = 0
     for idx_cluster, c in enumerate(clusters_por_identidade):
@@ -7408,16 +7249,6 @@ def replay_gates_reprovados(pair, dias_historico=30):
             'idx_m5': primeira_av['idx_m5'], 'cluster_tamanho': c['tamanho'],
         })
 
-    # ── "oportunidades" (representante por cluster) fica pronta, mas
-    # a resolução de TP/SL/win-rate downstream é SUSPENSA nesta
-    # rodada, por pedido explícito: ainda não decidimos a regra de
-    # dedup definitiva, só reconstruímos a identidade temporal + os
-    # clusters por igualdade real. clusters_por_identidade continua
-    # disponível no relatório como dado observacional. ──
-
-    # ── Resolver TP/SL/AMBIGUO/NENHUM nos 3 horizontes, sem lookahead ──
-    # SUSPENSO nesta rodada (ver nota acima) — lista fica vazia de
-    # propósito, sem consumir 'oportunidades' ainda.
     resultados_por_horizonte = {h: [] for h in GATES_REPROVADOS_HORIZONTES_CANDLES}
     for op in []:
         if op['entry'] is None or op['sl'] is None:
@@ -7442,8 +7273,6 @@ def replay_gates_reprovados(pair, dias_historico=30):
     duracao_horas = round((ultimo_ts_m5 - primeiro_ts_m5) / 3600000, 2) if (primeiro_ts_m5 and ultimo_ts_m5) else None
     duracao_dias = round(duracao_horas / 24, 2) if duracao_horas is not None else None
 
-    # Confirmação empírica do intervalo real (mediana da diferença entre
-    # candles consecutivos) — não assume, mede o dado de verdade.
     intervalo_medido_seg = None
     if len(m5) >= 2:
         diffs = sorted((m5[i]['t'] - m5[i - 1]['t']) / 1000 for i in range(1, len(m5)))
@@ -7633,7 +7462,6 @@ def _agregar_relatorio_gates_reprovados(lista_resultados):
     mfe_mediano = _percentil(mfes, 50)
     mae_mediano = _percentil(maes, 50)
 
-    # Expectancy com RR real do próprio setup (TP1), sem inventar RR
     rrs_win = []
     for r in lista_resultados:
         if r['resultado'] in ('TP1', 'SL') and r['entry'] is not None and r['sl'] is not None and r['tp1'] is not None:
@@ -7730,8 +7558,6 @@ def diagnostico_independente_luxalgo(candles_swing, candles_internal):
     else:
         resultado['zone_ok'] = False
 
-    # ── SEM short-circuit — testa CHoCH interno independente do
-    # resultado de zone_ok acima. ──
     eventos_internos = compute_lux_internal_structure(candles_internal, swing_size=5)
     choch_relevante = None
     if bias in ('alta', 'baixa'):
@@ -7742,8 +7568,6 @@ def diagnostico_independente_luxalgo(candles_swing, candles_internal):
     resultado['internal_choch_exists'] = choch_relevante is not None
     resultado['internal_choch_evento'] = choch_relevante
 
-    # ── SEM short-circuit — testa FVG independente de zone_ok e de
-    # internal_choch_exists acima. ──
     fvgs = find_open_fvgs_adaptive(candles_internal)
     tipo_fvg_desejado = 'FVG_bullish' if bias == 'alta' else ('FVG_bearish' if bias == 'baixa' else None)
     candidatos = [f for f in fvgs if tipo_fvg_desejado and f['tipo'] == tipo_fvg_desejado]
@@ -7786,9 +7610,9 @@ def replay_comparativo_luxalgo(pair, dias_historico=7):
         }
 
     total_candles = 0
-    legacy_signals = 0          # ciclos onde legacy chegou a ter fvg_candidatos (mais perto de um "setup")
-    luxalgo_valid_setups = 0    # ciclos onde luxalgo/vortex chegou a ter fvg_candidatos
-    vortex_decisions_nao_unknown = 0  # ciclos onde vortex parou ANTES do bloqueio FVG_CHOCH_RELATION_UNKNOWN
+    legacy_signals = 0
+    luxalgo_valid_setups = 0
+    vortex_decisions_nao_unknown = 0
 
     bias_divergences = 0
     zone_divergences = 0
@@ -7798,18 +7622,13 @@ def replay_comparativo_luxalgo(pair, dias_historico=7):
     rejection_reasons_legacy = {}
     rejection_reasons_luxalgo = {}
 
-    eventos_divergentes = []  # lista de {'t', 'campo', 'legacy', 'luxalgo'}
+    eventos_divergentes = []
 
-    MAX_EVENTOS_DIVERGENTES_GUARDADOS = 200  # não deixa a resposta explodir de tamanho
+    MAX_EVENTOS_DIVERGENTES_GUARDADOS = 200
 
-    # ── Medição de idade do CHoCH (item aprovado do ticket) — só
-    # medição, não define janela nenhuma. ──
     medicoes_idade_choch = []
     validacao_correspondencia_choch = {'ok': 0, 'divergente': 0}
 
-    # ── Diagnóstico independente (item aprovado do ticket) — sem
-    # short-circuit, mede as 4 condições sempre, separado do motivo de
-    # rejeição da ordem atual (que usa short-circuit). ──
     diag_agregado = {
         'total_candles': 0,
         'bias_ok': 0, 'bias_fail': 0,
@@ -7826,8 +7645,6 @@ def replay_comparativo_luxalgo(pair, dias_historico=7):
 
     for i in range(MIN_CANDLES_SWING, len(m5)):
         ts_corte = m5[i]['t']
-        # ── janela causal: só candles com t <= ts_corte, mesmo padrão
-        # já testado em replay_gates_reprovados (_montar_candles_por_tf_ate) ──
         candles_ate_agora = m5[:i + 1]
 
         total_candles += 1
@@ -7842,18 +7659,11 @@ def replay_comparativo_luxalgo(pair, dias_historico=7):
         except Exception as e:
             r_vortex = {'decisao': 'ERRO', 'motivo_rejeicao': f'excecao: {e}', 'bias': None, 'zona': None, 'internal_choch': None, 'fvg_candidatos': []}
 
-        # ── Diagnóstico independente (item aprovado do ticket) — mesma
-        # janela causal candles_ate_agora, sem short-circuit. ──
         try:
             diag = diagnostico_independente_luxalgo(candles_ate_agora, candles_ate_agora)
         except Exception:
             diag = None
 
-        # ── Medição de idade do CHoCH (item aprovado do ticket) — só
-        # roda quando diag existe e diag['internal_choch_exists'] é
-        # True, mesma janela causal (candles_ate_agora), idx_atual =
-        # último índice dessa janela (i, já que candles_ate_agora =
-        # m5[:i+1]). Puramente aditivo, não altera decisão nenhuma. ──
         if diag and diag.get('internal_choch_exists') and diag.get('bias') in ('alta', 'baixa'):
             try:
                 medicao = _selecionar_choch_para_medicao(candles_ate_agora, diag['bias'], i)
@@ -7861,10 +7671,6 @@ def replay_comparativo_luxalgo(pair, dias_historico=7):
                 medicao = None
             if medicao:
                 medicoes_idade_choch.append(medicao)
-                # ── Validação pedida no ticket: confirma que o CHoCH
-                # medido aqui é EXATAMENTE o mesmo que diag['internal_
-                # choch_evento'] já reportou (mesma seleção, calculada
-                # de forma independente pra cross-check). ──
                 evento_diag = diag.get('internal_choch_evento') or {}
                 bate = (
                     evento_diag.get('t') == medicao['choch_ts']
@@ -7905,7 +7711,6 @@ def replay_comparativo_luxalgo(pair, dias_historico=7):
             else:
                 diag_agregado['valid_fvg_absent'] += 1
 
-            # ── Combinações pedidas explicitamente no ticket ──
             if diag['zone_ok']:
                 if choch_existe:
                     diag_agregado['combinations']['zone_ok_choch_exists'] += 1
@@ -7935,7 +7740,6 @@ def replay_comparativo_luxalgo(pair, dias_historico=7):
         rejection_reasons_legacy[motivo_legacy] = rejection_reasons_legacy.get(motivo_legacy, 0) + 1
         rejection_reasons_luxalgo[motivo_luxalgo] = rejection_reasons_luxalgo.get(motivo_luxalgo, 0) + 1
 
-        # ── comparações campo a campo, guardando timestamp de cada divergência ──
         bias_legacy, bias_lux = r_legacy.get('bias'), r_vortex.get('bias')
         if bias_legacy != bias_lux:
             bias_divergences += 1
@@ -8071,9 +7875,6 @@ def replay_gates_reprovados_endpoint():
         return jsonify({"erro": str(e)}), 500
 
     if resumo and 'erro' not in report:
-        # Filtro puramente de apresentacao - remove so os campos
-        # volumosos (candles/MSS embutidos em cada avaliacao bruta),
-        # sem alterar nenhum calculo ja feito.
         report = dict(report)
         if 'gates_detalhe' in report:
             gd = dict(report['gates_detalhe'])
@@ -8161,9 +7962,6 @@ def replay_gates_reprovados_todos_pares(dias_historico=7, pares=None):
         total_long += r.get('oportunidades_long', 0) or 0
         total_short += r.get('oportunidades_short', 0) or 0
 
-    # ── Agregação do FUNIL completo, somando todos os pares — item 3/4
-    # do ticket. Cada campo é soma direta dos contadores por par (só
-    # leitura, nenhuma lógica de decisão nova). ──
     funil_agregado = {}
     violacoes_causais_h1_total = 0
     for p, r in resultados_por_pair.items():
@@ -8173,9 +7971,6 @@ def replay_gates_reprovados_todos_pares(dias_historico=7, pares=None):
             funil_agregado[chave] = funil_agregado.get(chave, 0) + (valor or 0)
         violacoes_causais_h1_total += (r.get('validacao_causal_h1') or {}).get('violacoes_causais_h1', 0) or 0
 
-    # ── Agregação combinada por horizonte, juntando as oportunidades de
-    # TODOS os pares que tiveram dados válidos — para ter uma amostra
-    # estatisticamente mais robusta que par por par isolado. ──
     agregado_por_horizonte = {}
     for h in GATES_REPROVADOS_HORIZONTES_CANDLES:
         chave_h = f'{h}_candles_M5'
@@ -8204,13 +7999,6 @@ def replay_gates_reprovados_todos_pares(dias_historico=7, pares=None):
             'loss_rate_pct': round(100 - win_rate, 1) if win_rate is not None else None,
         }
 
-    # ── Agregação da SIMULAÇÃO DE CENÁRIOS (item aprovado do ticket) —
-    # soma entradas_simuladas/TP1/TP2/SL/AMBIGUO/NENHUM de cada cenário
-    # através de TODOS os pares, e recalcula win_rate/expectancy sobre a
-    # amostra agregada (maior que qualquer par isolado). Nenhum gate é
-    # recalculado — só somamos o que replay_gates_reprovados() já
-    # calculou por par. ──
-    # ── Agregado do diagnóstico SFP (Casos A-E) por par e global ──
     diagnostico_sfp_por_pair = {}
     diagnostico_sfp_global = {}
     for p, r in resultados_por_pair.items():
@@ -8343,10 +8131,6 @@ def replay_gates_reprovados_todos_pares_endpoint():
         return jsonify({"erro": str(e)}), 500
 
     if resumo:
-        # Filtro puramente de apresentacao - resultados_por_pair vira um
-        # resumo minimo por par (funil + gates_detalhe sem avaliacoes +
-        # simulacao_cenarios_gates sem detalhe_candidatos), sem alterar
-        # nenhum calculo ja feito. Os agregados globais ficam completos.
         report = dict(report)
         resultados_por_pair_resumido = {}
         for p, r in (report.get('resultados_por_pair') or {}).items():
@@ -8798,7 +8582,7 @@ def simular_recencia_choch_comparativo(pair, dias_historico=7):
         for label, _ in JANELAS_RECENCIA_HIPOTETICAS
     }
 
-    current_setup_idades = []  # idade do CHoCH nos ciclos que hoje chegam a FVG_CHOCH_RELATION_UNKNOWN
+    current_setup_idades = []
 
     for i in range(MIN_CANDLES_SWING_LOCAL, len(m5)):
         candles_ate_agora = m5[:i + 1]
@@ -8832,7 +8616,6 @@ def simular_recencia_choch_comparativo(pair, dias_historico=7):
                 if label == 'CURRENT':
                     current_setup_idades.append(r['choch_idade'])
 
-    # ── Tabela pedida: dos setups CURRENT, quantos sobrevivem em cada janela ──
     tabela_setups_preservados = {}
     for label, max_idade in JANELAS_RECENCIA_HIPOTETICAS:
         if max_idade is None:
@@ -9009,9 +8792,6 @@ def simular_recencia_choch_todos_pares(dias_historico=7, pares=None):
         percentual_preservado_global[label] = round(100 * n / total_current_global, 1) if total_current_global else None
         setups_perdidos_global[label] = total_current_global - n
 
-    # ── Destaque de divergência vs BTCUSD (benchmark principal),
-    # pedido explícito do ticket — puramente comparativo, não decide
-    # qual janela usar. ──
     divergencia_vs_btc = {}
     btc_tabela = tabela_consolidada.get('BTCUSD', {})
     if btc_tabela:
@@ -9454,7 +9234,7 @@ def auditar_relevancia_choch(pair, dias_historico=7):
     if len(m5) < MIN_CANDLES_SWING_LOCAL + 10:
         return {'erro': f'dados históricos insuficientes pra {pair} (M5={len(m5)})', 'validacao_m5': validacao_m5}
 
-    todos_choch_observados = []  # 1 registro por (choch_index, direcao) único observado — não por ciclo
+    todos_choch_observados = []
     choch_ja_registrado = set()
     setups_current = []
     setups_perdidos_por_janela = {'RECENCY_100': [], 'RECENCY_150': [], 'RECENCY_200': []}
@@ -9489,7 +9269,6 @@ def auditar_relevancia_choch(pair, dias_historico=7):
                 'estado_na_primeira_observacao': estado_info['estado'],
             })
 
-        # ── Zona + FVG, mesmo critério já usado em avaliar_vortex_decision_layer ──
         zona_calc = compute_lux_premium_discount(candles_ate_agora, swing_size=50)
         preco_atual = candles_ate_agora[-1]['c']
         zona = classificar_zona_lux(preco_atual, zona_calc) if zona_calc else None
@@ -9503,7 +9282,6 @@ def auditar_relevancia_choch(pair, dias_historico=7):
         if not candidatos_fvg:
             continue
 
-        # ── Chegou até FVG_CHOCH_RELATION_UNKNOWN — é um setup CURRENT ──
         registro_setup = {
             'pair': pair, 'candle_event_ts': candles_ate_agora[-1]['t'], 'idx_ciclo': i,
             'direcao': bias, 'idade_choch': idade,
@@ -9745,7 +9523,7 @@ def comparar_current_vs_filtro_choch_vivo(resultado_auditoria):
 
     for s in setups:
         classificacao = aplicar_filtro_choch_vivo(s)
-        s_anotado = dict(s)  # cópia — nunca altera o setup original
+        s_anotado = dict(s)
         s_anotado['filtro_choch_vivo'] = classificacao
         s_anotado['passa_filtro_experimental'] = classificacao == 'vivo'
         s_anotado['eliminado_pelo_filtro_experimental'] = classificacao == 'morto'
@@ -10043,7 +9821,7 @@ def comparar_tres_filtros_choch(resultado_auditoria):
     setups_anotados_ai = []
     for s in setups:
         c = aplicar_filtro_choch_invalidado(s)
-        s2 = dict(s)  # cópia — nunca altera o setup original
+        s2 = dict(s)
         s2['filtro_apenas_invalidado'] = c
         setups_anotados_ai.append(s2)
         if c == 'passa':
@@ -10433,7 +10211,6 @@ def medir_mfe_mae_choch_filtros(pair, dias_historico=7, janelas=JANELAS_MFE_MAE_
             med[f'j{j}'] = _medir_mfe_mae_janela(candles_futuros, direcao, entry_proxy, j)
         medicoes.append(med)
 
-    # ── Grupos: CURRENT (todos), PRESERVADOS (passa), ELIMINADOS (bloqueado) ──
     preservados = [m for m in medicoes if m['filtro_apenas_invalidado'] == 'passa']
     eliminados = [m for m in medicoes if m['filtro_apenas_invalidado'] == 'bloqueado']
     casos_invalidos = [m for m in medicoes if m['filtro_apenas_invalidado'] == 'caso_invalido']
@@ -10762,11 +10539,9 @@ def _escolher_zona_entrada_v2(m15_ate_agora, bias):
     candidatos = [f for f in fvgs if f['tipo'] == tipo_desejado]
 
     if candidatos:
-        # mais próximo do preço atual, entre os candidatos válidos
         escolhido = min(candidatos, key=lambda f: abs((f['top'] + f['bottom']) / 2 - preco_atual))
         return escolhido['top'], escolhido['bottom'], 'FVG', 'FVG_M15_mais_proximo'
 
-    # ── Fallback EMA25 M15 — EXPERIMENTAL ──
     closes_m15 = [c['c'] for c in m15_ate_agora]
     ema25_series = compute_ema(closes_m15, 25)
     ema25_atual = next((v for v in reversed(ema25_series) if v is not None), None)
@@ -10805,7 +10580,6 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
         resultado['failure_reason'] = 'CANDLES_INSUFICIENTES'
         return resultado
 
-    # ── BIAS — reaproveita compute_lux_structure_bias() sem alteração ──
     bias = compute_lux_structure_bias(m15_ate_agora, swing_size=50)
     resultado['bias'] = bias
     if bias not in ('alta', 'baixa'):
@@ -10813,25 +10587,20 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
         return resultado
     resultado['direction'] = 'LONG' if bias == 'alta' else 'SHORT'
 
-    # ── ZONA ──
     zona_top, zona_bottom, zona_type, zona_info = _escolher_zona_entrada_v2(m15_ate_agora, bias)
     if zona_top is None:
-        resultado['failure_reason'] = zona_info  # motivo de falha específico
+        resultado['failure_reason'] = zona_info
         return resultado
     resultado['zone_top'] = round(zona_top, 6)
     resultado['zone_bottom'] = round(zona_bottom, 6)
     resultado['zone_type'] = zona_type
     resultado['zone_source'] = zona_info
 
-    # ── GATILHO: preço precisa ter TOCADO a zona (causal) ──
     idx_toque = _encontrar_toque_zona(m5_ate_agora, zona_top, zona_bottom)
     if idx_toque is None:
         resultado['failure_reason'] = 'PRECO_FORA_DA_ZONA'
         return resultado
 
-    # ── CHoCH no M5, SÓ a partir do toque (index+1) em diante — é
-    # isso que garante causalidade e "associado à zona": um CHoCH
-    # anterior ao toque simplesmente não aparece nessa janela. ──
     candles_pos_toque = m5_ate_agora[idx_toque:]
     if len(candles_pos_toque) < 10:
         resultado['failure_reason'] = 'CANDLES_INSUFICIENTES_POS_TOQUE'
@@ -10847,8 +10616,6 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
         resultado['failure_reason'] = 'NO_CHOCH_APOS_ZONA'
         return resultado
 
-    # ── Confirma que o CHoCH não foi invalidado depois (reaproveita
-    # _evento_choch_foi_invalidado(), já existente e testado) ──
     idx_atual_pos_toque = len(candles_pos_toque) - 1
     invalidado, evento_invalidador = _evento_choch_foi_invalidado(
         eventos_internos_m5, choch_relevante, idx_atual_pos_toque
@@ -10861,7 +10628,6 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
     resultado['choch_timestamp'] = choch_relevante['t']
     resultado['choch_level'] = choch_relevante['nivel']
 
-    # ── ENTRY — close do candle M5 que confirmou o CHoCH ──
     idx_choch_global = idx_toque + choch_relevante['index']
     if idx_choch_global >= len(m5_ate_agora):
         resultado['failure_reason'] = 'INDICE_CHOCH_INVALIDO'
@@ -10870,21 +10636,17 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
     entry = candle_confirmacao['c']
     resultado['entry'] = round(entry, 6)
 
-    # ── SL — regra EXPERIMENTAL declarada explicitamente: o mais
-    # conservador (mais protetor) entre o lado oposto da zona e o
-    # nível do pivot do CHoCH, com buffer via aplicar_buffer_stop_atr
-    # (já existente, não inventa fórmula de buffer nova). ──
     candles_para_buffer = m5_ate_agora[:idx_choch_global + 1]
     if bias == 'alta':
         candidato_zona = zona_bottom
         candidato_choch = choch_relevante['nivel']
-        nivel_bruto = min(candidato_zona, candidato_choch)  # mais baixo = mais protetor pra LONG
+        nivel_bruto = min(candidato_zona, candidato_choch)
         regra_sl = 'zona_bottom' if nivel_bruto == candidato_zona else 'choch_pivot'
         sl = aplicar_buffer_stop_atr(nivel_bruto, 'alta', candles_para_buffer)
     else:
         candidato_zona = zona_top
         candidato_choch = choch_relevante['nivel']
-        nivel_bruto = max(candidato_zona, candidato_choch)  # mais alto = mais protetor pra SHORT
+        nivel_bruto = max(candidato_zona, candidato_choch)
         regra_sl = 'zona_top' if nivel_bruto == candidato_zona else 'choch_pivot'
         sl = aplicar_buffer_stop_atr(nivel_bruto, 'baixa', candles_para_buffer)
 
@@ -10899,7 +10661,6 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
         return resultado
     resultado['sl'] = round(sl, 6)
 
-    # ── TP — reaproveita calcular_tp_dinamico() sem alteração nenhuma ──
     try:
         tp, tp_origem = calcular_tp_dinamico(bias, entry, sl, m15_ate_agora, d1_ate_agora or [])
     except Exception as e:
@@ -10973,9 +10734,6 @@ def replay_vortex_decision_layer_v2(pair, dias_historico=7, janelas_mfe_mae=JANE
     m15, val_m15 = _validar_e_limpar_candles(m15_bruto, '15')
     m5, val_m5 = _validar_e_limpar_candles(m5_bruto, '5')
 
-    # ── Janela fixa explícita: recorta pra [inicio, fim] exatos, mesmo
-    # que a API tenha devolvido candles um pouco além (segurança extra
-    # de reprodutibilidade — não deixa "sobra" contaminar o período). ──
     inicio_ts_ms = fim_ts_ms - dias_historico * 86400000
     d1 = [c for c in d1 if inicio_ts_ms <= c['t'] <= fim_ts_ms]
     m15 = [c for c in m15 if inicio_ts_ms <= c['t'] <= fim_ts_ms]
@@ -11034,8 +10792,6 @@ def replay_vortex_decision_layer_v2(pair, dias_historico=7, janelas_mfe_mae=JANE
             funil['sinais_validos_brutos'] += 1
             sinais_completos_brutos.append({**r, 'idx_m5': i, 'pair': pair})
 
-    # ── Dedup de sinais únicos (mesmo CHoCH permanece válido em vários
-    # ciclos consecutivos até ser invalidado) ──
     sinais_unicos = []
     chaves_vistas = set()
     for s in sinais_completos_brutos:
@@ -11044,9 +10800,6 @@ def replay_vortex_decision_layer_v2(pair, dias_historico=7, janelas_mfe_mae=JANE
             chaves_vistas.add(chave)
             sinais_unicos.append(s)
 
-    # ── ITEM 6 (auditoria da compressão brutos→únicos) — puramente
-    # aditivo, só CONTA quantas avaliações brutas mapeiam pra cada
-    # sinal único, não altera nenhum critério de dedup/validade. ──
     contagem_repeticoes = {}
     for s in sinais_completos_brutos:
         chave = (s['choch_timestamp'], s['direction'], s['zone_type'])
@@ -11076,7 +10829,6 @@ def replay_vortex_decision_layer_v2(pair, dias_historico=7, janelas_mfe_mae=JANE
     sinais_long = [s for s in sinais_unicos if s['direction'] == 'LONG']
     sinais_short = [s for s in sinais_unicos if s['direction'] == 'SHORT']
 
-    # ── Distribuição de R:R ──
     rrs = sorted(s['rr'] for s in sinais_unicos if s['rr'] is not None)
 
     def stats_rr(lista):
@@ -11088,8 +10840,6 @@ def replay_vortex_decision_layer_v2(pair, dias_historico=7, janelas_mfe_mae=JANE
             'p25': _percentil(lista, 25), 'p75': _percentil(lista, 75),
         }
 
-    # ── MFE/MAE causal dos sinais únicos (reaproveita infraestrutura já
-    # testada — não recalcula nenhuma fórmula nova) ──
     medicoes_mfe_mae = []
     for s in sinais_unicos:
         idx = s['idx_m5']
@@ -11183,28 +10933,6 @@ def replay_vortex_decision_layer_v2_todos_pares(dias_historico=7, pares=None):
             'n': len(lista), 'media': round(sum(lista) / len(lista), 3),
             'mediana': _percentil(lista, 50), 'min': lista[0], 'max': lista[-1],
         }
-
-    medicoes_globais = []
-    for p, r in resultados_por_pair.items():
-        if 'erro' in r:
-            continue
-        for s in r.get('sinais_unicos_completos', []):
-            idx = s['idx_m5']
-            medicoes_globais.append({'pair': p, 'direction': s['direction'], 'rr': s['rr'], **{
-                f'j{j}': None for j in JANELAS_MFE_MAE_PADRAO
-            }})
-    # Reaproveita as medições já calculadas por par (evita refetch/recalculo)
-    todas_medicoes_mfe_mae = []
-    for p, r in resultados_por_pair.items():
-        if 'erro' in r:
-            continue
-        mfe_mae_bloco = r.get('mfe_mae_causal', {})
-        # As medições brutas por sinal não são reexpostas fora do
-        # replay individual — reagregamos a partir do próprio bloco
-        # 'global' de cada par (pooled entre pares seria ideal, mas
-        # exigiria expor medicoes_raw também aqui; optamos por manter
-        # o relatório por par completo em resultados_por_pair para
-        # quem precisar do detalhe bruto).
 
     return {
         'dias_historico': dias_historico, 'pares_testados': pares, 'pares_com_erro': pares_com_erro,
@@ -11398,14 +11126,14 @@ def resolver_resultado_sinais_v2(pair, dias_historico=30, fim_ts_ms=None):
     for s in sinais:
         idx = s['idx_m5']
         direcao_lower = 'alta' if s['direction'] == 'LONG' else 'baixa'
-        candles_futuros = m5[idx + 1:]  # sem lookahead — estritamente depois do candle de entrada
+        candles_futuros = m5[idx + 1:]
 
         res = _resolver_tp_sl_futuro(
             candles_futuros, direcao_lower, s['entry'], s['sl'], s['tp'], None,
-            max_candles=len(candles_futuros),  # resolve até o fim do dado disponível na janela fixa
+            max_candles=len(candles_futuros),
         )
 
-        primeiro_evento = 'TP' if res['resultado'] == 'TP1' else res['resultado']  # TP1 do resolvedor genérico = TP único aqui
+        primeiro_evento = 'TP' if res['resultado'] == 'TP1' else res['resultado']
         candles_ate_evento = res['candles_ate_resolucao']
         timestamp_evento = None
         if candles_ate_evento is not None and candles_ate_evento - 1 < len(candles_futuros):
@@ -11415,7 +11143,7 @@ def resolver_resultado_sinais_v2(pair, dias_historico=30, fim_ts_ms=None):
             r_obtido = s['rr']
         elif primeiro_evento == 'SL':
             r_obtido = -1.0
-        else:  # AMBIGUO ou NENHUM — não fabricar resultado
+        else:
             r_obtido = None
 
         auditoria_sinais.append({
@@ -11437,23 +11165,17 @@ def resolver_resultado_sinais_v2(pair, dias_historico=30, fim_ts_ms=None):
         win_rate = round(100 * n_tp / n_resolvidos_binario, 2) if n_resolvidos_binario else None
         loss_rate = round(100 - win_rate, 2) if win_rate is not None else None
 
-        # ── Visão 1: excluindo AMBIGUOS (e NENHUM, que não é trade completo) ──
         rs_excluindo_ambiguo = [a['r_obtido'] for a in lista if a['primeiro_evento'] in ('TP', 'SL')]
         expectancy_excluindo = round(sum(rs_excluindo_ambiguo) / len(rs_excluindo_ambiguo), 4) if rs_excluindo_ambiguo else None
         media_r_excluindo = expectancy_excluindo
         mediana_r_excluindo = _percentil(sorted(rs_excluindo_ambiguo), 50) if rs_excluindo_ambiguo else None
 
-        # ── Visão 2: AMBIGUOS tratados como LOSS (-1R); NENHUM continua excluído
-        # (não é trade completo, não houve resolução dentro do dado disponível) ──
         rs_ambiguo_como_loss = list(rs_excluindo_ambiguo) + [-1.0] * n_ambiguo
         expectancy_amb_loss = round(sum(rs_ambiguo_como_loss) / len(rs_ambiguo_como_loss), 4) if rs_ambiguo_como_loss else None
         media_r_amb_loss = expectancy_amb_loss
         mediana_r_amb_loss = _percentil(sorted(rs_ambiguo_como_loss), 50) if rs_ambiguo_como_loss else None
         win_rate_amb_loss = round(100 * n_tp / (n_tp + n_sl + n_ambiguo), 2) if (n_tp + n_sl + n_ambiguo) else None
 
-        # ── Sequências máximas de win/loss, em ordem cronológica
-        # (choch_timestamp), usando a visão "ambíguo como loss" (única
-        # visão onde toda avaliação binária tem resultado definido) ──
         lista_cronologica = sorted(
             [a for a in lista if a['primeiro_evento'] in ('TP', 'SL', 'AMBIGUO')],
             key=lambda a: a['choch_timestamp'],
@@ -11464,7 +11186,7 @@ def resolver_resultado_sinais_v2(pair, dias_historico=30, fim_ts_ms=None):
             if venceu:
                 cur_win += 1
                 cur_loss = 0
-            else:  # SL ou AMBIGUO tratado como loss pra fins de sequência
+            else:
                 cur_loss += 1
                 cur_win = 0
             max_win_streak = max(max_win_streak, cur_win)
@@ -11655,8 +11377,6 @@ def resolver_resultado_sinais_v2_todos_pares(dias_historico=30, fim_ts_ms=None, 
     pares_long_positiva = [t['pair'] for t in pares_ok if t['long_expectancy'] is not None and t['long_expectancy'] > 0]
     pares_short_positiva = [t['pair'] for t in pares_ok if t['short_expectancy'] is not None and t['short_expectancy'] > 0]
 
-    # ── Concentração: contribuição de R total (soma, não média) por par,
-    # pra identificar se poucos pares dominam o resultado agregado ──
     contribuicao_r_total_por_par = []
     for p, r in resultados_por_pair.items():
         if 'erro' in r:
@@ -11966,8 +11686,6 @@ def paper_trading_v2_tick(pair, db_file, agora_ts_ms=None):
 
     novos_detectados = 0
     if len(m15) >= 40 and len(m5) >= 80:
-        # Só reavalia os últimos ciclos (não a janela toda) — a dedup
-        # por UNIQUE constraint garante segurança mesmo reprocessando.
         idx_inicio = max(60, len(m5) - 300)
         for i in range(idx_inicio, len(m5)):
             ts_corte = m5[i]['t']
@@ -12000,9 +11718,6 @@ def paper_trading_v2_tick(pair, db_file, agora_ts_ms=None):
                     conn.commit()
                     if cursor.rowcount > 0:
                         novos_detectados += 1
-                        # ── NOTIFICAÇÃO (secundária) — o sinal já está
-                        # gravado no banco antes desta linha, então uma
-                        # falha aqui NUNCA compromete a gravação. ──
                         try:
                             _paper_trading_v2_enviar_telegram(_formatar_mensagem_novo_sinal_paper_v2(pair, r))
                         except Exception as e_tg:
@@ -12019,7 +11734,6 @@ def paper_trading_v2_tick(pair, db_file, agora_ts_ms=None):
             except Exception as e:
                 print(f"[paper_trading_v2] erro ao gravar sinal de {pair}: {e}")
 
-    # ── Resolver sinais PENDING já existentes desse par ──
     resolvidos = 0
     try:
         with sqlite3.connect(db_file) as conn:
@@ -12035,8 +11749,6 @@ def paper_trading_v2_tick(pair, db_file, agora_ts_ms=None):
                     idx_candle_entrada = j
                     break
             if idx_candle_entrada is None:
-                # candle de entrada saiu da janela de lookback (par antigo) — não
-                # dá pra resolver com o dado atual, mas não é erro; expira se muito velho
                 idade_dias = (agora_ts_ms - sinal['choch_timestamp']) / 86400000
                 if idade_dias > PAPER_TRADING_V2_EXPIRACAO_DIAS:
                     with sqlite3.connect(db_file) as conn:
@@ -12084,8 +11796,6 @@ def paper_trading_v2_tick(pair, db_file, agora_ts_ms=None):
                           res['mfe_pct'], res['mae_pct'], agora_ts_ms, sinal['id']))
                     conn.commit()
                 resolvidos += 1
-                # ── NOTIFICAÇÃO (secundária) — status já atualizado no
-                # banco antes desta linha ──
                 try:
                     _paper_trading_v2_enviar_telegram(
                         _formatar_mensagem_resultado_paper_v2(sinal, evento, r_obtido, ts_evento)
@@ -12184,7 +11894,6 @@ def paper_trading_v2_relatorio(db_file):
         por_par.setdefault(s['pair'], []).append(s)
     resultado_por_par = {p: bloco_direcao(lista) for p, lista in por_par.items()}
 
-    # streaks cronológicos (resolvidos, AMBIGUO conta como loss pra sequência)
     cronologico = sorted([s for s in todos if s['status'] in ('TP', 'SL', 'AMBIGUO')], key=lambda s: s['choch_timestamp'])
     max_win, max_loss, cur_win, cur_loss = 0, 0, 0, 0
     for s in cronologico:
@@ -12197,7 +11906,6 @@ def paper_trading_v2_relatorio(db_file):
         max_win = max(max_win, cur_win)
         max_loss = max(max_loss, cur_loss)
 
-    # resultado diário (agrupado por dia UTC do choch_timestamp)
     resultado_diario = {}
     for s in resolvidos:
         dia = datetime.fromtimestamp(s['choch_timestamp'] / 1000, tz=timezone.utc).strftime('%Y-%m-%d')
@@ -12285,6 +11993,97 @@ def paper_trading_v2_relatorio_endpoint():
         return jsonify({"erro": f"erro ao gerar relatório: {e}"}), 500
 
 
+def paper_trading_v2_export_completo(db_file, limit=None, offset=None, desde_ts_ms=None):
+    """
+    Export somente-leitura de TODOS os registros crus da tabela
+    paper_trading_v2_sinais — sem nenhuma agregação, sem nenhum
+    cálculo, sem nenhuma transformação de dados (diferente de
+    paper_trading_v2_relatorio(), que agrega estatísticas). Serve para
+    autópsia manual (planilha/notebook externo) dos sinais já
+    detectados/resolvidos pelo paper trading v2.
+
+    Reaproveita a MESMA tabela paper_trading_v2_sinais já usada por
+    paper_trading_v2_tick() e paper_trading_v2_relatorio() — não cria
+    tabela nova, não altera nenhum registro (só SELECT, nunca UPDATE/
+    INSERT/DELETE).
+
+    Filtros OPCIONAIS — nenhum deles muda a natureza da query base
+    ("SELECT * FROM paper_trading_v2_sinais ORDER BY choch_timestamp
+    ASC"), só restringem o conjunto retornado:
+    - desde_ts_ms: só sinais com choch_timestamp >= desde_ts_ms
+    - limit: número máximo de linhas retornadas
+    - offset: pula as N primeiras linhas (só tem efeito junto com limit)
+    """
+    with sqlite3.connect(db_file) as conn:
+        conn.row_factory = sqlite3.Row
+        query = "SELECT * FROM paper_trading_v2_sinais"
+        params = []
+        if desde_ts_ms is not None:
+            query += " WHERE choch_timestamp >= ?"
+            params.append(desde_ts_ms)
+        query += " ORDER BY choch_timestamp ASC"
+        if limit is not None:
+            query += " LIMIT ?"
+            params.append(limit)
+            if offset is not None:
+                query += " OFFSET ?"
+                params.append(offset)
+        rows = conn.execute(query, params).fetchall()
+        sinais = [dict(r) for r in rows]
+
+    return {"total": len(sinais), "sinais": sinais}
+
+
+@explicacao_bp.route("/scalp_gates_vortex/paper_trading_v2_export", methods=["GET"])
+def paper_trading_v2_export_endpoint():
+    """
+    Export somente-leitura de TODOS os registros crus da tabela
+    paper_trading_v2_sinais, para autópsia manual dos sinais já
+    detectados/resolvidos. NÃO altera nenhum registro (só SELECT).
+
+    Mesmo padrão de autenticação de paper_trading_v2_tick_endpoint():
+    segredo lido de PAPER_TRADING_TICK_SECRET (nunca hardcoded), aceito
+    via header 'X-Paper-Tick-Secret' (preferencial) ou query param
+    '&token=' (fallback). FAIL-CLOSED: se a variável de ambiente não
+    estiver configurada, recusa TODAS as chamadas.
+
+    Diferença deliberada em relação ao tick: este endpoint é somente
+    leitura, então NÃO exige '&confirm=RODAR_PAPER_TICK' — essa trava
+    existe no tick para evitar disparo acidental de um ciclo de
+    detecção/gravação; aqui não há nada a disparar, só consulta.
+
+    Uso: ?token=<segredo>
+    ou header: X-Paper-Tick-Secret: <segredo>
+    Opcional: &limit=500&offset=0&desde_ts_ms=1700000000000
+    """
+    segredo_configurado = os.environ.get('PAPER_TRADING_TICK_SECRET')
+    if not segredo_configurado:
+        return jsonify({
+            "erro": "endpoint desabilitado — variável de ambiente PAPER_TRADING_TICK_SECRET não configurada",
+            "como_resolver": "defina PAPER_TRADING_TICK_SECRET nas variáveis de ambiente do Railway antes de usar este endpoint",
+        }), 503
+
+    segredo_recebido = request.headers.get('X-Paper-Tick-Secret') or request.args.get('token')
+    if not segredo_recebido or segredo_recebido != segredo_configurado:
+        return jsonify({"erro": "não autorizado"}), 401
+
+    limit_param = request.args.get('limit')
+    offset_param = request.args.get('offset')
+    desde_ts_ms_param = request.args.get('desde_ts_ms')
+
+    limit = int(limit_param) if limit_param else None
+    offset = int(offset_param) if offset_param else None
+    desde_ts_ms = int(desde_ts_ms_param) if desde_ts_ms_param else None
+
+    db_file = _db_file_explicacao()
+    init_paper_trading_v2_db(db_file)
+    try:
+        resultado = paper_trading_v2_export_completo(db_file, limit=limit, offset=offset, desde_ts_ms=desde_ts_ms)
+        return jsonify(resultado)
+    except Exception as e:
+        return jsonify({"erro": f"erro no export de paper trading: {e}"}), 500
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # paper_trading_v2_diagnostico_bias — item aprovado do ticket. SOMENTE
 # DIAGNÓSTICO/LEITURA — não escreve nada, não altera nenhuma tabela,
@@ -12339,7 +12138,7 @@ def paper_trading_v2_diagnostico_bias(pair, dias_historico=2, fim_ts_ms=None):
     distribuicao_motivos_short = {}
     exemplos_short_eliminados = []
 
-    idx_inicio = max(60, len(m5) - 300)  # MESMA janela de lookback que paper_trading_v2_tick usa
+    idx_inicio = max(60, len(m5) - 300)
     total_ciclos = 0
     for i in range(idx_inicio, len(m5)):
         ts_corte = m5[i]['t']

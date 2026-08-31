@@ -12343,3 +12343,700 @@ def paper_trading_v2_diagnostico_bias_endpoint():
         return jsonify(resultado)
     except Exception as e:
         return jsonify({"erro": f"erro no diagnóstico: {e}"}), 500
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# V2_FVG_ONLY — VARIANTE EXPERIMENTAL, item aprovado pelo usuário.
+# SOMENTE EXPERIMENTAL/ISOLADO — não é chamada por nenhum caminho de
+# produção, não substitui avaliar_vortex_decision_layer_v2() (que
+# permanece 100% intocada), não altera BIAS, CHoCH, ENTRY, SL, TP,
+# dedup ou gates_vortex.
+#
+# HIPÓTESE TESTADA (estrutural, não movida por resultado passado):
+# FVG é uma zona baseada em desequilíbrio/estrutura real de mercado;
+# EMA25 é um fallback de engenharia (só existe pra nunca deixar o
+# pipeline "vazio" quando não há FVG). A pergunta é: o motor deveria
+# aceitar EMA25 como zona válida, ou "não encontrei FVG" deveria
+# significar "não há sinal"?
+#
+# ⚠️ ANÁLISE DE DUPLICAÇÃO — REGISTRO EXPLÍCITO, PENDENTE:
+# Como esta variante reaproveita EXATAMENTE a mesma lógica de detecção
+# de FVG (find_open_fvgs_adaptive, sem alteração), a expectativa
+# TEÓRICA é que os sinais únicos gerados por V2_FVG_ONLY sejam um
+# SUBCONJUNTO IDÊNTICO dos sinais do V2 original que já tinham
+# zone_type='FVG' — a única coisa que muda é que os sinais que hoje
+# usam zone_type='EMA25' deixam de existir. Isso NÃO FOI VERIFICADO
+# EMPIRICAMENTE ainda. A função comparar_v2_original_vs_fvg_only()
+# abaixo inclui uma checagem de equivalência (auditoria_equivalencia_
+# fvg) que testa essa hipótese diretamente contra o dado real — os
+# resultados dessa checagem devem ser lidos antes de tirar qualquer
+# conclusão sobre a comparação.
+# ═══════════════════════════════════════════════════════════════════════
+
+def _escolher_zona_entrada_v2_fvg_only(m15_ate_agora, bias):
+    """
+    ZONA — versão FVG_ONLY. IDÊNTICA a _escolher_zona_entrada_v2() na
+    parte de busca de FVG (mesma chamada a find_open_fvgs_adaptive(),
+    sem alteração nenhuma) — a ÚNICA diferença é que, se não houver
+    FVG M15 válido na direção do bias, esta função retorna falha
+    (SEM_FVG_M15_NA_DIRECAO) em vez de cair no fallback EMA25.
+    Retorna (zona_top, zona_bottom, zona_type, zona_source) ou
+    (None, None, None, motivo_falha).
+    """
+    if len(m15_ate_agora) < 30:
+        return None, None, None, 'M15_INSUFICIENTE'
+
+    preco_atual = m15_ate_agora[-1]['c']
+    fvgs = find_open_fvgs_adaptive(m15_ate_agora)
+    tipo_desejado = 'FVG_bullish' if bias == 'alta' else 'FVG_bearish'
+    candidatos = [f for f in fvgs if f['tipo'] == tipo_desejado]
+
+    if candidatos:
+        escolhido = min(candidatos, key=lambda f: abs((f['top'] + f['bottom']) / 2 - preco_atual))
+        return escolhido['top'], escolhido['bottom'], 'FVG', 'FVG_M15_mais_proximo'
+
+    # ── SEM FALLBACK — item aprovado do ticket. "Não encontrei FVG"
+    # significa "não há sinal", não "vou inventar uma zona na EMA25". ──
+    return None, None, None, 'SEM_FVG_M15_NA_DIRECAO'
+
+
+def avaliar_vortex_decision_layer_v2_fvg_only(m15_ate_agora, m5_ate_agora, d1_ate_agora=None):
+    """
+    Pipeline EXPERIMENTAL — variante V2_FVG_ONLY. Estrutura IDÊNTICA a
+    avaliar_vortex_decision_layer_v2() (BIAS → ZONA → GATILHO → ENTRY
+    → SL → TP), reaproveitando exatamente as MESMAS funções pra tudo
+    exceto a escolha de zona:
+      - BIAS: compute_lux_structure_bias() — sem alteração
+      - ZONA: _escolher_zona_entrada_v2_fvg_only() — ÚNICA diferença,
+        sem fallback EMA25
+      - GATILHO/CHoCH: _encontrar_toque_zona() + compute_lux_internal_
+        structure() + _evento_choch_foi_invalidado() — sem alteração
+      - ENTRY: candle_confirmacao['c'] — sem alteração
+      - SL: aplicar_buffer_stop_atr() — sem alteração
+      - TP: calcular_tp_dinamico() — sem alteração
+    NÃO substitui nem chama avaliar_vortex_decision_layer_v2() (que
+    permanece intocada). NÃO é chamada por nenhum caminho de produção.
+    """
+    resultado = {
+        'signal': False, 'direction': None, 'bias': None,
+        'zone_type': None, 'zone_top': None, 'zone_bottom': None, 'zone_source': None,
+        'choch_confirmed': False, 'choch_timestamp': None, 'choch_level': None,
+        'entry': None, 'sl': None, 'sl_regra': None, 'tp': None, 'tp_origem': None, 'rr': None,
+        'reason': None, 'timestamp': m5_ate_agora[-1]['t'] if m5_ate_agora else None,
+        'valid': False, 'failure_reason': None, 'variante': 'V2_FVG_ONLY',
+    }
+
+    if not m15_ate_agora or not m5_ate_agora:
+        resultado['failure_reason'] = 'CANDLES_INSUFICIENTES'
+        return resultado
+
+    bias = compute_lux_structure_bias(m15_ate_agora, swing_size=50)
+    resultado['bias'] = bias
+    if bias not in ('alta', 'baixa'):
+        resultado['failure_reason'] = 'BIAS_FAIL'
+        return resultado
+    resultado['direction'] = 'LONG' if bias == 'alta' else 'SHORT'
+
+    zona_top, zona_bottom, zona_type, zona_info = _escolher_zona_entrada_v2_fvg_only(m15_ate_agora, bias)
+    if zona_top is None:
+        resultado['failure_reason'] = zona_info
+        return resultado
+    resultado['zone_top'] = round(zona_top, 6)
+    resultado['zone_bottom'] = round(zona_bottom, 6)
+    resultado['zone_type'] = zona_type
+    resultado['zone_source'] = zona_info
+
+    idx_toque = _encontrar_toque_zona(m5_ate_agora, zona_top, zona_bottom)
+    if idx_toque is None:
+        resultado['failure_reason'] = 'PRECO_FORA_DA_ZONA'
+        return resultado
+
+    candles_pos_toque = m5_ate_agora[idx_toque:]
+    if len(candles_pos_toque) < 10:
+        resultado['failure_reason'] = 'CANDLES_INSUFICIENTES_POS_TOQUE'
+        return resultado
+
+    eventos_internos_m5 = compute_lux_internal_structure(candles_pos_toque, swing_size=5)
+    choch_relevante = None
+    for ev in reversed(eventos_internos_m5):
+        if ev['tipo'] == 'CHoCH' and ev['direcao'] == bias:
+            choch_relevante = ev
+            break
+    if not choch_relevante:
+        resultado['failure_reason'] = 'NO_CHOCH_APOS_ZONA'
+        return resultado
+
+    idx_atual_pos_toque = len(candles_pos_toque) - 1
+    invalidado, evento_invalidador = _evento_choch_foi_invalidado(
+        eventos_internos_m5, choch_relevante, idx_atual_pos_toque
+    )
+    if invalidado:
+        resultado['failure_reason'] = 'CHOCH_INVALIDADO_ANTES_DO_GATILHO'
+        return resultado
+
+    resultado['choch_confirmed'] = True
+    resultado['choch_timestamp'] = choch_relevante['t']
+    resultado['choch_level'] = choch_relevante['nivel']
+
+    idx_choch_global = idx_toque + choch_relevante['index']
+    if idx_choch_global >= len(m5_ate_agora):
+        resultado['failure_reason'] = 'INDICE_CHOCH_INVALIDO'
+        return resultado
+    candle_confirmacao = m5_ate_agora[idx_choch_global]
+    entry = candle_confirmacao['c']
+    resultado['entry'] = round(entry, 6)
+
+    candles_para_buffer = m5_ate_agora[:idx_choch_global + 1]
+    if bias == 'alta':
+        candidato_zona = zona_bottom
+        candidato_choch = choch_relevante['nivel']
+        nivel_bruto = min(candidato_zona, candidato_choch)
+        regra_sl = 'zona_bottom' if nivel_bruto == candidato_zona else 'choch_pivot'
+        sl = aplicar_buffer_stop_atr(nivel_bruto, 'alta', candles_para_buffer)
+    else:
+        candidato_zona = zona_top
+        candidato_choch = choch_relevante['nivel']
+        nivel_bruto = max(candidato_zona, candidato_choch)
+        regra_sl = 'zona_top' if nivel_bruto == candidato_zona else 'choch_pivot'
+        sl = aplicar_buffer_stop_atr(nivel_bruto, 'baixa', candles_para_buffer)
+
+    resultado['sl_regra'] = regra_sl
+    if sl is None:
+        resultado['failure_reason'] = 'SL_INVALIDO'
+        return resultado
+    risco = abs(entry - sl)
+    sl_do_lado_certo = (sl < entry) if bias == 'alta' else (sl > entry)
+    if risco <= 0 or not sl_do_lado_certo:
+        resultado['failure_reason'] = 'SL_INVALIDO'
+        return resultado
+    resultado['sl'] = round(sl, 6)
+
+    try:
+        tp, tp_origem = calcular_tp_dinamico(bias, entry, sl, m15_ate_agora, d1_ate_agora or [])
+    except Exception as e:
+        resultado['failure_reason'] = f'ERRO_TP: {e}'
+        return resultado
+
+    if tp is None:
+        resultado['failure_reason'] = 'TP_INVALIDO'
+        return resultado
+    resultado['tp'] = round(tp, 6)
+    resultado['tp_origem'] = tp_origem
+    resultado['rr'] = round(abs(tp - entry) / risco, 2)
+
+    resultado['signal'] = True
+    resultado['valid'] = True
+    resultado['reason'] = (
+        f"[V2_FVG_ONLY] BIAS={bias} + ZONA({zona_type},{zona_info}) + CHoCH_M5({choch_relevante['t']}) "
+        f"+ SL({regra_sl}) + TP({tp_origem})"
+    )
+    return resultado
+
+
+def replay_vortex_decision_layer_v2_fvg_only(pair, dias_historico=7, fim_ts_ms=None):
+    """
+    Replay causal da variante EXPERIMENTAL V2_FVG_ONLY. Estrutura
+    IDÊNTICA a replay_vortex_decision_layer_v2() (mesmo fetch, mesmo
+    truncamento causal, mesma dedup por (choch_timestamp, direction,
+    zone_type), sem lookahead) — só troca a função de avaliação por
+    avaliar_vortex_decision_layer_v2_fvg_only(). NÃO chama nem altera
+    replay_vortex_decision_layer_v2() original.
+
+    Rastreia ADICIONALMENTE (item explícito do ticket) quantos ciclos
+    seriam eliminados especificamente por ausência de FVG — contagem
+    de ciclos em que zona_info == 'SEM_FVG_M15_NA_DIRECAO', ou seja,
+    o bias e o restante do pipeline chegaram até a etapa de zona mas
+    não havia FVG M15 válido (candidatos que, no V2 original, teriam
+    caído no fallback EMA25).
+    """
+    if fim_ts_ms is None:
+        fim_ts_ms = int(time.time() * 1000)
+
+    symbol_map = {
+        'BTCUSD': 'BTCUSDT', 'ETHUSD': 'ETHUSDT', 'SOLUSD': 'SOLUSDT', 'XRPUSD': 'XRPUSDT',
+        'LINKUSD': 'LINKUSDT', 'ADAUSD': 'ADAUSDT', 'AVAXUSD': 'AVAXUSDT', 'BNBUSD': 'BNBUSDT',
+        'AAVEUSD': 'AAVEUSDT', 'NEARUSD': 'NEARUSDT', 'PENDLEUSD': 'PENDLEUSDT', 'INJUSD': 'INJUSDT',
+        'ONDOUSD': 'ONDOUSDT',
+    }
+    symbol = symbol_map.get(pair.upper(), pair.upper().replace('USD', 'USDT'))
+
+    d1_bruto = _fetch_bybit_klines_historico(symbol, 'D', dias_historico + 20, fim_ts_ms=fim_ts_ms)
+    m15_bruto = _fetch_bybit_klines_historico(symbol, '15', dias_historico + 3, fim_ts_ms=fim_ts_ms)
+    m5_bruto = _fetch_bybit_klines_historico(symbol, '5', dias_historico + 2, fim_ts_ms=fim_ts_ms)
+
+    d1, val_d1 = _validar_e_limpar_candles(d1_bruto, 'D')
+    m15, val_m15 = _validar_e_limpar_candles(m15_bruto, '15')
+    m5, val_m5 = _validar_e_limpar_candles(m5_bruto, '5')
+
+    inicio_ts_ms = fim_ts_ms - dias_historico * 86400000
+    d1 = [c for c in d1 if inicio_ts_ms <= c['t'] <= fim_ts_ms]
+    m15 = [c for c in m15 if inicio_ts_ms <= c['t'] <= fim_ts_ms]
+    m5 = [c for c in m5 if inicio_ts_ms <= c['t'] <= fim_ts_ms]
+
+    MIN_M5_IDX = 60
+    if len(m15) < 40 or len(m5) < MIN_M5_IDX + 20:
+        return {'erro': f'dados insuficientes pra {pair} (M15={len(m15)}, M5={len(m5)})',
+                'validacao_m15': val_m15, 'validacao_m5': val_m5}
+
+    funil = {
+        'total_ciclos_avaliados': 0, 'bias_ok': 0,
+        'zona_encontrada': 0, 'eliminados_por_ausencia_fvg': 0,
+        'choch_confirmado': 0, 'choch_invalidado_antes_gatilho': 0,
+        'sl_ok': 0, 'tp_ok': 0, 'sinais_validos_brutos': 0,
+    }
+    distribuicao_motivos = {}
+    sinais_completos_brutos = []
+
+    for i in range(MIN_M5_IDX, len(m5)):
+        ts_corte = m5[i]['t']
+        m5_ate_agora = m5[:i + 1]
+        m15_ate_agora = [c for c in m15 if c['t'] <= ts_corte]
+        d1_ate_agora = [c for c in d1 if c['t'] <= ts_corte]
+        if len(m15_ate_agora) < 30:
+            continue
+
+        funil['total_ciclos_avaliados'] += 1
+        try:
+            r = avaliar_vortex_decision_layer_v2_fvg_only(m15_ate_agora, m5_ate_agora, d1_ate_agora)
+        except Exception as e:
+            distribuicao_motivos[f'EXCECAO: {e}'] = distribuicao_motivos.get(f'EXCECAO: {e}', 0) + 1
+            continue
+
+        if r['bias'] in ('alta', 'baixa'):
+            funil['bias_ok'] += 1
+        if r['zone_top'] is not None:
+            funil['zona_encontrada'] += 1
+        if r['failure_reason'] == 'SEM_FVG_M15_NA_DIRECAO':
+            funil['eliminados_por_ausencia_fvg'] += 1
+        if r['choch_confirmed']:
+            funil['choch_confirmado'] += 1
+        if r['failure_reason'] == 'CHOCH_INVALIDADO_ANTES_DO_GATILHO':
+            funil['choch_invalidado_antes_gatilho'] += 1
+        if r['sl'] is not None:
+            funil['sl_ok'] += 1
+        if r['tp'] is not None:
+            funil['tp_ok'] += 1
+
+        motivo_chave = 'SINAL_VALIDO' if r['valid'] else (r['failure_reason'] or 'MOTIVO_DESCONHECIDO')
+        distribuicao_motivos[motivo_chave] = distribuicao_motivos.get(motivo_chave, 0) + 1
+
+        if r['valid']:
+            funil['sinais_validos_brutos'] += 1
+            sinais_completos_brutos.append({**r, 'idx_m5': i, 'pair': pair})
+
+    sinais_unicos = []
+    chaves_vistas = set()
+    for s in sinais_completos_brutos:
+        chave = (s['choch_timestamp'], s['direction'], s['zone_type'])
+        if chave not in chaves_vistas:
+            chaves_vistas.add(chave)
+            sinais_unicos.append(s)
+
+    return {
+        'pair': pair, 'dias_historico': dias_historico, 'variante': 'V2_FVG_ONLY',
+        'janela_fixa': {
+            'data_inicio_ts_ms': inicio_ts_ms, 'data_fim_ts_ms': fim_ts_ms,
+            'data_inicio_iso': datetime.fromtimestamp(inicio_ts_ms / 1000, tz=timezone.utc).isoformat(),
+            'data_fim_iso': datetime.fromtimestamp(fim_ts_ms / 1000, tz=timezone.utc).isoformat(),
+        },
+        'nota_metodologica': (
+            'REPLAY EXPERIMENTAL — variante V2_FVG_ONLY, reaproveita avaliar_vortex_decision_'
+            'layer_v2_fvg_only() (função nova, isolada, não é chamada por nenhum caminho de '
+            'produção). BIAS, CHoCH, ENTRY, SL, TP e dedup são as MESMAS funções já existentes '
+            'e testadas, sem alteração nenhuma — a ÚNICA diferença estrutural é a ausência do '
+            'fallback EMA25 na escolha de zona. ANÁLISE DE DUPLICAÇÃO AINDA PENDENTE: a '
+            'expectativa teórica é que sinais_unicos aqui seja um subconjunto idêntico dos '
+            'sinais zone_type=FVG do V2 original — isso é checado empiricamente em '
+            'comparar_v2_original_vs_fvg_only(), não aqui.'
+        ),
+        'validacao_dados': {'M15': val_m15, 'M5': val_m5},
+        'funil': funil,
+        'distribuicao_motivos_todos_ciclos': distribuicao_motivos,
+        'total_sinais_unicos': len(sinais_unicos),
+        'sinais_unicos_completos': sinais_unicos,
+        'm5_completo': m5,
+    }
+
+
+def resolver_resultado_sinais_v2_fvg_only(pair, dias_historico=30, fim_ts_ms=None):
+    """
+    Auditoria de resultado da variante V2_FVG_ONLY — estrutura
+    IDÊNTICA a resolver_resultado_sinais_v2() (mesma _resolver_tp_sl_
+    futuro(), sem lookahead, sem inventar ordem intrabar), reaproveita
+    replay_vortex_decision_layer_v2_fvg_only() (não a versão original).
+    NÃO altera nem chama resolver_resultado_sinais_v2() original.
+    """
+    resultado_base = replay_vortex_decision_layer_v2_fvg_only(pair, dias_historico=dias_historico, fim_ts_ms=fim_ts_ms)
+    if 'erro' in resultado_base:
+        return resultado_base
+
+    m5 = resultado_base.get('m5_completo')
+    sinais = resultado_base.get('sinais_unicos_completos', [])
+    if not m5 or not sinais:
+        return {'erro': f'sem m5_completo ou sinais pra {pair} — replay base (fvg_only) não produziu dado suficiente',
+                'total_sinais_auditados': 0, 'funil': resultado_base.get('funil')}
+
+    auditoria_sinais = []
+    for s in sinais:
+        idx = s['idx_m5']
+        direcao_lower = 'alta' if s['direction'] == 'LONG' else 'baixa'
+        candles_futuros = m5[idx + 1:]
+
+        res = _resolver_tp_sl_futuro(
+            candles_futuros, direcao_lower, s['entry'], s['sl'], s['tp'], None,
+            max_candles=len(candles_futuros),
+        )
+
+        primeiro_evento = 'TP' if res['resultado'] == 'TP1' else res['resultado']
+        candles_ate_evento = res['candles_ate_resolucao']
+        timestamp_evento = None
+        if candles_ate_evento is not None and candles_ate_evento - 1 < len(candles_futuros):
+            timestamp_evento = candles_futuros[candles_ate_evento - 1]['t']
+
+        if primeiro_evento == 'TP':
+            r_obtido = s['rr']
+        elif primeiro_evento == 'SL':
+            r_obtido = -1.0
+        else:
+            r_obtido = None
+
+        idade_choch_min = (s['timestamp'] - s['choch_timestamp']) / 60000 if s.get('timestamp') else None
+
+        auditoria_sinais.append({
+            'pair': pair, 'direction': s['direction'], 'entry': s['entry'], 'sl': s['sl'], 'tp': s['tp'],
+            'rr': s['rr'], 'tp_origem': s['tp_origem'], 'sl_regra': s['sl_regra'],
+            'zone_type': s['zone_type'], 'choch_timestamp': s['choch_timestamp'],
+            'idade_choch_min': idade_choch_min,
+            'primeiro_evento': primeiro_evento, 'timestamp_evento': timestamp_evento,
+            'candles_ate_evento': candles_ate_evento, 'mfe_pct': res['mfe_pct'], 'mae_pct': res['mae_pct'],
+            'r_obtido': r_obtido,
+        })
+
+    def _agregar_grupo(lista):
+        total = len(lista)
+        n_tp = sum(1 for a in lista if a['primeiro_evento'] == 'TP')
+        n_sl = sum(1 for a in lista if a['primeiro_evento'] == 'SL')
+        n_ambiguo = sum(1 for a in lista if a['primeiro_evento'] == 'AMBIGUO')
+        n_nenhum = sum(1 for a in lista if a['primeiro_evento'] == 'NENHUM')
+        n_resolvidos_binario = n_tp + n_sl
+        win_rate = round(100 * n_tp / n_resolvidos_binario, 2) if n_resolvidos_binario else None
+        rs = [a['r_obtido'] for a in lista if a['primeiro_evento'] in ('TP', 'SL')]
+        expectancy = round(sum(rs) / len(rs), 4) if rs else None
+        soma_r = round(sum(rs), 2) if rs else None
+        mfes = [a['mfe_pct'] for a in lista if a['mfe_pct'] is not None]
+        maes = [a['mae_pct'] for a in lista if a['mae_pct'] is not None]
+        return {
+            'total_sinais': total, 'tp_primeiro': n_tp, 'sl_primeiro': n_sl,
+            'ambiguo': n_ambiguo, 'nenhum_nao_resolvido': n_nenhum,
+            'win_rate_pct': win_rate, 'expectancy_R': expectancy, 'soma_R': soma_r,
+            'mfe_medio_pct': round(sum(mfes) / len(mfes), 4) if mfes else None,
+            'mae_medio_pct': round(sum(maes) / len(maes), 4) if maes else None,
+        }
+
+    sinais_long = [a for a in auditoria_sinais if a['direction'] == 'LONG']
+    sinais_short = [a for a in auditoria_sinais if a['direction'] == 'SHORT']
+
+    por_pair_agrupado = {}
+    for a in auditoria_sinais:
+        por_pair_agrupado.setdefault(a['pair'], []).append(a)
+    resultado_por_pair = {p: _agregar_grupo(lst) for p, lst in por_pair_agrupado.items()}
+
+    por_tp_origem = {}
+    for a in auditoria_sinais:
+        origem = (a['tp_origem'] or 'None').split('(')[0].strip()
+        por_tp_origem.setdefault(origem, []).append(a)
+    resultado_por_tp_origem = {o: _agregar_grupo(lst) for o, lst in por_tp_origem.items()}
+
+    por_sl_regra = {}
+    for a in auditoria_sinais:
+        por_sl_regra.setdefault(a['sl_regra'], []).append(a)
+    resultado_por_sl_regra = {r: _agregar_grupo(lst) for r, lst in por_sl_regra.items()}
+
+    bins_idade = [(-0.01, 5, '0-5min'), (5, 15, '5-15min'), (15, 30, '15-30min'),
+                  (30, 60, '30-60min'), (60, 120, '1-2h'), (120, float('inf'), '2h+')]
+    por_idade = {}
+    for a in auditoria_sinais:
+        idade = a['idade_choch_min']
+        if idade is None:
+            continue
+        for lo, hi, label in bins_idade:
+            if lo < idade <= hi or (lo == -0.01 and idade == 0):
+                por_idade.setdefault(label, []).append(a)
+                break
+    resultado_por_idade = {label: _agregar_grupo(lst) for label, lst in por_idade.items()}
+
+    return {
+        'pair': pair, 'dias_historico': dias_historico, 'variante': 'V2_FVG_ONLY',
+        'janela_fixa': resultado_base.get('janela_fixa'),
+        'total_sinais_auditados': len(auditoria_sinais),
+        'GLOBAL': _agregar_grupo(auditoria_sinais),
+        'LONG': _agregar_grupo(sinais_long),
+        'SHORT': _agregar_grupo(sinais_short),
+        'por_pair': resultado_por_pair,
+        'por_tp_origem': resultado_por_tp_origem,
+        'por_sl_regra': resultado_por_sl_regra,
+        'por_idade_choch': resultado_por_idade,
+        'funil_deteccao': resultado_base.get('funil'),
+        'auditoria_sinais_completa': auditoria_sinais,
+    }
+
+
+def comparar_v2_original_vs_fvg_only(pair, dias_historico=30, fim_ts_ms=None):
+    """
+    COMPARAÇÃO EXPERIMENTAL — item aprovado do ticket. Roda
+    resolver_resultado_sinais_v2() (ORIGINAL, SEM ALTERAÇÃO) e
+    resolver_resultado_sinais_v2_fvg_only() (NOVA, isolada) sobre a
+    MESMA janela fixa (fim_ts_ms), e monta a comparação lado a lado
+    pedida: n sinais, WR, expectancy, soma R, LONG/SHORT, por par,
+    origem do TP, SL rule, idade do CHoCH, MFE/MAE, e quantidade de
+    sinais eliminados pela ausência de FVG.
+
+    Não decide qual variante é "melhor" — só apresenta os números.
+    Não altera nenhuma das duas funções de resolução. Não é chamada
+    por nenhum caminho de produção.
+
+    ⚠️ AUDITORIA DE EQUIVALÊNCIA/DUPLICAÇÃO — verificação empírica da
+    hipótese registrada nos comentários das funções acima: os sinais
+    de V2_FVG_ONLY DEVERIAM ser um subconjunto idêntico (mesmo entry/
+    sl/tp/choch_timestamp) dos sinais zone_type=FVG do V2 original.
+    Esta função testa isso diretamente, comparando por
+    (choch_timestamp, direction) — se 'nao_batem' for maior que zero,
+    a hipótese teórica está errada e precisa de investigação antes de
+    confiar nos números comparativos.
+    """
+    if fim_ts_ms is None:
+        fim_ts_ms = int(time.time() * 1000)
+
+    original = resolver_resultado_sinais_v2(pair, dias_historico=dias_historico, fim_ts_ms=fim_ts_ms)
+    fvg_only = resolver_resultado_sinais_v2_fvg_only(pair, dias_historico=dias_historico, fim_ts_ms=fim_ts_ms)
+
+    if 'erro' in original or 'erro' in fvg_only:
+        return {
+            'pair': pair, 'erro_original': original.get('erro'), 'erro_fvg_only': fvg_only.get('erro'),
+        }
+
+    # ── AUDITORIA DE EQUIVALÊNCIA (duplicação) ──
+    # resolver_resultado_sinais_v2() (original) não expõe zone_type na
+    # sua auditoria de saída — só o replay base (replay_vortex_decision_
+    # layer_v2, SEM ALTERAÇÃO) tem esse campo em sinais_unicos_completos.
+    # Chamada extra e independente, só de leitura, mesma janela fixa —
+    # não reaproveita nem altera nenhum estado da chamada de 'original'
+    # acima.
+    replay_base_original = replay_vortex_decision_layer_v2(pair, dias_historico=dias_historico, fim_ts_ms=fim_ts_ms)
+    sinais_original_fvg_chaves = set()
+    if 'erro' not in replay_base_original:
+        for s in replay_base_original.get('sinais_unicos_completos', []):
+            if s.get('zone_type') == 'FVG':
+                sinais_original_fvg_chaves.add((s['choch_timestamp'], s['direction']))
+
+    fvg_only_chaves = set()
+    for s in fvg_only.get('auditoria_sinais_completa', []):
+        fvg_only_chaves.add((s['choch_timestamp'], s['direction']))
+
+    so_no_original_fvg = sinais_original_fvg_chaves - fvg_only_chaves
+    so_no_fvg_only = fvg_only_chaves - sinais_original_fvg_chaves
+    em_ambos = sinais_original_fvg_chaves & fvg_only_chaves
+
+    auditoria_equivalencia_fvg = {
+        'total_original_zone_type_fvg': len(sinais_original_fvg_chaves),
+        'total_fvg_only': len(fvg_only_chaves),
+        'presentes_em_ambos': len(em_ambos),
+        'so_no_original_fvg_nao_no_fvg_only': len(so_no_original_fvg),
+        'so_no_fvg_only_nao_no_original_fvg': len(so_no_fvg_only),
+        'hipotese_confirmada': len(so_no_original_fvg) == 0 and len(so_no_fvg_only) == 0,
+        'nota': (
+            'Testa a hipótese teórica registrada nos comentários das funções acima: os sinais '
+            'de V2_FVG_ONLY DEVERIAM ser exatamente os sinais zone_type=FVG do V2 original '
+            '(mesma choch_timestamp+direction). Se hipotese_confirmada=False, existe uma '
+            'divergência real que precisa ser investigada antes de confiar nos números '
+            'comparativos abaixo — isso pode indicar efeito de borda no dedup ou na causalidade '
+            'do replay, não necessariamente um bug.'
+        ),
+    }
+
+    eliminados_por_ausencia_fvg = (replay_base_original.get('funil') or {}).get('total_ciclos_avaliados')
+    eliminados_fvg_only_funil = fvg_only.get('funil_deteccao') or {}
+
+    return {
+        'pair': pair, 'dias_historico': dias_historico, 'fim_ts_ms': fim_ts_ms,
+        'janela_fixa': original.get('janela_fixa'),
+        'nota_metodologica': (
+            'COMPARAÇÃO EXPERIMENTAL — roda resolver_resultado_sinais_v2() (ORIGINAL, SEM '
+            'ALTERAÇÃO NENHUMA) e resolver_resultado_sinais_v2_fvg_only() (variante nova e '
+            'isolada) sobre a MESMA janela fixa. Não decide qual é melhor, só apresenta os '
+            'números lado a lado. Ver "auditoria_equivalencia_fvg" ANTES de interpretar '
+            'qualquer diferença — se a hipótese de subconjunto não bater, a causa da diferença '
+            'pode não ser só "ausência de EMA25".'
+        ),
+        'auditoria_equivalencia_fvg': auditoria_equivalencia_fvg,
+        'eliminados_por_ausencia_fvg': {
+            'total_ciclos_sem_fvg_valido_na_variante_fvg_only': eliminados_fvg_only_funil.get('eliminados_por_ausencia_fvg'),
+            'nota': (
+                'Contagem de CICLOS (não sinais únicos) em que o pipeline FVG_ONLY chegou até a '
+                'etapa de zona mas não havia FVG M15 válido na direção do bias — no V2 original, '
+                'esses mesmos ciclos teriam usado o fallback EMA25 em vez de retornar sem sinal.'
+            ),
+        },
+        'GLOBAL': {'V2_ORIGINAL': original['GLOBAL'], 'V2_FVG_ONLY': fvg_only['GLOBAL']},
+        'LONG': {'V2_ORIGINAL': original['LONG'], 'V2_FVG_ONLY': fvg_only['LONG']},
+        'SHORT': {'V2_ORIGINAL': original['SHORT'], 'V2_FVG_ONLY': fvg_only['SHORT']},
+        'por_pair': {'V2_ORIGINAL': 'ver resultados_por_pair no replay original (não incluso aqui pra evitar duplicação — usar endpoint de replay original separadamente)', 'V2_FVG_ONLY': fvg_only['por_pair']},
+        'por_tp_origem': {'V2_FVG_ONLY': fvg_only['por_tp_origem']},
+        'por_sl_regra': {'V2_FVG_ONLY': fvg_only['por_sl_regra']},
+        'por_idade_choch': {'V2_FVG_ONLY': fvg_only['por_idade_choch']},
+        'funil_deteccao_fvg_only': fvg_only.get('funil_deteccao'),
+        'resultado_completo_original': original,
+        'resultado_completo_fvg_only': fvg_only,
+    }
+
+
+def comparar_v2_original_vs_fvg_only_todos_pares(dias_historico=30, fim_ts_ms=None, pares=None):
+    """
+    Orquestra comparar_v2_original_vs_fvg_only() (SEM ALTERAÇÃO) pra
+    cada par, usando a MESMA janela fixa — dá a comparação "por par"
+    completa pedida no ticket. Erro num par não derruba os demais.
+    """
+    if fim_ts_ms is None:
+        fim_ts_ms = int(time.time() * 1000)
+    pares = pares or PARES_MONITORADOS_REPLAY
+    resultados_por_pair = {}
+    pares_com_erro = []
+    tabela_por_par = []
+
+    total_r_original, total_r_fvg_only = [], []
+    divergencias_equivalencia = []
+
+    for p in pares:
+        try:
+            r = comparar_v2_original_vs_fvg_only(p, dias_historico=dias_historico, fim_ts_ms=fim_ts_ms)
+        except Exception as e:
+            r = {'erro_original': str(e), 'erro_fvg_only': str(e)}
+        resultados_por_pair[p] = r
+        if r.get('erro_original') or r.get('erro_fvg_only'):
+            pares_com_erro.append(p)
+            continue
+
+        g_orig, g_fvg = r['GLOBAL']['V2_ORIGINAL'], r['GLOBAL']['V2_FVG_ONLY']
+        tabela_por_par.append({
+            'pair': p,
+            'original_n': g_orig.get('total_sinais'), 'original_wr': g_orig.get('win_rate_pct'), 'original_expectancy': g_orig.get('expectancy_R'),
+            'fvg_only_n': g_fvg.get('total_sinais'), 'fvg_only_wr': g_fvg.get('win_rate_pct'), 'fvg_only_expectancy': g_fvg.get('expectancy_R'),
+        })
+
+        aud = r.get('auditoria_equivalencia_fvg', {})
+        if not aud.get('hipotese_confirmada', True):
+            divergencias_equivalencia.append({'pair': p, **aud})
+
+        for a in r.get('resultado_completo_original', {}).get('auditoria_sinais_completa', []):
+            if a['primeiro_evento'] in ('TP', 'SL'):
+                total_r_original.append(a['r_obtido'])
+        for a in r.get('resultado_completo_fvg_only', {}).get('auditoria_sinais_completa', []):
+            if a['primeiro_evento'] in ('TP', 'SL'):
+                total_r_fvg_only.append(a['r_obtido'])
+
+    def _stats_pooled(lista):
+        if not lista:
+            return {'n': 0, 'win_rate_pct': None, 'expectancy_R': None, 'soma_R': None}
+        vencedores = sum(1 for r in lista if r > 0)
+        return {
+            'n': len(lista), 'win_rate_pct': round(100 * vencedores / len(lista), 2),
+            'expectancy_R': round(sum(lista) / len(lista), 4), 'soma_R': round(sum(lista), 2),
+        }
+
+    return {
+        'dias_historico': dias_historico, 'fim_ts_ms': fim_ts_ms, 'pares_testados': pares,
+        'pares_com_erro': pares_com_erro,
+        'nota_metodologica': (
+            'Orquestra comparar_v2_original_vs_fvg_only() (SEM ALTERAÇÃO) pra cada par, mesma '
+            'janela fixa. Consolidado GLOBAL usa valores R pooled entre pares (não média das '
+            'médias por par). Erro num par não derruba os demais.'
+        ),
+        'ATENCAO_divergencias_equivalencia': divergencias_equivalencia,
+        'nota_divergencias': (
+            'Lista vazia = hipótese de subconjunto (FVG_ONLY ⊆ FVG do original) se confirmou em '
+            'TODOS os pares testados. Lista não-vazia = existe pelo menos 1 par onde a hipótese '
+            'não bateu — investigar antes de confiar nos números consolidados.'
+        ),
+        'tabela_por_par': tabela_por_par,
+        'consolidado_global_pooled': {
+            'V2_ORIGINAL': _stats_pooled(total_r_original),
+            'V2_FVG_ONLY': _stats_pooled(total_r_fvg_only),
+        },
+        'resultados_completos_por_pair': resultados_por_pair,
+    }
+
+
+def _executar_comparacao_fvg_only_job(db_file, job_id, dias_historico, fim_ts_ms, pares):
+    try:
+        resultado = comparar_v2_original_vs_fvg_only_todos_pares(dias_historico=dias_historico, fim_ts_ms=fim_ts_ms, pares=pares)
+        with sqlite3.connect(db_file) as conn:
+            conn.execute('''
+                UPDATE scalp_replay_jobs SET status='concluido', resultado_json=?, finished_at=? WHERE job_id=?
+            ''', (json.dumps(resultado, ensure_ascii=False), int(time.time()), job_id))
+            conn.commit()
+    except Exception as e:
+        try:
+            with sqlite3.connect(db_file) as conn:
+                conn.execute('''
+                    UPDATE scalp_replay_jobs SET status='erro', erro=?, finished_at=? WHERE job_id=?
+                ''', (str(e), int(time.time()), job_id))
+                conn.commit()
+        except Exception as e2:
+            print(f"[scalp_engine replay_jobs] erro ao registrar falha do job {job_id}: {e2}")
+
+
+@explicacao_bp.route("/scalp_gates_vortex/comparar_v2_fvg_only_iniciar", methods=["GET"])
+def comparar_v2_fvg_only_iniciar_endpoint():
+    """
+    VARIANTE EXPERIMENTAL — item aprovado do ticket. Compara V2
+    ORIGINAL vs V2_FVG_ONLY (sem fallback EMA25) sobre a mesma janela
+    fixa, em todos os pares. 100% EXPERIMENTAL/REPLAY — não altera
+    nenhuma lógica de produção, não faz deploy de mudança de
+    estratégia, não desliga o V2 original. Roda em BACKGROUND.
+    Consultar no MESMO endpoint de status genérico já existente.
+
+    Uso: ?dias=30&confirm=RODAR_COMPARACAO_FVG_ONLY
+    Opcional &fim_ts_ms=<timestamp_ms> pra reproduzir exatamente uma
+    janela já usada antes, e &pares=BTCUSD,ETHUSD,...
+    """
+    if request.args.get('confirm') != 'RODAR_COMPARACAO_FVG_ONLY':
+        return jsonify({
+            "erro": "endpoint MUITO pesado (roda 2 variantes x 13 pares), protegido contra chamada acidental",
+            "como_usar": "adiciona &confirm=RODAR_COMPARACAO_FVG_ONLY na URL, ex: "
+                          "/scalp_gates_vortex/comparar_v2_fvg_only_iniciar?dias=30&confirm=RODAR_COMPARACAO_FVG_ONLY",
+            "aviso": "isto é uma comparação EXPERIMENTAL — não altera o V2 original, não desliga "
+                     "nada em produção, não faz deploy de estratégia nova",
+        }), 400
+
+    dias = int(request.args.get('dias', 30))
+    fim_ts_ms_param = request.args.get('fim_ts_ms')
+    fim_ts_ms = int(fim_ts_ms_param) if fim_ts_ms_param else None
+    pares_param = request.args.get('pares')
+    pares_lista = [p.strip().upper() for p in pares_param.split(',') if p.strip()] if pares_param else None
+
+    db_file = _db_file_explicacao()
+    init_replay_jobs_db(db_file)
+    job_id = f"comparafvgonly_{int(time.time()*1000)}"
+
+    try:
+        with sqlite3.connect(db_file) as conn:
+            conn.execute('''
+                INSERT INTO scalp_replay_jobs (job_id, tipo, pair, dias_historico, status, created_at)
+                VALUES (?, ?, ?, ?, 'rodando', ?)
+            ''', (job_id, 'comparar_v2_original_vs_fvg_only_todos_pares', 'TODOS', dias, int(time.time())))
+            conn.commit()
+    except Exception as e:
+        return jsonify({"erro": f"não foi possível criar o job: {e}"}), 500
+
+    thread = threading.Thread(
+        target=_executar_comparacao_fvg_only_job,
+        args=(db_file, job_id, dias, fim_ts_ms, pares_lista), daemon=True,
+    )
+    thread.start()
+
+    return jsonify({
+        "job_id": job_id, "status": "iniciado", "dias_historico": dias, "fim_ts_ms": fim_ts_ms,
+        "pares": pares_lista or PARES_MONITORADOS_REPLAY,
+        "como_consultar": f"/scalp_gates_vortex/replay_comparativo_luxalgo_status/{job_id}",
+        "aviso": "MUITO pesado (2 variantes x 13 pares) — roda em background, pode levar bastante tempo",
+    })

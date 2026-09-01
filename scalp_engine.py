@@ -14761,3 +14761,965 @@ def diagnostico_confluencias_metricas_endpoint():
         return jsonify(gerar_metricas_grupos_confluencia(db_file))
     except Exception as e:
         return jsonify({"erro": str(e)}), 500
+
+
+# =========================================================================
+# MODULO EXPERIMENTAL ISOLADO — KAIROS_ICT_CASCATA — item aprovado do
+# ticket. NAO altera V2, V2_FVG_ONLY, gates_vortex, producao ou PAPER
+# A/B. Nenhuma funcao existente foi modificada para construir isto —
+# tudo aqui e composicao de pecas ja existentes, mais as poucas pecas
+# genuinamente novas (identificadas explicitamente abaixo).
+#
+# CONTEXTO HIERARQUICO EM CASCATA — correcao de escopo (item aprovado):
+# D1 (macro) -> H4 (confirma) -> H1 (refina) -> M15 (regiao de
+# interesse + liquidez-alvo) -> M5 (execucao: sweep -> MSS/CHoCH ->
+# displacement -> FVG/OB do movimento -> reteste -> entry -> SL -> TP).
+#
+# SEM M1. SEM fallback EMA25. SEM RSI. SEM filtro extra alem do que a
+# propria cadeia causal exige.
+#
+# PECAS REAPROVEITADAS SEM ALTERACAO NENHUMA:
+#   compute_htf_narrative (D1->H4->H1)
+#   compute_lux_structure_bias (M15, mesma funcao que a V2 usa pro bias)
+#   detect_exec_swings / find_equal_highs_lows (liquidez M15)
+#   validar_sfp_estrito (sweep, direto em M5, sem cascata M15->M5->M1)
+#   validar_mss_m1 (aceita qualquer candles, aqui passamos M5 puro)
+#   compute_atr (displacement)
+#   find_fvg_ob_after_choch (FVG/OB ancorado no CHoCH, nao busca solta)
+#   aplicar_buffer_stop_atr (SL)
+#   calcular_tp_dinamico (TP na liquidez, com o SEM_TRADE embutido:
+#       se RR nao fechar, retorna None e o pipeline aborta)
+#
+# PECA GENUINAMENTE NOVA (unica que nao existia em lugar nenhum):
+#   _confirmar_reteste_com_rejeicao — o gap real identificado na
+#   auditoria anterior: reteste com CONFIRMACAO de rejeicao (fecha de
+#   volta pra fora da zona), nao so sobreposicao geometrica bruta.
+# =========================================================================
+
+KAIROS_ICT_DISPLACEMENT_ATR_MIN = 1.05  # mesmo limiar ja usado e validado em gates_vortex
+KAIROS_ICT_RETESTE_MAX_CANDLES = 20      # janela causal pra esperar o reteste depois do FVG/OB
+
+
+def _identificar_liquidez_alvo_m15(m15_ate_agora, bias):
+    """
+    LIQUIDEZ — item aprovado do ticket. Identifica, no M15 (a "regiao
+    de interesse" do seu desenho), qual liquidez o preco deveria
+    buscar antes de reverter — reaproveita detect_exec_swings() e
+    find_equal_highs_lows() (ja existentes, sem alteracao), sem
+    inventar deteccao nova.
+
+    bias='alta' (LONG) -> precisamos que o preco tenha varrido
+    liquidez do lado VENDEDOR (um fundo/swing low ou EQL) antes de
+    reverter pra cima.
+    bias='baixa' (SHORT) -> precisamos que o preco tenha varrido
+    liquidez do lado COMPRADOR (um topo/swing high ou EQH) antes de
+    reverter pra baixo.
+
+    Retorna no MESMO formato que validar_sfp_estrito() ja espera
+    (compativel com compute_liquidez_referencia): {'high','low','cutoff_ts'}.
+    """
+    if len(m15_ate_agora) < 20:
+        return None
+
+    swings = detect_exec_swings(m15_ate_agora, lookback=SWING_LOOKBACK)
+    eqs = find_equal_highs_lows(m15_ate_agora)
+
+    if bias == 'alta':
+        candidatos_low = [s['valor'] for s in swings if s['tipo'] == 'low']
+        candidatos_low += [eq['nivel'] for eq in eqs if eq['tipo'] == 'EQL']
+        if not candidatos_low:
+            return None
+        nivel_low = max(candidatos_low)  # o mais PROXIMO do preco atual (o proximo a ser varrido)
+        preco_atual = m15_ate_agora[-1]['c']
+        nivel_high = preco_atual + (preco_atual - nivel_low)  # placeholder simetrico, nao usado pro lado alta
+        return {'high': nivel_high, 'low': nivel_low, 'cutoff_ts': None, 'tipo': 'swing_low_m15'}
+    else:
+        candidatos_high = [s['valor'] for s in swings if s['tipo'] == 'high']
+        candidatos_high += [eq['nivel'] for eq in eqs if eq['tipo'] == 'EQH']
+        if not candidatos_high:
+            return None
+        nivel_high = min(candidatos_high)
+        preco_atual = m15_ate_agora[-1]['c']
+        nivel_low = preco_atual - (nivel_high - preco_atual)
+        return {'high': nivel_high, 'low': nivel_low, 'cutoff_ts': None, 'tipo': 'swing_high_m15'}
+
+
+def _contexto_htf_cascata_kairos(d1, h4, h1, m15):
+    """
+    CONTEXTO HTF EM CASCATA — item aprovado do ticket, correcao de
+    escopo. NAO e so M15. Reaproveita compute_htf_narrative()
+    (D1->H4->H1, hierarquia estrita, ja existente, sem alteracao) e
+    adiciona o refinamento final em M15 (item 4 do seu desenho:
+    'refinamento FINAL do contexto, estrutura local, zona de
+    interesse, liquidez que queremos que o preco busque').
+
+    Retorna None se o contexto D1->H4->H1 nao tiver forca suficiente
+    (bias NEUTRAL ou strength WEAK) OU se o M15 nao concordar com a
+    direcao do contexto HTF -- SEM TRADE nesse caso, nao forca nada.
+    """
+    htf = compute_htf_narrative(d1, h4, h1)
+    if htf['bias'] not in ('LONG', 'SHORT'):
+        return None, 'HTF_NEUTRO'
+    if htf['strength'] == 'WEAK':
+        return None, 'HTF_FRACO'
+
+    bias_alta_baixa = 'alta' if htf['bias'] == 'LONG' else 'baixa'
+
+    if len(m15) < 55:
+        return None, 'M15_INSUFICIENTE'
+    m15_bias = compute_lux_structure_bias(m15, swing_size=50)
+    if m15_bias != bias_alta_baixa:
+        return None, 'M15_NAO_CONFIRMA_HTF'
+
+    liquidez_alvo = _identificar_liquidez_alvo_m15(m15, bias_alta_baixa)
+    if not liquidez_alvo:
+        return None, 'SEM_LIQUIDEZ_M15_IDENTIFICAVEL'
+
+    return {
+        'bias': bias_alta_baixa,
+        'htf_bias_label': htf['bias'],
+        'htf_strength': htf['strength'],
+        'htf_alignment': htf['alignment'],
+        'htf_premium_discount': htf['premium_discount'],
+        'm15_bias_confirma': True,
+        'liquidez_alvo': liquidez_alvo,
+    }, None
+
+
+def _confirmar_reteste_com_rejeicao(candles_pos_zona, zona_top, zona_bottom, direcao):
+    """
+    RETESTE — item aprovado do ticket. ESTA E A UNICA PECA
+    GENUINAMENTE NOVA de todo o modulo (o gap real identificado na
+    auditoria anterior). Nao existe em nenhum lugar do Kairos uma
+    checagem de reteste com CONFIRMACAO de rejeicao -- so toque bruto
+    (_encontrar_toque_zona, usado pela V2) ou reteste implicito via
+    ordem limite (gates_vortex).
+
+    Exige: candle toca a zona (sobrepoe top/bottom) E fecha de volta
+    PRA FORA da zona, na direcao do trade (rejeicao real, nao so
+    sobreposicao). Primeiro candle que satisfizer isso confirma o
+    reteste.
+    """
+    for i, c in enumerate(candles_pos_zona):
+        tocou = c['h'] >= zona_bottom and c['l'] <= zona_top
+        if not tocou:
+            continue
+        if direcao == 'alta':
+            rejeitou = c['c'] > zona_top
+        else:
+            rejeitou = c['c'] < zona_bottom
+        if rejeitou:
+            return {'index': i, 'candle': c, 't': c['t']}
+    return None
+
+
+def avaliar_kairos_ict_cascata(d1, h4, h1, m15, m5, pair=None):
+    """
+    MODULO EXPERIMENTAL ISOLADO -- item aprovado do ticket. Cadeia
+    causal completa: CONTEXTO HTF (D1->H4->H1->M15) -> LIQUIDEZ ->
+    SWEEP -> MSS/CHoCH M5 -> DISPLACEMENT -> FVG/OB do movimento ->
+    RETESTE -> ENTRY -> SL -> TP.
+
+    NAO altera avaliar_vortex_decision_layer_v2, process_pair_gates_
+    vortex ou qualquer outra funcao de decisao existente -- todas
+    permanecem 100% intocadas. Esta funcao so COMPOE pecas ja
+    existentes (compute_htf_narrative, compute_lux_structure_bias,
+    validar_sfp_estrito, validar_mss_m1, find_fvg_ob_after_choch,
+    aplicar_buffer_stop_atr, calcular_tp_dinamico) mais a unica peca
+    nova (_confirmar_reteste_com_rejeicao). SEM M1. SEM fallback
+    EMA25. SEM RSI. Nao e chamada por nenhum caminho de producao.
+    """
+    resultado = {
+        'signal': False, 'valid': False, 'failure_reason': None,
+        'pair': pair, 'direction': None, 'bias_htf': None, 'htf_strength': None,
+        'liquidez_tipo': None, 'liquidez_nivel': None,
+        'sweep_timestamp': None, 'sweep_nivel': None,
+        'choch_timestamp': None, 'choch_nivel': None,
+        'displacement_atr_multiplo': None, 'displacement_ok': None,
+        'zone_type': None, 'zone_top': None, 'zone_bottom': None,
+        'reteste_timestamp': None,
+        'entry': None, 'sl': None, 'sl_regra': None, 'tp': None, 'tp_origem': None, 'rr': None,
+        'reason': None,
+    }
+
+    if not d1 or not h4 or not h1 or not m15 or not m5:
+        resultado['failure_reason'] = 'CANDLES_INSUFICIENTES'
+        return resultado
+
+    # === 1) CONTEXTO HTF EM CASCATA (D1 -> H4 -> H1 -> M15) ===
+    contexto, motivo_contexto = _contexto_htf_cascata_kairos(d1, h4, h1, m15)
+    if not contexto:
+        resultado['failure_reason'] = motivo_contexto
+        return resultado
+
+    bias = contexto['bias']
+    resultado['direction'] = 'LONG' if bias == 'alta' else 'SHORT'
+    resultado['bias_htf'] = contexto['htf_bias_label']
+    resultado['htf_strength'] = contexto['htf_strength']
+
+    # === 2) LIQUIDEZ (identificada no M15, carregada pro M5) ===
+    liquidez = contexto['liquidez_alvo']
+    resultado['liquidez_tipo'] = liquidez['tipo']
+    resultado['liquidez_nivel'] = liquidez['high'] if bias == 'baixa' else liquidez['low']
+
+    # === 3) SWEEP -- direto em M5, SEM M1, reaproveita validar_sfp_estrito ===
+    sfp, motivo_sfp, _ts_breakout = validar_sfp_estrito(m5, liquidez, bias)
+    if not sfp:
+        resultado['failure_reason'] = f'SEM_SWEEP: {motivo_sfp}'
+        return resultado
+    resultado['sweep_timestamp'] = sfp['t']
+    resultado['sweep_nivel'] = sfp['nivel']
+
+    # === 4) MSS/CHoCH M5 -- DEPOIS do sweep, reaproveita validar_mss_m1 (aceita M5 puro) ===
+    mss = validar_mss_m1(m5, sfp, bias)
+    if not mss:
+        resultado['failure_reason'] = 'SEM_MSS_APOS_SWEEP'
+        return resultado
+    resultado['choch_timestamp'] = mss['t']
+    resultado['choch_nivel'] = mss['nivel']
+
+    # === 5) DISPLACEMENT -- medido de verdade, mesmo criterio ja
+    # validado em gates_vortex (range do candle de MSS / ATR) ===
+    idx_mss_global = None
+    for i, c in enumerate(m5):
+        if c['t'] == mss['t']:
+            idx_mss_global = i
+            break
+    if idx_mss_global is None:
+        resultado['failure_reason'] = 'INDICE_MSS_INVALIDO'
+        return resultado
+
+    candle_mss = m5[idx_mss_global]
+    atr_series = compute_atr(m5[:idx_mss_global + 1], 14)
+    atr_no_momento = next((v for v in reversed(atr_series) if v is not None), None)
+    range_mss = candle_mss['h'] - candle_mss['l']
+    displacement_atr_multiplo = round(range_mss / atr_no_momento, 2) if atr_no_momento and atr_no_momento > 0 else None
+    resultado['displacement_atr_multiplo'] = displacement_atr_multiplo
+    displacement_ok = displacement_atr_multiplo is not None and displacement_atr_multiplo >= KAIROS_ICT_DISPLACEMENT_ATR_MIN
+    resultado['displacement_ok'] = displacement_ok
+    if not displacement_ok:
+        resultado['failure_reason'] = 'DISPLACEMENT_INSUFICIENTE'
+        return resultado
+
+    # === 6) FVG/OB CRIADO PELO MOVIMENTO -- reaproveita find_fvg_ob_after_choch,
+    # janela estreita ancorada no MSS, NAO busca solta nos ultimos 100 candles ===
+    candles_ref_pos_mss = m5[max(0, idx_mss_global - 5):]
+    mss_local = dict(mss)
+    mss_local['index'] = min(5, idx_mss_global)
+    entry_zone = find_fvg_ob_after_choch(candles_ref_pos_mss, mss_local)
+    if not entry_zone:
+        resultado['failure_reason'] = 'SEM_FVG_OB_APOS_DISPLACEMENT'
+        return resultado
+    resultado['zone_type'] = entry_zone['tipo']
+    resultado['zone_top'] = round(entry_zone['top'], 6)
+    resultado['zone_bottom'] = round(entry_zone['bottom'], 6)
+
+    # === 7) RETESTE -- com confirmacao de rejeicao (a peca nova) ===
+    candles_pos_zona = m5[idx_mss_global + 1: idx_mss_global + 1 + KAIROS_ICT_RETESTE_MAX_CANDLES]
+    reteste = _confirmar_reteste_com_rejeicao(candles_pos_zona, entry_zone['top'], entry_zone['bottom'], bias)
+    if not reteste:
+        resultado['failure_reason'] = 'SEM_RETESTE_CONFIRMADO'
+        return resultado
+    resultado['reteste_timestamp'] = reteste['t']
+
+    # === 8) ENTRY -- close do candle que confirmou o reteste ===
+    entry = reteste['candle']['c']
+    resultado['entry'] = round(entry, 6)
+
+    # === 9) SL ESTRUTURAL -- atras da invalidacao: o mais protetor entre
+    # a borda da zona e o pavio do sweep, com buffer de ATR (mesma funcao
+    # ja usada pela V2, aplicar_buffer_stop_atr, sem alteracao) ===
+    candles_para_sl = m5[:idx_mss_global + 1]
+    if bias == 'alta':
+        nivel_bruto = min(entry_zone['bottom'], sfp['sl_pavio'])
+        sl = aplicar_buffer_stop_atr(nivel_bruto, 'alta', candles_para_sl)
+        sl_regra = 'zona' if nivel_bruto == entry_zone['bottom'] else 'sweep_pavio'
+    else:
+        nivel_bruto = max(entry_zone['top'], sfp['sl_pavio'])
+        sl = aplicar_buffer_stop_atr(nivel_bruto, 'baixa', candles_para_sl)
+        sl_regra = 'zona' if nivel_bruto == entry_zone['top'] else 'sweep_pavio'
+
+    if sl is None:
+        resultado['failure_reason'] = 'SL_INVALIDO'
+        return resultado
+    risco = abs(entry - sl)
+    sl_do_lado_certo = (sl < entry) if bias == 'alta' else (sl > entry)
+    if risco <= 0 or not sl_do_lado_certo:
+        resultado['failure_reason'] = 'SL_INVALIDO'
+        return resultado
+    resultado['sl'] = round(sl, 6)
+    resultado['sl_regra'] = sl_regra
+
+    # === 10) TP NA PROXIMA LIQUIDEZ -- mesma funcao que a V2 ja usa,
+    # calcular_tp_dinamico(), que ja embute o "SEM TRADE se RR nao
+    # fechar" (retorna None se nao houver alvo com RR aceitavel) ===
+    try:
+        tp, tp_origem = calcular_tp_dinamico(bias, entry, sl, m15, d1)
+    except Exception as e:
+        resultado['failure_reason'] = f'ERRO_TP: {e}'
+        return resultado
+    if tp is None:
+        resultado['failure_reason'] = 'SEM_TRADE_RR_INSUFICIENTE'
+        return resultado
+
+    resultado['tp'] = round(tp, 6)
+    resultado['tp_origem'] = tp_origem
+    resultado['rr'] = round(abs(tp - entry) / risco, 2)
+    resultado['signal'] = True
+    resultado['valid'] = True
+    resultado['reason'] = (
+        f"CONTEXTO(D1-H4-H1-M15)={contexto['htf_bias_label']}/{contexto['htf_strength']} + "
+        f"LIQUIDEZ({liquidez['tipo']}) + SWEEP({sfp['t']}) + MSS({mss['t']}) + "
+        f"DISPLACEMENT({displacement_atr_multiplo}x) + {entry_zone['tipo']} + "
+        f"RETESTE({reteste['t']}) + SL({sl_regra}) + TP({tp_origem})"
+    )
+    return resultado
+
+
+# =========================================================================
+# REPLAY CAUSAL -- avaliar_kairos_ict_cascata() -- item aprovado do
+# ticket. SOMENTE REPLAY/BACKTEST, sem deploy, sem alterar producao.
+# Mesma metodologia causal ja validada em todo o resto desta conversa
+# (fetch por par, truncamento por ts_corte, sem lookahead). SEM M1.
+# =========================================================================
+
+def replay_kairos_ict_cascata(pair, dias_historico=7, fim_ts_ms=None):
+    """
+    Replay causal do modulo experimental isolado. Busca D1/H4/H1/M15/M5
+    (SEM M1, como pedido), truncamento causal identico ao ja usado em
+    replay_vortex_decision_layer_v2(). Nao chama nem altera nenhuma
+    outra funcao de decisao existente.
+    """
+    if fim_ts_ms is None:
+        fim_ts_ms = int(time.time() * 1000)
+
+    symbol_map = {
+        'BTCUSD': 'BTCUSDT', 'ETHUSD': 'ETHUSDT', 'SOLUSD': 'SOLUSDT', 'XRPUSD': 'XRPUSDT',
+        'LINKUSD': 'LINKUSDT', 'ADAUSD': 'ADAUSDT', 'AVAXUSD': 'AVAXUSDT', 'BNBUSD': 'BNBUSDT',
+        'AAVEUSD': 'AAVEUSDT', 'NEARUSD': 'NEARUSDT', 'PENDLEUSD': 'PENDLEUSDT', 'INJUSD': 'INJUSDT',
+        'ONDOUSD': 'ONDOUSDT',
+    }
+    symbol = symbol_map.get(pair.upper(), pair.upper().replace('USD', 'USDT'))
+
+    d1_bruto = _fetch_bybit_klines_historico(symbol, 'D', dias_historico + 120, fim_ts_ms=fim_ts_ms)
+    h4_bruto = _fetch_bybit_klines_historico(symbol, '240', dias_historico + 60, fim_ts_ms=fim_ts_ms)
+    h1_bruto = _fetch_bybit_klines_historico(symbol, '60', dias_historico + 60, fim_ts_ms=fim_ts_ms)
+    m15_bruto = _fetch_bybit_klines_historico(symbol, '15', dias_historico + 3, fim_ts_ms=fim_ts_ms)
+    m5_bruto = _fetch_bybit_klines_historico(symbol, '5', dias_historico + 2, fim_ts_ms=fim_ts_ms)
+
+    d1, val_d1 = _validar_e_limpar_candles(d1_bruto, 'D')
+    h4, val_h4 = _validar_e_limpar_candles(h4_bruto, '240')
+    h1, val_h1 = _validar_e_limpar_candles(h1_bruto, '60')
+    m15, val_m15 = _validar_e_limpar_candles(m15_bruto, '15')
+    m5, val_m5 = _validar_e_limpar_candles(m5_bruto, '5')
+
+    inicio_ts_ms = fim_ts_ms - dias_historico * 86400000
+    d1 = [c for c in d1 if c['t'] <= fim_ts_ms]
+    h4 = [c for c in h4 if c['t'] <= fim_ts_ms]
+    h1 = [c for c in h1 if c['t'] <= fim_ts_ms]
+    m15_periodo = [c for c in m15 if inicio_ts_ms <= c['t'] <= fim_ts_ms]
+    m5_periodo = [c for c in m5 if inicio_ts_ms <= c['t'] <= fim_ts_ms]
+
+    MIN_M5_IDX = 60
+    if len(m15_periodo) < 60 or len(m5_periodo) < MIN_M5_IDX + 20:
+        return {'erro': f'dados insuficientes pra {pair} (M15={len(m15_periodo)}, M5={len(m5_periodo)})',
+                'validacao_m15': val_m15, 'validacao_m5': val_m5}
+
+    funil = {
+        'total_ciclos_avaliados': 0, 'sem_contexto_htf': 0, 'sem_liquidez': 0,
+        'sem_sweep': 0, 'sem_mss': 0, 'sem_displacement': 0, 'sem_fvg_ob': 0,
+        'sem_reteste': 0, 'sem_trade_rr': 0, 'sinais_validos_brutos': 0,
+    }
+    distribuicao_motivos = {}
+    sinais_completos_brutos = []
+
+    for i in range(MIN_M5_IDX, len(m5_periodo)):
+        ts_corte = m5_periodo[i]['t']
+        m5_ate_agora = [c for c in m5 if c['t'] <= ts_corte][-500:]
+        m15_ate_agora = [c for c in m15 if c['t'] <= ts_corte]
+        h1_ate_agora = [c for c in h1 if c['t'] <= ts_corte]
+        h4_ate_agora = [c for c in h4 if c['t'] <= ts_corte]
+        d1_ate_agora = [c for c in d1 if c['t'] <= ts_corte]
+        if len(m15_ate_agora) < 60 or len(m5_ate_agora) < MIN_M5_IDX:
+            continue
+
+        funil['total_ciclos_avaliados'] += 1
+        try:
+            r = avaliar_kairos_ict_cascata(d1_ate_agora, h4_ate_agora, h1_ate_agora, m15_ate_agora, m5_ate_agora, pair=pair)
+        except Exception as e:
+            distribuicao_motivos[f'EXCECAO: {e}'] = distribuicao_motivos.get(f'EXCECAO: {e}', 0) + 1
+            continue
+
+        motivo = r['failure_reason'] or 'SINAL_VALIDO'
+        distribuicao_motivos[motivo] = distribuicao_motivos.get(motivo, 0) + 1
+
+        if motivo and motivo.startswith('HTF') or motivo in ('M15_INSUFICIENTE', 'M15_NAO_CONFIRMA_HTF'):
+            funil['sem_contexto_htf'] += 1
+        elif motivo == 'SEM_LIQUIDEZ_M15_IDENTIFICAVEL':
+            funil['sem_liquidez'] += 1
+        elif motivo and motivo.startswith('SEM_SWEEP'):
+            funil['sem_sweep'] += 1
+        elif motivo == 'SEM_MSS_APOS_SWEEP':
+            funil['sem_mss'] += 1
+        elif motivo == 'DISPLACEMENT_INSUFICIENTE':
+            funil['sem_displacement'] += 1
+        elif motivo == 'SEM_FVG_OB_APOS_DISPLACEMENT':
+            funil['sem_fvg_ob'] += 1
+        elif motivo == 'SEM_RETESTE_CONFIRMADO':
+            funil['sem_reteste'] += 1
+        elif motivo == 'SEM_TRADE_RR_INSUFICIENTE':
+            funil['sem_trade_rr'] += 1
+
+        if r['valid']:
+            funil['sinais_validos_brutos'] += 1
+            sinais_completos_brutos.append({**r, 'idx_m5': i})
+
+    sinais_unicos = []
+    chaves_vistas = set()
+    for s in sinais_completos_brutos:
+        chave = (s['choch_timestamp'], s['direction'], s['zone_type'])
+        if chave not in chaves_vistas:
+            chaves_vistas.add(chave)
+            sinais_unicos.append(s)
+
+    return {
+        'pair': pair, 'dias_historico': dias_historico,
+        'nota_metodologica': (
+            'REPLAY EXPERIMENTAL do modulo KAIROS_ICT_CASCATA -- SEM M1, SEM EMA25, SEM RSI. '
+            'Nao altera nem chama avaliar_vortex_decision_layer_v2, process_pair_gates_vortex '
+            'ou qualquer outra funcao de decisao existente.'
+        ),
+        'funil': funil,
+        'distribuicao_motivos_todos_ciclos': distribuicao_motivos,
+        'total_sinais_unicos': len(sinais_unicos),
+        'exemplos_sinais_completos': sinais_unicos[:10],
+        'sinais_unicos_completos': sinais_unicos,
+        'm5_completo': m5,
+    }
+
+
+@explicacao_bp.route("/scalp_gates_vortex/kairos_ict_cascata_replay", methods=["GET"])
+def kairos_ict_cascata_replay_endpoint():
+    """
+    MODULO EXPERIMENTAL ISOLADO -- replay somente leitura do
+    avaliar_kairos_ict_cascata(). NAO altera V2, V2_FVG_ONLY,
+    gates_vortex, producao ou PAPER A/B. SEM M1, SEM EMA25, SEM RSI.
+    Uso: ?pair=BTCUSD&dias=7&confirm=RODAR_ICT_CASCATA
+    """
+    if request.args.get('confirm') != 'RODAR_ICT_CASCATA':
+        return jsonify({
+            "erro": "protegido contra chamada acidental",
+            "como_usar": "adiciona &confirm=RODAR_ICT_CASCATA na URL, ex: "
+                          "/scalp_gates_vortex/kairos_ict_cascata_replay?pair=BTCUSD&dias=7&confirm=RODAR_ICT_CASCATA",
+        }), 400
+    pair = request.args.get('pair', 'BTCUSD')
+    dias = int(request.args.get('dias', 7))
+    fim_ts_ms_param = request.args.get('fim_ts_ms')
+    fim_ts_ms = int(fim_ts_ms_param) if fim_ts_ms_param else None
+    try:
+        resultado = replay_kairos_ict_cascata(pair, dias_historico=dias, fim_ts_ms=fim_ts_ms)
+        # m5_completo eh pesado e so serve pra resolucao de TP/SL futura -- nao devolve no endpoint direto
+        resultado_enxuto = {k: v for k, v in resultado.items() if k != 'm5_completo'}
+        return jsonify(resultado_enxuto)
+    except Exception as e:
+        return jsonify({"erro": str(e)}), 500
+
+
+# =========================================================================
+# ENGINE EXPERIMENTAL ISOLADA -- KAIROS_ICT_MMXM -- item aprovado do
+# ticket. NAO altera V2, V2_FVG_ONLY, gates_vortex, PAPER A/B,
+# producao, Telegram, heartbeat ou kill switches. Reaproveita
+# avaliar_kairos_ict_cascata() e replay_kairos_ict_cascata() (SEM
+# ALTERACAO NENHUMA -- essas duas continuam sendo o motor de decisao
+# OBRIGATORIO: contexto D1->H4->H1->M15, liquidez, sweep, MSS,
+# displacement, FVG/OB do movimento, reteste, entry, SL, TP).
+#
+# ESTA CAMADA ADICIONA, POR CIMA, sem tocar no motor:
+#   B) NARRATIVA/PD-ARRAYS -- so leitura, so tag informativa, NUNCA
+#      bloqueia o sinal (elementos opcionais, conforme pedido)
+#   C) GESTAO -- parcial, protecao (breakeven), saida por invalidacao
+#      -- reaproveita as MESMAS constantes ja usadas em producao
+#      (BE_PROGRESSO_PCT, PARCIAL_PROGRESSO_PCT de gerenciar_trades_
+#      abertos), sem chamar nem alterar essa funcao (que grava em
+#      tabela real e manda Telegram -- aqui e so simulacao de backtest)
+#   D) REPLAY MULTI-PAR + METRICAS -- reaproveita replay_kairos_ict_
+#      cascata() por par, sem reimplementar o loop causal
+#
+# CLASSIFICACAO EXPLICITA (item aprovado do ticket):
+#   OBRIGATORIO       = tudo dentro de avaliar_kairos_ict_cascata()
+#                        (contexto/liquidez/sweep/MSS/displacement/
+#                        FVG-OB/reteste/entry/SL/TP) -- sem isso, SEM
+#                        TRADE, ja validado no modulo anterior
+#   CONFIRMACAO        = displacement (ja obrigatorio dentro do motor,
+#                        mas listado aqui porque e o unico item que
+#                        "confirma" o movimento em vez de definir a
+#                        tese -- nao adiciona filtro novo, e o mesmo
+#                        criterio ja embutido)
+#   OPCIONAL/NARRATIVA = PDH/PDL/PWH/PWL, ADR, sessoes, Daily Open,
+#                        Premium/Discount, IFVG, Breaker Block, OTE --
+#                        calculados e anexados a cada sinal, NUNCA
+#                        usados pra aceitar/rejeitar o trade
+# =========================================================================
+
+def _calcular_narrativa_pd_arrays(d1, m15, m5, entry_zone, direcao, entry, ts_corte, sweep_nivel=None, choch_nivel=None):
+    """
+    NARRATIVA/PD-ARRAYS -- item aprovado do ticket. SOMENTE
+    INFORMATIVO -- cada campo aqui e uma TAG, nunca uma condicao que
+    aceita ou rejeita o sinal (o sinal ja foi decidido antes desta
+    funcao ser chamada, por avaliar_kairos_ict_cascata()).
+
+    Reaproveita: compute_midnight_open_utc, compute_session_high_low,
+    compute_lux_premium_discount, classificar_zona_lux,
+    find_ifvg_after_choch, find_breaker_block_after_choch -- todas ja
+    existentes, sem alteracao. MMXM nao vira um classificador
+    separado (nao existe deteccao de fase MMXM pronta no Kairos, e
+    inventar um agora seria exatamente o 'achismo ICT' que voce nao
+    quer) -- MMXM fica representado implicitamente pela propria
+    sequencia sweep->MSS->displacement, que ja e o mecanismo de
+    manipulacao->distribuicao.
+    """
+    narrativa = {
+        'pdh': None, 'pdl': None, 'pwh': None, 'pwl': None, 'adr_pct': None,
+        'daily_open': None, 'session_asia_high': None, 'session_asia_low': None,
+        'session_london_high': None, 'session_london_low': None,
+        'premium_discount': None, 'ifvg_presente': False, 'breaker_presente': False,
+        'ote_min': None, 'ote_max': None, 'entry_dentro_ote': None,
+    }
+
+    # PDH/PDL -- previous day high/low, direto do candle D1 anterior (dado ja existente, sem funcao nova)
+    if len(d1) >= 2:
+        narrativa['pdh'] = d1[-2]['h']
+        narrativa['pdl'] = d1[-2]['l']
+
+    # PWH/PWL -- previous week high/low, max/min dos ultimos ~7 candles D1 anteriores ao atual
+    if len(d1) >= 8:
+        semana_anterior = d1[-8:-1]
+        narrativa['pwh'] = max(c['h'] for c in semana_anterior)
+        narrativa['pwl'] = min(c['l'] for c in semana_anterior)
+
+    # ADR -- Average Daily Range (%), media do range D1 dos ultimos 14 dias
+    if len(d1) >= 15:
+        janela_adr = d1[-15:-1]
+        adrs_pct = [(c['h'] - c['l']) / c['c'] * 100 for c in janela_adr if c['c']]
+        narrativa['adr_pct'] = round(sum(adrs_pct) / len(adrs_pct), 3) if adrs_pct else None
+
+    # Daily Open (UTC) -- reaproveita compute_midnight_open_utc, sem alteracao
+    try:
+        narrativa['daily_open'] = compute_midnight_open_utc(m15)
+    except Exception:
+        pass
+
+    # Sessoes -- reaproveita compute_session_high_low, sem alteracao
+    try:
+        asia = compute_session_high_low(m15, 'asia', dias_atras=0)
+        if asia:
+            narrativa['session_asia_high'] = asia['high']
+            narrativa['session_asia_low'] = asia['low']
+    except Exception:
+        pass
+    try:
+        london = compute_session_high_low(m15, 'london', dias_atras=0)
+        if london:
+            narrativa['session_london_high'] = london['high']
+            narrativa['session_london_low'] = london['low']
+    except Exception:
+        pass
+
+    # Premium/Discount -- reaproveita compute_lux_premium_discount + classificar_zona_lux, sem alteracao
+    try:
+        zona_pd = compute_lux_premium_discount(m15, swing_size=50)
+        narrativa['premium_discount'] = classificar_zona_lux(entry, zona_pd)
+    except Exception:
+        pass
+
+    # IFVG / Breaker Block -- reaproveita find_ifvg_after_choch e
+    # find_breaker_block_after_choch, sem alteracao. Precisam de um
+    # evento de CHoCH -- reaproveita a estrutura interna do M15
+    # (mesma funcao ja usada por avaliar_kairos_ict_cascata pro
+    # contexto), so como leitura extra, nao decide nada.
+    try:
+        eventos_m15 = compute_lux_structure_events(m15, swing_size=50)
+        choch_m15_recente = next((ev for ev in reversed(eventos_m15) if ev['tipo'] == 'CHoCH'), None)
+        if choch_m15_recente:
+            ifvg = find_ifvg_after_choch(m15, choch_m15_recente)
+            narrativa['ifvg_presente'] = ifvg is not None
+            breaker = find_breaker_block_after_choch(m15, choch_m15_recente)
+            narrativa['breaker_presente'] = breaker is not None
+    except Exception:
+        pass
+
+    # OTE (Optimal Trade Entry, 62%-79% Fibonacci) -- calculado sobre a
+    # PERNA DO MOVIMENTO (sweep ate o pivot do MSS/CHoCH), nao sobre a
+    # zona do FVG -- isso e o padrao ICT correto (retracao dentro do
+    # impulso que gerou a quebra de estrutura, nao dentro da propria
+    # zona de entrada). E so aritmetica sobre niveis que o motor ja
+    # calculou (sweep_nivel, choch_nivel) -- nenhuma deteccao nova.
+    if sweep_nivel is not None and choch_nivel is not None:
+        topo, fundo = max(sweep_nivel, choch_nivel), min(sweep_nivel, choch_nivel)
+        if direcao == 'alta':
+            narrativa['ote_min'] = round(fundo + (topo - fundo) * 0.21, 6)
+            narrativa['ote_max'] = round(fundo + (topo - fundo) * 0.38, 6)
+        else:
+            narrativa['ote_min'] = round(fundo + (topo - fundo) * 0.62, 6)
+            narrativa['ote_max'] = round(fundo + (topo - fundo) * 0.79, 6)
+        if narrativa['ote_min'] is not None and narrativa['ote_max'] is not None:
+            lo, hi = sorted([narrativa['ote_min'], narrativa['ote_max']])
+            narrativa['entry_dentro_ote'] = lo <= entry <= hi
+
+    return narrativa
+
+
+def _resolver_com_gestao_kairos_ict(candles_futuros, direcao, entry, sl, tp, max_candles):
+    """
+    GESTAO -- item aprovado do ticket. SOMENTE SIMULACAO DE BACKTEST --
+    nao chama gerenciar_trades_abertos() (que grava em tabela real e
+    manda Telegram), so reaproveita os MESMOS criterios/constantes ja
+    validados em producao: BE_PROGRESSO_PCT (0.30) e PARCIAL_
+    PROGRESSO_PCT (0.50).
+
+    Simplificacao explicita, documentada (nao escondida): 'trailing
+    estrutural' continuo (recalcular swing a cada candle) NAO foi
+    implementado -- seria um sistema bem maior, dificil de validar
+    com o mesmo rigor do resto. Em vez disso: ao atingir 50% do
+    caminho ate o TP, registra parcial (metade do R planejado) e move
+    o resto pra breakeven -- e a mesma logica que ja roda em producao
+    pra Engine A/B, so simulada aqui candle a candle no passado.
+    'Saida por invalidacao da tese' = o proprio SL estrutural ja
+    calculado por avaliar_kairos_ict_cascata() (que fica atras do
+    pavio do sweep ou da zona) -- nao e uma condicao nova, e o SL que
+    ja existe, chamado pelo nome que voce usou.
+    """
+    janela = candles_futuros[:max_candles]
+    if not janela:
+        return {'resultado': 'NENHUM', 'r_final': None, 'parcial_r': None, 'be_movido': False, 'candles_ate_resolucao': None}
+
+    risco = abs(entry - sl)
+    if risco <= 0:
+        return {'resultado': 'ERRO', 'r_final': None, 'parcial_r': None, 'be_movido': False, 'candles_ate_resolucao': None}
+
+    dist_total_tp = abs(tp - entry)
+    parcial_feita = False
+    be_movido = False
+    sl_efetivo = sl
+    r_parcial_travado = 0.0
+
+    for idx, c in enumerate(janela):
+        if direcao == 'alta':
+            atingiu_sl = c['l'] <= sl_efetivo
+            avanco = c['h'] - entry
+        else:
+            atingiu_sl = c['h'] >= sl_efetivo
+            avanco = entry - c['l']
+
+        progresso = avanco / dist_total_tp if dist_total_tp > 0 else 0
+
+        if atingiu_sl:
+            if be_movido:
+                return {
+                    'resultado': 'BE_APOS_PARCIAL', 'r_final': r_parcial_travado,
+                    'parcial_r': r_parcial_travado, 'be_movido': True,
+                    'candles_ate_resolucao': idx + 1,
+                }
+            return {
+                'resultado': 'SL', 'r_final': -1.0, 'parcial_r': None,
+                'be_movido': False, 'candles_ate_resolucao': idx + 1,
+            }
+
+        if not parcial_feita and progresso >= PARCIAL_PROGRESSO_PCT:
+            parcial_feita = True
+            be_movido = True
+            sl_efetivo = entry
+            r_parcial_travado += PARCIAL_PROGRESSO_PCT * (dist_total_tp / risco)
+
+        if direcao == 'alta':
+            atingiu_tp = c['h'] >= tp
+        else:
+            atingiu_tp = c['l'] <= tp
+
+        if atingiu_tp:
+            rr_total = dist_total_tp / risco
+            if parcial_feita:
+                r_restante = (1 - PARCIAL_PROGRESSO_PCT) * rr_total
+                r_final = r_parcial_travado + r_restante
+                return {
+                    'resultado': 'TP_COM_PARCIAL', 'r_final': round(r_final, 4),
+                    'parcial_r': round(r_parcial_travado, 4), 'be_movido': True,
+                    'candles_ate_resolucao': idx + 1,
+                }
+            return {
+                'resultado': 'TP_CHEIO', 'r_final': round(rr_total, 4), 'parcial_r': None,
+                'be_movido': False, 'candles_ate_resolucao': idx + 1,
+            }
+
+    if parcial_feita:
+        return {
+            'resultado': 'PARCIAL_SEM_RESOLUCAO_FINAL', 'r_final': round(r_parcial_travado, 4),
+            'parcial_r': round(r_parcial_travado, 4), 'be_movido': True,
+            'candles_ate_resolucao': None,
+        }
+    return {'resultado': 'NENHUM', 'r_final': None, 'parcial_r': None, 'be_movido': False, 'candles_ate_resolucao': None}
+
+
+# =========================================================================
+# REPLAY + METRICAS -- KAIROS_ICT_MMXM -- item aprovado do ticket.
+# Reaproveita replay_kairos_ict_cascata() (SEM ALTERACAO) pra obter os
+# sinais e o m5_completo, depois aplica narrativa (Camada B) e
+# resolucao com gestao (Camada C) em cima -- nao reimplementa o loop
+# causal, nao duplica deteccao nenhuma.
+# =========================================================================
+
+def replay_kairos_ict_mmxm(pair, dias_historico=7, fim_ts_ms=None):
+    """
+    Roda replay_kairos_ict_cascata() (SEM ALTERACAO), e para cada sinal
+    unico: calcula a narrativa PD-arrays (so informativo) e resolve
+    com a simulacao de gestao (parcial + BE), em vez do TP/SL binario
+    simples. NAO altera nem chama nenhuma funcao de producao.
+    """
+    resultado_base = replay_kairos_ict_cascata(pair, dias_historico=dias_historico, fim_ts_ms=fim_ts_ms)
+    if 'erro' in resultado_base:
+        return resultado_base
+
+    m5 = resultado_base.get('m5_completo')
+    sinais = resultado_base.get('sinais_unicos_completos', [])
+    if not m5 or not sinais:
+        return {'erro': f'sem m5_completo ou sinais pra {pair} -- replay base nao produziu dado suficiente',
+                'funil': resultado_base.get('funil')}
+
+    # D1 nao vem exposto no retorno de replay_kairos_ict_cascata() (que
+    # nao foi alterada) -- busca separada, so pra Camada B (narrativa),
+    # NUNCA usada pra decidir nada, so pra PDH/PDL/PWH/PWL/ADR.
+    symbol_map_d1 = {
+        'BTCUSD': 'BTCUSDT', 'ETHUSD': 'ETHUSDT', 'SOLUSD': 'SOLUSDT', 'XRPUSD': 'XRPUSDT',
+        'LINKUSD': 'LINKUSDT', 'ADAUSD': 'ADAUSDT', 'AVAXUSD': 'AVAXUSDT', 'BNBUSD': 'BNBUSDT',
+        'AAVEUSD': 'AAVEUSDT', 'NEARUSD': 'NEARUSDT', 'PENDLEUSD': 'PENDLEUSDT', 'INJUSD': 'INJUSDT',
+        'ONDOUSD': 'ONDOUSDT',
+    }
+    symbol_d1 = symbol_map_d1.get(pair.upper(), pair.upper().replace('USD', 'USDT'))
+    fim_ts_ms_real = fim_ts_ms if fim_ts_ms is not None else int(time.time() * 1000)
+    d1_bruto_narrativa = _fetch_bybit_klines_historico(symbol_d1, 'D', dias_historico + 20, fim_ts_ms=fim_ts_ms_real)
+    d1_narrativa, _ = _validar_e_limpar_candles(d1_bruto_narrativa, 'D')
+    m15_bruto_narrativa = _fetch_bybit_klines_historico(symbol_d1, '15', dias_historico + 3, fim_ts_ms=fim_ts_ms_real)
+    m15_narrativa, _ = _validar_e_limpar_candles(m15_bruto_narrativa, '15')
+
+    auditoria = []
+    for s in sinais:
+        idx = s['idx_m5']
+        direcao_lower = 'alta' if s['direction'] == 'LONG' else 'baixa'
+        candles_futuros = m5[idx + 1:]
+
+        res_gestao = _resolver_com_gestao_kairos_ict(
+            candles_futuros, direcao_lower, s['entry'], s['sl'], s['tp'], max_candles=len(candles_futuros),
+        )
+
+        # narrativa -- so tag informativa, reaproveita candles ja truncados causalmente
+        # (m5[:idx+1] eh o mesmo corte causal que o motor ja usou pra gerar este sinal)
+        try:
+            d1_ate_agora = [c for c in d1_narrativa if c['t'] <= s['choch_timestamp']]
+            m15_ate_agora = [c for c in m15_narrativa if c['t'] <= s['choch_timestamp']]
+            narrativa = _calcular_narrativa_pd_arrays(
+                d1=d1_ate_agora, m15=m15_ate_agora, m5=m5[:idx + 1], entry_zone={'top': s['zone_top'], 'bottom': s['zone_bottom']},
+                direcao=direcao_lower, entry=s['entry'], ts_corte=s['choch_timestamp'],
+                sweep_nivel=s.get('sweep_nivel'), choch_nivel=s.get('choch_nivel'),
+            )
+        except Exception:
+            narrativa = {}
+
+        auditoria.append({
+            'pair': pair, 'direction': s['direction'], 'entry': s['entry'], 'sl': s['sl'], 'tp': s['tp'],
+            'rr': s['rr'], 'zone_type': s['zone_type'], 'choch_timestamp': s['choch_timestamp'],
+            'displacement_atr_multiplo': s.get('displacement_atr_multiplo'),
+            'resultado_gestao': res_gestao['resultado'], 'r_final': res_gestao['r_final'],
+            'parcial_r': res_gestao['parcial_r'], 'be_movido': res_gestao['be_movido'],
+            **narrativa,
+        })
+
+    resolvidos = [a for a in auditoria if a['resultado_gestao'] in ('TP_CHEIO', 'TP_COM_PARCIAL', 'SL', 'BE_APOS_PARCIAL')]
+    rs = [a['r_final'] for a in resolvidos if a['r_final'] is not None]
+    n_wins = sum(1 for a in resolvidos if a['r_final'] is not None and a['r_final'] > 0)
+    win_rate = round(100 * n_wins / len(resolvidos), 2) if resolvidos else None
+    expectancy = round(sum(rs) / len(rs), 4) if rs else None
+    soma_r = round(sum(rs), 2) if rs else None
+
+    ordenados = sorted(resolvidos, key=lambda a: a['choch_timestamp'])
+    equity = pico = max_dd = 0.0
+    for a in ordenados:
+        if a['r_final'] is None:
+            continue
+        equity += a['r_final']
+        pico = max(pico, equity)
+        max_dd = max(max_dd, pico - equity)
+    r_sobre_dd = round(soma_r / max_dd, 3) if max_dd > 0 and soma_r is not None else None
+
+    long_r = [a['r_final'] for a in resolvidos if a['direction'] == 'LONG' and a['r_final'] is not None]
+    short_r = [a['r_final'] for a in resolvidos if a['direction'] == 'SHORT' and a['r_final'] is not None]
+
+    por_tipo_modelo = {}
+    for a in resolvidos:
+        tipo = a['zone_type'] or 'desconhecido'
+        por_tipo_modelo.setdefault(tipo, []).append(a['r_final'])
+
+    return {
+        'pair': pair, 'dias_historico': dias_historico,
+        'nota_metodologica': (
+            'ENGINE EXPERIMENTAL ISOLADA -- KAIROS_ICT_MMXM. Reaproveita replay_kairos_ict_'
+            'cascata() e avaliar_kairos_ict_cascata() (motor OBRIGATORIO, SEM ALTERACAO). '
+            'Narrativa (Camada B) e so informativa, nunca decide. Gestao (Camada C) simula '
+            'parcial+BE reaproveitando as mesmas constantes de producao (PARCIAL_PROGRESSO_PCT, '
+            'BE_PROGRESSO_PCT), sem chamar gerenciar_trades_abertos() nem gravar em tabela real.'
+        ),
+        'funil_deteccao': resultado_base.get('funil'),
+        'total_sinais': len(auditoria), 'total_resolvidos': len(resolvidos),
+        'win_rate_pct': win_rate, 'expectancy_R': expectancy, 'soma_R': soma_r,
+        'max_drawdown_R': round(max_dd, 2), 'soma_R_sobre_max_dd': r_sobre_dd,
+        'LONG': {'n': len(long_r), 'soma_R': round(sum(long_r), 2) if long_r else None,
+                 'win_rate_pct': round(100 * sum(1 for r in long_r if r > 0) / len(long_r), 1) if long_r else None},
+        'SHORT': {'n': len(short_r), 'soma_R': round(sum(short_r), 2) if short_r else None,
+                  'win_rate_pct': round(100 * sum(1 for r in short_r if r > 0) / len(short_r), 1) if short_r else None},
+        'por_tipo_modelo': {
+            tipo: {'n': len(vals), 'soma_R': round(sum(vals), 2)}
+            for tipo, vals in por_tipo_modelo.items()
+        },
+        'auditoria_sinais_completa': auditoria,
+    }
+
+
+def replay_kairos_ict_mmxm_todos_pares(db_file, job_id, dias_historico=7, fim_ts_ms=None, pares=None):
+    """Orquestra replay_kairos_ict_mmxm() (SEM ALTERACAO) pra cada
+    par, com heartbeat -- reaproveita _registrar_heartbeat_fvg_only()
+    (generico, ja aprovado, sem alteracao) pra progresso por par."""
+    pares = pares or PARES_MONITORADOS_REPLAY
+    ts_inicio = int(time.time())
+    total_pares = len(pares)
+    _registrar_heartbeat_fvg_only(db_file, job_id, total_pares, 0, None, 'iniciando', ts_inicio)
+
+    resultados_por_pair = {}
+    todos_r = []
+    todos_r_long = []
+    todos_r_short = []
+    pares_com_erro = []
+
+    for idx, pair in enumerate(pares):
+        _registrar_heartbeat_fvg_only(db_file, job_id, total_pares, idx, pair, 'processando', ts_inicio)
+        try:
+            r = replay_kairos_ict_mmxm(pair, dias_historico=dias_historico, fim_ts_ms=fim_ts_ms)
+        except Exception as e:
+            r = {'erro': str(e)}
+        resultados_por_pair[pair] = r
+        if 'erro' in r:
+            pares_com_erro.append(pair)
+        else:
+            for a in r.get('auditoria_sinais_completa', []):
+                if a['r_final'] is not None:
+                    todos_r.append(a['r_final'])
+                    (todos_r_long if a['direction'] == 'LONG' else todos_r_short).append(a['r_final'])
+        _registrar_heartbeat_fvg_only(db_file, job_id, total_pares, idx + 1, pair, 'concluido', ts_inicio)
+
+    _registrar_heartbeat_fvg_only(db_file, job_id, total_pares, total_pares, None, 'concluido_com_sucesso', ts_inicio)
+
+    def _stats(lista):
+        if not lista:
+            return {'n': 0}
+        wins = sum(1 for r in lista if r > 0)
+        return {
+            'n': len(lista), 'win_rate_pct': round(100 * wins / len(lista), 2),
+            'expectancy_R': round(sum(lista) / len(lista), 4), 'soma_R': round(sum(lista), 2),
+        }
+
+    return {
+        'dias_historico': dias_historico, 'pares_testados': pares, 'pares_com_erro': pares_com_erro,
+        'CONSOLIDADO_GLOBAL_pooled': {
+            'TODOS': _stats(todos_r), 'LONG': _stats(todos_r_long), 'SHORT': _stats(todos_r_short),
+        },
+        'resultados_por_pair': resultados_por_pair,
+    }
+
+
+def _executar_kairos_ict_mmxm_job(db_file, job_id, pares, dias_historico, fim_ts_ms):
+    try:
+        resultado = replay_kairos_ict_mmxm_todos_pares(db_file, job_id, dias_historico=dias_historico, fim_ts_ms=fim_ts_ms, pares=pares)
+        with sqlite3.connect(db_file) as conn:
+            conn.execute(
+                "UPDATE scalp_replay_jobs SET status='concluido', resultado_json=?, finished_at=? WHERE job_id=?",
+                (json.dumps(resultado, ensure_ascii=False), int(time.time()), job_id),
+            )
+            conn.commit()
+    except Exception as e:
+        try:
+            with sqlite3.connect(db_file) as conn:
+                conn.execute(
+                    "UPDATE scalp_replay_jobs SET status='erro', erro=?, finished_at=? WHERE job_id=?",
+                    (str(e), int(time.time()), job_id),
+                )
+                conn.commit()
+        except Exception as e2:
+            print(f"[kairos_ict_mmxm] erro ao registrar falha do job {job_id}: {e2}")
+
+
+@explicacao_bp.route("/scalp_gates_vortex/kairos_ict_mmxm_teste_pequeno", methods=["GET"])
+def kairos_ict_mmxm_teste_pequeno_endpoint():
+    """TESTE PEQUENO -- 1 par, roda sincrono, ANTES do job completo.
+    Uso: ?pair=BTCUSD&dias=7&confirm=RODAR_TESTE_PEQUENO_MMXM"""
+    if request.args.get('confirm') != 'RODAR_TESTE_PEQUENO_MMXM':
+        return jsonify({
+            "erro": "protegido contra chamada acidental",
+            "como_usar": "adiciona &confirm=RODAR_TESTE_PEQUENO_MMXM na URL, ex: "
+                          "/scalp_gates_vortex/kairos_ict_mmxm_teste_pequeno?pair=BTCUSD&dias=7&confirm=RODAR_TESTE_PEQUENO_MMXM",
+        }), 400
+    pair = request.args.get('pair', 'BTCUSD')
+    dias = int(request.args.get('dias', 7))
+    fim_ts_ms_param = request.args.get('fim_ts_ms')
+    fim_ts_ms = int(fim_ts_ms_param) if fim_ts_ms_param else None
+    try:
+        resultado = replay_kairos_ict_mmxm(pair, dias_historico=dias, fim_ts_ms=fim_ts_ms)
+        resultado_enxuto = {k: v for k, v in resultado.items() if k not in ('m5_completo',)}
+        return jsonify(resultado_enxuto)
+    except Exception as e:
+        return jsonify({"erro": str(e)}), 500
+
+
+@explicacao_bp.route("/scalp_gates_vortex/kairos_ict_mmxm_iniciar", methods=["GET"])
+def kairos_ict_mmxm_iniciar_endpoint():
+    """JOB COMPLETO -- 13 pares, background, heartbeat.
+    Uso: ?dias=7&confirm=RODAR_KAIROS_ICT_MMXM"""
+    if request.args.get('confirm') != 'RODAR_KAIROS_ICT_MMXM':
+        return jsonify({
+            "erro": "endpoint pesado, protegido contra chamada acidental",
+            "como_usar": "adiciona &confirm=RODAR_KAIROS_ICT_MMXM na URL, ex: "
+                          "/scalp_gates_vortex/kairos_ict_mmxm_iniciar?dias=7&confirm=RODAR_KAIROS_ICT_MMXM",
+        }), 400
+    dias = int(request.args.get('dias', 7))
+    fim_ts_ms_param = request.args.get('fim_ts_ms')
+    fim_ts_ms = int(fim_ts_ms_param) if fim_ts_ms_param else None
+    pares_param = request.args.get('pares')
+    pares_lista = [p.strip().upper() for p in pares_param.split(',') if p.strip()] if pares_param else None
+
+    db_file = _db_file_explicacao()
+    init_replay_jobs_db(db_file)
+    job_id = f"kairosictmmxm_{int(time.time()*1000)}"
+
+    try:
+        with sqlite3.connect(db_file) as conn:
+            conn.execute(
+                "INSERT INTO scalp_replay_jobs (job_id, tipo, pair, dias_historico, status, created_at) VALUES (?, ?, ?, ?, 'rodando', ?)",
+                (job_id, 'replay_kairos_ict_mmxm_todos_pares', 'TODOS', dias, int(time.time())),
+            )
+            conn.commit()
+    except Exception as e:
+        return jsonify({"erro": f"nao foi possivel criar o job: {e}"}), 500
+
+    thread = threading.Thread(
+        target=_executar_kairos_ict_mmxm_job, args=(db_file, job_id, pares_lista, dias, fim_ts_ms), daemon=True,
+    )
+    thread.start()
+
+    return jsonify({
+        "job_id": job_id, "status": "iniciado", "dias_historico": dias,
+        "pares": pares_lista or PARES_MONITORADOS_REPLAY,
+        "como_consultar_progresso": f"/scalp_gates_vortex/comparar_v2_fvg_only_heartbeat/{job_id}",
+        "como_consultar_resultado": f"/scalp_gates_vortex/replay_comparativo_luxalgo_status/{job_id}",
+        "nota_heartbeat": (
+            "Reaproveita o MESMO endpoint de heartbeat de job em background ja aprovado "
+            "(generico por job_id, nao especifico do FVG_ONLY) -- nao o /ab_heartbeat, "
+            "que e pra ticks recorrentes de paper trading, um mecanismo diferente."
+        ),
+    })

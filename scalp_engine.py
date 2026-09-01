@@ -10519,7 +10519,7 @@ def _encontrar_toque_zona(candles, zona_top, zona_bottom):
     return None
 
 
-def _escolher_zona_entrada_v2(m15_ate_agora, bias):
+def _escolher_zona_entrada_v2(m15_ate_agora, bias, permitir_fallback_ema25=True):
     """
     ZONA — item aprovado do ticket. Procura FVG M15 aberto mais
     próximo do preço atual, na direção do bias (reaproveita
@@ -10529,6 +10529,15 @@ def _escolher_zona_entrada_v2(m15_ate_agora, bias):
     não existe no código de produção uma "zona EMA" pronta).
     Retorna (zona_top, zona_bottom, zona_type, zona_source) ou
     (None, None, None, motivo_falha).
+
+    permitir_fallback_ema25 — ÚNICA BIFURCAÇÃO EXPERIMENTAL entre
+    V2_ORIGINAL e V2_FVG_ONLY (item aprovado do ticket: "consolidar
+    numa única pipeline, bifurcação só na seleção de zona"). Default
+    True preserva EXATAMENTE o comportamento histórico desta função
+    pra qualquer chamador existente que não passe este argumento —
+    zero mudança de comportamento em produção. Quando False, "não
+    encontrei FVG" retorna direto como falha (SEM_FVG_M15_NA_DIRECAO),
+    sem cair no fallback EMA25.
     """
     if len(m15_ate_agora) < 30:
         return None, None, None, 'M15_INSUFICIENTE'
@@ -10541,6 +10550,14 @@ def _escolher_zona_entrada_v2(m15_ate_agora, bias):
     if candidatos:
         escolhido = min(candidatos, key=lambda f: abs((f['top'] + f['bottom']) / 2 - preco_atual))
         return escolhido['top'], escolhido['bottom'], 'FVG', 'FVG_M15_mais_proximo'
+
+    # ═══ BIFURCAÇÃO ÚNICA — a única diferença de comportamento entre
+    # os dois modos existe a partir desta linha. Tudo antes desta
+    # linha (busca de FVG) e tudo em avaliar_vortex_decision_layer_v2
+    # depois da zona escolhida (CHoCH, ENTRY, SL, TP) é idêntico e
+    # compartilhado pelos dois modos, sem exceção. ═══
+    if not permitir_fallback_ema25:
+        return None, None, None, 'SEM_FVG_M15_NA_DIRECAO'
 
     closes_m15 = [c['c'] for c in m15_ate_agora]
     ema25_series = compute_ema(closes_m15, 25)
@@ -10557,7 +10574,7 @@ def _escolher_zona_entrada_v2(m15_ate_agora, bias):
     return ema25_atual + largura, ema25_atual - largura, 'EMA25', 'EMA25_M15_fallback_sem_FVG'
 
 
-def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=None):
+def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=None, permitir_fallback_ema25=True):
     """
     Pipeline completo EXPERIMENTAL — BIAS → ZONA → GATILHO → ENTRY →
     SL → TP. Recebe candles JÁ TRUNCADOS causalmente pelo chamador
@@ -10566,6 +10583,16 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
     aprovado) — esta função não faz nenhum fetch, não decide o corte
     de tempo, só avalia o que já foi passado. Nunca fabrica sinal: se
     qualquer etapa falhar, valid=False com failure_reason explícito.
+
+    permitir_fallback_ema25 — item aprovado do ticket: PIPELINE ÚNICA
+    consolidada (V2_ORIGINAL e V2_FVG_ONLY deixam de ser duas cópias
+    do motor; passam a ser esta MESMA função com uma flag). Default
+    True preserva 100% o comportamento histórico pra qualquer chamador
+    que não passe este argumento — nenhuma mudança de comportamento em
+    produção. A ÚNICA diferença de lógica entre os dois modos vive
+    dentro de _escolher_zona_entrada_v2() (repassada adiante, sem
+    nenhuma outra ramificação neste arquivo) — BIAS, CHoCH, ENTRY, SL
+    e TP abaixo são exatamente o mesmo código pros dois modos, sempre.
     """
     resultado = {
         'signal': False, 'direction': None, 'bias': None,
@@ -10574,6 +10601,7 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
         'entry': None, 'sl': None, 'sl_regra': None, 'tp': None, 'tp_origem': None, 'rr': None,
         'reason': None, 'timestamp': m5_ate_agora[-1]['t'] if m5_ate_agora else None,
         'valid': False, 'failure_reason': None,
+        'variante': 'V2_ORIGINAL' if permitir_fallback_ema25 else 'V2_FVG_ONLY',
     }
 
     if not m15_ate_agora or not m5_ate_agora:
@@ -10587,7 +10615,9 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
         return resultado
     resultado['direction'] = 'LONG' if bias == 'alta' else 'SHORT'
 
-    zona_top, zona_bottom, zona_type, zona_info = _escolher_zona_entrada_v2(m15_ate_agora, bias)
+    zona_top, zona_bottom, zona_type, zona_info = _escolher_zona_entrada_v2(
+        m15_ate_agora, bias, permitir_fallback_ema25=permitir_fallback_ema25
+    )
     if zona_top is None:
         resultado['failure_reason'] = zona_info
         return resultado
@@ -12373,164 +12403,15 @@ def paper_trading_v2_diagnostico_bias_endpoint():
 # conclusão sobre a comparação.
 # ═══════════════════════════════════════════════════════════════════════
 
-def _escolher_zona_entrada_v2_fvg_only(m15_ate_agora, bias):
-    """
-    ZONA — versão FVG_ONLY. IDÊNTICA a _escolher_zona_entrada_v2() na
-    parte de busca de FVG (mesma chamada a find_open_fvgs_adaptive(),
-    sem alteração nenhuma) — a ÚNICA diferença é que, se não houver
-    FVG M15 válido na direção do bias, esta função retorna falha
-    (SEM_FVG_M15_NA_DIRECAO) em vez de cair no fallback EMA25.
-    Retorna (zona_top, zona_bottom, zona_type, zona_source) ou
-    (None, None, None, motivo_falha).
-    """
-    if len(m15_ate_agora) < 30:
-        return None, None, None, 'M15_INSUFICIENTE'
-
-    preco_atual = m15_ate_agora[-1]['c']
-    fvgs = find_open_fvgs_adaptive(m15_ate_agora)
-    tipo_desejado = 'FVG_bullish' if bias == 'alta' else 'FVG_bearish'
-    candidatos = [f for f in fvgs if f['tipo'] == tipo_desejado]
-
-    if candidatos:
-        escolhido = min(candidatos, key=lambda f: abs((f['top'] + f['bottom']) / 2 - preco_atual))
-        return escolhido['top'], escolhido['bottom'], 'FVG', 'FVG_M15_mais_proximo'
-
-    # ── SEM FALLBACK — item aprovado do ticket. "Não encontrei FVG"
-    # significa "não há sinal", não "vou inventar uma zona na EMA25". ──
-    return None, None, None, 'SEM_FVG_M15_NA_DIRECAO'
-
-
-def avaliar_vortex_decision_layer_v2_fvg_only(m15_ate_agora, m5_ate_agora, d1_ate_agora=None):
-    """
-    Pipeline EXPERIMENTAL — variante V2_FVG_ONLY. Estrutura IDÊNTICA a
-    avaliar_vortex_decision_layer_v2() (BIAS → ZONA → GATILHO → ENTRY
-    → SL → TP), reaproveitando exatamente as MESMAS funções pra tudo
-    exceto a escolha de zona:
-      - BIAS: compute_lux_structure_bias() — sem alteração
-      - ZONA: _escolher_zona_entrada_v2_fvg_only() — ÚNICA diferença,
-        sem fallback EMA25
-      - GATILHO/CHoCH: _encontrar_toque_zona() + compute_lux_internal_
-        structure() + _evento_choch_foi_invalidado() — sem alteração
-      - ENTRY: candle_confirmacao['c'] — sem alteração
-      - SL: aplicar_buffer_stop_atr() — sem alteração
-      - TP: calcular_tp_dinamico() — sem alteração
-    NÃO substitui nem chama avaliar_vortex_decision_layer_v2() (que
-    permanece intocada). NÃO é chamada por nenhum caminho de produção.
-    """
-    resultado = {
-        'signal': False, 'direction': None, 'bias': None,
-        'zone_type': None, 'zone_top': None, 'zone_bottom': None, 'zone_source': None,
-        'choch_confirmed': False, 'choch_timestamp': None, 'choch_level': None,
-        'entry': None, 'sl': None, 'sl_regra': None, 'tp': None, 'tp_origem': None, 'rr': None,
-        'reason': None, 'timestamp': m5_ate_agora[-1]['t'] if m5_ate_agora else None,
-        'valid': False, 'failure_reason': None, 'variante': 'V2_FVG_ONLY',
-    }
-
-    if not m15_ate_agora or not m5_ate_agora:
-        resultado['failure_reason'] = 'CANDLES_INSUFICIENTES'
-        return resultado
-
-    bias = compute_lux_structure_bias(m15_ate_agora, swing_size=50)
-    resultado['bias'] = bias
-    if bias not in ('alta', 'baixa'):
-        resultado['failure_reason'] = 'BIAS_FAIL'
-        return resultado
-    resultado['direction'] = 'LONG' if bias == 'alta' else 'SHORT'
-
-    zona_top, zona_bottom, zona_type, zona_info = _escolher_zona_entrada_v2_fvg_only(m15_ate_agora, bias)
-    if zona_top is None:
-        resultado['failure_reason'] = zona_info
-        return resultado
-    resultado['zone_top'] = round(zona_top, 6)
-    resultado['zone_bottom'] = round(zona_bottom, 6)
-    resultado['zone_type'] = zona_type
-    resultado['zone_source'] = zona_info
-
-    idx_toque = _encontrar_toque_zona(m5_ate_agora, zona_top, zona_bottom)
-    if idx_toque is None:
-        resultado['failure_reason'] = 'PRECO_FORA_DA_ZONA'
-        return resultado
-
-    candles_pos_toque = m5_ate_agora[idx_toque:]
-    if len(candles_pos_toque) < 10:
-        resultado['failure_reason'] = 'CANDLES_INSUFICIENTES_POS_TOQUE'
-        return resultado
-
-    eventos_internos_m5 = compute_lux_internal_structure(candles_pos_toque, swing_size=5)
-    choch_relevante = None
-    for ev in reversed(eventos_internos_m5):
-        if ev['tipo'] == 'CHoCH' and ev['direcao'] == bias:
-            choch_relevante = ev
-            break
-    if not choch_relevante:
-        resultado['failure_reason'] = 'NO_CHOCH_APOS_ZONA'
-        return resultado
-
-    idx_atual_pos_toque = len(candles_pos_toque) - 1
-    invalidado, evento_invalidador = _evento_choch_foi_invalidado(
-        eventos_internos_m5, choch_relevante, idx_atual_pos_toque
-    )
-    if invalidado:
-        resultado['failure_reason'] = 'CHOCH_INVALIDADO_ANTES_DO_GATILHO'
-        return resultado
-
-    resultado['choch_confirmed'] = True
-    resultado['choch_timestamp'] = choch_relevante['t']
-    resultado['choch_level'] = choch_relevante['nivel']
-
-    idx_choch_global = idx_toque + choch_relevante['index']
-    if idx_choch_global >= len(m5_ate_agora):
-        resultado['failure_reason'] = 'INDICE_CHOCH_INVALIDO'
-        return resultado
-    candle_confirmacao = m5_ate_agora[idx_choch_global]
-    entry = candle_confirmacao['c']
-    resultado['entry'] = round(entry, 6)
-
-    candles_para_buffer = m5_ate_agora[:idx_choch_global + 1]
-    if bias == 'alta':
-        candidato_zona = zona_bottom
-        candidato_choch = choch_relevante['nivel']
-        nivel_bruto = min(candidato_zona, candidato_choch)
-        regra_sl = 'zona_bottom' if nivel_bruto == candidato_zona else 'choch_pivot'
-        sl = aplicar_buffer_stop_atr(nivel_bruto, 'alta', candles_para_buffer)
-    else:
-        candidato_zona = zona_top
-        candidato_choch = choch_relevante['nivel']
-        nivel_bruto = max(candidato_zona, candidato_choch)
-        regra_sl = 'zona_top' if nivel_bruto == candidato_zona else 'choch_pivot'
-        sl = aplicar_buffer_stop_atr(nivel_bruto, 'baixa', candles_para_buffer)
-
-    resultado['sl_regra'] = regra_sl
-    if sl is None:
-        resultado['failure_reason'] = 'SL_INVALIDO'
-        return resultado
-    risco = abs(entry - sl)
-    sl_do_lado_certo = (sl < entry) if bias == 'alta' else (sl > entry)
-    if risco <= 0 or not sl_do_lado_certo:
-        resultado['failure_reason'] = 'SL_INVALIDO'
-        return resultado
-    resultado['sl'] = round(sl, 6)
-
-    try:
-        tp, tp_origem = calcular_tp_dinamico(bias, entry, sl, m15_ate_agora, d1_ate_agora or [])
-    except Exception as e:
-        resultado['failure_reason'] = f'ERRO_TP: {e}'
-        return resultado
-
-    if tp is None:
-        resultado['failure_reason'] = 'TP_INVALIDO'
-        return resultado
-    resultado['tp'] = round(tp, 6)
-    resultado['tp_origem'] = tp_origem
-    resultado['rr'] = round(abs(tp - entry) / risco, 2)
-
-    resultado['signal'] = True
-    resultado['valid'] = True
-    resultado['reason'] = (
-        f"[V2_FVG_ONLY] BIAS={bias} + ZONA({zona_type},{zona_info}) + CHoCH_M5({choch_relevante['t']}) "
-        f"+ SL({regra_sl}) + TP({tp_origem})"
-    )
-    return resultado
+# ── CONSOLIDAÇÃO (item aprovado do ticket) — _escolher_zona_entrada_v2_
+# fvg_only() e avaliar_vortex_decision_layer_v2_fvg_only() foram
+# REMOVIDAS daqui. Não existem mais como funções separadas — eram
+# cópias quase idênticas de _escolher_zona_entrada_v2()/avaliar_
+# vortex_decision_layer_v2() (só a etapa de zona diferia). Agora a
+# variante FVG_ONLY é obtida chamando as MESMAS funções de sempre com
+# permitir_fallback_ema25=False. Zero risco de as duas lógicas
+# divergirem por esquecimento de atualizar uma cópia — só existe UMA
+# implementação de BIAS/ZONA/CHoCH/ENTRY/SL/TP no arquivo inteiro. ──
 
 
 def replay_vortex_decision_layer_v2_fvg_only(pair, dias_historico=7, fim_ts_ms=None):
@@ -12538,9 +12419,11 @@ def replay_vortex_decision_layer_v2_fvg_only(pair, dias_historico=7, fim_ts_ms=N
     Replay causal da variante EXPERIMENTAL V2_FVG_ONLY. Estrutura
     IDÊNTICA a replay_vortex_decision_layer_v2() (mesmo fetch, mesmo
     truncamento causal, mesma dedup por (choch_timestamp, direction,
-    zone_type), sem lookahead) — só troca a função de avaliação por
-    avaliar_vortex_decision_layer_v2_fvg_only(). NÃO chama nem altera
-    replay_vortex_decision_layer_v2() original.
+    zone_type), sem lookahead) — chama a MESMA avaliar_vortex_decision_
+    layer_v2() com permitir_fallback_ema25=False (pipeline consolidada,
+    item aprovado do ticket). NÃO chama nem altera
+    replay_vortex_decision_layer_v2() original (que continua chamando
+    a mesma função com o default True).
 
     Rastreia ADICIONALMENTE (item explícito do ticket) quantos ciclos
     seriam eliminados especificamente por ausência de FVG — contagem
@@ -12597,7 +12480,7 @@ def replay_vortex_decision_layer_v2_fvg_only(pair, dias_historico=7, fim_ts_ms=N
 
         funil['total_ciclos_avaliados'] += 1
         try:
-            r = avaliar_vortex_decision_layer_v2_fvg_only(m15_ate_agora, m5_ate_agora, d1_ate_agora)
+            r = avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora, permitir_fallback_ema25=False)
         except Exception as e:
             distribuicao_motivos[f'EXCECAO: {e}'] = distribuicao_motivos.get(f'EXCECAO: {e}', 0) + 1
             continue
@@ -13040,3 +12923,1841 @@ def comparar_v2_fvg_only_iniciar_endpoint():
         "como_consultar": f"/scalp_gates_vortex/replay_comparativo_luxalgo_status/{job_id}",
         "aviso": "MUITO pesado (2 variantes x 13 pares) — roda em background, pode levar bastante tempo",
     })
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# HEARTBEAT DE PROGRESSO — comparar_v2_original_vs_fvg_only — item
+# aprovado do ticket. SOMENTE OBSERVABILIDADE — não altera nenhum
+# cálculo, filtro, sinal, tabela de produção ou lógica de estratégia.
+# NÃO toca em comparar_v2_original_vs_fvg_only(), comparar_v2_original_
+# vs_fvg_only_todos_pares(), replay_vortex_decision_layer_v2(),
+# resolver_resultado_sinais_v2() ou qualquer outra função existente —
+# todas permanecem 100% intocadas.
+#
+# GRANULARIDADE — decisão explícita, documentada: heartbeat POR PAR
+# (13 checkpoints por job), não por candle/ciclo interno. Instrumentar
+# dentro do loop candle-a-candle exigiria alterar replay_vortex_
+# decision_layer_v2()/resolver_resultado_sinais_v2() (que devem
+# permanecer intocadas) ou duplicá-las inteiras só pra inserir
+# heartbeat (superfície de risco maior que o benefício agora). Cada
+# par leva ~10min nas execuções já observadas — heartbeat por par dá
+# granularidade suficiente pra distinguir vivo/travado com folga.
+# ═══════════════════════════════════════════════════════════════════════
+
+HEARTBEAT_LIMIAR_TRAVADO_SEGUNDOS = 25 * 60  # ~2.5x o tempo médio observado por par (~10min)
+
+
+def init_replay_heartbeat_db(db_file):
+    """Cria a tabela de heartbeat se não existir. Auto-blindada, tabela
+    PRÓPRIA e ISOLADA — nunca compartilhada com scalp_replay_jobs nem
+    com nenhuma tabela de produção."""
+    try:
+        with sqlite3.connect(db_file) as conn:
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS scalp_replay_heartbeat (
+                    job_id TEXT PRIMARY KEY,
+                    total_pares INTEGER,
+                    pares_concluidos INTEGER DEFAULT 0,
+                    par_atual TEXT,
+                    etapa_atual TEXT,
+                    percentual_aproximado REAL,
+                    segundos_decorridos INTEGER,
+                    criado_em INTEGER,
+                    atualizado_em INTEGER
+                )
+            ''')
+            conn.commit()
+    except Exception as e:
+        print(f"[heartbeat] erro ao criar tabela: {e}")
+
+
+def _registrar_heartbeat_fvg_only(db_file, job_id, total_pares, pares_concluidos, par_atual, etapa_atual, ts_inicio):
+    """
+    Grava/atualiza 1 linha por job_id (UPSERT) — não é log em série,
+    é um "ponteiro de progresso" que a query de status lê e compara
+    com o relógio atual. Fail-open: erro aqui é só logado, nunca
+    propaga (heartbeat nunca pode derrubar o job real).
+    """
+    init_replay_heartbeat_db(db_file)
+    agora = int(time.time())
+    percentual = round(100 * pares_concluidos / total_pares, 1) if total_pares else None
+    try:
+        with sqlite3.connect(db_file) as conn:
+            conn.execute('''
+                INSERT INTO scalp_replay_heartbeat
+                    (job_id, total_pares, pares_concluidos, par_atual, etapa_atual,
+                     percentual_aproximado, segundos_decorridos, criado_em, atualizado_em)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(job_id) DO UPDATE SET
+                    pares_concluidos=excluded.pares_concluidos,
+                    par_atual=excluded.par_atual,
+                    etapa_atual=excluded.etapa_atual,
+                    percentual_aproximado=excluded.percentual_aproximado,
+                    segundos_decorridos=excluded.segundos_decorridos,
+                    atualizado_em=excluded.atualizado_em
+            ''', (job_id, total_pares, pares_concluidos, par_atual, etapa_atual,
+                  percentual, agora - ts_inicio, agora, agora))
+            conn.commit()
+    except Exception as e:
+        print(f"[heartbeat] erro ao registrar {job_id}: {e}")
+
+
+def comparar_v2_original_vs_fvg_only_todos_pares_com_heartbeat(db_file, job_id, dias_historico=30, fim_ts_ms=None, pares=None):
+    """
+    MESMO comportamento e MESMO resultado final de comparar_v2_
+    original_vs_fvg_only_todos_pares() (que permanece 100% INTOCADA)
+    — só que registra heartbeat de progresso a cada par concluído.
+    Reaproveita comparar_v2_original_vs_fvg_only() (também intocada),
+    chamando-a par a par no lugar do loop interno da função original.
+    Nenhum cálculo, filtro, sinal ou lógica de estratégia é diferente
+    do resultado que a função original produziria — só observabilidade
+    a mais.
+    """
+    if fim_ts_ms is None:
+        fim_ts_ms = int(time.time() * 1000)
+    pares = pares or PARES_MONITORADOS_REPLAY
+    ts_inicio = int(time.time())
+    total_pares = len(pares)
+
+    _registrar_heartbeat_fvg_only(db_file, job_id, total_pares, 0, None, 'iniciando', ts_inicio)
+
+    resultados_por_pair = {}
+    pares_com_erro = []
+    tabela_por_par = []
+    total_r_original, total_r_fvg_only = [], []
+    divergencias_equivalencia = []
+
+    for idx, p in enumerate(pares):
+        _registrar_heartbeat_fvg_only(db_file, job_id, total_pares, idx, p, 'processando', ts_inicio)
+        try:
+            r = comparar_v2_original_vs_fvg_only(p, dias_historico=dias_historico, fim_ts_ms=fim_ts_ms)
+        except Exception as e:
+            r = {'erro_original': str(e), 'erro_fvg_only': str(e)}
+        resultados_por_pair[p] = r
+
+        if r.get('erro_original') or r.get('erro_fvg_only'):
+            pares_com_erro.append(p)
+        else:
+            g_orig, g_fvg = r['GLOBAL']['V2_ORIGINAL'], r['GLOBAL']['V2_FVG_ONLY']
+            tabela_por_par.append({
+                'pair': p,
+                'original_n': g_orig.get('total_sinais'),
+                'original_wr': g_orig.get('win_rate_pct_excluindo_ambiguo'),
+                'original_expectancy': g_orig.get('expectancy_R_excluindo_ambiguo'),
+                'fvg_only_n': g_fvg.get('total_sinais'),
+                'fvg_only_wr': g_fvg.get('win_rate_pct'),
+                'fvg_only_expectancy': g_fvg.get('expectancy_R'),
+            })
+            aud = r.get('auditoria_equivalencia_fvg', {})
+            if not aud.get('hipotese_confirmada', True):
+                divergencias_equivalencia.append({'pair': p, **aud})
+            for a in r.get('resultado_completo_original', {}).get('auditoria_sinais_completa', []):
+                if a['primeiro_evento'] in ('TP', 'SL'):
+                    total_r_original.append(a['r_obtido'])
+            for a in r.get('resultado_completo_fvg_only', {}).get('auditoria_sinais_completa', []):
+                if a['primeiro_evento'] in ('TP', 'SL'):
+                    total_r_fvg_only.append(a['r_obtido'])
+
+        _registrar_heartbeat_fvg_only(db_file, job_id, total_pares, idx + 1, p, 'concluido', ts_inicio)
+
+    _registrar_heartbeat_fvg_only(db_file, job_id, total_pares, total_pares, None, 'finalizando', ts_inicio)
+
+    def _stats_pooled(lista):
+        if not lista:
+            return {'n': 0, 'win_rate_pct': None, 'expectancy_R': None, 'soma_R': None}
+        vencedores = sum(1 for r in lista if r > 0)
+        return {
+            'n': len(lista), 'win_rate_pct': round(100 * vencedores / len(lista), 2),
+            'expectancy_R': round(sum(lista) / len(lista), 4), 'soma_R': round(sum(lista), 2),
+        }
+
+    resultado_final = {
+        'dias_historico': dias_historico, 'fim_ts_ms': fim_ts_ms, 'pares_testados': pares,
+        'pares_com_erro': pares_com_erro,
+        'nota_metodologica': (
+            'Variante COM HEARTBEAT de comparar_v2_original_vs_fvg_only_todos_pares() — mesmo '
+            'resultado, mesmos cálculos, reaproveitando comparar_v2_original_vs_fvg_only() sem '
+            'alteração nenhuma. Só adiciona registro de progresso por par em '
+            'scalp_replay_heartbeat, consultável via /comparar_v2_fvg_only_heartbeat/<job_id>.'
+        ),
+        'ATENCAO_divergencias_equivalencia': divergencias_equivalencia,
+        'tabela_por_par': tabela_por_par,
+        'consolidado_global_pooled': {
+            'V2_ORIGINAL': _stats_pooled(total_r_original),
+            'V2_FVG_ONLY': _stats_pooled(total_r_fvg_only),
+        },
+        'resultados_completos_por_pair': resultados_por_pair,
+    }
+
+    _registrar_heartbeat_fvg_only(db_file, job_id, total_pares, total_pares, None, 'concluido_com_sucesso', ts_inicio)
+    return resultado_final
+
+
+def _executar_comparacao_fvg_only_job_com_heartbeat(db_file, job_id, dias_historico, fim_ts_ms, pares):
+    try:
+        resultado = comparar_v2_original_vs_fvg_only_todos_pares_com_heartbeat(
+            db_file, job_id, dias_historico=dias_historico, fim_ts_ms=fim_ts_ms, pares=pares,
+        )
+        with sqlite3.connect(db_file) as conn:
+            conn.execute('''
+                UPDATE scalp_replay_jobs SET status='concluido', resultado_json=?, finished_at=? WHERE job_id=?
+            ''', (json.dumps(resultado, ensure_ascii=False), int(time.time()), job_id))
+            conn.commit()
+    except Exception as e:
+        try:
+            with sqlite3.connect(db_file) as conn:
+                conn.execute('''
+                    UPDATE scalp_replay_jobs SET status='erro', erro=?, finished_at=? WHERE job_id=?
+                ''', (str(e), int(time.time()), job_id))
+                conn.commit()
+        except Exception as e2:
+            print(f"[scalp_engine replay_jobs] erro ao registrar falha do job {job_id}: {e2}")
+        # ── Heartbeat também registra o erro explicitamente — permite
+        # distinguir "morreu sem log nenhum" (heartbeat parado, mas
+        # etapa_atual continua 'processando') de "morreu com erro
+        # capturado" (etapa_atual vira 'erro', com timestamp do momento
+        # exato da falha). ──
+        try:
+            init_replay_heartbeat_db(db_file)
+            with sqlite3.connect(db_file) as conn:
+                conn.execute('''
+                    UPDATE scalp_replay_heartbeat SET etapa_atual='erro', atualizado_em=? WHERE job_id=?
+                ''', (int(time.time()), job_id))
+                conn.commit()
+        except Exception:
+            pass
+
+
+@explicacao_bp.route("/scalp_gates_vortex/comparar_v2_fvg_only_com_heartbeat_iniciar", methods=["GET"])
+def comparar_v2_fvg_only_com_heartbeat_iniciar_endpoint():
+    """
+    IDÊNTICO a /comparar_v2_fvg_only_iniciar (que permanece intocado e
+    continua disponível), só que roda a variante COM HEARTBEAT —
+    permite consultar progresso por par em tempo real, além do status
+    genérico já existente. NÃO altera nenhuma lógica de trading.
+
+    Uso: ?dias=30&fim_ts_ms=<opcional>&confirm=RODAR_COMPARACAO_FVG_ONLY
+    Consultar progresso em:
+    /scalp_gates_vortex/comparar_v2_fvg_only_heartbeat/<job_id>
+    Consultar resultado final no MESMO endpoint genérico de sempre:
+    /scalp_gates_vortex/replay_comparativo_luxalgo_status/<job_id>
+    """
+    if request.args.get('confirm') != 'RODAR_COMPARACAO_FVG_ONLY':
+        return jsonify({
+            "erro": "endpoint MUITO pesado (roda 2 variantes x 13 pares), protegido contra chamada acidental",
+            "como_usar": "adiciona &confirm=RODAR_COMPARACAO_FVG_ONLY na URL",
+        }), 400
+
+    dias = int(request.args.get('dias', 30))
+    fim_ts_ms_param = request.args.get('fim_ts_ms')
+    fim_ts_ms = int(fim_ts_ms_param) if fim_ts_ms_param else None
+    pares_param = request.args.get('pares')
+    pares_lista = [p.strip().upper() for p in pares_param.split(',') if p.strip()] if pares_param else None
+
+    db_file = _db_file_explicacao()
+    init_replay_jobs_db(db_file)
+    init_replay_heartbeat_db(db_file)
+    job_id = f"comparafvgonlyhb_{int(time.time()*1000)}"
+
+    try:
+        with sqlite3.connect(db_file) as conn:
+            conn.execute('''
+                INSERT INTO scalp_replay_jobs (job_id, tipo, pair, dias_historico, status, created_at)
+                VALUES (?, ?, ?, ?, 'rodando', ?)
+            ''', (job_id, 'comparar_v2_original_vs_fvg_only_todos_pares_com_heartbeat', 'TODOS', dias, int(time.time())))
+            conn.commit()
+    except Exception as e:
+        return jsonify({"erro": f"não foi possível criar o job: {e}"}), 500
+
+    thread = threading.Thread(
+        target=_executar_comparacao_fvg_only_job_com_heartbeat,
+        args=(db_file, job_id, dias, fim_ts_ms, pares_lista), daemon=True,
+    )
+    thread.start()
+
+    return jsonify({
+        "job_id": job_id, "status": "iniciado", "dias_historico": dias, "fim_ts_ms": fim_ts_ms,
+        "pares": pares_lista or PARES_MONITORADOS_REPLAY,
+        "como_consultar_progresso": f"/scalp_gates_vortex/comparar_v2_fvg_only_heartbeat/{job_id}",
+        "como_consultar_resultado_final": f"/scalp_gates_vortex/replay_comparativo_luxalgo_status/{job_id}",
+        "aviso": "MUITO pesado — roda em background, mas agora com heartbeat de progresso por par",
+    })
+
+
+@explicacao_bp.route("/scalp_gates_vortex/comparar_v2_fvg_only_heartbeat/<job_id>", methods=["GET"])
+def comparar_v2_fvg_only_heartbeat_endpoint(job_id):
+    """
+    Consulta o heartbeat de progresso de um job iniciado via
+    /comparar_v2_fvg_only_com_heartbeat_iniciar. SOMENTE LEITURA —
+    não altera nenhum job, não decide nada.
+
+    Devolve o estado bruto (job_id, timestamp, pares processados/total,
+    último par em processamento, percentual aproximado, tempo
+    decorrido) MAIS um diagnóstico automático:
+      - 'vivo': heartbeat foi atualizado há menos de
+        HEARTBEAT_LIMIAR_TRAVADO_SEGUNDOS (25min)
+      - 'possivelmente_travado_ou_morto': sem atualização há mais que
+        isso — não é certeza absoluta (pode só estar processando um
+        par excepcionalmente pesado), mas é o sinal objetivo que
+        existia pra decidir antes.
+      - 'sem_heartbeat_registrado': job iniciado ANTES desta feature
+        existir (ex: comparafvgonly_1788257593205, que continua sem
+        nenhum heartbeat — isso é esperado e não indica problema).
+    """
+    db_file = _db_file_explicacao()
+    init_replay_heartbeat_db(db_file)
+    try:
+        with sqlite3.connect(db_file) as conn:
+            row = conn.execute('''
+                SELECT total_pares, pares_concluidos, par_atual, etapa_atual,
+                       percentual_aproximado, segundos_decorridos, criado_em, atualizado_em
+                FROM scalp_replay_heartbeat WHERE job_id=?
+            ''', (job_id,)).fetchone()
+    except Exception as e:
+        return jsonify({"erro": str(e)}), 500
+
+    if not row:
+        return jsonify({
+            "job_id": job_id,
+            "diagnostico": "sem_heartbeat_registrado",
+            "nota": (
+                "Este job não tem heartbeat registrado — ou foi iniciado antes desta feature "
+                "existir (ex: via /comparar_v2_fvg_only_iniciar, endpoint antigo sem heartbeat), "
+                "ou o job_id está incorreto. Isso NÃO indica que o job travou — só que não há "
+                "instrumentação de progresso pra ele."
+            ),
+        }), 200
+
+    total_pares, pares_concluidos, par_atual, etapa_atual, percentual, segundos_decorridos, criado_em, atualizado_em = row
+    agora = int(time.time())
+    segundos_desde_ultima_atualizacao = agora - atualizado_em
+
+    if etapa_atual in ('concluido_com_sucesso', 'erro'):
+        diagnostico = 'finalizado' if etapa_atual == 'concluido_com_sucesso' else 'terminou_com_erro'
+    elif segundos_desde_ultima_atualizacao > HEARTBEAT_LIMIAR_TRAVADO_SEGUNDOS:
+        diagnostico = 'possivelmente_travado_ou_morto'
+    else:
+        diagnostico = 'vivo'
+
+    return jsonify({
+        "job_id": job_id,
+        "total_pares": total_pares,
+        "pares_concluidos": pares_concluidos,
+        "par_atual": par_atual,
+        "etapa_atual": etapa_atual,
+        "percentual_aproximado": percentual,
+        "segundos_decorridos_total": segundos_decorridos,
+        "segundos_desde_ultima_atualizacao": segundos_desde_ultima_atualizacao,
+        "limiar_para_suspeitar_travado_segundos": HEARTBEAT_LIMIAR_TRAVADO_SEGUNDOS,
+        "diagnostico": diagnostico,
+        "nota_diagnostico": (
+            "'vivo' = progresso registrado há menos de 25min, provavelmente processando. "
+            "'possivelmente_travado_ou_morto' = sem atualização há mais que isso — sinal "
+            "objetivo, mas não é certeza absoluta (um par pode legitimamente demorar mais "
+            "num caso raro). 'finalizado'/'terminou_com_erro' = job já chegou ao fim."
+        ),
+    })
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# A/B FORWARD TEST — ENGINE B (V2_FVG_ONLY) — item aprovado do ticket.
+# ETAPA 1: 100% PAPER, ZERO dinheiro real, ZERO ordem enviada a
+# qualquer exchange (nenhuma função de execução existe neste módulo —
+# confirmado por busca exaustiva antes desta implementação).
+#
+# ISOLAMENTO — Engine B tem: tabela própria (paper_trading_v2_fvg_
+# only_sinais, NUNCA a mesma que paper_trading_v2_sinais do Engine A),
+# ciclo de tick próprio, resolução própria. NÃO compartilha posição,
+# cooldown, estado, bloqueio, resultado, decisão ou variável de
+# execução com o Engine A — são funções e tabelas completamente
+# separadas, só lendo os mesmos candles públicos da Bybit (dado de
+# mercado, não estado de execução).
+#
+# DIFF LÓGICO A vs B — CONSOLIDADO (item aprovado do ticket, revisão
+# posterior): a ÚNICA diferença entre as duas engines é o valor do
+# parâmetro permitir_fallback_ema25 passado pra MESMA função avaliar_
+# vortex_decision_layer_v2() — Engine A chama com True (ou omite,
+# mesmo default), Engine B chama com False. Não existem mais duas
+# implementações do motor de decisão — só uma, parametrizada. BIAS,
+# CHoCH, ENTRY, SL, TP são literalmente o mesmo código executado pros
+# dois engines, não "código idêntico em dois lugares".
+#
+# KILL SWITCH — cada engine só roda se sua variável de ambiente
+# dedicada estiver "true": PAPER_TRADING_V2_ENGINE_A_ENABLED (Engine
+# A, default true — não muda comportamento hoje) e PAPER_TRADING_V2_
+# ENGINE_B_ENABLED (Engine B, default false — precisa ser ativado
+# explicitamente). Fail-closed: ausência ou qualquer valor diferente
+# de "true" desliga o engine imediatamente, sem precisar de redeploy
+# de código pra desligar.
+# ═══════════════════════════════════════════════════════════════════════
+
+def _kill_switch_geral_ativo():
+    """
+    Kill switch GERAL — item aprovado do ticket (ponto 8, requisito
+    explícito antes do deploy A/B). Se PAPER_TRADING_V2_KILL_SWITCH_
+    GERAL=true, desliga os DOIS engines de uma vez, independente do
+    valor dos switches individuais. Default False (ausente = nenhum
+    kill switch geral ativo, comportamento normal).
+    """
+    valor = os.environ.get('PAPER_TRADING_V2_KILL_SWITCH_GERAL')
+    return valor is not None and valor.strip().lower() == 'true'
+
+
+def _engine_habilitado(nome_env_var, default_ativo=True):
+    """
+    Kill switch por variável de ambiente. Fail-closed pra Engine B
+    (default False — precisa ativação explícita); Engine A mantém
+    comportamento atual (default True — não muda nada em produção
+    sem esta feature ser tocada). Checa PRIMEIRO o kill switch geral —
+    se ativo, desliga qualquer engine, não importa o switch individual.
+    """
+    if _kill_switch_geral_ativo():
+        return False
+    valor = os.environ.get(nome_env_var)
+    if valor is None:
+        return default_ativo
+    return valor.strip().lower() == 'true'
+
+
+def init_paper_trading_v2_fvg_only_db(db_file):
+    """
+    Cria a tabela ISOLADA do Engine B — mesmo schema de
+    paper_trading_v2_sinais (Engine A), mas fisicamente uma tabela
+    diferente. Nenhuma linha, nenhuma leitura, nenhuma escrita é
+    compartilhada entre as duas.
+    """
+    try:
+        with sqlite3.connect(db_file) as conn:
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS paper_trading_v2_fvg_only_sinais (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    pair TEXT NOT NULL,
+                    direction TEXT NOT NULL,
+                    choch_timestamp INTEGER NOT NULL,
+                    zone_type TEXT NOT NULL,
+                    zone_source TEXT,
+                    zone_top REAL, zone_bottom REAL,
+                    choch_level REAL,
+                    entry REAL, sl REAL, tp REAL, rr REAL,
+                    tp_origem TEXT, sl_regra TEXT, reason TEXT,
+                    candle_confirmacao_ts INTEGER,
+                    detectado_em INTEGER,
+                    status TEXT DEFAULT 'PENDING',
+                    resultado_timestamp INTEGER,
+                    candles_ate_evento INTEGER,
+                    r_obtido REAL, mfe_pct REAL, mae_pct REAL,
+                    spread_no_sinal TEXT DEFAULT 'NAO_MEDIDO',
+                    updated_at INTEGER,
+                    UNIQUE(pair, choch_timestamp, direction, zone_type)
+                )
+            ''')
+            conn.execute('''
+                CREATE INDEX IF NOT EXISTS idx_paper_v2_fvg_only_status ON paper_trading_v2_fvg_only_sinais(status)
+            ''')
+            conn.execute('''
+                CREATE INDEX IF NOT EXISTS idx_paper_v2_fvg_only_pair ON paper_trading_v2_fvg_only_sinais(pair)
+            ''')
+            conn.commit()
+    except Exception as e:
+        print(f"[paper_trading_v2_fvg_only] erro ao criar tabela: {e}")
+
+
+def _formatar_mensagem_novo_sinal_paper_v2_fvg_only(pair, sinal):
+    """
+    Mensagem de novo sinal do Engine B — CLARAMENTE rotulada
+    "ENGINE B — V2_FVG_ONLY", pra nunca ser confundida com o Engine A
+    (que usa _formatar_mensagem_novo_sinal_paper_v2, intocada, sem
+    rótulo — mensagem sem rótulo = sempre Engine A/ORIGINAL).
+    """
+    ts_str = datetime.fromtimestamp(sinal['choch_timestamp'] / 1000, tz=timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
+    return (
+        f"📝 <b>[ENGINE B — V2_FVG_ONLY] NOVO SINAL</b>\n"
+        f"Par: {pair}\n"
+        f"Direção: {sinal['direction']}\n"
+        f"Timestamp: {ts_str}\n"
+        f"Entry: {sinal['entry']}\n"
+        f"SL: {sinal['sl']}\n"
+        f"TP: {sinal['tp']}\n"
+        f"R:R: {sinal['rr']}\n"
+        f"Origem do TP: {sinal['tp_origem']}\n"
+        f"Estado: PENDING\n"
+        f"⚠️ 100% experimental — paper trading, zero dinheiro real. FALLBACK EMA25 DESLIGADO."
+    )
+
+
+def _formatar_mensagem_resultado_paper_v2_fvg_only(sinal_row, resultado_status, r_obtido, ts_evento_ms):
+    """Mensagem de resultado do Engine B — mesma rotulagem clara."""
+    ts_str = datetime.fromtimestamp(ts_evento_ms / 1000, tz=timezone.utc).strftime('%Y-%m-%d %H:%M UTC') if ts_evento_ms else 'N/A'
+    emoji = {'TP': '✅', 'SL': '❌', 'AMBIGUO': '⚠️', 'EXPIRED': '⌛'}.get(resultado_status, 'ℹ️')
+    r_str = f"{r_obtido:+.2f}R" if r_obtido is not None else "N/A"
+    return (
+        f"{emoji} <b>[ENGINE B — V2_FVG_ONLY] RESULTADO</b>\n"
+        f"Par: {sinal_row['pair']}\n"
+        f"Direção: {sinal_row['direction']}\n"
+        f"Entry: {sinal_row['entry']}\n"
+        f"SL: {sinal_row['sl']}\n"
+        f"TP: {sinal_row['tp']}\n"
+        f"Resultado: {resultado_status}\n"
+        f"R realizado: {r_str}\n"
+        f"Horário da resolução: {ts_str}\n"
+        f"⚠️ 100% experimental — paper trading, zero dinheiro real."
+    )
+
+
+def paper_trading_v2_fvg_only_tick(pair, db_file, agora_ts_ms=None):
+    """
+    Tick do Engine B — estrutura IDÊNTICA a paper_trading_v2_tick()
+    (Engine A, intocado), única diferença: chama avaliar_vortex_
+    decision_layer_v2_fvg_only() em vez de avaliar_vortex_decision_
+    layer_v2(), e escreve em paper_trading_v2_fvg_only_sinais (tabela
+    própria) em vez de paper_trading_v2_sinais. Kill switch: se
+    PAPER_TRADING_V2_ENGINE_B_ENABLED != 'true', retorna imediatamente
+    sem processar nada (fail-closed, default desligado).
+    """
+    if not _engine_habilitado('PAPER_TRADING_V2_ENGINE_B_ENABLED', default_ativo=False):
+        return {'pair': pair, 'engine': 'B_FVG_ONLY', 'desabilitado': True, 'novos_detectados': 0, 'resolvidos_neste_tick': 0}
+
+    if agora_ts_ms is None:
+        agora_ts_ms = int(time.time() * 1000)
+
+    symbol_map = {
+        'BTCUSD': 'BTCUSDT', 'ETHUSD': 'ETHUSDT', 'SOLUSD': 'SOLUSDT', 'XRPUSD': 'XRPUSDT',
+        'LINKUSD': 'LINKUSDT', 'ADAUSD': 'ADAUSDT', 'AVAXUSD': 'AVAXUSDT', 'BNBUSD': 'BNBUSDT',
+        'AAVEUSD': 'AAVEUSDT', 'NEARUSD': 'NEARUSDT', 'PENDLEUSD': 'PENDLEUSDT', 'INJUSD': 'INJUSDT',
+        'ONDOUSD': 'ONDOUSDT',
+    }
+    symbol = symbol_map.get(pair.upper(), pair.upper().replace('USD', 'USDT'))
+
+    d1_bruto = _fetch_bybit_klines_historico(symbol, 'D', PAPER_TRADING_V2_JANELA_LOOKBACK_DIAS + 20, fim_ts_ms=agora_ts_ms)
+    m15_bruto = _fetch_bybit_klines_historico(symbol, '15', PAPER_TRADING_V2_JANELA_LOOKBACK_DIAS + 3, fim_ts_ms=agora_ts_ms)
+    m5_bruto = _fetch_bybit_klines_historico(symbol, '5', PAPER_TRADING_V2_JANELA_LOOKBACK_DIAS + 2, fim_ts_ms=agora_ts_ms)
+
+    d1, _ = _validar_e_limpar_candles(d1_bruto, 'D')
+    m15, _ = _validar_e_limpar_candles(m15_bruto, '15')
+    m5, _ = _validar_e_limpar_candles(m5_bruto, '5')
+
+    novos_detectados = 0
+    if len(m15) >= 40 and len(m5) >= 80:
+        idx_inicio = max(60, len(m5) - 300)
+        for i in range(idx_inicio, len(m5)):
+            ts_corte = m5[i]['t']
+            m5_ate_agora = m5[:i + 1]
+            m15_ate_agora = [c for c in m15 if c['t'] <= ts_corte]
+            d1_ate_agora = [c for c in d1 if c['t'] <= ts_corte]
+            if len(m15_ate_agora) < 30:
+                continue
+            try:
+                r = avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora, permitir_fallback_ema25=False)
+            except Exception:
+                continue
+            if not r['valid']:
+                continue
+            try:
+                with sqlite3.connect(db_file) as conn:
+                    cursor = conn.execute('''
+                        INSERT OR IGNORE INTO paper_trading_v2_fvg_only_sinais (
+                            pair, direction, choch_timestamp, zone_type, zone_source,
+                            zone_top, zone_bottom, choch_level, entry, sl, tp, rr,
+                            tp_origem, sl_regra, reason, candle_confirmacao_ts,
+                            detectado_em, status, spread_no_sinal, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', 'NAO_MEDIDO', ?)
+                    ''', (
+                        pair, r['direction'], r['choch_timestamp'], r['zone_type'], r['zone_source'],
+                        r['zone_top'], r['zone_bottom'], r['choch_level'], r['entry'], r['sl'], r['tp'], r['rr'],
+                        r['tp_origem'], r['sl_regra'], r['reason'], r['timestamp'],
+                        agora_ts_ms, agora_ts_ms,
+                    ))
+                    conn.commit()
+                    if cursor.rowcount > 0:
+                        novos_detectados += 1
+                        try:
+                            _paper_trading_v2_enviar_telegram(_formatar_mensagem_novo_sinal_paper_v2_fvg_only(pair, r))
+                        except Exception as e_tg:
+                            print(f"[paper_trading_v2_fvg_only] erro ao notificar novo sinal de {pair}: {e_tg}")
+            except Exception as e:
+                print(f"[paper_trading_v2_fvg_only] erro ao gravar sinal de {pair}: {e}")
+
+    resolvidos = 0
+    try:
+        with sqlite3.connect(db_file) as conn:
+            conn.row_factory = sqlite3.Row
+            pendentes = conn.execute(
+                "SELECT * FROM paper_trading_v2_fvg_only_sinais WHERE pair=? AND status='PENDING'", (pair,)
+            ).fetchall()
+
+        for sinal in pendentes:
+            idx_candle_entrada = None
+            for j, c in enumerate(m5):
+                if c['t'] == sinal['candle_confirmacao_ts']:
+                    idx_candle_entrada = j
+                    break
+            if idx_candle_entrada is None:
+                idade_dias = (agora_ts_ms - sinal['choch_timestamp']) / 86400000
+                if idade_dias > PAPER_TRADING_V2_EXPIRACAO_DIAS:
+                    with sqlite3.connect(db_file) as conn:
+                        conn.execute(
+                            "UPDATE paper_trading_v2_fvg_only_sinais SET status='EXPIRED', updated_at=? WHERE id=?",
+                            (agora_ts_ms, sinal['id']),
+                        )
+                        conn.commit()
+                continue
+
+            candles_futuros = m5[idx_candle_entrada + 1:]
+            direcao_lower = 'alta' if sinal['direction'] == 'LONG' else 'baixa'
+            res = _resolver_tp_sl_futuro(
+                candles_futuros, direcao_lower, sinal['entry'], sinal['sl'], sinal['tp'], None,
+                max_candles=len(candles_futuros),
+            )
+            evento = 'TP' if res['resultado'] == 'TP1' else res['resultado']
+
+            if evento in ('TP', 'SL', 'AMBIGUO'):
+                r_obtido = sinal['rr'] if evento == 'TP' else (-1.0 if evento == 'SL' else None)
+                ts_evento = None
+                if res['candles_ate_resolucao'] and res['candles_ate_resolucao'] - 1 < len(candles_futuros):
+                    ts_evento = candles_futuros[res['candles_ate_resolucao'] - 1]['t']
+                with sqlite3.connect(db_file) as conn:
+                    conn.execute('''
+                        UPDATE paper_trading_v2_fvg_only_sinais
+                        SET status=?, resultado_timestamp=?, candles_ate_evento=?,
+                            r_obtido=?, mfe_pct=?, mae_pct=?, updated_at=?
+                        WHERE id=?
+                    ''', (evento, ts_evento, res['candles_ate_resolucao'], r_obtido,
+                          res['mfe_pct'], res['mae_pct'], agora_ts_ms, sinal['id']))
+                    conn.commit()
+                resolvidos += 1
+                try:
+                    _paper_trading_v2_enviar_telegram(
+                        _formatar_mensagem_resultado_paper_v2_fvg_only(sinal, evento, r_obtido, ts_evento)
+                    )
+                except Exception as e_tg:
+                    print(f"[paper_trading_v2_fvg_only] erro ao notificar resultado de {pair}: {e_tg}")
+            else:
+                idade_dias = (agora_ts_ms - sinal['choch_timestamp']) / 86400000
+                if idade_dias > PAPER_TRADING_V2_EXPIRACAO_DIAS:
+                    with sqlite3.connect(db_file) as conn:
+                        conn.execute(
+                            "UPDATE paper_trading_v2_fvg_only_sinais SET status='EXPIRED', updated_at=? WHERE id=?",
+                            (agora_ts_ms, sinal['id']),
+                        )
+                        conn.commit()
+    except Exception as e:
+        print(f"[paper_trading_v2_fvg_only] erro ao resolver pendentes de {pair}: {e}")
+
+    return {'pair': pair, 'engine': 'B_FVG_ONLY', 'desabilitado': False,
+            'novos_detectados': novos_detectados, 'resolvidos_neste_tick': resolvidos}
+
+
+def paper_trading_v2_fvg_only_tick_todos_pares(db_file, pares=None, agora_ts_ms=None):
+    """Roda paper_trading_v2_fvg_only_tick() pra cada par. Erro num par
+    não derruba os demais nem afeta o Engine A."""
+    pares = pares or PARES_MONITORADOS_REPLAY
+    resultados = {}
+    for p in pares:
+        try:
+            resultados[p] = paper_trading_v2_fvg_only_tick(p, db_file, agora_ts_ms=agora_ts_ms)
+        except Exception as e:
+            resultados[p] = {'pair': p, 'engine': 'B_FVG_ONLY', 'erro': str(e)}
+        try:
+            _registrar_heartbeat_engine_tick(db_file, 'engine_b_fvg_only', p, resultados[p])
+        except Exception as e:
+            print(f"[heartbeat] erro ao registrar tick de {p} (engine B): {e}")
+    return resultados
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# HEARTBEAT DE ENGINE (TICK RECORRENTE) — reaproveita o MESMO princípio
+# já aprovado do heartbeat de job em background (scalp_replay_
+# heartbeat), adaptado pra um ciclo que roda repetidamente (tick a
+# tick, via cron externo), não uma execução única com início/fim.
+# Tabela PRÓPRIA, isolada — não é a mesma tabela do heartbeat de
+# replay, e não é compartilhada entre Engine A e Engine B (cada linha
+# é UNIQUE por (engine, pair)).
+# ═══════════════════════════════════════════════════════════════════════
+
+ENGINE_HEARTBEAT_LIMIAR_PARADO_SEGUNDOS = 20 * 60  # ~2x o intervalo esperado de tick (M5 = 5min por ciclo)
+
+
+def init_engine_heartbeat_db(db_file):
+    try:
+        with sqlite3.connect(db_file) as conn:
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS scalp_engine_heartbeat (
+                    engine TEXT NOT NULL,
+                    pair TEXT NOT NULL,
+                    ultimo_tick_em INTEGER,
+                    novos_detectados_ultimo_tick INTEGER,
+                    resolvidos_ultimo_tick INTEGER,
+                    total_ticks INTEGER DEFAULT 0,
+                    desabilitado INTEGER DEFAULT 0,
+                    PRIMARY KEY (engine, pair)
+                )
+            ''')
+            conn.commit()
+    except Exception as e:
+        print(f"[engine_heartbeat] erro ao criar tabela: {e}")
+
+
+def _registrar_heartbeat_engine_tick(db_file, engine, pair, resultado_tick):
+    init_engine_heartbeat_db(db_file)
+    agora = int(time.time())
+    desabilitado = 1 if resultado_tick.get('desabilitado') else 0
+    novos = resultado_tick.get('novos_detectados', 0)
+    resolvidos = resultado_tick.get('resolvidos_neste_tick', 0)
+    try:
+        with sqlite3.connect(db_file) as conn:
+            conn.execute('''
+                INSERT INTO scalp_engine_heartbeat
+                    (engine, pair, ultimo_tick_em, novos_detectados_ultimo_tick, resolvidos_ultimo_tick, total_ticks, desabilitado)
+                VALUES (?, ?, ?, ?, ?, 1, ?)
+                ON CONFLICT(engine, pair) DO UPDATE SET
+                    ultimo_tick_em=excluded.ultimo_tick_em,
+                    novos_detectados_ultimo_tick=excluded.novos_detectados_ultimo_tick,
+                    resolvidos_ultimo_tick=excluded.resolvidos_ultimo_tick,
+                    total_ticks=total_ticks + 1,
+                    desabilitado=excluded.desabilitado
+            ''', (engine, pair, agora, novos, resolvidos, desabilitado))
+            conn.commit()
+    except Exception as e:
+        print(f"[engine_heartbeat] erro ao registrar {engine}/{pair}: {e}")
+
+
+@explicacao_bp.route("/scalp_gates_vortex/ab_heartbeat", methods=["GET"])
+def ab_heartbeat_endpoint():
+    """
+    Consulta o heartbeat dos dois engines (A e B), por par — diagnóstico
+    automático 'vivo'/'parado_ou_desabilitado' por comparação do
+    último tick registrado com o relógio atual. SOMENTE LEITURA.
+    """
+    db_file = _db_file_explicacao()
+    init_engine_heartbeat_db(db_file)
+    try:
+        with sqlite3.connect(db_file) as conn:
+            rows = conn.execute('''
+                SELECT engine, pair, ultimo_tick_em, novos_detectados_ultimo_tick,
+                       resolvidos_ultimo_tick, total_ticks, desabilitado
+                FROM scalp_engine_heartbeat ORDER BY engine, pair
+            ''').fetchall()
+    except Exception as e:
+        return jsonify({"erro": str(e)}), 500
+
+    agora = int(time.time())
+    resultado = {'engine_a_original': {}, 'engine_b_fvg_only': {}}
+    for engine, pair, ultimo_tick, novos, resolvidos, total_ticks, desabilitado in rows:
+        segundos_desde = agora - ultimo_tick if ultimo_tick else None
+        if desabilitado:
+            diagnostico = 'desabilitado_via_kill_switch'
+        elif segundos_desde is None:
+            diagnostico = 'nunca_rodou'
+        elif segundos_desde > ENGINE_HEARTBEAT_LIMIAR_PARADO_SEGUNDOS:
+            diagnostico = 'parado_ou_morto'
+        else:
+            diagnostico = 'vivo'
+        chave = 'engine_a_original' if engine == 'engine_a_original' else 'engine_b_fvg_only'
+        resultado[chave][pair] = {
+            'ultimo_tick_em': ultimo_tick, 'segundos_desde_ultimo_tick': segundos_desde,
+            'novos_detectados_ultimo_tick': novos, 'resolvidos_ultimo_tick': resolvidos,
+            'total_ticks_registrados': total_ticks, 'diagnostico': diagnostico,
+        }
+
+    return jsonify({
+        'limiar_parado_segundos': ENGINE_HEARTBEAT_LIMIAR_PARADO_SEGUNDOS,
+        'nota': (
+            "'vivo' = tick registrado há menos de 20min (2x o ciclo M5 esperado). "
+            "'parado_ou_morto' = sem tick recente — pode ser cron externo parado, "
+            "processo travado, ou engine desabilitado sem heartbeat marcar isso ainda. "
+            "'desabilitado_via_kill_switch' = a env var do engine está false/ausente. "
+            "'nunca_rodou' = ainda não houve nenhum tick desde que a tabela foi criada."
+        ),
+        **resultado,
+    })
+
+
+def paper_trading_v2_tick_todos_pares_com_heartbeat(db_file, pares=None, agora_ts_ms=None):
+    """
+    MESMO comportamento de paper_trading_v2_tick_todos_pares() (Engine
+    A, que permanece 100% INTOCADA) — reaproveita paper_trading_v2_
+    tick() por par sem alteração, só adiciona registro de heartbeat.
+    Kill switch: se PAPER_TRADING_V2_ENGINE_A_ENABLED != 'true' (default
+    TRUE — não muda nada em produção sem ação explícita), pula o tick
+    real e só registra 'desabilitado' no heartbeat.
+    """
+    pares = pares or PARES_MONITORADOS_REPLAY
+    resultados = {}
+    engine_ligado = _engine_habilitado('PAPER_TRADING_V2_ENGINE_A_ENABLED', default_ativo=True)
+    for p in pares:
+        if not engine_ligado:
+            resultados[p] = {'pair': p, 'engine': 'A_ORIGINAL', 'desabilitado': True, 'novos_detectados': 0, 'resolvidos_neste_tick': 0}
+        else:
+            try:
+                resultados[p] = paper_trading_v2_tick(p, db_file, agora_ts_ms=agora_ts_ms)
+                resultados[p]['desabilitado'] = False
+            except Exception as e:
+                resultados[p] = {'pair': p, 'engine': 'A_ORIGINAL', 'erro': str(e)}
+        try:
+            _registrar_heartbeat_engine_tick(db_file, 'engine_a_original', p, resultados[p])
+        except Exception as e:
+            print(f"[heartbeat] erro ao registrar tick de {p} (engine A): {e}")
+    return resultados
+
+
+@explicacao_bp.route("/scalp_gates_vortex/paper_trading_v2_tick_com_heartbeat", methods=["GET"])
+def paper_trading_v2_tick_com_heartbeat_endpoint():
+    """
+    Roda o Engine A (V2 ORIGINAL) com registro de heartbeat — mesmo
+    padrão de auth do endpoint original (/paper_trading_v2_tick, que
+    permanece intocado e disponível). Use este OU o antigo pro cron do
+    Engine A — os dois fazem o mesmo tick real, este só adiciona
+    observabilidade.
+    """
+    segredo_configurado = os.environ.get('PAPER_TRADING_TICK_SECRET')
+    if not segredo_configurado:
+        return jsonify({"erro": "PAPER_TRADING_TICK_SECRET não configurada"}), 503
+    segredo_recebido = request.headers.get('X-Paper-Tick-Secret') or request.args.get('token')
+    if not segredo_recebido or segredo_recebido != segredo_configurado:
+        return jsonify({"erro": "não autorizado"}), 401
+    if request.args.get('confirm') != 'RODAR_PAPER_TICK':
+        return jsonify({"erro": "adiciona &confirm=RODAR_PAPER_TICK na URL"}), 400
+
+    db_file = _db_file_explicacao()
+    init_paper_trading_v2_db(db_file)
+    init_engine_heartbeat_db(db_file)
+    try:
+        resultado = paper_trading_v2_tick_todos_pares_com_heartbeat(db_file)
+        return jsonify({"status": "ok", "engine": "A_ORIGINAL", "resultados_por_par": resultado})
+    except Exception as e:
+        return jsonify({"erro": f"erro no tick do Engine A: {e}"}), 500
+
+
+@explicacao_bp.route("/scalp_gates_vortex/paper_trading_v2_fvg_only_tick", methods=["GET"])
+def paper_trading_v2_fvg_only_tick_endpoint():
+    """
+    Roda o Engine B (V2_FVG_ONLY) — mesmo padrão de auth do Engine A
+    (PAPER_TRADING_TICK_SECRET compartilhado, já que é o mesmo tipo de
+    proteção, não é segredo de execução real). KILL SWITCH: só
+    processa se PAPER_TRADING_V2_ENGINE_B_ENABLED=true (default FALSE
+    — precisa ativação explícita, diferente do Engine A).
+    """
+    segredo_configurado = os.environ.get('PAPER_TRADING_TICK_SECRET')
+    if not segredo_configurado:
+        return jsonify({"erro": "PAPER_TRADING_TICK_SECRET não configurada"}), 503
+    segredo_recebido = request.headers.get('X-Paper-Tick-Secret') or request.args.get('token')
+    if not segredo_recebido or segredo_recebido != segredo_configurado:
+        return jsonify({"erro": "não autorizado"}), 401
+    if request.args.get('confirm') != 'RODAR_PAPER_TICK':
+        return jsonify({"erro": "adiciona &confirm=RODAR_PAPER_TICK na URL"}), 400
+
+    db_file = _db_file_explicacao()
+    init_paper_trading_v2_fvg_only_db(db_file)
+    init_engine_heartbeat_db(db_file)
+    try:
+        resultado = paper_trading_v2_fvg_only_tick_todos_pares(db_file)
+        return jsonify({"status": "ok", "engine": "B_FVG_ONLY", "resultados_por_par": resultado})
+    except Exception as e:
+        return jsonify({"erro": f"erro no tick do Engine B: {e}"}), 500
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# MÉTRICAS ESTENDIDAS — profit factor, max drawdown, R/DD — item
+# aprovado do ticket. Métricas que NENHUM relatório existente calcula
+# hoje (nem paper_trading_v2_relatorio, que permanece intocado). Função
+# nova, isolada, só de LEITURA — recebe uma lista de r_obtido já
+# resolvidos e devolve as métricas, sem tocar em nenhuma tabela.
+# ═══════════════════════════════════════════════════════════════════════
+
+def _calcular_metricas_estendidas(lista_sinais_cronologicos):
+    """
+    lista_sinais_cronologicos: lista de dicts com pelo menos 'r_obtido'
+    (float ou None) e 'choch_timestamp' (int), status TP/SL apenas
+    (AMBIGUO/PENDING/EXPIRED já devem ter sido filtrados por quem chama).
+    Retorna profit_factor, max_drawdown_R, r_sobre_dd.
+    """
+    ordenados = sorted(lista_sinais_cronologicos, key=lambda s: s['choch_timestamp'])
+    rs = [s['r_obtido'] for s in ordenados if s.get('r_obtido') is not None]
+    if not rs:
+        return {'profit_factor': None, 'max_drawdown_R': None, 'r_sobre_dd': None}
+
+    ganhos = sum(r for r in rs if r > 0)
+    perdas = abs(sum(r for r in rs if r < 0))
+    profit_factor = round(ganhos / perdas, 3) if perdas > 0 else None
+
+    equity = 0.0
+    pico = 0.0
+    max_dd = 0.0
+    for r in rs:
+        equity += r
+        pico = max(pico, equity)
+        max_dd = max(max_dd, pico - equity)
+
+    r_sobre_dd = round(sum(rs) / max_dd, 3) if max_dd > 0 else None
+
+    return {
+        'profit_factor': profit_factor,
+        'max_drawdown_R': round(max_dd, 2),
+        'r_sobre_dd': r_sobre_dd,
+        'equity_final_R': round(sum(rs), 2),
+    }
+
+
+def paper_trading_v2_fvg_only_relatorio(db_file):
+    """
+    Telemetria do Engine B — MESMA estrutura de paper_trading_v2_
+    relatorio() (Engine A, intocado), lendo paper_trading_v2_fvg_only_
+    sinais (tabela isolada), MAIS as métricas estendidas (profit
+    factor, max drawdown, R/DD) que nenhum relatório anterior tinha.
+    """
+    with sqlite3.connect(db_file) as conn:
+        conn.row_factory = sqlite3.Row
+        todos = conn.execute("SELECT * FROM paper_trading_v2_fvg_only_sinais ORDER BY choch_timestamp ASC").fetchall()
+        todos = [dict(r) for r in todos]
+
+    total = len(todos)
+    pendentes = [s for s in todos if s['status'] == 'PENDING']
+    tp = [s for s in todos if s['status'] == 'TP']
+    sl = [s for s in todos if s['status'] == 'SL']
+    ambiguo = [s for s in todos if s['status'] == 'AMBIGUO']
+    expired = [s for s in todos if s['status'] == 'EXPIRED']
+
+    resolvidos = tp + sl
+    rs = [s['r_obtido'] for s in resolvidos if s['r_obtido'] is not None]
+    win_rate = round(100 * len(tp) / len(resolvidos), 2) if resolvidos else None
+    expectancy = round(sum(rs) / len(rs), 4) if rs else None
+    metricas_estendidas = _calcular_metricas_estendidas(resolvidos)
+
+    def bloco_direcao(lista_status):
+        r_dir = [s['r_obtido'] for s in lista_status if s['status'] in ('TP', 'SL') and s['r_obtido'] is not None]
+        wins = sum(1 for s in lista_status if s['status'] == 'TP')
+        losses = sum(1 for s in lista_status if s['status'] == 'SL')
+        n_resolvido = wins + losses
+        resolvidos_dir = [s for s in lista_status if s['status'] in ('TP', 'SL')]
+        return {
+            'sinais': len(lista_status), 'tp': wins, 'sl': losses,
+            'wr': round(100 * wins / n_resolvido, 2) if n_resolvido else None,
+            'expectancy': round(sum(r_dir) / len(r_dir), 4) if r_dir else None,
+            **_calcular_metricas_estendidas(resolvidos_dir),
+        }
+
+    long_sinais = [s for s in todos if s['direction'] == 'LONG']
+    short_sinais = [s for s in todos if s['direction'] == 'SHORT']
+
+    por_par = {}
+    for s in todos:
+        por_par.setdefault(s['pair'], []).append(s)
+    resultado_por_par = {p: bloco_direcao(lista) for p, lista in por_par.items()}
+
+    return {
+        'engine': 'B_FVG_ONLY',
+        'total_sinais': total, 'pendentes': len(pendentes), 'tp': len(tp), 'sl': len(sl),
+        'ambiguo': len(ambiguo), 'expired': len(expired),
+        'win_rate_pct': win_rate, 'expectancy_R': expectancy,
+        **metricas_estendidas,
+        'LONG': bloco_direcao(long_sinais), 'SHORT': bloco_direcao(short_sinais),
+        'resultado_por_par': resultado_por_par,
+        'nota_metodologica': (
+            'PAPER TRADING — 100% experimental, ZERO dinheiro real, ZERO ordem enviada a '
+            'qualquer exchange. Reaproveita avaliar_vortex_decision_layer_v2(..., '
+            'permitir_fallback_ema25=False) — mesma função do Engine A, pipeline consolidada, '
+            'sem duas implementações do motor. Tabela isolada (paper_trading_v2_fvg_only_sinais), '
+            'nunca compartilhada com o Engine A nem com produção.'
+        ),
+    }
+
+
+@explicacao_bp.route("/scalp_gates_vortex/paper_trading_v2_fvg_only_relatorio", methods=["GET"])
+def paper_trading_v2_fvg_only_relatorio_endpoint():
+    """Telemetria do Engine B — somente leitura."""
+    db_file = _db_file_explicacao()
+    init_paper_trading_v2_fvg_only_db(db_file)
+    try:
+        return jsonify(paper_trading_v2_fvg_only_relatorio(db_file))
+    except Exception as e:
+        return jsonify({"erro": f"erro ao gerar relatório do Engine B: {e}"}), 500
+
+
+@explicacao_bp.route("/scalp_gates_vortex/paper_trading_v2_fvg_only_export", methods=["GET"])
+def paper_trading_v2_fvg_only_export_endpoint():
+    """
+    Export bruto do Engine B — MESMO padrão de auth e formato de
+    /paper_trading_v2_export (Engine A, intocado). Só leitura.
+    """
+    segredo_configurado = os.environ.get('PAPER_TRADING_TICK_SECRET')
+    if not segredo_configurado:
+        return jsonify({"erro": "PAPER_TRADING_TICK_SECRET não configurada"}), 503
+    segredo_recebido = request.headers.get('X-Paper-Tick-Secret') or request.args.get('token')
+    if not segredo_recebido or segredo_recebido != segredo_configurado:
+        return jsonify({"erro": "não autorizado"}), 401
+
+    limit_param = request.args.get('limit')
+    offset_param = request.args.get('offset')
+    desde_ts_ms_param = request.args.get('desde_ts_ms')
+    limit = int(limit_param) if limit_param else None
+    offset = int(offset_param) if offset_param else None
+    desde_ts_ms = int(desde_ts_ms_param) if desde_ts_ms_param else None
+
+    db_file = _db_file_explicacao()
+    init_paper_trading_v2_fvg_only_db(db_file)
+    try:
+        with sqlite3.connect(db_file) as conn:
+            conn.row_factory = sqlite3.Row
+            query = "SELECT * FROM paper_trading_v2_fvg_only_sinais"
+            params = []
+            if desde_ts_ms is not None:
+                query += " WHERE choch_timestamp >= ?"
+                params.append(desde_ts_ms)
+            query += " ORDER BY choch_timestamp ASC"
+            if limit is not None:
+                query += " LIMIT ?"
+                params.append(limit)
+                if offset is not None:
+                    query += " OFFSET ?"
+                    params.append(offset)
+            rows = conn.execute(query, params).fetchall()
+            sinais = [dict(r) for r in rows]
+        return jsonify({"engine": "B_FVG_ONLY", "total": len(sinais), "sinais": sinais})
+    except Exception as e:
+        return jsonify({"erro": f"erro no export do Engine B: {e}"}), 500
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# CLASSIFICAÇÃO A+B / A-only / B-only — item aprovado do ticket.
+# SOMENTE LEITURA das duas tabelas isoladas (paper_trading_v2_sinais
+# e paper_trading_v2_fvg_only_sinais) — nunca escreve, nunca decide
+# nada, nunca altera nenhum dos dois engines.
+# ═══════════════════════════════════════════════════════════════════════
+
+def classificar_oportunidades_ab(db_file):
+    """
+    Classifica cada oportunidade única (pair, choch_timestamp,
+    direction) como A+B (ambos engines geraram), A-only (só Engine A
+    — veio da EMA25) ou B-only (impossível estruturalmente, já que B é
+    subconjunto de A — se aparecer, é sinal de alerta, ver nota).
+    """
+    with sqlite3.connect(db_file) as conn:
+        conn.row_factory = sqlite3.Row
+        sinais_a = [dict(r) for r in conn.execute("SELECT * FROM paper_trading_v2_sinais").fetchall()]
+        sinais_b = [dict(r) for r in conn.execute("SELECT * FROM paper_trading_v2_fvg_only_sinais").fetchall()]
+
+    chaves_a = {(s['pair'], s['choch_timestamp'], s['direction']): s for s in sinais_a}
+    chaves_b = {(s['pair'], s['choch_timestamp'], s['direction']): s for s in sinais_b}
+
+    ambos = set(chaves_a.keys()) & set(chaves_b.keys())
+    so_a = set(chaves_a.keys()) - set(chaves_b.keys())
+    so_b = set(chaves_b.keys()) - set(chaves_a.keys())
+
+    return {
+        'total_A': len(sinais_a), 'total_B': len(sinais_b),
+        'A_mais_B': len(ambos), 'A_only': len(so_a), 'B_only': len(so_b),
+        'alerta_b_only_inesperado': (
+            f"ATENÇÃO: {len(so_b)} sinais existem em B mas não em A — isso não deveria "
+            f"acontecer estruturalmente (B é subconjunto FVG de A). Investigar antes de "
+            f"confiar nos números." if so_b else None
+        ),
+        'chaves_ambos': [{'pair': k[0], 'choch_timestamp': k[1], 'direction': k[2]} for k in ambos],
+        'chaves_so_a': [{'pair': k[0], 'choch_timestamp': k[1], 'direction': k[2]} for k in so_a],
+        'chaves_so_b': [{'pair': k[0], 'choch_timestamp': k[1], 'direction': k[2]} for k in so_b],
+        '_sinais_a_completos': sinais_a, '_sinais_b_completos': sinais_b,
+        '_chaves_ambos_set': ambos, '_chaves_so_a_set': so_a,
+    }
+
+
+def gerar_comparacao_ab_forward(db_file):
+    """
+    Relatório consolidado do A/B FORWARD TEST — número de trades, win
+    rate, expectancy, profit factor, soma R, max drawdown, R/DD,
+    LONG/SHORT, por par, e a quebra A-only/B-only/A+B. SOMENTE LEITURA.
+    """
+    classificacao = classificar_oportunidades_ab(db_file)
+    sinais_a = classificacao['_sinais_a_completos']
+    sinais_b = classificacao['_sinais_b_completos']
+    chaves_ambos = classificacao['_chaves_ambos_set']
+    chaves_so_a = classificacao['_chaves_so_a_set']
+
+    def bloco_completo(lista):
+        resolvidos = [s for s in lista if s['status'] in ('TP', 'SL')]
+        n = len(lista)
+        n_res = len(resolvidos)
+        n_tp = sum(1 for s in resolvidos if s['status'] == 'TP')
+        n_sl = n_res - n_tp
+        wr = round(100 * n_tp / n_res, 2) if n_res else None
+        rs = [s['r_obtido'] for s in resolvidos if s['r_obtido'] is not None]
+        expectancy = round(sum(rs) / len(rs), 4) if rs else None
+        metricas = _calcular_metricas_estendidas(resolvidos)
+        long_r = [s['r_obtido'] for s in resolvidos if s['direction'] == 'LONG' and s['r_obtido'] is not None]
+        short_r = [s['r_obtido'] for s in resolvidos if s['direction'] == 'SHORT' and s['r_obtido'] is not None]
+        return {
+            'n_trades': n, 'n_resolvidos': n_res, 'tp': n_tp, 'sl': n_sl,
+            'win_rate_pct': wr, 'expectancy_R': expectancy, **metricas,
+            'LONG': {'n': len(long_r), 'soma_R': round(sum(long_r), 2) if long_r else None},
+            'SHORT': {'n': len(short_r), 'soma_R': round(sum(short_r), 2) if short_r else None},
+        }
+
+    def bloco_por_par(lista):
+        por_par = {}
+        for s in lista:
+            por_par.setdefault(s['pair'], []).append(s)
+        return {p: bloco_completo(l) for p, l in por_par.items()}
+
+    sinais_a_mais_b = [s for s in sinais_a if (s['pair'], s['choch_timestamp'], s['direction']) in chaves_ambos]
+    sinais_a_only = [s for s in sinais_a if (s['pair'], s['choch_timestamp'], s['direction']) in chaves_so_a]
+
+    return {
+        'nota_metodologica': (
+            'A/B FORWARD TEST — 100% paper, zero dinheiro real. Engine A e Engine B são '
+            'estruturalmente isolados (tabelas próprias, ciclos próprios, sem estado '
+            'compartilhado). Comparação SOMENTE LEITURA das duas tabelas — não altera nem '
+            'decide nada em nenhum dos dois engines.'
+        ),
+        'classificacao_oportunidades': {
+            'total_A': classificacao['total_A'], 'total_B': classificacao['total_B'],
+            'A_mais_B': classificacao['A_mais_B'], 'A_only': classificacao['A_only'],
+            'B_only': classificacao['B_only'],
+            'alerta_b_only_inesperado': classificacao['alerta_b_only_inesperado'],
+        },
+        'ENGINE_A_COMPLETO': bloco_completo(sinais_a),
+        'ENGINE_B_COMPLETO': bloco_completo(sinais_b),
+        'A_MAIS_B_apenas_oportunidades_em_comum': bloco_completo(sinais_a_mais_b),
+        'A_ONLY_oportunidades_so_da_ema25': bloco_completo(sinais_a_only),
+        'por_par_engine_a': bloco_por_par(sinais_a),
+        'por_par_engine_b': bloco_por_par(sinais_b),
+    }
+
+
+@explicacao_bp.route("/scalp_gates_vortex/comparacao_ab_forward", methods=["GET"])
+def comparacao_ab_forward_endpoint():
+    """Relatório consolidado do A/B forward test — somente leitura."""
+    db_file = _db_file_explicacao()
+    init_paper_trading_v2_db(db_file)
+    init_paper_trading_v2_fvg_only_db(db_file)
+    try:
+        return jsonify(gerar_comparacao_ab_forward(db_file))
+    except Exception as e:
+        return jsonify({"erro": f"erro ao gerar comparação A/B: {e}"}), 500
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# DIAGNÓSTICO DE CONFLUÊNCIAS HISTÓRICAS — item aprovado do ticket.
+# SOMENTE LEITURA/ANÁLISE — não decide sinal, não bloqueia sinal, não
+# altera avaliar_vortex_decision_layer_v2, Engine A, Engine B,
+# gates_vortex, PAPER A/B, tabelas de produção, heartbeat, Telegram
+# ou kill switches. Reaproveita EXCLUSIVAMENTE compute_htf_narrative,
+# compute_liquidez_referencia e validar_sfp_cascata_tf — todas
+# funções puras já existentes, sem alteração nenhuma.
+#
+# OTIMIZAÇÃO APROVADA — fetch por PAR+PERÍODO (não por sinal): busca
+# candles UMA vez por par, guarda em cache na memória do job, e cada
+# sinal usa esse mesmo cache com um corte AS-OF próprio (fatiar a
+# lista, não refazer request). Reduz de "6 timeframes × ~1800 sinais"
+# pra "6 timeframes × 13 pares".
+# ═══════════════════════════════════════════════════════════════════════
+
+import hashlib
+import inspect
+
+DIAGNOSTICO_CONFLUENCIAS_WARMUP_DIAS_D1 = 120   # cobre HTF_PREMIUM_DISCOUNT_LOOKBACK=90 + folga
+DIAGNOSTICO_CONFLUENCIAS_WARMUP_DIAS_H4_H1 = 60  # folga generosa pra compute_bias_from_swings não faltar dado
+
+
+def _computar_hash_funcoes_confluencia():
+    """
+    Hash do código-fonte REAL das 3 funções reaproveitadas, capturado
+    via inspect.getsource() no momento da execução — não é uma versão
+    declarada manualmente, é o hash do texto que está de fato rodando.
+    Qualquer alteração futura em qualquer uma das 3 muda o hash,
+    permitindo saber exatamente qual implementação gerou cada linha
+    do diagnóstico.
+    """
+    try:
+        fontes = (
+            inspect.getsource(compute_htf_narrative)
+            + inspect.getsource(compute_liquidez_referencia)
+            + inspect.getsource(validar_sfp_cascata_tf)
+        )
+        return hashlib.sha256(fontes.encode('utf-8')).hexdigest()[:16]
+    except Exception as e:
+        return f'ERRO_AO_CALCULAR_HASH: {e}'
+
+
+def init_diagnostico_confluencias_db(db_file):
+    """Tabela isolada — nunca escrita por nenhum engine, nunca lida
+    por nenhum engine. Só existe pra este diagnóstico."""
+    try:
+        with sqlite3.connect(db_file) as conn:
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS diagnostico_confluencias_v2 (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    engine_origem TEXT,
+                    pair TEXT,
+                    direction TEXT,
+                    choch_timestamp INTEGER,
+                    ts_corte_confluencia INTEGER,
+
+                    htf_bias TEXT, htf_strength TEXT, htf_alinhado INTEGER,
+                    htf_premium_discount TEXT, htf_disponivel INTEGER,
+
+                    liquidez_disponivel INTEGER, liquidez_tipo TEXT,
+                    liquidez_nivel_high REAL, liquidez_nivel_low REAL,
+                    liquidez_distancia_pct REAL,
+
+                    sweep_encontrado INTEGER, sweep_timeframe TEXT,
+                    sweep_direcao TEXT, sweep_timestamp INTEGER,
+                    sweep_idade_min REAL, sweep_nivel REAL,
+                    sweep_motivo_bruto TEXT,
+
+                    status TEXT, r_obtido REAL,
+
+                    max_candle_ts_usado_d1 INTEGER, max_candle_ts_usado_h4 INTEGER,
+                    max_candle_ts_usado_h1 INTEGER, max_candle_ts_usado_m15 INTEGER,
+                    max_candle_ts_usado_m5 INTEGER, max_candle_ts_usado_m1 INTEGER,
+                    zero_lookahead_confirmado INTEGER,
+
+                    erro TEXT,
+                    hash_funcoes_confluencia TEXT,
+                    calculado_em INTEGER,
+                    UNIQUE(engine_origem, pair, choch_timestamp, direction)
+                )
+            ''')
+            conn.execute('''
+                CREATE INDEX IF NOT EXISTS idx_diag_conf_pair ON diagnostico_confluencias_v2(pair)
+            ''')
+            conn.commit()
+    except Exception as e:
+        print(f"[diagnostico_confluencias] erro ao criar tabela: {e}")
+
+
+def _montar_cache_candles_par_periodo(pair, inicio_ts_ms, fim_ts_ms):
+    """
+    Busca candles UMA VEZ por par, cobrindo todo o período pedido MAIS
+    warmup suficiente pra nenhuma função ficar sem histórico logo nos
+    primeiros sinais do período (item 4 do ticket — evita falso
+    'sem HTF'/'sem sweep' por corte de cache tardio).
+    Reaproveita _fetch_bybit_klines_historico() sem alteração.
+    """
+    symbol_map = {
+        'BTCUSD': 'BTCUSDT', 'ETHUSD': 'ETHUSDT', 'SOLUSD': 'SOLUSDT', 'XRPUSD': 'XRPUSDT',
+        'LINKUSD': 'LINKUSDT', 'ADAUSD': 'ADAUSDT', 'AVAXUSD': 'AVAXUSDT', 'BNBUSD': 'BNBUSDT',
+        'AAVEUSD': 'AAVEUSDT', 'NEARUSD': 'NEARUSDT', 'PENDLEUSD': 'PENDLEUSDT', 'INJUSD': 'INJUSDT',
+        'ONDOUSD': 'ONDOUSDT',
+    }
+    symbol = symbol_map.get(pair.upper(), pair.upper().replace('USD', 'USDT'))
+    dias_periodo = max(1, int((fim_ts_ms - inicio_ts_ms) / 86400000) + 1)
+
+    d1_bruto = _fetch_bybit_klines_historico(symbol, 'D', dias_periodo + DIAGNOSTICO_CONFLUENCIAS_WARMUP_DIAS_D1, fim_ts_ms=fim_ts_ms)
+    h4_bruto = _fetch_bybit_klines_historico(symbol, '240', dias_periodo + DIAGNOSTICO_CONFLUENCIAS_WARMUP_DIAS_H4_H1, fim_ts_ms=fim_ts_ms)
+    h1_bruto = _fetch_bybit_klines_historico(symbol, '60', dias_periodo + DIAGNOSTICO_CONFLUENCIAS_WARMUP_DIAS_H4_H1, fim_ts_ms=fim_ts_ms)
+    m15_bruto = _fetch_bybit_klines_historico(symbol, '15', dias_periodo + 3, fim_ts_ms=fim_ts_ms)
+    m5_bruto = _fetch_bybit_klines_historico(symbol, '5', dias_periodo + 2, fim_ts_ms=fim_ts_ms)
+    m1_bruto = _fetch_bybit_klines_historico(symbol, '1', dias_periodo + 1, fim_ts_ms=fim_ts_ms)
+
+    d1, val_d1 = _validar_e_limpar_candles(d1_bruto, 'D')
+    h4, val_h4 = _validar_e_limpar_candles(h4_bruto, '240')
+    h1, val_h1 = _validar_e_limpar_candles(h1_bruto, '60')
+    m15, val_m15 = _validar_e_limpar_candles(m15_bruto, '15')
+    m5, val_m5 = _validar_e_limpar_candles(m5_bruto, '5')
+    m1, val_m1 = _validar_e_limpar_candles(m1_bruto, '1')
+
+    return {
+        'pair': pair, 'symbol': symbol,
+        'D1': d1, 'H4': h4, 'H1': h1, 'M15': m15, 'M5': m5, 'M1': m1,
+        'validacao': {'D1': val_d1, 'H4': val_h4, 'H1': val_h1, 'M15': val_m15, 'M5': val_m5, 'M1': val_m1},
+        'contagem_bruta': {'D1': len(d1), 'H4': len(h4), 'H1': len(h1), 'M15': len(m15), 'M5': len(m5), 'M1': len(m1)},
+    }
+
+
+def _cortar_cache_as_of(cache_pair, ts_corte):
+    """
+    Corte AS-OF a partir do cache já em memória — NENHUM request novo.
+    Filtro explícito (segunda camada de proteção, além do fim_ts_ms já
+    aplicado na busca original do cache): candles_tf = [c for c in
+    cache_tf if c['t'] <= ts_corte]. Devolve o dict candles_por_tf no
+    formato que compute_htf_narrative/compute_liquidez_referencia/
+    validar_sfp_cascata_tf esperam, MAIS o timestamp máximo usado por
+    timeframe (pra confirmar zero lookahead depois, sem re-varrer).
+    """
+    resultado = {}
+    max_ts_usado = {}
+    for tf in ('D1', 'H4', 'H1', 'M15', 'M5', 'M1'):
+        candles_cortados = [c for c in cache_pair[tf] if c['t'] <= ts_corte]
+        resultado[tf] = candles_cortados
+        max_ts_usado[tf] = candles_cortados[-1]['t'] if candles_cortados else None
+    return resultado, max_ts_usado
+
+
+def calcular_confluencias_um_sinal(sinal, cache_pair, hash_funcoes):
+    """
+    Calcula as 3 confluências (HTF, liquidez, sweep) pra UM sinal já
+    gerado pela V2, usando o cache do par (sem request novo). AS-OF
+    ancorado em candle_confirmacao_ts do sinal — o mesmo corte que a
+    própria V2 já usou pra gerar aquele sinal.
+
+    NÃO reinterpreta 'sweep encontrado' como 'sweep válido pra
+    entrada' — devolve o resultado BRUTO de validar_sfp_cascata_tf()
+    (timestamp, timeframe, direção, nível, motivo), sem julgar se
+    aquilo "confirma" ou não a entrada. Essa decisão fica pra depois,
+    com dado.
+    """
+    ts_corte = sinal.get('candle_confirmacao_ts') or sinal.get('timestamp')
+    pair = sinal['pair']
+    direcao_alta_baixa = 'alta' if sinal['direction'] == 'LONG' else 'baixa'
+
+    candles_por_tf, max_ts_usado = _cortar_cache_as_of(cache_pair, ts_corte)
+
+    linha = {
+        'engine_origem': sinal.get('_engine_origem', 'A'),
+        'pair': pair, 'direction': sinal['direction'],
+        'choch_timestamp': sinal['choch_timestamp'], 'ts_corte_confluencia': ts_corte,
+        'htf_bias': None, 'htf_strength': None, 'htf_alinhado': None,
+        'htf_premium_discount': None, 'htf_disponivel': 0,
+        'liquidez_disponivel': 0, 'liquidez_tipo': None,
+        'liquidez_nivel_high': None, 'liquidez_nivel_low': None, 'liquidez_distancia_pct': None,
+        'sweep_encontrado': 0, 'sweep_timeframe': None, 'sweep_direcao': None,
+        'sweep_timestamp': None, 'sweep_idade_min': None, 'sweep_nivel': None, 'sweep_motivo_bruto': None,
+        'status': sinal.get('status'), 'r_obtido': sinal.get('r_obtido'),
+        'max_candle_ts_usado_d1': max_ts_usado['D1'], 'max_candle_ts_usado_h4': max_ts_usado['H4'],
+        'max_candle_ts_usado_h1': max_ts_usado['H1'], 'max_candle_ts_usado_m15': max_ts_usado['M15'],
+        'max_candle_ts_usado_m5': max_ts_usado['M5'], 'max_candle_ts_usado_m1': max_ts_usado['M1'],
+        'zero_lookahead_confirmado': None, 'erro': None,
+        'hash_funcoes_confluencia': hash_funcoes, 'calculado_em': int(time.time()),
+    }
+
+    # ── Confirmação de zero lookahead — checagem automática, não afirmação ──
+    lookahead_detectado = any(
+        ts is not None and ts > ts_corte for ts in max_ts_usado.values()
+    )
+    linha['zero_lookahead_confirmado'] = 0 if lookahead_detectado else 1
+
+    # ── 1) CONTEXTO HTF ──
+    try:
+        htf = compute_htf_narrative(candles_por_tf['D1'], candles_por_tf['H4'], candles_por_tf['H1'])
+        linha['htf_bias'] = htf.get('bias')
+        linha['htf_strength'] = htf.get('strength')
+        linha['htf_alinhado'] = 1 if htf.get('alignment', {}).get('aligned') else 0
+        linha['htf_premium_discount'] = htf.get('premium_discount', {}).get('state')
+        # 'disponível' = teve candles D1 suficientes pra calcular bias de verdade (não caiu no fallback neutro por falta de dado)
+        linha['htf_disponivel'] = 1 if len(candles_por_tf['D1']) >= (SWING_LOOKBACK * 2 + 5) else 0
+    except Exception as e:
+        linha['erro'] = f'HTF: {e}'
+
+    # ── 2) LIQUIDEZ PRÉ-ENTRADA ──
+    try:
+        liquidez = compute_liquidez_referencia(pair, candles_por_tf)
+        if liquidez:
+            linha['liquidez_disponivel'] = 1
+            linha['liquidez_tipo'] = liquidez.get('sessao')
+            linha['liquidez_nivel_high'] = liquidez.get('high')
+            linha['liquidez_nivel_low'] = liquidez.get('low')
+            preco_no_momento = candles_por_tf['M5'][-1]['c'] if candles_por_tf['M5'] else None
+            nivel_relevante = liquidez.get('high') if direcao_alta_baixa == 'baixa' else liquidez.get('low')
+            if preco_no_momento and nivel_relevante:
+                linha['liquidez_distancia_pct'] = round(abs(nivel_relevante - preco_no_momento) / preco_no_momento * 100, 4)
+    except Exception as e:
+        linha['erro'] = (linha['erro'] + ' | ' if linha['erro'] else '') + f'LIQUIDEZ: {e}'
+        liquidez = None
+
+    # ── 3) SWEEP/SFP — resultado BRUTO, sem reinterpretar "encontrado" como "válido" ──
+    try:
+        sfp, motivo_sfp, tf_sfp_usado, _ = validar_sfp_cascata_tf(candles_por_tf, liquidez, direcao_alta_baixa)
+        linha['sweep_motivo_bruto'] = motivo_sfp
+        if sfp:
+            linha['sweep_encontrado'] = 1
+            linha['sweep_timeframe'] = tf_sfp_usado
+            linha['sweep_direcao'] = sfp.get('tipo')
+            linha['sweep_timestamp'] = sfp.get('t')
+            linha['sweep_nivel'] = sfp.get('nivel')
+            if sfp.get('t'):
+                linha['sweep_idade_min'] = round((ts_corte - sfp['t']) / 60000, 2)
+    except Exception as e:
+        linha['erro'] = (linha['erro'] + ' | ' if linha['erro'] else '') + f'SWEEP: {e}'
+
+    return linha
+
+
+def _validar_equivalencia_ab_dataset(sinais_a, sinais_b):
+    """
+    Validação EXPLÍCITA de equivalência A/B — item aprovado do ticket:
+    "não assumir que A é superconjunto de B sem verificar no dataset
+    específico". Reaproveita o mesmo princípio de chave já usado antes
+    (pair, choch_timestamp, direction), mas recalcula do zero pra ESTE
+    dataset, sem herdar conclusão de nenhuma análise anterior.
+    """
+    chaves_a = {(s['pair'], s['choch_timestamp'], s['direction']) for s in sinais_a}
+    chaves_b = {(s['pair'], s['choch_timestamp'], s['direction']) for s in sinais_b}
+    so_b = chaves_b - chaves_a
+    return {
+        'total_a': len(chaves_a), 'total_b': len(chaves_b),
+        'a_e_superconjunto_de_b': len(so_b) == 0,
+        'sinais_em_b_ausentes_de_a': len(so_b),
+        'exemplos_b_sem_a': list(so_b)[:5] if so_b else [],
+    }
+
+
+def diagnostico_confluencias_teste_pequeno(pair, dias_historico=30, fim_ts_ms=None, limit_sinais=5):
+    """
+    TESTE PEQUENO — item aprovado do ticket, obrigatório antes do job
+    completo. 1 par, poucos sinais, NÃO escreve na tabela de
+    diagnóstico (roda em memória, devolve tudo pra inspeção manual).
+    Valida: schema, AS-OF, zero lookahead, coerência das 3 funções,
+    e que o sinal original (status/r_obtido) não foi alterado.
+    """
+    if fim_ts_ms is None:
+        fim_ts_ms = int(time.time() * 1000)
+    inicio_ts_ms = fim_ts_ms - dias_historico * 86400000
+
+    db_file = _db_file_explicacao()
+    with sqlite3.connect(db_file) as conn:
+        conn.row_factory = sqlite3.Row
+        sinais_raw = conn.execute('''
+            SELECT * FROM paper_trading_v2_sinais
+            WHERE pair=? AND status IN ('TP','SL') AND choch_timestamp BETWEEN ? AND ?
+            ORDER BY choch_timestamp ASC LIMIT ?
+        ''', (pair, inicio_ts_ms, fim_ts_ms, limit_sinais)).fetchall()
+    sinais = [dict(r) for r in sinais_raw]
+
+    if not sinais:
+        return {'erro': f'nenhum sinal resolvido encontrado pra {pair} no período — confere se a tabela paper_trading_v2_sinais tem dado nesse intervalo'}
+
+    hash_funcoes = _computar_hash_funcoes_confluencia()
+    cache_pair = _montar_cache_candles_par_periodo(pair, inicio_ts_ms, fim_ts_ms)
+
+    resultados = []
+    for sinal in sinais:
+        sinal_original_status = sinal.get('status')
+        sinal_original_r = sinal.get('r_obtido')
+        linha = calcular_confluencias_um_sinal(sinal, cache_pair, hash_funcoes)
+        resultados.append({
+            **linha,
+            '_checagem_sinal_nao_alterado': (
+                linha['status'] == sinal_original_status and linha['r_obtido'] == sinal_original_r
+            ),
+        })
+
+    todos_zero_lookahead = all(r['zero_lookahead_confirmado'] == 1 for r in resultados)
+    todos_sinal_intacto = all(r['_checagem_sinal_nao_alterado'] for r in resultados)
+
+    return {
+        'pair': pair, 'periodo': {'inicio_ts_ms': inicio_ts_ms, 'fim_ts_ms': fim_ts_ms},
+        'hash_funcoes_confluencia': hash_funcoes,
+        'cache_contagem_bruta': cache_pair['contagem_bruta'],
+        'cache_validacao': cache_pair['validacao'],
+        'sinais_testados': len(resultados),
+        'CHECAGEM_zero_lookahead_em_todos': todos_zero_lookahead,
+        'CHECAGEM_sinal_original_nao_alterado_em_todos': todos_sinal_intacto,
+        'resultados_detalhados': resultados,
+    }
+
+
+def diagnostico_confluencias_completo(db_file, job_id, pares=None, dias_historico=30, fim_ts_ms=None):
+    """
+    JOB COMPLETO — item aprovado do ticket, só roda depois do teste
+    pequeno confirmado. Fetch UMA vez por par (não por sinal),
+    processa todos os sinais resolvidos (TP/SL) do Engine A dentro do
+    período. Valida equivalência A/B NESTE dataset (não assume nada
+    de análises anteriores). Heartbeat por par, mesmo mecanismo já
+    aprovado. NÃO decide sinal, NÃO altera nenhuma tabela de produção.
+    """
+    if fim_ts_ms is None:
+        fim_ts_ms = int(time.time() * 1000)
+    inicio_ts_ms = fim_ts_ms - dias_historico * 86400000
+    pares = pares or PARES_MONITORADOS_REPLAY
+    ts_inicio_job = int(time.time())
+    total_pares = len(pares)
+
+    init_diagnostico_confluencias_db(db_file)
+    hash_funcoes = _computar_hash_funcoes_confluencia()
+
+    _registrar_heartbeat_fvg_only(db_file, job_id, total_pares, 0, None, 'iniciando', ts_inicio_job)
+
+    with sqlite3.connect(db_file) as conn:
+        conn.row_factory = sqlite3.Row
+        todos_sinais_a = [dict(r) for r in conn.execute(
+            "SELECT * FROM paper_trading_v2_sinais WHERE choch_timestamp BETWEEN ? AND ?",
+            (inicio_ts_ms, fim_ts_ms),
+        ).fetchall()]
+        todos_sinais_b = [dict(r) for r in conn.execute(
+            "SELECT * FROM paper_trading_v2_fvg_only_sinais WHERE choch_timestamp BETWEEN ? AND ?",
+            (inicio_ts_ms, fim_ts_ms),
+        ).fetchall()]
+
+    equivalencia = _validar_equivalencia_ab_dataset(todos_sinais_a, todos_sinais_b)
+
+    sinais_resolvidos_a = [s for s in todos_sinais_a if s['status'] in ('TP', 'SL')]
+
+    erros_por_par = {}
+    sinais_processados = 0
+    sinais_com_erro = 0
+
+    for idx, pair in enumerate(pares):
+        _registrar_heartbeat_fvg_only(db_file, job_id, total_pares, idx, pair, 'processando', ts_inicio_job)
+
+        sinais_do_par = [s for s in sinais_resolvidos_a if s['pair'] == pair]
+        if not sinais_do_par:
+            _registrar_heartbeat_fvg_only(db_file, job_id, total_pares, idx + 1, pair, 'concluido_sem_sinais', ts_inicio_job)
+            continue
+
+        try:
+            cache_pair = _montar_cache_candles_par_periodo(pair, inicio_ts_ms, fim_ts_ms)
+        except Exception as e:
+            erros_por_par[pair] = f'erro ao montar cache: {e}'
+            _registrar_heartbeat_fvg_only(db_file, job_id, total_pares, idx + 1, pair, 'erro_cache', ts_inicio_job)
+            continue
+
+        for sinal in sinais_do_par:
+            try:
+                linha = calcular_confluencias_um_sinal(sinal, cache_pair, hash_funcoes)
+                sinais_processados += 1
+                if linha['erro']:
+                    sinais_com_erro += 1
+                with sqlite3.connect(db_file) as conn:
+                    conn.execute('''
+                        INSERT OR IGNORE INTO diagnostico_confluencias_v2 (
+                            engine_origem, pair, direction, choch_timestamp, ts_corte_confluencia,
+                            htf_bias, htf_strength, htf_alinhado, htf_premium_discount, htf_disponivel,
+                            liquidez_disponivel, liquidez_tipo, liquidez_nivel_high, liquidez_nivel_low, liquidez_distancia_pct,
+                            sweep_encontrado, sweep_timeframe, sweep_direcao, sweep_timestamp, sweep_idade_min, sweep_nivel, sweep_motivo_bruto,
+                            status, r_obtido,
+                            max_candle_ts_usado_d1, max_candle_ts_usado_h4, max_candle_ts_usado_h1,
+                            max_candle_ts_usado_m15, max_candle_ts_usado_m5, max_candle_ts_usado_m1,
+                            zero_lookahead_confirmado, erro, hash_funcoes_confluencia, calculado_em
+                        ) VALUES (?,?,?,?,?, ?,?,?,?,?, ?,?,?,?,?, ?,?,?,?,?,?,?, ?,?, ?,?,?,?,?,?, ?,?,?,?)
+                    ''', (
+                        linha['engine_origem'], linha['pair'], linha['direction'], linha['choch_timestamp'], linha['ts_corte_confluencia'],
+                        linha['htf_bias'], linha['htf_strength'], linha['htf_alinhado'], linha['htf_premium_discount'], linha['htf_disponivel'],
+                        linha['liquidez_disponivel'], linha['liquidez_tipo'], linha['liquidez_nivel_high'], linha['liquidez_nivel_low'], linha['liquidez_distancia_pct'],
+                        linha['sweep_encontrado'], linha['sweep_timeframe'], linha['sweep_direcao'], linha['sweep_timestamp'], linha['sweep_idade_min'], linha['sweep_nivel'], linha['sweep_motivo_bruto'],
+                        linha['status'], linha['r_obtido'],
+                        linha['max_candle_ts_usado_d1'], linha['max_candle_ts_usado_h4'], linha['max_candle_ts_usado_h1'],
+                        linha['max_candle_ts_usado_m15'], linha['max_candle_ts_usado_m5'], linha['max_candle_ts_usado_m1'],
+                        linha['zero_lookahead_confirmado'], linha['erro'], linha['hash_funcoes_confluencia'], linha['calculado_em'],
+                    ))
+                    conn.commit()
+            except Exception as e:
+                sinais_com_erro += 1
+                erros_por_par.setdefault(pair, []).append(str(e)) if isinstance(erros_por_par.get(pair), list) else erros_por_par.update({pair: [str(e)]})
+
+        _registrar_heartbeat_fvg_only(db_file, job_id, total_pares, idx + 1, pair, 'concluido', ts_inicio_job)
+
+    _registrar_heartbeat_fvg_only(db_file, job_id, total_pares, total_pares, None, 'concluido_com_sucesso', ts_inicio_job)
+
+    return {
+        'job_id': job_id, 'periodo': {'inicio_ts_ms': inicio_ts_ms, 'fim_ts_ms': fim_ts_ms},
+        'hash_funcoes_confluencia': hash_funcoes,
+        'equivalencia_ab_neste_dataset': equivalencia,
+        'total_sinais_resolvidos_engine_a': len(sinais_resolvidos_a),
+        'sinais_processados': sinais_processados, 'sinais_com_erro': sinais_com_erro,
+        'erros_por_par': erros_por_par,
+        'nota': 'Diagnóstico gravado em diagnostico_confluencias_v2. Rode gerar_relatorio_sanidade_confluencias() ANTES de gerar_metricas_grupos_confluencia().',
+    }
+
+
+def gerar_relatorio_sanidade_confluencias(db_file):
+    """
+    RELATÓRIO DE SANIDADE — item aprovado do ticket, obrigatório antes
+    de qualquer métrica A-H. Só leitura da tabela de diagnóstico.
+    """
+    init_diagnostico_confluencias_db(db_file)
+    with sqlite3.connect(db_file) as conn:
+        conn.row_factory = sqlite3.Row
+        todos = [dict(r) for r in conn.execute("SELECT * FROM diagnostico_confluencias_v2").fetchall()]
+
+    if not todos:
+        return {'erro': 'tabela de diagnóstico vazia — rode diagnostico_confluencias_completo() primeiro'}
+
+    n = len(todos)
+    sem_dados_suficientes = sum(1 for r in todos if not r['htf_disponivel'] and not r['liquidez_disponivel'])
+    htf_disponivel = sum(1 for r in todos if r['htf_disponivel'])
+    liquidez_disponivel = sum(1 for r in todos if r['liquidez_disponivel'])
+    sweep_encontrado = sum(1 for r in todos if r['sweep_encontrado'])
+    com_erro = [r for r in todos if r['erro']]
+
+    erros_por_tipo = {}
+    for r in com_erro:
+        for parte in (r['erro'] or '').split(' | '):
+            chave = parte.split(':')[0].strip() if ':' in parte else parte.strip()
+            if chave:
+                erros_por_tipo[chave] = erros_por_tipo.get(chave, 0) + 1
+
+    def max_ignorando_none(valores):
+        vals = [v for v in valores if v is not None]
+        return max(vals) if vals else None
+
+    candles_maximos = {
+        tf: max_ignorando_none([r[f'max_candle_ts_usado_{tf.lower()}'] for r in todos])
+        for tf in ('d1', 'h4', 'h1', 'm15', 'm5', 'm1')
+    }
+
+    zero_lookahead_violado = [r for r in todos if r['zero_lookahead_confirmado'] == 0]
+
+    # duplicatas — não deveria existir (UNIQUE constraint impede na escrita), mas confirma
+    chaves_vistas = {}
+    duplicatas = 0
+    for r in todos:
+        chave = (r['engine_origem'], r['pair'], r['choch_timestamp'], r['direction'])
+        chaves_vistas[chave] = chaves_vistas.get(chave, 0) + 1
+    duplicatas = sum(1 for v in chaves_vistas.values() if v > 1)
+
+    with sqlite3.connect(db_file) as conn:
+        total_sinais_resolvidos_origem = conn.execute(
+            "SELECT COUNT(*) FROM paper_trading_v2_sinais WHERE status IN ('TP','SL')"
+        ).fetchone()[0]
+    sinais_nao_encontrados_no_diagnostico = total_sinais_resolvidos_origem - n
+
+    return {
+        'sinais_analisados': n,
+        'sinais_sem_dados_suficientes_htf_e_liquidez': sem_dados_suficientes,
+        'htf_disponivel_pct': round(100 * htf_disponivel / n, 1),
+        'liquidez_disponivel_pct': round(100 * liquidez_disponivel / n, 1),
+        'sweep_encontrado_pct': round(100 * sweep_encontrado / n, 1),
+        'erros_por_funcao': erros_por_tipo,
+        'total_sinais_com_algum_erro': len(com_erro),
+        'candles_maximos_usados_por_timeframe_ts': candles_maximos,
+        'zero_lookahead_confirmado_em_todos': len(zero_lookahead_violado) == 0,
+        'violacoes_de_lookahead_detectadas': len(zero_lookahead_violado),
+        'exemplos_violacao_lookahead': zero_lookahead_violado[:3],
+        'duplicatas_detectadas': duplicatas,
+        'sinais_resolvidos_na_origem_paper_trading_v2': total_sinais_resolvidos_origem,
+        'sinais_nao_encontrados_no_diagnostico': sinais_nao_encontrados_no_diagnostico,
+        'nota': (
+            'Se sinais_nao_encontrados_no_diagnostico > 0, significa que existem sinais '
+            'resolvidos na tabela original que não foram processados neste diagnóstico — '
+            'provavelmente fora da janela de período usada, ou o job ainda não rodou pra '
+            'aquele par. Não é erro automático, é um número pra você investigar.'
+        ),
+    }
+
+
+
+def gerar_metricas_grupos_confluencia(db_file):
+    """
+    METRICAS A-H - so deve ser lido depois de conferir gerar_relatorio_
+    sanidade_confluencias(). Classifica cada sinal ja diagnosticado nos
+    8 grupos pedidos, usando os campos BRUTOS (htf_alinhado, liquidez_
+    disponivel, sweep_encontrado) - SEM redefinir "sweep encontrado"
+    como "sweep valido". A definicao de "confluencia valida" fica pra
+    decisao posterior, com base nesses numeros.
+    """
+    init_diagnostico_confluencias_db(db_file)
+    with sqlite3.connect(db_file) as conn:
+        conn.row_factory = sqlite3.Row
+        todos = [dict(r) for r in conn.execute(
+            "SELECT * FROM diagnostico_confluencias_v2 WHERE status IN ('TP','SL')"
+        ).fetchall()]
+
+    if not todos:
+        return {'erro': 'sem sinais resolvidos no diagnostico'}
+
+    def tem_htf(r):
+        return bool(r['htf_alinhado'])
+
+    def tem_liquidez(r):
+        return bool(r['liquidez_disponivel'])
+
+    def tem_sweep(r):
+        return bool(r['sweep_encontrado'])
+
+    grupos_def = {
+        'A_sem_confluencias': lambda r: not tem_htf(r) and not tem_liquidez(r) and not tem_sweep(r),
+        'B_htf': lambda r: tem_htf(r) and not tem_liquidez(r) and not tem_sweep(r),
+        'C_liquidez': lambda r: not tem_htf(r) and tem_liquidez(r) and not tem_sweep(r),
+        'D_sweep': lambda r: not tem_htf(r) and not tem_liquidez(r) and tem_sweep(r),
+        'E_htf_liquidez': lambda r: tem_htf(r) and tem_liquidez(r) and not tem_sweep(r),
+        'F_htf_sweep': lambda r: tem_htf(r) and not tem_liquidez(r) and tem_sweep(r),
+        'G_liquidez_sweep': lambda r: not tem_htf(r) and tem_liquidez(r) and tem_sweep(r),
+        'H_htf_liquidez_sweep': lambda r: tem_htf(r) and tem_liquidez(r) and tem_sweep(r),
+    }
+
+    def _metricas(lista):
+        n = len(lista)
+        if n == 0:
+            return {'n': 0}
+        rs = [r['r_obtido'] for r in lista if r['r_obtido'] is not None]
+        wins = sum(1 for r in rs if r > 0)
+        wr = round(100 * wins / len(rs), 2) if rs else None
+        exp = round(sum(rs) / len(rs), 4) if rs else None
+        soma_r = round(sum(rs), 2) if rs else None
+        media_r = exp
+
+        ordenados = sorted(lista, key=lambda r: r['choch_timestamp'])
+        equity = 0.0
+        pico = 0.0
+        max_dd = 0.0
+        for r in ordenados:
+            if r['r_obtido'] is None:
+                continue
+            equity += r['r_obtido']
+            pico = max(pico, equity)
+            max_dd = max(max_dd, pico - equity)
+        r_sobre_dd = round(sum(rs) / max_dd, 3) if max_dd > 0 else None
+
+        long_r = [r['r_obtido'] for r in lista if r['direction'] == 'LONG' and r['r_obtido'] is not None]
+        short_r = [r['r_obtido'] for r in lista if r['direction'] == 'SHORT' and r['r_obtido'] is not None]
+
+        por_par = {}
+        for r in lista:
+            por_par.setdefault(r['pair'], []).append(r['r_obtido'])
+        por_par_stats = {
+            p: {'n': len(vals), 'soma_R': round(sum(v for v in vals if v is not None), 2)}
+            for p, vals in por_par.items()
+        }
+
+        por_sweep_tf = {}
+        for r in lista:
+            if r['sweep_timeframe']:
+                por_sweep_tf.setdefault(r['sweep_timeframe'], []).append(r['r_obtido'])
+        por_sweep_tf_stats = {
+            tf: {'n': len(vals), 'soma_R': round(sum(v for v in vals if v is not None), 2)}
+            for tf, vals in por_sweep_tf.items()
+        }
+
+        por_periodo = {}
+        for r in lista:
+            mes = datetime.fromtimestamp(r['choch_timestamp'] / 1000, tz=timezone.utc).strftime('%Y-%m')
+            por_periodo.setdefault(mes, []).append(r['r_obtido'])
+        por_periodo_stats = {
+            m: {'n': len(vals), 'soma_R': round(sum(v for v in vals if v is not None), 2)}
+            for m, vals in por_periodo.items()
+        }
+
+        return {
+            'n': n, 'win_rate_pct': wr, 'expectancy_R': exp, 'soma_R': soma_r, 'media_R': media_r,
+            'max_drawdown_R': round(max_dd, 2), 'soma_R_sobre_max_dd': r_sobre_dd,
+            'LONG': {'n': len(long_r), 'soma_R': round(sum(long_r), 2) if long_r else None},
+            'SHORT': {'n': len(short_r), 'soma_R': round(sum(short_r), 2) if short_r else None},
+            'por_par': por_par_stats,
+            'por_timeframe_sweep': por_sweep_tf_stats,
+            'por_periodo_mensal': por_periodo_stats,
+        }
+
+    baseline = _metricas(todos)
+    grupos_resultado = {}
+    for nome_grupo, filtro in grupos_def.items():
+        sinais_grupo = [r for r in todos if filtro(r)]
+        grupos_resultado[nome_grupo] = _metricas(sinais_grupo)
+        grupos_resultado[nome_grupo]['sinais_eliminados_vs_baseline'] = baseline['n'] - grupos_resultado[nome_grupo]['n']
+        grupos_resultado[nome_grupo]['pct_do_baseline'] = round(100 * grupos_resultado[nome_grupo]['n'] / baseline['n'], 1) if baseline['n'] else None
+
+    return {
+        'nota_metodologica': (
+            'Grupos classificados por flags BRUTAS (htf_alinhado, liquidez_disponivel, '
+            'sweep_encontrado) - nenhuma reinterpretacao de "encontrado" como "valido". '
+            'baseline = todos os sinais resolvidos no diagnostico, independente de confluencia.'
+        ),
+        'BASELINE_V2_ORIGINAL': baseline,
+        'grupos': grupos_resultado,
+    }
+
+
+def _executar_diagnostico_confluencias_job(db_file, job_id, pares, dias_historico, fim_ts_ms):
+    try:
+        resultado = diagnostico_confluencias_completo(db_file, job_id, pares=pares, dias_historico=dias_historico, fim_ts_ms=fim_ts_ms)
+        with sqlite3.connect(db_file) as conn:
+            conn.execute(
+                "UPDATE scalp_replay_jobs SET status='concluido', resultado_json=?, finished_at=? WHERE job_id=?",
+                (json.dumps(resultado, ensure_ascii=False), int(time.time()), job_id),
+            )
+            conn.commit()
+    except Exception as e:
+        try:
+            with sqlite3.connect(db_file) as conn:
+                conn.execute(
+                    "UPDATE scalp_replay_jobs SET status='erro', erro=?, finished_at=? WHERE job_id=?",
+                    (str(e), int(time.time()), job_id),
+                )
+                conn.commit()
+        except Exception as e2:
+            print(f"[diagnostico_confluencias] erro ao registrar falha do job {job_id}: {e2}")
+
+
+@explicacao_bp.route("/scalp_gates_vortex/diagnostico_confluencias_teste_pequeno", methods=["GET"])
+def diagnostico_confluencias_teste_pequeno_endpoint():
+    """
+    TESTE PEQUENO - obrigatorio rodar ANTES do job completo. 1 par,
+    poucos sinais, roda SINCRONO (rapido), nao escreve na tabela de
+    diagnostico - so devolve tudo pra inspecao manual.
+    Uso: ?pair=BTCUSD&dias=30&limit=5&confirm=RODAR_TESTE_PEQUENO
+    """
+    if request.args.get('confirm') != 'RODAR_TESTE_PEQUENO':
+        return jsonify({
+            "erro": "protegido contra chamada acidental",
+            "como_usar": "adiciona &confirm=RODAR_TESTE_PEQUENO na URL, ex: "
+                          "/scalp_gates_vortex/diagnostico_confluencias_teste_pequeno?pair=BTCUSD&dias=30&limit=5&confirm=RODAR_TESTE_PEQUENO",
+        }), 400
+    pair = request.args.get('pair', 'BTCUSD')
+    dias = int(request.args.get('dias', 30))
+    limit = int(request.args.get('limit', 5))
+    fim_ts_ms_param = request.args.get('fim_ts_ms')
+    fim_ts_ms = int(fim_ts_ms_param) if fim_ts_ms_param else None
+    try:
+        resultado = diagnostico_confluencias_teste_pequeno(pair, dias_historico=dias, fim_ts_ms=fim_ts_ms, limit_sinais=limit)
+        return jsonify(resultado)
+    except Exception as e:
+        return jsonify({"erro": f"erro no teste pequeno: {e}"}), 500
+
+
+@explicacao_bp.route("/scalp_gates_vortex/diagnostico_confluencias_iniciar", methods=["GET"])
+def diagnostico_confluencias_iniciar_endpoint():
+    """
+    JOB COMPLETO - so rodar depois do teste pequeno confirmado. 13
+    pares, fetch 1x por par (nao por sinal). Roda em BACKGROUND com
+    heartbeat. NAO decide sinal, NAO altera producao.
+    Uso: ?dias=30&fim_ts_ms=<opcional>&confirm=RODAR_DIAGNOSTICO_CONFLUENCIAS
+    """
+    if request.args.get('confirm') != 'RODAR_DIAGNOSTICO_CONFLUENCIAS':
+        return jsonify({
+            "erro": "endpoint pesado, protegido contra chamada acidental",
+            "como_usar": "adiciona &confirm=RODAR_DIAGNOSTICO_CONFLUENCIAS na URL, ex: "
+                          "/scalp_gates_vortex/diagnostico_confluencias_iniciar?dias=30&confirm=RODAR_DIAGNOSTICO_CONFLUENCIAS",
+            "aviso": "so rode isso DEPOIS de validar o teste pequeno (/diagnostico_confluencias_teste_pequeno)",
+        }), 400
+
+    dias = int(request.args.get('dias', 30))
+    fim_ts_ms_param = request.args.get('fim_ts_ms')
+    fim_ts_ms = int(fim_ts_ms_param) if fim_ts_ms_param else None
+    pares_param = request.args.get('pares')
+    pares_lista = [p.strip().upper() for p in pares_param.split(',') if p.strip()] if pares_param else None
+
+    db_file = _db_file_explicacao()
+    init_replay_jobs_db(db_file)
+    init_diagnostico_confluencias_db(db_file)
+    job_id = f"diagconfluencias_{int(time.time()*1000)}"
+
+    try:
+        with sqlite3.connect(db_file) as conn:
+            conn.execute(
+                "INSERT INTO scalp_replay_jobs (job_id, tipo, pair, dias_historico, status, created_at) VALUES (?, ?, ?, ?, 'rodando', ?)",
+                (job_id, 'diagnostico_confluencias_completo', 'TODOS', dias, int(time.time())),
+            )
+            conn.commit()
+    except Exception as e:
+        return jsonify({"erro": f"nao foi possivel criar o job: {e}"}), 500
+
+    thread = threading.Thread(
+        target=_executar_diagnostico_confluencias_job,
+        args=(db_file, job_id, pares_lista, dias, fim_ts_ms), daemon=True,
+    )
+    thread.start()
+
+    return jsonify({
+        "job_id": job_id, "status": "iniciado", "dias_historico": dias,
+        "pares": pares_lista or PARES_MONITORADOS_REPLAY,
+        "como_consultar_progresso": f"/scalp_gates_vortex/ab_heartbeat",
+        "como_consultar_resultado": f"/scalp_gates_vortex/replay_comparativo_luxalgo_status/{job_id}",
+        "depois_de_concluido": "chame /diagnostico_confluencias_sanidade PRIMEIRO, depois /diagnostico_confluencias_metricas",
+    })
+
+
+@explicacao_bp.route("/scalp_gates_vortex/diagnostico_confluencias_sanidade", methods=["GET"])
+def diagnostico_confluencias_sanidade_endpoint():
+    """Relatorio de sanidade - ver ANTES das metricas A-H."""
+    db_file = _db_file_explicacao()
+    try:
+        return jsonify(gerar_relatorio_sanidade_confluencias(db_file))
+    except Exception as e:
+        return jsonify({"erro": str(e)}), 500
+
+
+@explicacao_bp.route("/scalp_gates_vortex/diagnostico_confluencias_metricas", methods=["GET"])
+def diagnostico_confluencias_metricas_endpoint():
+    """Metricas A-H - so ler depois de conferir a sanidade."""
+    db_file = _db_file_explicacao()
+    try:
+        return jsonify(gerar_metricas_grupos_confluencia(db_file))
+    except Exception as e:
+        return jsonify({"erro": str(e)}), 500

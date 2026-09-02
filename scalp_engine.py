@@ -5702,7 +5702,7 @@ def _fetch_bybit_klines_historico(symbol, interval, dias_historico, fim_ts_ms=No
     fixo, tornando o período reproduzível (não desloca com o tempo
     real entre execuções).
     """
-    intervalo_ms = {'D': 86400000, '15': 900000, '60': 3600000, '5': 300000}.get(interval, 900000)
+    intervalo_ms = {'D': 86400000, '240': 14400000, '15': 900000, '60': 3600000, '5': 300000}.get(interval, 900000)
     total_candles_necessarios = int((dias_historico * 86400000) / intervalo_ms) + 20
     todos = []
     end_ts = fim_ts_ms

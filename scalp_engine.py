@@ -15482,8 +15482,52 @@ def replay_kairos_ict_mmxm(pair, dias_historico=7, fim_ts_ms=None):
     m5 = resultado_base.get('m5_completo')
     sinais = resultado_base.get('sinais_unicos_completos', [])
     if not m5 or not sinais:
-        return {'erro': f'sem m5_completo ou sinais pra {pair} -- replay base nao produziu dado suficiente',
-                'funil': resultado_base.get('funil')}
+        # === QUEBRA DO FUNIL AGREGADO -- item aprovado do ticket ===
+        # SOMENTE INSTRUMENTACAO/DIAGNOSTICO. NAO altera _contexto_htf_
+        # cascata_kairos, avaliar_kairos_ict_cascata, replay_kairos_ict_
+        # cascata nem nenhum criterio -- os 4 motivos abaixo ja existiam,
+        # exatos, dentro de distribuicao_motivos_todos_ciclos (que
+        # replay_kairos_ict_cascata() ja calculava e ja devolvia, sem
+        # alteracao nenhuma) -- so nao estavam sendo repassados aqui no
+        # caminho de erro. Mutuamente exclusivos por construcao: cada
+        # motivo vem de um "return" imediato dentro de um if sequencial
+        # em _contexto_htf_cascata_kairos() -- um ciclo so pode cair em
+        # UM dos 4, nunca em mais de um.
+        distribuicao = resultado_base.get('distribuicao_motivos_todos_ciclos', {})
+        total_ciclos = resultado_base.get('funil', {}).get('total_ciclos_avaliados', 0)
+
+        motivos_htf = {
+            'htf_neutro': distribuicao.get('HTF_NEUTRO', 0),
+            'htf_fraco': distribuicao.get('HTF_FRACO', 0),
+            'm15_dados_insuficientes': distribuicao.get('M15_INSUFICIENTE', 0),
+            'm15_discordando_do_htf': distribuicao.get('M15_NAO_CONFIRMA_HTF', 0),
+        }
+        soma_motivos_htf = sum(motivos_htf.values())
+        breakdown_contexto_htf = {
+            nome: {
+                'quantidade': qtd,
+                'percentual_do_total': round(100 * qtd / total_ciclos, 2) if total_ciclos else None,
+                'percentual_do_bloco_sem_contexto': round(100 * qtd / soma_motivos_htf, 2) if soma_motivos_htf else None,
+            }
+            for nome, qtd in motivos_htf.items()
+        }
+        ciclos_que_passam_do_contexto = total_ciclos - soma_motivos_htf
+
+        return {
+            'erro': f'sem m5_completo ou sinais pra {pair} -- replay base nao produziu dado suficiente',
+            'funil': resultado_base.get('funil'),
+            'total_ciclos_avaliados': total_ciclos,
+            'breakdown_contexto_htf': breakdown_contexto_htf,
+            'soma_motivos_htf_confere_com_funil': soma_motivos_htf == resultado_base.get('funil', {}).get('sem_contexto_htf'),
+            'ciclos_que_passam_do_contexto': ciclos_que_passam_do_contexto,
+            'nota_mutua_exclusividade': (
+                'Os 4 motivos sao mutuamente exclusivos por construcao -- cada um vem de um '
+                '"return" imediato dentro de um if sequencial em _contexto_htf_cascata_kairos() '
+                '(que NAO foi alterada). Um ciclo so pode ter EXATAMENTE um desses 4 motivos, '
+                'nunca mais de um. Confirmado via leitura direta do codigo, nao inferido.'
+            ),
+            'distribuicao_completa_todos_motivos': distribuicao,
+        }
 
     # D1 nao vem exposto no retorno de replay_kairos_ict_cascata() (que
     # nao foi alterada) -- busca separada, so pra Camada B (narrativa),

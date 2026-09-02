@@ -15767,3 +15767,262 @@ def kairos_ict_mmxm_iniciar_endpoint():
             "que e pra ticks recorrentes de paper trading, um mecanismo diferente."
         ),
     })
+
+
+# =========================================================================
+# AUTOPSIA DO BIAS HTF -- KAIROS_ICT_MMXM -- item aprovado do ticket.
+# SOMENTE LEITURA/DIAGNOSTICO. NAO altera compute_bias_from_swings,
+# detect_exec_swings, compute_htf_narrative, compute_lux_structure_
+# bias, _contexto_htf_cascata_kairos, avaliar_kairos_ict_cascata ou
+# QUALQUER threshold/swing_size/criterio de decisao -- todas essas
+# funcoes sao chamadas exatamente como ja existem, sem nenhuma
+# alteracao. Este modulo so OBSERVA e MEDE, nao decide nada.
+# =========================================================================
+
+def _classificar_proximidade_bias(candles, lookback=SWING_LOOKBACK):
+    """
+    Reaproveita EXATAMENTE a mesma logica de compute_bias_from_swings()
+    (mesma chamada a detect_exec_swings, mesmo criterio de comparacao),
+    mas em vez de so devolver 'alta'/'baixa'/'neutro', devolve TAMBEM
+    o detalhamento de quao perto estava -- sem mudar nenhum criterio,
+    so expondo o que a funcao original ja calcula internamente e
+    descarta.
+
+    Classificacao do 'neutro':
+      'dados_insuficientes'  -- nem chegou a ter 2 swings de cada tipo
+      'expandindo'           -- topo sobe E fundo desce (maior amplitude,
+                                 nao concorda em nenhuma direcao)
+      'contraindo'           -- topo desce E fundo sobe (menor amplitude,
+                                 consolidacao, tambem nao concorda)
+      'exato_empate'         -- topo ou fundo ficou EXATAMENTE igual ao anterior
+    """
+    if not candles or len(candles) < (lookback * 2 + 5):
+        return {'bias': 'neutro', 'motivo_neutro': 'dados_insuficientes', 'pct_diff_topos': None, 'pct_diff_fundos': None}
+
+    swings = detect_exec_swings(candles, lookback=lookback)
+    highs = [s for s in swings if s['tipo'] == 'high'][-2:]
+    lows = [s for s in swings if s['tipo'] == 'low'][-2:]
+
+    if len(highs) != 2 or len(lows) != 2:
+        return {'bias': 'neutro', 'motivo_neutro': 'dados_insuficientes', 'pct_diff_topos': None, 'pct_diff_fundos': None}
+
+    pct_diff_topos = round((highs[1]['valor'] - highs[0]['valor']) / highs[0]['valor'] * 100, 4) if highs[0]['valor'] else None
+    pct_diff_fundos = round((lows[1]['valor'] - lows[0]['valor']) / lows[0]['valor'] * 100, 4) if lows[0]['valor'] else None
+
+    topos_sobem = highs[1]['valor'] > highs[0]['valor']
+    fundos_sobem = lows[1]['valor'] > lows[0]['valor']
+    topos_descem = highs[1]['valor'] < highs[0]['valor']
+    fundos_descem = lows[1]['valor'] < lows[0]['valor']
+
+    if topos_sobem and fundos_sobem:
+        return {'bias': 'alta', 'motivo_neutro': None, 'pct_diff_topos': pct_diff_topos, 'pct_diff_fundos': pct_diff_fundos}
+    if topos_descem and fundos_descem:
+        return {'bias': 'baixa', 'motivo_neutro': None, 'pct_diff_topos': pct_diff_topos, 'pct_diff_fundos': pct_diff_fundos}
+    if topos_sobem and fundos_descem:
+        motivo = 'expandindo'
+    elif topos_descem and fundos_sobem:
+        motivo = 'contraindo'
+    else:
+        motivo = 'exato_empate'
+    return {'bias': 'neutro', 'motivo_neutro': motivo, 'pct_diff_topos': pct_diff_topos, 'pct_diff_fundos': pct_diff_fundos}
+
+
+def autopsia_bias_htf_kairos(pair, dias_historico=7, fim_ts_ms=None):
+    """
+    AUTOPSIA -- item aprovado do ticket. Roda o MESMO fetch e o MESMO
+    loop causal de replay_kairos_ict_cascata() (nao chama essa funcao
+    pra evitar computar duas vezes coisas que nao precisamos aqui, mas
+    reproduz o mesmo padrao de truncamento -- mesmo numero de ciclos,
+    mesmos candles por ciclo). Chama compute_bias_from_swings,
+    compute_htf_narrative, compute_lux_structure_bias e _contexto_htf_
+    cascata_kairos EXATAMENTE como ja existem, sem alteracao nenhuma
+    -- so registra mais detalhe por ciclo do que o replay normal guarda.
+    """
+    if fim_ts_ms is None:
+        fim_ts_ms = int(time.time() * 1000)
+
+    symbol_map = {
+        'BTCUSD': 'BTCUSDT', 'ETHUSD': 'ETHUSDT', 'SOLUSD': 'SOLUSDT', 'XRPUSD': 'XRPUSDT',
+        'LINKUSD': 'LINKUSDT', 'ADAUSD': 'ADAUSDT', 'AVAXUSD': 'AVAXUSDT', 'BNBUSD': 'BNBUSDT',
+        'AAVEUSD': 'AAVEUSDT', 'NEARUSD': 'NEARUSDT', 'PENDLEUSD': 'PENDLEUSDT', 'INJUSD': 'INJUSDT',
+        'ONDOUSD': 'ONDOUSDT',
+    }
+    symbol = symbol_map.get(pair.upper(), pair.upper().replace('USD', 'USDT'))
+
+    d1_bruto = _fetch_bybit_klines_historico(symbol, 'D', dias_historico + 120, fim_ts_ms=fim_ts_ms)
+    h4_bruto = _fetch_bybit_klines_historico(symbol, '240', dias_historico + 60, fim_ts_ms=fim_ts_ms)
+    h1_bruto = _fetch_bybit_klines_historico(symbol, '60', dias_historico + 60, fim_ts_ms=fim_ts_ms)
+    m15_bruto = _fetch_bybit_klines_historico(symbol, '15', dias_historico + 3, fim_ts_ms=fim_ts_ms)
+    m5_bruto = _fetch_bybit_klines_historico(symbol, '5', dias_historico + 2, fim_ts_ms=fim_ts_ms)
+
+    d1, _ = _validar_e_limpar_candles(d1_bruto, 'D')
+    h4, _ = _validar_e_limpar_candles(h4_bruto, '240')
+    h1, _ = _validar_e_limpar_candles(h1_bruto, '60')
+    m15, _ = _validar_e_limpar_candles(m15_bruto, '15')
+    m5, _ = _validar_e_limpar_candles(m5_bruto, '5')
+
+    inicio_ts_ms = fim_ts_ms - dias_historico * 86400000
+    d1 = [c for c in d1 if c['t'] <= fim_ts_ms]
+    h4 = [c for c in h4 if c['t'] <= fim_ts_ms]
+    h1 = [c for c in h1 if c['t'] <= fim_ts_ms]
+    m15_periodo = [c for c in m15 if inicio_ts_ms <= c['t'] <= fim_ts_ms]
+    m5_periodo = [c for c in m5 if inicio_ts_ms <= c['t'] <= fim_ts_ms]
+
+    MIN_M5_IDX = 60
+    if len(m15_periodo) < 60 or len(m5_periodo) < MIN_M5_IDX + 20:
+        return {'erro': f'dados insuficientes pra {pair}'}
+
+    registros = []
+    for i in range(MIN_M5_IDX, len(m5_periodo)):
+        ts_corte = m5_periodo[i]['t']
+        m15_ate_agora = [c for c in m15 if c['t'] <= ts_corte]
+        h1_ate_agora = [c for c in h1 if c['t'] <= ts_corte]
+        h4_ate_agora = [c for c in h4 if c['t'] <= ts_corte]
+        d1_ate_agora = [c for c in d1 if c['t'] <= ts_corte]
+        if len(m15_ate_agora) < 60:
+            continue
+
+        # === motivo OFICIAL -- exatamente a mesma funcao de producao,
+        # sem alteracao nenhuma, garante que a autopsia bate 1:1 com
+        # o que o replay real classificou ===
+        contexto_oficial, motivo_oficial = _contexto_htf_cascata_kairos(d1_ate_agora, h4_ate_agora, h1_ate_agora, m15_ate_agora)
+
+        # === detalhamento -- reaproveita compute_htf_narrative (oficial)
+        # + o classificador de proximidade (mesma logica de compute_bias_
+        # from_swings, so com mais detalhe exposto) pra D1/H4/H1 isolados ===
+        htf = compute_htf_narrative(d1_ate_agora, h4_ate_agora, h1_ate_agora)
+        d1_detalhe = _classificar_proximidade_bias(d1_ate_agora)
+        h4_detalhe = _classificar_proximidade_bias(h4_ate_agora)
+        h1_detalhe = _classificar_proximidade_bias(h1_ate_agora)
+
+        m15_bias_lux = None
+        if len(m15_ate_agora) >= 55:
+            try:
+                m15_bias_lux = compute_lux_structure_bias(m15_ate_agora, swing_size=50)
+            except Exception:
+                m15_bias_lux = None
+
+        registros.append({
+            'ts_corte': ts_corte,
+            'motivo_oficial': motivo_oficial or 'PASSOU_DO_CONTEXTO',
+            'htf_bias_final': htf.get('bias'), 'htf_strength_final': htf.get('strength'),
+            'd1_bias': d1_detalhe['bias'], 'd1_motivo_neutro': d1_detalhe['motivo_neutro'],
+            'd1_pct_diff_topos': d1_detalhe['pct_diff_topos'], 'd1_pct_diff_fundos': d1_detalhe['pct_diff_fundos'],
+            'h4_bias': h4_detalhe['bias'], 'h4_motivo_neutro': h4_detalhe['motivo_neutro'],
+            'h1_bias': h1_detalhe['bias'], 'h1_motivo_neutro': h1_detalhe['motivo_neutro'],
+            'm15_bias_lux': m15_bias_lux,
+        })
+
+    total = len(registros)
+    if total == 0:
+        return {'erro': f'nenhum ciclo processado pra {pair}'}
+
+    # === 1-4: contagem por motivo oficial (idêntico ao funil já usado) ===
+    contagem_motivos = {}
+    for r in registros:
+        contagem_motivos[r['motivo_oficial']] = contagem_motivos.get(r['motivo_oficial'], 0) + 1
+
+    # === 5: distribuição de D1/H4/H1/M15 em ALTA/BAIXA/NEUTRO ===
+    def _distribuicao(chave):
+        dist = {'alta': 0, 'baixa': 0, 'neutro': 0, 'indisponivel': 0}
+        for r in registros:
+            v = r[chave]
+            if v in ('alta', 'baixa', 'neutro'):
+                dist[v] += 1
+            else:
+                dist['indisponivel'] += 1
+        return dist
+
+    distribuicao_tf = {
+        'D1': _distribuicao('d1_bias'), 'H4': _distribuicao('h4_bias'),
+        'H1': _distribuicao('h1_bias'), 'M15_lux': _distribuicao('m15_bias_lux'),
+    }
+
+    # === 6: quão perto os casos NEUTROS estavam de formar direção válida
+    # (só faz sentido medir isso pro D1, que é 100% do gargalo já confirmado
+    # -- mas calcula pros 3 timeframes clássicos igual, pra comparação) ===
+    def _proximidade(tf_bias_key, tf_motivo_key, tf_pct_topos_key, tf_pct_fundos_key):
+        neutros = [r for r in registros if r[tf_bias_key] == 'neutro']
+        motivos_neutro = {}
+        for r in neutros:
+            m = r[tf_motivo_key] or 'desconhecido'
+            motivos_neutro[m] = motivos_neutro.get(m, 0) + 1
+        pct_topos_validos = [r[tf_pct_topos_key] for r in neutros if r[tf_pct_topos_key] is not None]
+        pct_fundos_validos = [r[tf_pct_fundos_key] for r in neutros if r[tf_pct_fundos_key] is not None]
+        return {
+            'total_neutros': len(neutros),
+            'motivos_do_neutro': motivos_neutro,
+            'pct_diff_topos_medio': round(sum(pct_topos_validos) / len(pct_topos_validos), 4) if pct_topos_validos else None,
+            'pct_diff_fundos_medio': round(sum(pct_fundos_validos) / len(pct_fundos_validos), 4) if pct_fundos_validos else None,
+            'pct_diff_topos_min_max': [round(min(pct_topos_validos), 4), round(max(pct_topos_validos), 4)] if pct_topos_validos else None,
+            'pct_diff_fundos_min_max': [round(min(pct_fundos_validos), 4), round(max(pct_fundos_validos), 4)] if pct_fundos_validos else None,
+        }
+
+    proximidade_neutro = {
+        'D1': _proximidade('d1_bias', 'd1_motivo_neutro', 'd1_pct_diff_topos', 'd1_pct_diff_fundos'),
+        'H4': {
+            'total_neutros': sum(1 for r in registros if r['h4_bias'] == 'neutro'),
+            'motivos_do_neutro': {m: sum(1 for r in registros if r['h4_bias']=='neutro' and (r['h4_motivo_neutro'] or 'desconhecido')==m) for m in set(r['h4_motivo_neutro'] for r in registros if r['h4_bias']=='neutro')},
+        },
+        'H1': {
+            'total_neutros': sum(1 for r in registros if r['h1_bias'] == 'neutro'),
+            'motivos_do_neutro': {m: sum(1 for r in registros if r['h1_bias']=='neutro' and (r['h1_motivo_neutro'] or 'desconhecido')==m) for m in set(r['h1_motivo_neutro'] for r in registros if r['h1_bias']=='neutro')},
+        },
+    }
+
+    # === 7: quantas vezes D1 tinha direção clara mas H4 (ou a cascata) bloqueou ===
+    d1_claro_mas_final_neutro = sum(
+        1 for r in registros if r['d1_bias'] in ('alta', 'baixa') and r['htf_bias_final'] not in ('LONG', 'SHORT')
+    )
+    d1_e_h4_claros_concordam_mas_final_neutro = sum(
+        1 for r in registros
+        if r['d1_bias'] in ('alta', 'baixa') and r['h4_bias'] == r['d1_bias'] and r['htf_bias_final'] not in ('LONG', 'SHORT')
+    )
+
+    return {
+        'pair': pair, 'dias_historico': dias_historico, 'total_ciclos_avaliados': total,
+        'nota_metodologica': (
+            'AUTOPSIA SOMENTE LEITURA -- reaproveita compute_bias_from_swings, detect_exec_swings, '
+            'compute_htf_narrative, compute_lux_structure_bias e _contexto_htf_cascata_kairos '
+            'EXATAMENTE como ja existem, sem alteracao nenhuma de threshold/swing_size/criterio. '
+            'motivo_oficial vem da mesma funcao de producao (_contexto_htf_cascata_kairos), '
+            'garantindo que esta autopsia bate 1:1 com o funil real ja reportado.'
+        ),
+        '1_a_4_contagem_por_motivo_oficial': contagem_motivos,
+        '5_distribuicao_alta_baixa_neutro_por_timeframe': distribuicao_tf,
+        '6_proximidade_dos_casos_neutros': proximidade_neutro,
+        '7_d1_claro_mas_bloqueado_depois': {
+            'd1_teve_direcao_clara_mas_final_saiu_neutro': d1_claro_mas_final_neutro,
+            'd1_e_h4_concordaram_mas_final_saiu_neutro': d1_e_h4_claros_concordam_mas_final_neutro,
+            'nota': (
+                'Se d1_e_h4_concordaram_mas_final_saiu_neutro for proximo de d1_teve_direcao_clara, '
+                'o bloqueio nao vem do H4 discordando -- vem de outro criterio dentro de compute_'
+                'htf_narrative (ex: H1 quebrando o alinhamento, gerando strength=WEAK mesmo com '
+                'D1 e H4 concordando).'
+            ),
+        },
+    }
+
+
+@explicacao_bp.route("/scalp_gates_vortex/kairos_ict_autopsia_bias_htf", methods=["GET"])
+def kairos_ict_autopsia_bias_htf_endpoint():
+    """
+    AUTOPSIA SOMENTE LEITURA do bias HTF -- item aprovado do ticket.
+    NAO altera nenhum criterio, threshold ou swing_size. Sincrono
+    (mesmo volume de dado do teste pequeno normal).
+    Uso: ?pair=BTCUSD&dias=7&confirm=RODAR_AUTOPSIA_BIAS_HTF
+    """
+    if request.args.get('confirm') != 'RODAR_AUTOPSIA_BIAS_HTF':
+        return jsonify({
+            "erro": "protegido contra chamada acidental",
+            "como_usar": "adiciona &confirm=RODAR_AUTOPSIA_BIAS_HTF na URL, ex: "
+                          "/scalp_gates_vortex/kairos_ict_autopsia_bias_htf?pair=BTCUSD&dias=7&confirm=RODAR_AUTOPSIA_BIAS_HTF",
+        }), 400
+    pair = request.args.get('pair', 'BTCUSD')
+    dias = int(request.args.get('dias', 7))
+    fim_ts_ms_param = request.args.get('fim_ts_ms')
+    fim_ts_ms = int(fim_ts_ms_param) if fim_ts_ms_param else None
+    try:
+        return jsonify(autopsia_bias_htf_kairos(pair, dias_historico=dias, fim_ts_ms=fim_ts_ms))
+    except Exception as e:
+        return jsonify({"erro": str(e)}), 500

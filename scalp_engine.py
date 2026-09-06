@@ -5358,6 +5358,56 @@ def explicacao_ultimo(modo, pair):
     return jsonify(json.loads(row[0]))
 
 
+@explicacao_bp.route("/scalp_gates_vortex/export_signal_state", methods=["GET"])
+def gates_vortex_export_signal_state_endpoint():
+    segredo_configurado = os.environ.get('PAPER_TRADING_TICK_SECRET')
+    if not segredo_configurado:
+        return jsonify({"erro": "endpoint não configurado"}), 503
+    segredo_recebido = request.headers.get('X-Paper-Tick-Secret') or request.args.get('token')
+    if not segredo_recebido or segredo_recebido != segredo_configurado:
+        return jsonify({"erro": "não autorizado"}), 401
+
+
+
+
+    LIMIT_MAXIMO_SEGURO = 5000
+    limit = request.args.get('limit', default=1500, type=int)
+    if limit is None or limit <= 0:
+        limit = 1500
+    limit = min(limit, LIMIT_MAXIMO_SEGURO)
+
+
+
+
+    db_file = _db_file_explicacao()
+    try:
+        with sqlite3.connect(db_file) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT id, pair, created_at, direcao, score, entry, sl, tp,
+                       resultado_final, alerted
+                FROM scalp_gates_vortex_signal_state
+                ORDER BY created_at DESC
+                LIMIT ?
+            ''', (limit,))
+            rows = cursor.fetchall()
+            cols = ['id','pair','created_at','direcao','score','entry','sl','tp','resultado_final','alerted']
+    except Exception as e:
+        return jsonify({"erro": str(e)}), 500
+
+
+
+
+    sinais = [dict(zip(cols, row)) for row in rows]
+    return jsonify({"total": len(sinais), "limit_usado": limit, "limit_maximo": LIMIT_MAXIMO_SEGURO, "sinais": sinais})
+
+
+
+
+
+
+
+
 @explicacao_bp.route("/scalp_gates_vortex/diagnostico", methods=["GET"])
 def diagnostico_gates_vortex():
     """

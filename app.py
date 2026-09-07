@@ -12,7 +12,7 @@ import io
 from datetime import datetime, timezone
 from PIL import Image, ImageDraw, ImageFont
 
-import cascade_engine
+
 import scalp_engine
 
 app = Flask(__name__)
@@ -25,7 +25,7 @@ app.config['DB_FILE'] = DB_FILE
 
 PRECOS_TICKER = {}
 
-CASCADE_STATUS = {}  # pair -> {'result': {...}, 'updated_at': int}
+
 SCALP_STATUS = {}  # pair -> {'result': {...}, 'updated_at': int}
 SCALP_ANTECIPADO_STATUS = {}  # pair -> {'result': {...}, 'updated_at': int}
 SCALP_INDICADORES_STATUS = {}  # pair -> {'result': {...}, 'updated_at': int}

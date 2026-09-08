@@ -2571,8 +2571,6 @@ def scalp_modos_disponiveis():
         return jsonify({'error': str(e)}), 500
 
 
-threading.Thread(target=live_scheduler_loop, daemon=True).start()
-threading.Thread(target=paper_tick_scheduler_loop, daemon=True).start()
 
 
 @app.route('/api/gates_vortex/analisar', methods=['POST'])
@@ -2643,14 +2641,15 @@ def api_gates_vortex_analisar():
                 src.backup(dst)
         
         # 4. Call engine against temp DB with send_telegram_fn=None
+        # Signature: process_pair_gates_vortex(db_file, pair, candles_por_tf, exec_tf_label='M5', send_telegram_fn=None, agora_ts=None, debug_gates=False)
         result = scalp_engine.process_pair_gates_vortex(
             temp_db,
-            pair=pair,
-            candles_por_tf=candles_por_tf,
+            pair,
+            candles_por_tf,
             exec_tf_label=exec_tf_label,
-            debug_gates=debug_gates if debug_gates is not None else False,
+            send_telegram_fn=None,
             agora_ts=agora_ts,
-            send_telegram_fn=None
+            debug_gates=debug_gates if debug_gates is not None else False
         )
         
         return jsonify(result), 200
@@ -2665,3 +2664,4 @@ def api_gates_vortex_analisar():
                 os.remove(temp_db)
             except Exception as cleanup_err:
                 print(f"Erro ao deletar temp DB {temp_db}: {cleanup_err}")
+

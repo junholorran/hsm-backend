@@ -2573,3 +2573,95 @@ def scalp_modos_disponiveis():
 
 threading.Thread(target=live_scheduler_loop, daemon=True).start()
 threading.Thread(target=paper_tick_scheduler_loop, daemon=True).start()
+
+
+@app.route('/api/gates_vortex/analisar', methods=['POST'])
+def api_gates_vortex_analisar():
+    """
+    Safe gates_vortex analysis endpoint.
+    
+    Auth: X-Paper-Tick-Secret header or ?token= query param
+    Fail-closed 503 if env secret missing, 401 if wrong/missing token.
+    
+    Request body (JSON):
+    {
+      "pair": "BTCUSD",  (required, uppercased)
+      "candles_por_tf": { "D1": [...], "H4": [...], "M5": [...] },  (required, non-empty dict)
+      "exec_tf_label": "M5",  (optional, default "M5")
+      "debug_gates": true,  (optional, strict boolean)
+      "agora_ts": 1234567890  (optional, number/null)
+    }
+    
+    Returns: analysis from scalp_engine.process_pair_gates_vortex
+    against a temporary SQLite copy (original DB never modified).
+    """
+    import tempfile
+    
+    # 1. Auth check (fail-closed)
+    segredo_configurado = os.environ.get('PAPER_TRADING_TICK_SECRET')
+    if not segredo_configurado:
+        return jsonify({"erro": "endpoint desabilitado — variável de ambiente PAPER_TRADING_TICK_SECRET não configurada"}), 503
+    
+    segredo_recebido = request.headers.get('X-Paper-Tick-Secret') or request.args.get('token')
+    if not segredo_recebido or segredo_recebido != segredo_configurado:
+        return jsonify({"erro": "não autorizado"}), 401
+    
+    # 2. Validate and parse request body
+    try:
+        data = request.get_json() or {}
+    except Exception:
+        return jsonify({"erro": "corpo da requisição deve ser JSON válido"}), 400
+    
+    pair = data.get('pair', '').strip().upper()
+    candles_por_tf = data.get('candles_por_tf', {})
+    exec_tf_label = data.get('exec_tf_label', 'M5')
+    debug_gates = data.get('debug_gates')
+    agora_ts = data.get('agora_ts')
+    
+    # Validate required fields
+    if not pair:
+        return jsonify({"erro": "pair é obrigatório (string, será uppercased)"}), 400
+    
+    if not isinstance(candles_por_tf, dict) or not candles_por_tf:
+        return jsonify({"erro": "candles_por_tf é obrigatório (dict não-vazio)"}), 400
+    
+    # Validate optional fields
+    if debug_gates is not None and not isinstance(debug_gates, bool):
+        return jsonify({"erro": "debug_gates deve ser strict boolean (true/false) ou omitido"}), 400
+    
+    if agora_ts is not None and not isinstance(agora_ts, (int, float, type(None))):
+        return jsonify({"erro": "agora_ts deve ser number ou null"}), 400
+    
+    # 3. Copy DB to temp file
+    temp_db = None
+    try:
+        fd, temp_db = tempfile.mkstemp(suffix='.db', prefix='gates_vortex_')
+        os.close(fd)
+        
+        with sqlite3.connect(DB_FILE) as src:
+            with sqlite3.connect(temp_db) as dst:
+                src.backup(dst)
+        
+        # 4. Call engine against temp DB with send_telegram_fn=None
+        result = scalp_engine.process_pair_gates_vortex(
+            temp_db,
+            pair=pair,
+            candles_por_tf=candles_por_tf,
+            exec_tf_label=exec_tf_label,
+            debug_gates=debug_gates if debug_gates is not None else False,
+            agora_ts=agora_ts,
+            send_telegram_fn=None
+        )
+        
+        return jsonify(result), 200
+    
+    except Exception as e:
+        return jsonify({"erro": f"análise falhou: {str(e)}"}), 500
+    
+    finally:
+        # 5. Cleanup temp file
+        if temp_db and os.path.exists(temp_db):
+            try:
+                os.remove(temp_db)
+            except Exception as cleanup_err:
+                print(f"Erro ao deletar temp DB {temp_db}: {cleanup_err}")

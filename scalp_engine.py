@@ -14968,7 +14968,7 @@ def avaliar_kairos_ict_cascata(d1, h4, h1, m15, m5, pair=None):
     MODULO EXPERIMENTAL ISOLADO -- item aprovado do ticket. Cadeia
     causal completa: CONTEXTO HTF (D1->H4->H1->M15) -> LIQUIDEZ ->
     SWEEP -> MSS/CHoCH M5 -> DISPLACEMENT -> FVG/OB do movimento ->
-    RETESTE -> ENTRY -> SL -> TP.
+    RETESTE -> ENTRY -> SL ATRAS DO SWEEP -> BE 1R -> TP1 2R -> TP2 3R.
 
     NAO altera avaliar_vortex_decision_layer_v2, process_pair_gates_
     vortex ou qualquer outra funcao de decisao existente -- todas
@@ -15076,52 +15076,53 @@ def avaliar_kairos_ict_cascata(d1, h4, h1, m15, m5, pair=None):
     entry = reteste['candle']['c']
     resultado['entry'] = round(entry, 6)
 
-    # === 9) SL ESTRUTURAL -- atras da invalidacao: o mais protetor entre
-    # a borda da zona e o pavio do sweep, com buffer de ATR (mesma funcao
-    # ja usada pela V2, aplicar_buffer_stop_atr, sem alteracao) ===
+    # === 9) SL ESTRUTURAL -- SEMPRE ATRAS DO SWEEP ===
+    # A tese invalida se o extremo que varreu a liquidez for perdido.
+    # Stop atrás do pavio do sweep com pequeno buffer ATR.
     candles_para_sl = m5[:idx_mss_global + 1]
-    if bias == 'alta':
-        nivel_bruto = min(entry_zone['bottom'], sfp['sl_pavio'])
-        sl = aplicar_buffer_stop_atr(nivel_bruto, 'alta', candles_para_sl)
-        sl_regra = 'zona' if nivel_bruto == entry_zone['bottom'] else 'sweep_pavio'
-    else:
-        nivel_bruto = max(entry_zone['top'], sfp['sl_pavio'])
-        sl = aplicar_buffer_stop_atr(nivel_bruto, 'baixa', candles_para_sl)
-        sl_regra = 'zona' if nivel_bruto == entry_zone['top'] else 'sweep_pavio'
+    nivel_bruto = sfp['sl_pavio']
+    sl = aplicar_buffer_stop_atr(nivel_bruto, bias, candles_para_sl)
+    sl_regra = 'sweep_pavio_atr'
 
     if sl is None:
         resultado['failure_reason'] = 'SL_INVALIDO'
         return resultado
+
     risco = abs(entry - sl)
     sl_do_lado_certo = (sl < entry) if bias == 'alta' else (sl > entry)
     if risco <= 0 or not sl_do_lado_certo:
         resultado['failure_reason'] = 'SL_INVALIDO'
         return resultado
+
     resultado['sl'] = round(sl, 6)
     resultado['sl_regra'] = sl_regra
 
-    # === 10) TP NA PROXIMA LIQUIDEZ -- mesma funcao que a V2 ja usa,
-    # calcular_tp_dinamico(), que ja embute o "SEM TRADE se RR nao
-    # fechar" (retorna None se nao houver alvo com RR aceitavel) ===
-    try:
-        tp, tp_origem = calcular_tp_dinamico(bias, entry, sl, m15, d1)
-    except Exception as e:
-        resultado['failure_reason'] = f'ERRO_TP: {e}'
-        return resultado
-    if tp is None:
-        resultado['failure_reason'] = 'SEM_TRADE_RR_INSUFICIENTE'
-        return resultado
+    # === 10) GESTAO DE RISCO: BE + TP1 2R + TP2 3R ===
+    if bias == 'alta':
+        be_trigger = entry + risco
+        tp1 = entry + (2.0 * risco)
+        tp2 = entry + (3.0 * risco)
+    else:
+        be_trigger = entry - risco
+        tp1 = entry - (2.0 * risco)
+        tp2 = entry - (3.0 * risco)
 
-    resultado['tp'] = round(tp, 6)
-    resultado['tp_origem'] = tp_origem
-    resultado['rr'] = round(abs(tp - entry) / risco, 2)
+    resultado['be_trigger'] = round(be_trigger, 6)
+    resultado['be_price'] = round(entry, 6)
+    resultado['tp'] = round(tp1, 6)       # compatibilidade com consumidores antigos
+    resultado['tp1'] = round(tp1, 6)
+    resultado['tp2'] = round(tp2, 6)
+    resultado['tp_origem'] = 'RR_FIXO_2R_3R'
+    resultado['rr'] = 2.0
+    resultado['rr_tp1'] = 2.0
+    resultado['rr_tp2'] = 3.0
     resultado['signal'] = True
     resultado['valid'] = True
     resultado['reason'] = (
         f"CONTEXTO(D1-H4-H1-M15)={contexto['htf_bias_label']}/{contexto['htf_strength']} + "
         f"LIQUIDEZ({liquidez['tipo']}) + SWEEP({sfp['t']}) + MSS({mss['t']}) + "
         f"DISPLACEMENT({displacement_atr_multiplo}x) + {entry_zone['tipo']} + "
-        f"RETESTE({reteste['t']}) + SL({sl_regra}) + TP({tp_origem})"
+        f"RETESTE({reteste['t']}) + SL_ATRAS_SWEEP + BE_1R + TP1_2R + TP2_3R"
     )
     return resultado
 

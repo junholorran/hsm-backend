@@ -2292,12 +2292,13 @@ def scalp_gates_vortex_status():
         return jsonify({'error': str(e)}), 500
 
 
-
-@app.route('/scalp_gates_vortex/gates_vortex', methods=['POST'])
-def scalp_gates_vortex_api():
+@app.route('/api/kairos/liquidity_mss', methods=['POST'])
+def api_kairos_liquidity_mss():
     """
-    API fina para expor process_pair_gates_vortex() sem duplicar
-    nem alterar a lógica de trading existente no scalp_engine.py.
+    Kairos causal:
+    HTF -> liquidez -> sweep -> MSS/CHoCH -> displacement ->
+    FVG/OB causal -> reteste/rejeicao -> entry ->
+    SL atras do sweep -> BE em 1R -> TP1 2R -> TP2 3R.
     """
     try:
         secret = os.environ.get('PAPER_TRADING_TICK_SECRET')
@@ -2313,29 +2314,30 @@ def scalp_gates_vortex_api():
 
         data = request.get_json(silent=True) or {}
         pair = str(data.get('pair') or '').strip().upper()
-        candles_por_tf = data.get('candles_por_tf')
-        exec_tf_label = str(data.get('exec_tf_label') or 'M1').strip().upper()
-        debug_gates = bool(data.get('debug_gates', False))
+        candles = data.get('candles_por_tf') or {}
 
         if not pair:
             return jsonify({'error': 'pair obrigatório'}), 400
-        if not isinstance(candles_por_tf, dict):
-            return jsonify({
-                'error': 'candles_por_tf obrigatório e deve ser objeto/dict'
-            }), 400
+        if not isinstance(candles, dict):
+            return jsonify({'error': 'candles_por_tf deve ser objeto/dict'}), 400
 
-        resultado = scalp_engine.process_pair_gates_vortex(
-            DB_FILE,
-            pair,
-            candles_por_tf,
-            exec_tf_label=exec_tf_label,
-            send_telegram_fn=None,
-            debug_gates=debug_gates,
+        obrigatorios = ('D1', 'H4', 'H1', 'M15', 'M5')
+        faltando = [tf for tf in obrigatorios if not candles.get(tf)]
+        if faltando:
+            return jsonify({'error': 'candles insuficientes', 'faltando': faltando}), 400
+
+        resultado = scalp_engine.avaliar_kairos_ict_cascata(
+            candles['D1'],
+            candles['H4'],
+            candles['H1'],
+            candles['M15'],
+            candles['M5'],
+            pair=pair,
         )
-
         return jsonify(resultado), 200
 
     except Exception as e:
+        app.logger.exception('erro api_kairos_liquidity_mss')
         return jsonify({'error': str(e)}), 500
 
 

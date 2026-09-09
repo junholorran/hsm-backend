@@ -14852,21 +14852,16 @@ KAIROS_ICT_RETESTE_MAX_CANDLES = 20      # janela causal pra esperar o reteste d
 
 def _identificar_liquidez_alvo_m15(m15_ate_agora, bias):
     """
-    LIQUIDEZ — item aprovado do ticket. Identifica, no M15 (a "regiao
-    de interesse" do seu desenho), qual liquidez o preco deveria
-    buscar antes de reverter — reaproveita detect_exec_swings() e
-    find_equal_highs_lows() (ja existentes, sem alteracao), sem
-    inventar deteccao nova.
+    LIQUIDEZ CAUSAL M15 para o KAIROS ICT.
 
-    bias='alta' (LONG) -> precisamos que o preco tenha varrido
-    liquidez do lado VENDEDOR (um fundo/swing low ou EQL) antes de
-    reverter pra cima.
-    bias='baixa' (SHORT) -> precisamos que o preco tenha varrido
-    liquidez do lado COMPRADOR (um topo/swing high ou EQH) antes de
-    reverter pra baixo.
+    Identifica swing/EQH/EQL do lado que precisa ser varrido e, crucialmente,
+    carrega o instante em que esse nivel passou a existir. Isso impede
+    validar_sfp_estrito() de olhar candles M5 anteriores a formacao da propria
+    liquidez e cancelar o setup por um breakout historico sem relacao causal.
 
-    Retorna no MESMO formato que validar_sfp_estrito() ja espera
-    (compativel com compute_liquidez_referencia): {'high','low','cutoff_ts'}.
+    validar_sfp_estrito() usa c['t'] >= cutoff_ts. Por isso o cutoff retornado
+    aqui e evento_ts + 1 ms: o candle que FORMOU a liquidez nao pode ser usado
+    como sweep da mesma liquidez.
     """
     if len(m15_ate_agora) < 20:
         return None
@@ -14874,25 +14869,92 @@ def _identificar_liquidez_alvo_m15(m15_ate_agora, bias):
     swings = detect_exec_swings(m15_ate_agora, lookback=SWING_LOOKBACK)
     eqs = find_equal_highs_lows(m15_ate_agora)
 
-    if bias == 'alta':
-        candidatos_low = [s['valor'] for s in swings if s['tipo'] == 'low']
-        candidatos_low += [eq['nivel'] for eq in eqs if eq['tipo'] == 'EQL']
-        if not candidatos_low:
-            return None
-        nivel_low = max(candidatos_low)  # o mais PROXIMO do preco atual (o proximo a ser varrido)
-        preco_atual = m15_ate_agora[-1]['c']
-        nivel_high = preco_atual + (preco_atual - nivel_low)  # placeholder simetrico, nao usado pro lado alta
-        return {'high': nivel_high, 'low': nivel_low, 'cutoff_ts': None, 'tipo': 'swing_low_m15'}
-    else:
-        candidatos_high = [s['valor'] for s in swings if s['tipo'] == 'high']
-        candidatos_high += [eq['nivel'] for eq in eqs if eq['tipo'] == 'EQH']
-        if not candidatos_high:
-            return None
-        nivel_high = min(candidatos_high)
-        preco_atual = m15_ate_agora[-1]['c']
-        nivel_low = preco_atual - (nivel_high - preco_atual)
-        return {'high': nivel_high, 'low': nivel_low, 'cutoff_ts': None, 'tipo': 'swing_high_m15'}
+    # Tolerancia identica a find_equal_highs_lows() para ligar cada EQH/EQL
+    # aos swings que realmente o formaram. Usamos o ULTIMO toque conhecido:
+    # e o ponto mais conservador em que o nivel calculado atual ja existia.
+    atr_series = compute_atr(m15_ate_agora, 14)
+    atr_atual = next((v for v in reversed(atr_series) if v is not None), None)
+    tolerancia_eq = (0.1 * atr_atual) if atr_atual else 0.0
 
+    def _ts_eq(eq, tipo_swing):
+        nivel = float(eq['nivel'])
+        relacionados = [
+            s for s in swings
+            if s['tipo'] == tipo_swing
+            and abs(float(s['valor']) - nivel) < tolerancia_eq
+        ]
+        if len(relacionados) < 2:
+            return None
+        return max(int(s['t']) for s in relacionados)
+
+    candidatos = []
+
+    if bias == 'alta':
+        # LONG: queremos sweep de liquidez vendedora (low/EQL).
+        for s in swings:
+            if s['tipo'] == 'low':
+                candidatos.append({
+                    'nivel': float(s['valor']),
+                    'evento_ts': int(s['t']),
+                    'tipo': 'swing_low_m15',
+                })
+        for eq in eqs:
+            if eq['tipo'] == 'EQL':
+                evento_ts = _ts_eq(eq, 'low')
+                if evento_ts is not None:
+                    candidatos.append({
+                        'nivel': float(eq['nivel']),
+                        'evento_ts': evento_ts,
+                        'tipo': 'EQL_m15',
+                    })
+
+        if not candidatos:
+            return None
+
+        escolhido = max(candidatos, key=lambda x: x['nivel'])
+        nivel_low = escolhido['nivel']
+        preco_atual = float(m15_ate_agora[-1]['c'])
+        nivel_high = preco_atual + (preco_atual - nivel_low)  # placeholder; lado high nao decide LONG
+        return {
+            'high': nivel_high,
+            'low': nivel_low,
+            'cutoff_ts': escolhido['evento_ts'] + 1,
+            'liquidez_evento_ts': escolhido['evento_ts'],
+            'tipo': escolhido['tipo'],
+        }
+
+    # SHORT: queremos sweep de liquidez compradora (high/EQH).
+    for s in swings:
+        if s['tipo'] == 'high':
+            candidatos.append({
+                'nivel': float(s['valor']),
+                'evento_ts': int(s['t']),
+                'tipo': 'swing_high_m15',
+            })
+    for eq in eqs:
+        if eq['tipo'] == 'EQH':
+            evento_ts = _ts_eq(eq, 'high')
+            if evento_ts is not None:
+                candidatos.append({
+                    'nivel': float(eq['nivel']),
+                    'evento_ts': evento_ts,
+                    'tipo': 'EQH_m15',
+                })
+
+    if not candidatos:
+        return None
+
+    escolhido = min(candidatos, key=lambda x: x['nivel'])
+    nivel_high = escolhido['nivel']
+    preco_atual = float(m15_ate_agora[-1]['c'])
+    nivel_low = preco_atual - (nivel_high - preco_atual)  # placeholder; lado low nao decide SHORT
+    return {
+        'high': nivel_high,
+        'low': nivel_low,
+        'cutoff_ts': escolhido['evento_ts'] + 1,
+        'liquidez_evento_ts': escolhido['evento_ts'],
+        'tipo': escolhido['tipo'],
+    }
 
 def _contexto_htf_cascata_kairos(d1, h4, h1, m15):
     """

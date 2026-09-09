@@ -2292,6 +2292,53 @@ def scalp_gates_vortex_status():
         return jsonify({'error': str(e)}), 500
 
 
+
+@app.route('/scalp_gates_vortex/gates_vortex', methods=['POST'])
+def scalp_gates_vortex_api():
+    """
+    API fina para expor process_pair_gates_vortex() sem duplicar
+    nem alterar a lógica de trading existente no scalp_engine.py.
+    """
+    try:
+        secret = os.environ.get('PAPER_TRADING_TICK_SECRET')
+        if not secret:
+            return jsonify({'error': 'endpoint desabilitado'}), 503
+
+        recebido = (
+            request.headers.get('X-Paper-Tick-Secret')
+            or request.args.get('token')
+        )
+        if recebido != secret:
+            return jsonify({'error': 'não autorizado'}), 401
+
+        data = request.get_json(silent=True) or {}
+        pair = str(data.get('pair') or '').strip().upper()
+        candles_por_tf = data.get('candles_por_tf')
+        exec_tf_label = str(data.get('exec_tf_label') or 'M1').strip().upper()
+        debug_gates = bool(data.get('debug_gates', False))
+
+        if not pair:
+            return jsonify({'error': 'pair obrigatório'}), 400
+        if not isinstance(candles_por_tf, dict):
+            return jsonify({
+                'error': 'candles_por_tf obrigatório e deve ser objeto/dict'
+            }), 400
+
+        resultado = scalp_engine.process_pair_gates_vortex(
+            DB_FILE,
+            pair,
+            candles_por_tf,
+            exec_tf_label=exec_tf_label,
+            send_telegram_fn=None,
+            debug_gates=debug_gates,
+        )
+
+        return jsonify(resultado), 200
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/scalp_htf_narrative/status', methods=['GET'])
 def scalp_htf_narrative_status():
     """

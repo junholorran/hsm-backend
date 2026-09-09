@@ -44,6 +44,8 @@ STATUS_GATES_VORTEX = {}  # pair -> {'result': {...}, 'updated_at': int}
 # ── NOVO: status da camada de narrativa HTF (D1/H4/H1) — contexto,
 # não gatilho. Calculado uma vez por ciclo em run_live_cycle. ──
 HTF_NARRATIVE_STATUS = {}  # pair -> {'result': {...}, 'updated_at': int}
+STATUS_KAIROS_ICT = {}  # pair -> {'result': {...}, 'updated_at': int}
+KAIROS_ICT_LAST_SENT = {}  # pair -> chave causal do último sinal enviado
 
 CACHE_WINDOW_SECONDS = 15 * 60  # 15 minutos
 
@@ -1426,6 +1428,79 @@ def run_live_cycle(pair, interval_min):
                 except Exception as e:
                     print(f"[scalp_engine] erro ao gerenciar trades abertos de {pair}: {e}")
 
+                # ── KAIROS ICT CAUSAL — LIVE + TELEGRAM ─────────────────────
+                # Usa OS MESMOS candles que o scheduler já buscou neste ciclo.
+                # Não faz HTTP, não pede candles manualmente e não altera Gates/4camadas.
+                if all(candles_por_tf_cache.get(tf) for tf in ('D1', 'H4', 'H1', 'M15', 'M5')):
+                    try:
+                        resultado_ict = scalp_engine.avaliar_kairos_ict_cascata(
+                            candles_por_tf_cache['D1'],
+                            candles_por_tf_cache['H4'],
+                            candles_por_tf_cache['H1'],
+                            candles_por_tf_cache['M15'],
+                            candles_por_tf_cache['M5'],
+                            pair=pair,
+                        )
+                        STATUS_KAIROS_ICT[pair] = {
+                            'result': resultado_ict,
+                            'updated_at': int(time.time())
+                        }
+
+                        if resultado_ict.get('signal') and resultado_ict.get('valid'):
+                            # Dedup causal: mesmo reteste/CHoCH não pode mandar Telegram de novo
+                            # a cada ciclo do scheduler.
+                            chave_sinal = (
+                                resultado_ict.get('direction'),
+                                resultado_ict.get('choch_timestamp'),
+                                resultado_ict.get('reteste_timestamp'),
+                                resultado_ict.get('entry'),
+                            )
+
+                            # Evita "ressuscitar" sinal histórico depois de restart/deploy:
+                            # só envia se o reteste for recente (até 15 min).
+                            reteste_ts = resultado_ict.get('reteste_timestamp')
+                            agora_ms = int(time.time() * 1000)
+                            reteste_ms = None
+                            if reteste_ts is not None:
+                                try:
+                                    reteste_num = int(reteste_ts)
+                                    reteste_ms = reteste_num if reteste_num > 10_000_000_000 else reteste_num * 1000
+                                except Exception:
+                                    reteste_ms = None
+
+                            sinal_recente = (
+                                reteste_ms is not None
+                                and 0 <= (agora_ms - reteste_ms) <= 15 * 60 * 1000
+                            )
+
+                            if sinal_recente and KAIROS_ICT_LAST_SENT.get(pair) != chave_sinal:
+                                direcao = resultado_ict.get('direction') or 'N/A'
+                                emoji = '🟢' if direcao == 'LONG' else '🔴'
+                                msg = (
+                                    f"⚡ <b>KAIROS — SINAL CAUSAL</b>\n\n"
+                                    f"{emoji} <b>{pair} — {direcao}</b>\n"
+                                    f"💧 Liquidez: {resultado_ict.get('liquidez_tipo')} @ {resultado_ict.get('liquidez_nivel')}\n"
+                                    f"🧹 Sweep: {resultado_ict.get('sweep_nivel')}\n"
+                                    f"🔁 CHoCH/MSS: {resultado_ict.get('choch_nivel')}\n"
+                                    f"📍 Entrada: <b>{resultado_ict.get('entry')}</b>\n"
+                                    f"🛑 SL: <b>{resultado_ict.get('sl')}</b> — atrás do sweep\n"
+                                    f"🛡️ BE: <b>{resultado_ict.get('be_trigger')}</b> → stop na entrada\n"
+                                    f"🎯 TP1: <b>{resultado_ict.get('tp1')}</b> (2R)\n"
+                                    f"🚀 TP2: <b>{resultado_ict.get('tp2')}</b> (3R)\n\n"
+                                    f"✅ Liquidez → Sweep → MSS/CHoCH → Displacement → "
+                                    f"{resultado_ict.get('zone_type')} → Reteste/Rejeição"
+                                )
+                                send_telegram(msg)
+                                KAIROS_ICT_LAST_SENT[pair] = chave_sinal
+                                print(f"[kairos_ict] Telegram enviado: {pair} {direcao}")
+                            elif not sinal_recente:
+                                print(
+                                    f"[kairos_ict] sinal válido antigo ignorado para Telegram: "
+                                    f"{pair} reteste={reteste_ts}"
+                                )
+                    except Exception as e:
+                        print(f"[kairos_ict] erro no ciclo de {pair}: {e}")
+
                 # Modo 4camadas (réplica Vortex, sem trava)
                 if scalp_engine.MODOS_ATIVOS.get('4camadas', False):
                     try:
@@ -2339,6 +2414,14 @@ def api_kairos_liquidity_mss():
     except Exception as e:
         app.logger.exception('erro api_kairos_liquidity_mss')
         return jsonify({'error': str(e)}), 500
+
+
+@app.route('/kairos_ict/status', methods=['GET'])
+def kairos_ict_status():
+    pair = request.args.get('pair')
+    if pair:
+        return jsonify(STATUS_KAIROS_ICT.get(pair.upper(), {}))
+    return jsonify(STATUS_KAIROS_ICT)
 
 
 @app.route('/scalp_htf_narrative/status', methods=['GET'])

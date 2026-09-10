@@ -5662,7 +5662,7 @@ REFERENCIAS_LIQUIDEZ = {
 }
 
 
-INTERVALO_MS_POR_LABEL = {'D': 86400000, '15': 900000, '60': 3600000, '5': 300000}
+INTERVALO_MS_POR_LABEL = {'W': 604800000, 'D': 86400000, '240': 14400000, '60': 3600000, '30': 1800000, '15': 900000, '5': 300000, '1': 60000}
 
 
 def _remover_candle_em_formacao(candles, interval_label):
@@ -5752,7 +5752,7 @@ def _fetch_bybit_klines_historico(symbol, interval, dias_historico, fim_ts_ms=No
     fixo, tornando o período reproduzível (não desloca com o tempo
     real entre execuções).
     """
-    intervalo_ms = {'D': 86400000, '240': 14400000, '15': 900000, '60': 3600000, '5': 300000}.get(interval, 900000)
+    intervalo_ms = {'W': 604800000, 'D': 86400000, '240': 14400000, '60': 3600000, '30': 1800000, '15': 900000, '5': 300000, '1': 60000}.get(interval, 900000)
     total_candles_necessarios = int((dias_historico * 86400000) / intervalo_ms) + 20
     todos = []
     end_ts = fim_ts_ms
@@ -10555,6 +10555,328 @@ def medir_mfe_mae_choch_todos_pares_iniciar_endpoint():
 ZONA_EMA25_ATR_BUFFER_MULT = 0.5  # largura da "zona" EMA25 = ATR*este_mult pra cada lado — EXPERIMENTAL, documentado
 
 
+# ═══════════════════════════════════════════════════════════════════════
+# PAPER V2 — REFINAMENTO MTF DE MATEMÁTICA (SEM MOTOR NOVO)
+# Mantém o mesmo paper_trading_v2_tick / tabela / Telegram / dedup.
+# Este bloco só centraliza a leitura matemática que o Paper V2 consome:
+# W1→D1→H4→H1→M30→M15→M5→M1, liquidez, sweep, estrutura, FVG/IFVG/OB,
+# momentum, volume e alvos de liquidez. Não é um gate “todos concordam”.
+# ═══════════════════════════════════════════════════════════════════════
+
+KAIROS_TF_ORDEM = ('W1', 'D1', 'H4', 'H1', 'M30', 'M15', 'M5', 'M1')
+KAIROS_TF_PESO = {'W1': 8, 'D1': 7, 'H4': 6, 'H1': 5, 'M30': 4, 'M15': 3, 'M5': 2, 'M1': 1}
+KAIROS_SWEEP_LEFT = 20
+KAIROS_SWEEP_RIGHT = 20
+KAIROS_SWEEP_CONFIRM_BARS = 3
+
+
+def _kairos_confirmed_pivots(candles, left=KAIROS_SWEEP_LEFT, right=KAIROS_SWEEP_RIGHT):
+    """Pivôs simétricos estilo Sweep Institutional, mas com causalidade explícita.
+    O preço do pivô pertence ao candle origin_idx; ele só fica elegível em
+    confirm_idx=origin_idx+right. Nunca devolvemos um pivot antes da confirmação.
+    """
+    out = []
+    n = len(candles)
+    if n < left + right + 1:
+        return out
+    for origin_idx in range(left, n - right):
+        c = candles[origin_idx]
+        lows_l = [x['l'] for x in candles[origin_idx-left:origin_idx]]
+        lows_r = [x['l'] for x in candles[origin_idx+1:origin_idx+right+1]]
+        highs_l = [x['h'] for x in candles[origin_idx-left:origin_idx]]
+        highs_r = [x['h'] for x in candles[origin_idx+1:origin_idx+right+1]]
+        confirm_idx = origin_idx + right
+        if c['l'] <= min(lows_l + lows_r):
+            out.append({'tipo':'low','nivel':c['l'],'origin_idx':origin_idx,'confirm_idx':confirm_idx,
+                        'origin_ts':c['t'],'confirm_ts':candles[confirm_idx]['t']})
+        if c['h'] >= max(highs_l + highs_r):
+            out.append({'tipo':'high','nivel':c['h'],'origin_idx':origin_idx,'confirm_idx':confirm_idx,
+                        'origin_ts':c['t'],'confirm_ts':candles[confirm_idx]['t']})
+    out.sort(key=lambda x: (x['confirm_idx'], x['origin_idx']))
+    return out
+
+
+def _kairos_sweeps_institucionais(candles, left=KAIROS_SWEEP_LEFT, right=KAIROS_SWEEP_RIGHT):
+    """Traduz a matemática útil do Sweep Institutional para eventos de dados.
+    Bullish: varre último swing low confirmado e fecha/abre de volta acima.
+    Bearish: espelho no último swing high confirmado. Também marca a confirmação
+    3 barras depois quando o preço permanece do lado recuperado do nível.
+    """
+    pivots = _kairos_confirmed_pivots(candles, left, right)
+    by_confirm = {}
+    for p in pivots:
+        by_confirm.setdefault(p['confirm_idx'], []).append(p)
+    last_low = last_high = None
+    sweeps = []
+    for i, c in enumerate(candles):
+        for p in by_confirm.get(i, []):
+            if p['tipo'] == 'low':
+                last_low = p
+            else:
+                last_high = p
+        if i < left - 1:
+            continue
+        janela = candles[i-left+1:i+1]
+        lp = min(x['l'] for x in janela)
+        hp = max(x['h'] for x in janela)
+        lowest_close = min(x['c'] for x in janela)
+        highest_close = max(x['c'] for x in janela)
+        if last_low and c['l'] < last_low['nivel'] and c['c'] > last_low['nivel'] and c['o'] > last_low['nivel'] \
+                and c['l'] <= lp and lowest_close >= last_low['nivel']:
+            ev={'direcao':'alta','side':'SELL_SIDE','nivel':last_low['nivel'],'extremo':c['l'],
+                'sweep_idx':i,'sweep_ts':c['t'],'pivot':last_low,'confirmado_3b':False,'confirm_ts':None}
+            if i+3 < len(candles) and all(candles[j]['c'] > last_low['nivel'] for j in (i+1,i+2,i+3)):
+                ev['confirmado_3b']=True; ev['confirm_ts']=candles[i+3]['t']
+            sweeps.append(ev)
+        if last_high and c['h'] > last_high['nivel'] and c['c'] < last_high['nivel'] and c['o'] < last_high['nivel'] \
+                and c['h'] >= hp and highest_close <= last_high['nivel']:
+            ev={'direcao':'baixa','side':'BUY_SIDE','nivel':last_high['nivel'],'extremo':c['h'],
+                'sweep_idx':i,'sweep_ts':c['t'],'pivot':last_high,'confirmado_3b':False,'confirm_ts':None}
+            if i+3 < len(candles) and all(candles[j]['c'] < last_high['nivel'] for j in (i+1,i+2,i+3)):
+                ev['confirmado_3b']=True; ev['confirm_ts']=candles[i+3]['t']
+            sweeps.append(ev)
+    return sweeps
+
+
+def _kairos_fvg_states(candles, lookback=250):
+    """FVG de 3 candles + ciclo de vida. IFVG não é detector separado:
+    FVG bullish fechada abaixo do bottom vira IFVG bearish; FVG bearish
+    fechada acima do top vira IFVG bullish. Mantém genealogia/timestamps.
+    """
+    c = candles[-lookback:] if len(candles) > lookback else candles
+    if len(c) < 3:
+        return []
+    states=[]
+    for i in range(2, len(c)):
+        a, meio, atual = c[i-2], c[i-1], c[i]
+        novo=None
+        if atual['l'] > a['h'] and meio['c'] > a['h']:
+            novo={'id':f"FVG_{meio['t']}_B",'tipo':'FVG_bullish','direcao':'alta','top':atual['l'],'bottom':a['h'],
+                  'created_ts':atual['t'],'origin_ts':meio['t'],'state':'ATIVA','flip_ts':None}
+        elif atual['h'] < a['l'] and meio['c'] < a['l']:
+            novo={'id':f"FVG_{meio['t']}_S",'tipo':'FVG_bearish','direcao':'baixa','top':a['l'],'bottom':atual['h'],
+                  'created_ts':atual['t'],'origin_ts':meio['t'],'state':'ATIVA','flip_ts':None}
+        if novo:
+            states.append(novo)
+        for z in states:
+            if z['created_ts'] >= atual['t']:
+                continue
+            if z['state'] == 'ATIVA':
+                if z['direcao']=='alta' and atual['c'] < z['bottom']:
+                    z['state']='IFVG'; z['tipo']='IFVG_bearish'; z['direcao']='baixa'; z['flip_ts']=atual['t']
+                elif z['direcao']=='baixa' and atual['c'] > z['top']:
+                    z['state']='IFVG'; z['tipo']='IFVG_bullish'; z['direcao']='alta'; z['flip_ts']=atual['t']
+    return states
+
+
+def _kairos_momentum_z(candles, period=50):
+    if len(candles) < period + 1:
+        return None
+    changes=[candles[i]['c']-candles[i-1]['c'] for i in range(1,len(candles))]
+    w=changes[-period:]
+    avg=sum(w)/len(w)
+    var=sum((x-avg)**2 for x in w)/len(w)
+    std=var**0.5
+    return 0.0 if std == 0 else (w[-1]-avg)/std
+
+
+def _kairos_ob_from_break(candles, break_idx, direcao, search_back=10):
+    """OB causal ligado à quebra: primeiro candle oposto nos 10 candles
+    anteriores ao break; zona = high/low inteiro do candle, não body arbitrário.
+    """
+    if break_idx is None or break_idx <= 0:
+        return None
+    for j in range(break_idx-1, max(-1, break_idx-search_back-1), -1):
+        c=candles[j]
+        bearish = c['c'] < c['o']
+        bullish = c['c'] > c['o']
+        if (direcao=='alta' and bearish) or (direcao=='baixa' and bullish):
+            return {'tipo':'OB_bullish' if direcao=='alta' else 'OB_bearish', 'direcao':direcao,
+                    'top':c['h'],'bottom':c['l'],'t':c['t'],'idx':j,'break_idx':break_idx}
+    return None
+
+
+def _kairos_volume_context(candles, bins=24, lookback=200):
+    """Volume/VP aproximado com OHLCV: distribui cada candle no seu preço típico.
+    Não é order-flow por tick; serve como contexto/score, nunca trava obrigatória.
+    """
+    c=candles[-lookback:] if len(candles)>lookback else candles
+    if not c:
+        return None
+    vols=[x.get('v',0) or 0 for x in c]
+    avg=sum(vols)/len(vols) if vols else 0
+    rel=(vols[-1]/avg) if avg else None
+    lo=min(x['l'] for x in c); hi=max(x['h'] for x in c)
+    if hi <= lo:
+        return {'relative_volume':rel,'poc':c[-1]['c'],'hvn':[],'lvn':[]}
+    step=(hi-lo)/bins
+    hist=[0.0]*bins
+    for x in c:
+        typical=(x['h']+x['l']+x['c'])/3.0
+        idx=min(bins-1,max(0,int((typical-lo)/step)))
+        hist[idx]+=x.get('v',0) or 0
+    poc_i=max(range(bins), key=lambda i: hist[i])
+    centers=[lo+(i+0.5)*step for i in range(bins)]
+    ranked=sorted(range(bins), key=lambda i: hist[i], reverse=True)
+    lowrank=sorted(range(bins), key=lambda i: hist[i])
+    return {'relative_volume':round(rel,3) if rel is not None else None,
+            'poc':round(centers[poc_i],6),
+            'hvn':[round(centers[i],6) for i in ranked[:3]],
+            'lvn':[round(centers[i],6) for i in lowrank[:3]]}
+
+
+def _kairos_liquidity_map_tf(candles, tf):
+    pivots=_kairos_confirmed_pivots(candles)
+    atrs=compute_atr(candles, 200)
+    atr=next((v for v in reversed(atrs) if v is not None), None)
+    eq=[]
+    if atr:
+        for typ,name in (('high','EQH'),('low','EQL')):
+            pts=[p for p in pivots if p['tipo']==typ]
+            for a,b in zip(pts, pts[1:]):
+                if abs(a['nivel']-b['nivel']) < 0.1*atr:
+                    eq.append({'tipo':name,'nivel':(a['nivel']+b['nivel'])/2,'toques':2,
+                               'confirm_ts':max(a['confirm_ts'],b['confirm_ts'])})
+    sweeps=_kairos_sweeps_institucionais(candles)
+    fvg=_kairos_fvg_states(candles)
+    return {'tf':tf,'pivots':pivots[-30:],'equal_liquidity':eq[-20:],'sweeps':sweeps[-20:],
+            'zones':fvg[-50:],'volume':_kairos_volume_context(candles)}
+
+
+def _kairos_build_mtf_map(candles_por_tf):
+    mapa={}
+    for tf in KAIROS_TF_ORDEM:
+        cs=candles_por_tf.get(tf) or []
+        if cs:
+            mapa[tf]=_kairos_liquidity_map_tf(cs, tf)
+    return mapa
+
+
+def _kairos_nearest_liquidity_targets(mapa, entry, direction, limit=8):
+    alvos=[]
+    for tf,data in mapa.items():
+        for p in data.get('pivots',[]):
+            level=p['nivel']
+            ok=(level>entry) if direction=='LONG' else (level<entry)
+            if ok:
+                alvos.append({'tf':tf,'tipo':'SWING_HIGH' if p['tipo']=='high' else 'SWING_LOW',
+                              'nivel':level,'peso':KAIROS_TF_PESO.get(tf,1),'dist':abs(level-entry)})
+        for e in data.get('equal_liquidity',[]):
+            level=e['nivel']; ok=(level>entry) if direction=='LONG' else (level<entry)
+            if ok:
+                alvos.append({'tf':tf,'tipo':e['tipo'],'nivel':level,
+                              'peso':KAIROS_TF_PESO.get(tf,1)+1,'dist':abs(level-entry)})
+    # preço mais próximo primeiro; peso fica disponível para distinguir alvo micro vs HTF
+    alvos.sort(key=lambda x:(x['dist'],-x['peso']))
+    return alvos[:limit]
+
+
+def _kairos_zone_contains_liquidity(zone, mapa, max_items=10):
+    if not zone:
+        return []
+    hits=[]
+    for tf,data in mapa.items():
+        for p in data.get('pivots',[]):
+            if zone['bottom'] <= p['nivel'] <= zone['top']:
+                hits.append({'tf':tf,'tipo':'SWING_'+p['tipo'].upper(),'nivel':p['nivel']})
+        for e in data.get('equal_liquidity',[]):
+            if zone['bottom'] <= e['nivel'] <= zone['top']:
+                hits.append({'tf':tf,'tipo':e['tipo'],'nivel':e['nivel']})
+    hits.sort(key=lambda x:-KAIROS_TF_PESO.get(x['tf'],1))
+    return hits[:max_items]
+
+
+def _kairos_select_recent_sweep(mapa, now_ts):
+    """Escolhe o evento de liquidez mais relevante ainda recente.
+    H4/H1/M30/M15/M5/M1 competem por recência+timeframe; W1/D1 ficam como mapa/contexto.
+    """
+    candidatos=[]
+    max_age={'H4':48*3600000,'H1':18*3600000,'M30':8*3600000,'M15':5*3600000,'M5':2*3600000,'M1':45*60000}
+    for tf in ('H4','H1','M30','M15','M5','M1'):
+        for s in (mapa.get(tf) or {}).get('sweeps',[]):
+            age=now_ts-s['sweep_ts']
+            if 0 <= age <= max_age[tf]:
+                score=KAIROS_TF_PESO[tf]*10 - age/max_age[tf]*5 + (3 if s.get('confirmado_3b') else 0)
+                candidatos.append((score,tf,s))
+    if not candidatos:
+        return None
+    candidatos.sort(key=lambda x:x[0], reverse=True)
+    _,tf,s=candidatos[0]
+    return {'tf':tf, **s}
+
+
+def _kairos_find_structure_after_sweep(candles, sweep, swing_size=5):
+    if not candles or not sweep:
+        return None
+    idx=next((i for i,c in enumerate(candles) if c['t']>=sweep['sweep_ts']),None)
+    if idx is None:
+        return None
+    sub=candles[max(0,idx-swing_size-2):]
+    events=compute_lux_internal_structure(sub,swing_size=swing_size)
+    wanted=sweep['direcao']
+    for e in events:
+        if e['t'] > sweep['sweep_ts'] and e['direcao']==wanted and e['tipo'] in ('CHoCH','BOS'):
+            # translate local index to full list approximately by timestamp (robust)
+            full_idx=next((j for j,c in enumerate(candles) if c['t']==e['t']),None)
+            return {**e,'full_idx':full_idx}
+    return None
+
+
+def _kairos_select_entry_zone(exec_candles, sweep, structure, mapa):
+    if not structure:
+        return None
+    direction=sweep['direcao']
+    st=structure['t']
+    zones=[z for z in _kairos_fvg_states(exec_candles) if z['direcao']==direction and
+           (z.get('flip_ts') or z.get('created_ts') or 0) >= sweep['sweep_ts']]
+    # prefer zones born/flipped no later than now and nearest current price
+    price=exec_candles[-1]['c']
+    candidates=[]
+    for z in zones:
+        z2=dict(z)
+        z2['liquidity_inside']=_kairos_zone_contains_liquidity(z2,mapa)
+        z2['score_zone']=2 + (3 if z2['liquidity_inside'] else 0) + (1 if z2['tipo'].startswith('IFVG') else 0)
+        candidates.append(z2)
+    ob=_kairos_ob_from_break(exec_candles, structure.get('full_idx'), direction)
+    if ob:
+        ob['liquidity_inside']=_kairos_zone_contains_liquidity(ob,mapa)
+        ob['score_zone']=2 + (3 if ob['liquidity_inside'] else 0)
+        candidates.append(ob)
+    if not candidates:
+        return None
+    candidates.sort(key=lambda z:(-z.get('score_zone',0), abs(((z['top']+z['bottom'])/2)-price)))
+    return candidates[0]
+
+
+def _kairos_retest_zone(candles, zone, after_ts):
+    if not zone:
+        return None
+    for c in candles:
+        if c['t'] <= after_ts:
+            continue
+        if c['h'] >= zone['bottom'] and c['l'] <= zone['top']:
+            return c
+    return None
+
+
+def _kairos_context_bias(candles_por_tf):
+    """Contexto, não trava. W1/D1/H4 votam direção; D1 recebe maior prioridade operacional.
+    Countertrend continua permitido pelo sweep/estrutura local.
+    """
+    out={}
+    for tf,size in (('W1',20),('D1',50),('H4',50),('H1',50)):
+        cs=candles_por_tf.get(tf) or []
+        out[tf]=compute_lux_structure_bias(cs,swing_size=min(size,max(5,len(cs)//3))) if len(cs)>=12 else 'neutro'
+    votes=[out[t] for t in ('W1','D1','H4') if out[t] in ('alta','baixa')]
+    if not votes:
+        final='neutro'
+    else:
+        final='alta' if votes.count('alta')>=votes.count('baixa') else 'baixa'
+    out['final']=final
+    return out
+
+
+
 def _encontrar_toque_zona(candles, zona_top, zona_bottom):
     """
     Acha o índice do PRIMEIRO candle, na lista causal fornecida, cujo
@@ -10624,25 +10946,14 @@ def _escolher_zona_entrada_v2(m15_ate_agora, bias, permitir_fallback_ema25=True)
     return ema25_atual + largura, ema25_atual - largura, 'EMA25', 'EMA25_M15_fallback_sem_FVG'
 
 
-def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=None, permitir_fallback_ema25=True):
-    """
-    Pipeline completo EXPERIMENTAL — BIAS → ZONA → GATILHO → ENTRY →
-    SL → TP. Recebe candles JÁ TRUNCADOS causalmente pelo chamador
-    (m15_ate_agora/m5_ate_agora/d1_ate_agora = candles com t <=
-    ts_corte do ciclo, mesmo padrão já usado em todo o replay
-    aprovado) — esta função não faz nenhum fetch, não decide o corte
-    de tempo, só avalia o que já foi passado. Nunca fabrica sinal: se
-    qualquer etapa falhar, valid=False com failure_reason explícito.
+def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=None,
+                                      permitir_fallback_ema25=True, candles_por_tf=None):
+    """Paper V2 refinado, MESMO motor/entry point.
 
-    permitir_fallback_ema25 — item aprovado do ticket: PIPELINE ÚNICA
-    consolidada (V2_ORIGINAL e V2_FVG_ONLY deixam de ser duas cópias
-    do motor; passam a ser esta MESMA função com uma flag). Default
-    True preserva 100% o comportamento histórico pra qualquer chamador
-    que não passe este argumento — nenhuma mudança de comportamento em
-    produção. A ÚNICA diferença de lógica entre os dois modos vive
-    dentro de _escolher_zona_entrada_v2() (repassada adiante, sem
-    nenhuma outra ramificação neste arquivo) — BIAS, CHoCH, ENTRY, SL
-    e TP abaixo são exatamente o mesmo código pros dois modos, sempre.
+    A decisão deixa de ser "bias M15 -> zona -> CHoCH" e passa a consumir
+    um mapa MTF causal. O HTF é contexto, não prisão: um sweep M5/M1 contra
+    W1/D1/H4 pode gerar PULLBACK se houver estrutura/intenção local e alvo
+    de liquidez com RR suficiente.
     """
     resultado = {
         'signal': False, 'direction': None, 'bias': None,
@@ -10651,114 +10962,134 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
         'entry': None, 'sl': None, 'sl_regra': None, 'tp': None, 'tp_origem': None, 'rr': None,
         'reason': None, 'timestamp': m5_ate_agora[-1]['t'] if m5_ate_agora else None,
         'valid': False, 'failure_reason': None,
-        'variante': 'V2_ORIGINAL' if permitir_fallback_ema25 else 'V2_FVG_ONLY',
+        'variante': 'V2_REFINADO_MTF',
+        'setup_type': None, 'context_bias': None, 'sweep_tf': None, 'sweep_level': None,
+        'sweep_extreme': None, 'execution_tf': None, 'momentum_z': None,
+        'liquidity_inside_zone': [], 'next_liquidity_targets': [], 'mtf_summary': {},
     }
-
     if not m15_ate_agora or not m5_ate_agora:
-        resultado['failure_reason'] = 'CANDLES_INSUFICIENTES'
-        return resultado
+        resultado['failure_reason']='CANDLES_INSUFICIENTES'; return resultado
 
-    bias = compute_lux_structure_bias(m15_ate_agora, swing_size=50)
-    resultado['bias'] = bias
-    if bias not in ('alta', 'baixa'):
-        resultado['failure_reason'] = 'BIAS_FAIL'
-        return resultado
-    resultado['direction'] = 'LONG' if bias == 'alta' else 'SHORT'
-
-    zona_top, zona_bottom, zona_type, zona_info = _escolher_zona_entrada_v2(
-        m15_ate_agora, bias, permitir_fallback_ema25=permitir_fallback_ema25
-    )
-    if zona_top is None:
-        resultado['failure_reason'] = zona_info
-        return resultado
-    resultado['zone_top'] = round(zona_top, 6)
-    resultado['zone_bottom'] = round(zona_bottom, 6)
-    resultado['zone_type'] = zona_type
-    resultado['zone_source'] = zona_info
-
-    idx_toque = _encontrar_toque_zona(m5_ate_agora, zona_top, zona_bottom)
-    if idx_toque is None:
-        resultado['failure_reason'] = 'PRECO_FORA_DA_ZONA'
-        return resultado
-
-    candles_pos_toque = m5_ate_agora[idx_toque:]
-    if len(candles_pos_toque) < 10:
-        resultado['failure_reason'] = 'CANDLES_INSUFICIENTES_POS_TOQUE'
-        return resultado
-
-    eventos_internos_m5 = compute_lux_internal_structure(candles_pos_toque, swing_size=5)
-    choch_relevante = None
-    for ev in reversed(eventos_internos_m5):
-        if ev['tipo'] == 'CHoCH' and ev['direcao'] == bias:
-            choch_relevante = ev
-            break
-    if not choch_relevante:
-        resultado['failure_reason'] = 'NO_CHOCH_APOS_ZONA'
-        return resultado
-
-    idx_atual_pos_toque = len(candles_pos_toque) - 1
-    invalidado, evento_invalidador = _evento_choch_foi_invalidado(
-        eventos_internos_m5, choch_relevante, idx_atual_pos_toque
-    )
-    if invalidado:
-        resultado['failure_reason'] = 'CHOCH_INVALIDADO_ANTES_DO_GATILHO'
-        return resultado
-
-    resultado['choch_confirmed'] = True
-    resultado['choch_timestamp'] = choch_relevante['t']
-    resultado['choch_level'] = choch_relevante['nivel']
-
-    idx_choch_global = idx_toque + choch_relevante['index']
-    if idx_choch_global >= len(m5_ate_agora):
-        resultado['failure_reason'] = 'INDICE_CHOCH_INVALIDO'
-        return resultado
-    candle_confirmacao = m5_ate_agora[idx_choch_global]
-    entry = candle_confirmacao['c']
-    resultado['entry'] = round(entry, 6)
-
-    candles_para_buffer = m5_ate_agora[:idx_choch_global + 1]
-    if bias == 'alta':
-        candidato_zona = zona_bottom
-        candidato_choch = choch_relevante['nivel']
-        nivel_bruto = min(candidato_zona, candidato_choch)
-        regra_sl = 'zona_bottom' if nivel_bruto == candidato_zona else 'choch_pivot'
-        sl = aplicar_buffer_stop_atr(nivel_bruto, 'alta', candles_para_buffer)
+    if candles_por_tf is None:
+        candles_por_tf={'D1':d1_ate_agora or [], 'M15':m15_ate_agora, 'M5':m5_ate_agora}
     else:
-        candidato_zona = zona_top
-        candidato_choch = choch_relevante['nivel']
-        nivel_bruto = max(candidato_zona, candidato_choch)
-        regra_sl = 'zona_top' if nivel_bruto == candidato_zona else 'choch_pivot'
-        sl = aplicar_buffer_stop_atr(nivel_bruto, 'baixa', candles_para_buffer)
+        candles_por_tf=dict(candles_por_tf)
+        candles_por_tf.setdefault('D1',d1_ate_agora or [])
+        candles_por_tf.setdefault('M15',m15_ate_agora)
+        candles_por_tf.setdefault('M5',m5_ate_agora)
 
-    resultado['sl_regra'] = regra_sl
+    now_ts=max((cs[-1]['t'] for cs in candles_por_tf.values() if cs), default=resultado['timestamp'] or 0)
+    mapa=_kairos_build_mtf_map(candles_por_tf)
+    contexto=_kairos_context_bias(candles_por_tf)
+    resultado['context_bias']=contexto
+    resultado['bias']=contexto.get('final')
+    resultado['mtf_summary']={tf:{
+        'pivots':len(d.get('pivots',[])), 'eq':len(d.get('equal_liquidity',[])),
+        'sweeps':len(d.get('sweeps',[])), 'zones':len(d.get('zones',[])),
+        'volume':d.get('volume')
+    } for tf,d in mapa.items()}
+
+    sweep=_kairos_select_recent_sweep(mapa, now_ts)
+    if not sweep:
+        resultado['failure_reason']='SEM_SWEEP_MTF_RECENTE'; return resultado
+    direction='LONG' if sweep['direcao']=='alta' else 'SHORT'
+    resultado['direction']=direction
+    resultado['sweep_tf']=sweep['tf']; resultado['sweep_level']=round(sweep['nivel'],6)
+    resultado['sweep_extreme']=round(sweep['extremo'],6)
+
+    ctx=contexto.get('final')
+    same_ctx=(ctx==sweep['direcao'])
+    resultado['setup_type']='TREND' if same_ctx else ('PULLBACK' if ctx in ('alta','baixa') else 'LOCAL')
+
+    # TF menor procura intenção/quebra. Não exigimos que todos confirmem.
+    if sweep['tf'] in ('H4','H1','M30'):
+        exec_order=('M15','M5','M1')
+    elif sweep['tf']=='M15':
+        exec_order=('M5','M1','M15')
+    elif sweep['tf']=='M5':
+        exec_order=('M1','M5')
+    else:
+        exec_order=('M1',)
+
+    structure=None; exec_tf=None; exec_candles=None
+    for tf in exec_order:
+        cs=candles_por_tf.get(tf) or []
+        if len(cs)<12: continue
+        st=_kairos_find_structure_after_sweep(cs,sweep,swing_size=5)
+        if st:
+            structure=st; exec_tf=tf; exec_candles=cs; break
+    if not structure:
+        resultado['failure_reason']='SEM_CHOCH_MSS_APOS_SWEEP'; return resultado
+
+    resultado['execution_tf']=exec_tf
+    resultado['choch_confirmed']=True
+    resultado['choch_timestamp']=structure['t']
+    resultado['choch_level']=round(structure['nivel'],6)
+
+    break_idx=structure.get('full_idx')
+    z=_kairos_momentum_z(exec_candles[:break_idx+1] if break_idx is not None else exec_candles)
+    resultado['momentum_z']=round(z,3) if z is not None else None
+    atrs=compute_atr(exec_candles[:break_idx+1] if break_idx is not None else exec_candles,14)
+    atr=next((v for v in reversed(atrs) if v is not None),None)
+    bc=exec_candles[break_idx] if break_idx is not None else exec_candles[-1]
+    body=abs(bc['c']-bc['o'])
+    displacement_ok=((z is not None and ((sweep['direcao']=='alta' and z>0.5) or (sweep['direcao']=='baixa' and z<-0.5)))
+                     or (atr and body>=0.5*atr))
+    if not displacement_ok:
+        resultado['failure_reason']='SEM_INTENCAO_DISPLACEMENT'; return resultado
+
+    zone=_kairos_select_entry_zone(exec_candles,sweep,structure,mapa)
+    if not zone:
+        resultado['failure_reason']='SEM_FVG_IFVG_OB_CAUSAL'; return resultado
+    resultado['zone_type']=zone['tipo']
+    resultado['zone_top']=round(zone['top'],6); resultado['zone_bottom']=round(zone['bottom'],6)
+    resultado['zone_source']=f"{zone['tipo']}_{exec_tf}_APOS_SWEEP"
+    resultado['liquidity_inside_zone']=zone.get('liquidity_inside',[])
+
+    zone_ts=zone.get('flip_ts') or zone.get('created_ts') or zone.get('t') or structure['t']
+    after_ts=max(structure['t'],zone_ts)
+    retest=_kairos_retest_zone(exec_candles,zone,after_ts)
+    if not retest:
+        resultado['failure_reason']='AGUARDANDO_RETESTE_ZONA'; return resultado
+    entry=retest['c']
+    resultado['entry']=round(entry,6); resultado['timestamp']=retest['t']
+
+    # Invalidação da EXECUÇÃO: prefere sweep local posterior ao sweep de contexto.
+    local_sweeps=(mapa.get(exec_tf) or {}).get('sweeps',[])
+    local=[x for x in local_sweeps if x['direcao']==sweep['direcao'] and sweep['sweep_ts']<=x['sweep_ts']<=retest['t']]
+    stop_sweep=local[-1] if local else sweep
+    sl_base=stop_sweep['extremo']
+    sl=aplicar_buffer_stop_atr(sl_base,sweep['direcao'],[c for c in exec_candles if c['t']<=retest['t']])
     if sl is None:
-        resultado['failure_reason'] = 'SL_INVALIDO'
-        return resultado
-    risco = abs(entry - sl)
-    sl_do_lado_certo = (sl < entry) if bias == 'alta' else (sl > entry)
-    if risco <= 0 or not sl_do_lado_certo:
-        resultado['failure_reason'] = 'SL_INVALIDO'
-        return resultado
-    resultado['sl'] = round(sl, 6)
+        resultado['failure_reason']='SL_INVALIDO'; return resultado
+    risk=abs(entry-sl)
+    right=(sl<entry) if direction=='LONG' else (sl>entry)
+    if risk<=0 or not right:
+        resultado['failure_reason']='SL_INVALIDO'; return resultado
+    resultado['sl']=round(sl,6)
+    resultado['sl_regra']=f"sweep_{exec_tf if local else sweep['tf']}_extremo_atr"
 
-    try:
-        tp, tp_origem = calcular_tp_dinamico(bias, entry, sl, m15_ate_agora, d1_ate_agora or [])
-    except Exception as e:
-        resultado['failure_reason'] = f'ERRO_TP: {e}'
-        return resultado
+    targets=_kairos_nearest_liquidity_targets(mapa,entry,direction,limit=12)
+    for t in targets:
+        t['rr']=round(t['dist']/risk,2) if risk else None
+    resultado['next_liquidity_targets']=targets[:8]
+    # Contra HTF: scalp pode aceitar 1R. A favor: procura 2R, mas targets menores ficam mapeados como obstáculos/parciais.
+    min_rr=1.0 if resultado['setup_type']=='PULLBACK' else 2.0
+    target=next((t for t in targets if t.get('rr') is not None and t['rr']>=min_rr),None)
+    if target is None:
+        resultado['failure_reason']='SEM_LIQUIDEZ_ALVO_COM_RR'; return resultado
+    tp=target['nivel']; rr=abs(tp-entry)/risk
+    resultado['tp']=round(tp,6); resultado['rr']=round(rr,2)
+    resultado['tp_origem']=f"LIQUIDEZ_{target['tf']}_{target['tipo']}"
 
-    if tp is None:
-        resultado['failure_reason'] = 'TP_INVALIDO'
-        return resultado
-    resultado['tp'] = round(tp, 6)
-    resultado['tp_origem'] = tp_origem
-    resultado['rr'] = round(abs(tp - entry) / risco, 2)
-
-    resultado['signal'] = True
-    resultado['valid'] = True
-    resultado['reason'] = (
-        f"BIAS={bias} + ZONA({zona_type},{zona_info}) + CHoCH_M5({choch_relevante['t']}) "
-        f"+ SL({regra_sl}) + TP({tp_origem})"
+    resultado['signal']=True; resultado['valid']=True
+    liq_inside='SIM' if resultado['liquidity_inside_zone'] else 'NAO'
+    resultado['reason']=(
+        f"MAPA_MTF + SWEEP_{sweep['tf']}({sweep['side']}@{sweep['nivel']}) + "
+        f"{structure['tipo']}_{exec_tf} + INTENCAO(z={resultado['momentum_z']}) + "
+        f"{zone['tipo']}({exec_tf},liq_inside={liq_inside}) + RETESTE + "
+        f"SL({resultado['sl_regra']}) + ALVO({resultado['tp_origem']},RR={resultado['rr']}) + "
+        f"SETUP={resultado['setup_type']}"
     )
     return resultado
 
@@ -11756,13 +12087,26 @@ def paper_trading_v2_tick(pair, db_file, agora_ts_ms=None):
     }
     symbol = symbol_map.get(pair.upper(), pair.upper().replace('USD', 'USDT'))
 
-    d1_bruto = _fetch_bybit_klines_historico(symbol, 'D', PAPER_TRADING_V2_JANELA_LOOKBACK_DIAS + 20, fim_ts_ms=agora_ts_ms)
-    m15_bruto = _fetch_bybit_klines_historico(symbol, '15', PAPER_TRADING_V2_JANELA_LOOKBACK_DIAS + 3, fim_ts_ms=agora_ts_ms)
-    m5_bruto = _fetch_bybit_klines_historico(symbol, '5', PAPER_TRADING_V2_JANELA_LOOKBACK_DIAS + 2, fim_ts_ms=agora_ts_ms)
+    # Mesmo Paper V2; apenas ampliamos o mapa que alimenta a decisão.
+    # Janelas escolhidas para manter candles suficientes aos pivôs/ATR sem
+    # multiplicar paginação desnecessariamente.
+    w1_bruto  = _fetch_bybit_klines_historico(symbol, 'W',   900, fim_ts_ms=agora_ts_ms)
+    d1_bruto  = _fetch_bybit_klines_historico(symbol, 'D',   260, fim_ts_ms=agora_ts_ms)
+    h4_bruto  = _fetch_bybit_klines_historico(symbol, '240', 120, fim_ts_ms=agora_ts_ms)
+    h1_bruto  = _fetch_bybit_klines_historico(symbol, '60',   35, fim_ts_ms=agora_ts_ms)
+    m30_bruto = _fetch_bybit_klines_historico(symbol, '30',   18, fim_ts_ms=agora_ts_ms)
+    m15_bruto = _fetch_bybit_klines_historico(symbol, '15',    9, fim_ts_ms=agora_ts_ms)
+    m5_bruto  = _fetch_bybit_klines_historico(symbol, '5',     4, fim_ts_ms=agora_ts_ms)
+    m1_bruto  = _fetch_bybit_klines_historico(symbol, '1',     1, fim_ts_ms=agora_ts_ms)
 
-    d1, _ = _validar_e_limpar_candles(d1_bruto, 'D')
+    w1, _  = _validar_e_limpar_candles(w1_bruto, 'W')
+    d1, _  = _validar_e_limpar_candles(d1_bruto, 'D')
+    h4, _  = _validar_e_limpar_candles(h4_bruto, '240')
+    h1, _  = _validar_e_limpar_candles(h1_bruto, '60')
+    m30, _ = _validar_e_limpar_candles(m30_bruto, '30')
     m15, _ = _validar_e_limpar_candles(m15_bruto, '15')
-    m5, _ = _validar_e_limpar_candles(m5_bruto, '5')
+    m5, _  = _validar_e_limpar_candles(m5_bruto, '5')
+    m1, _  = _validar_e_limpar_candles(m1_bruto, '1')
 
     novos_detectados = 0
     if len(m15) >= 40 and len(m5) >= 80:
@@ -11774,9 +12118,23 @@ def paper_trading_v2_tick(pair, db_file, agora_ts_ms=None):
             d1_ate_agora = [c for c in d1 if c['t'] <= ts_corte]
             if len(m15_ate_agora) < 30:
                 continue
+            tf_map = {
+                'W1': [c for c in w1 if c['t'] <= ts_corte],
+                'D1': d1_ate_agora,
+                'H4': [c for c in h4 if c['t'] <= ts_corte],
+                'H1': [c for c in h1 if c['t'] <= ts_corte],
+                'M30': [c for c in m30 if c['t'] <= ts_corte],
+                'M15': m15_ate_agora,
+                'M5': m5_ate_agora,
+                'M1': [c for c in m1 if c['t'] <= ts_corte],
+            }
             try:
-                r = avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora)
-            except Exception:
+                r = avaliar_vortex_decision_layer_v2(
+                    m15_ate_agora, m5_ate_agora, d1_ate_agora,
+                    candles_por_tf=tf_map,
+                )
+            except Exception as e:
+                print(f"[paper_trading_v2] erro na decisão MTF de {pair}: {e}")
                 continue
             if not r['valid']:
                 continue

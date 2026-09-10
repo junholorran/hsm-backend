@@ -10753,22 +10753,86 @@ def _kairos_build_mtf_map(candles_por_tf):
 
 
 def _kairos_nearest_liquidity_targets(mapa, entry, direction, limit=8):
+    """Alvos de liquidez semanticamente corretos por direção.
+
+    LONG  -> apenas buy-side liquidity acima: SWING_HIGH / EQH.
+    SHORT -> apenas sell-side liquidity abaixo: SWING_LOW / EQL.
+
+    Não escolhe um swing do tipo errado só porque está do lado do preço e
+    produz RR maior. Níveis praticamente duplicados são consolidados,
+    preservando o TF mais pesado.
+    """
     alvos=[]
+    want_pivot = 'high' if direction == 'LONG' else 'low'
+    want_eq = 'EQH' if direction == 'LONG' else 'EQL'
     for tf,data in mapa.items():
+        peso=KAIROS_TF_PESO.get(tf,1)
         for p in data.get('pivots',[]):
+            if p.get('tipo') != want_pivot:
+                continue
             level=p['nivel']
-            ok=(level>entry) if direction=='LONG' else (level<entry)
-            if ok:
-                alvos.append({'tf':tf,'tipo':'SWING_HIGH' if p['tipo']=='high' else 'SWING_LOW',
-                              'nivel':level,'peso':KAIROS_TF_PESO.get(tf,1),'dist':abs(level-entry)})
+            if (direction=='LONG' and level<=entry) or (direction=='SHORT' and level>=entry):
+                continue
+            alvos.append({'tf':tf,'tipo':'SWING_HIGH' if direction=='LONG' else 'SWING_LOW',
+                          'nivel':level,'peso':peso,'dist':abs(level-entry),'classe':'LIQUIDEZ'})
         for e in data.get('equal_liquidity',[]):
-            level=e['nivel']; ok=(level>entry) if direction=='LONG' else (level<entry)
-            if ok:
-                alvos.append({'tf':tf,'tipo':e['tipo'],'nivel':level,
-                              'peso':KAIROS_TF_PESO.get(tf,1)+1,'dist':abs(level-entry)})
-    # preço mais próximo primeiro; peso fica disponível para distinguir alvo micro vs HTF
+            if e.get('tipo') != want_eq:
+                continue
+            level=e['nivel']
+            if (direction=='LONG' and level<=entry) or (direction=='SHORT' and level>=entry):
+                continue
+            alvos.append({'tf':tf,'tipo':want_eq,'nivel':level,
+                          'peso':peso+1,'dist':abs(level-entry),'classe':'LIQUIDEZ'})
+
     alvos.sort(key=lambda x:(x['dist'],-x['peso']))
-    return alvos[:limit]
+    dedup=[]
+    for a in alvos:
+        tol=max(abs(entry)*1e-7, 1e-9)
+        igual=next((d for d in dedup if abs(d['nivel']-a['nivel'])<=tol),None)
+        if igual:
+            if a['peso'] > igual['peso']:
+                igual.update(a)
+            continue
+        dedup.append(a)
+    return dedup[:limit]
+
+
+def _kairos_opposing_zone_obstacles(mapa, entry, direction, target_level=None, limit=8):
+    """Mapeia a primeira oferta/demanda contrária no caminho do alvo.
+
+    É apenas geometria causal das zonas já existentes no mapa: para LONG,
+    FVG/IFVG bearish acima; para SHORT, FVG/IFVG bullish abaixo. A borda
+    mais próxima da entrada é usada como preço do obstáculo.
+    """
+    obs=[]
+    for tf,data in mapa.items():
+        for z in data.get('zones',[]):
+            zd=z.get('direcao')
+            if direction=='LONG' and zd!='baixa':
+                continue
+            if direction=='SHORT' and zd!='alta':
+                continue
+            bottom=z.get('bottom'); top=z.get('top')
+            if bottom is None or top is None:
+                continue
+            level=bottom if direction=='LONG' else top
+            if direction=='LONG':
+                if level<=entry or (target_level is not None and level>=target_level):
+                    continue
+            else:
+                if level>=entry or (target_level is not None and level<=target_level):
+                    continue
+            obs.append({'tf':tf,'tipo':z.get('tipo','ZONA_OPPOSTA'),'nivel':level,
+                        'top':top,'bottom':bottom,'peso':KAIROS_TF_PESO.get(tf,1),
+                        'dist':abs(level-entry),'classe':'OBSTACULO_ZONA'})
+    obs.sort(key=lambda x:(x['dist'],-x['peso']))
+    dedup=[]
+    for o in obs:
+        tol=max(abs(entry)*1e-7, 1e-9)
+        if any(abs(d['nivel']-o['nivel'])<=tol and d['tipo']==o['tipo'] for d in dedup):
+            continue
+        dedup.append(o)
+    return dedup[:limit]
 
 
 def _kairos_zone_contains_liquidity(zone, mapa, max_items=10):
@@ -11033,7 +11097,9 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
         'variante': 'V2_REFINADO_MTF',
         'setup_type': None, 'context_bias': None, 'sweep_tf': None, 'sweep_level': None,
         'sweep_extreme': None, 'execution_tf': None, 'momentum_z': None,
-        'liquidity_inside_zone': [], 'next_liquidity_targets': [], 'mtf_summary': {},
+        'liquidity_inside_zone': [], 'next_liquidity_targets': [], 'target_obstacles': [],
+        'first_liquidity_target': None, 'tp_final_liquidez': None, 'tp1_obstacle': None,
+        'mtf_summary': {},
         'sl_audit': None, 'sl_anchor_tf': None, 'sl_anchor_class': None,
         'sl_anchor_sweep_ts': None, 'sl_anchor_extreme': None,
     }
@@ -11148,14 +11214,43 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
     for t in targets:
         t['rr']=round(t['dist']/risk,2) if risk else None
     resultado['next_liquidity_targets']=targets[:8]
-    # Contra HTF: scalp pode aceitar 1R. A favor: procura 2R, mas targets menores ficam mapeados como obstáculos/parciais.
+
+    # O alvo principal é SEMPRE a próxima liquidez correta do lado do trade.
+    # Não salta uma liquidez próxima só para fabricar 2R num nível mais distante.
+    if not targets:
+        resultado['failure_reason']='SEM_LIQUIDEZ_DIRECIONAL_ALVO'; return resultado
+    target=targets[0]
+    resultado['first_liquidity_target']=dict(target)
+    resultado['tp_final_liquidez']=round(target['nivel'],6)
+
+    # Antes dessa liquidez, mapeia zonas contrárias. Se houver uma, a borda
+    # próxima vira alvo operacional/TP1 conservador; a liquidez continua
+    # guardada como alvo final. Assim o Paper V2 não ignora resistência/suporte
+    # estrutural só para manter um RR bonito.
+    obstacles=_kairos_opposing_zone_obstacles(mapa,entry,direction,target_level=target['nivel'],limit=8)
+    for o in obstacles:
+        o['rr']=round(o['dist']/risk,2) if risk else None
+    resultado['target_obstacles']=obstacles
+    effective=target
+    if obstacles:
+        effective=obstacles[0]
+        resultado['tp1_obstacle']=dict(effective)
+
+    # Contra HTF: scalp pode aceitar 1R; a favor/LOCAL exige 2R.
+    # RR é validado contra o PRIMEIRO nível efetivamente enfrentado, nunca
+    # contra um alvo mais longe depois de ignorar liquidez/zona no caminho.
     min_rr=1.0 if resultado['setup_type']=='PULLBACK' else 2.0
-    target=next((t for t in targets if t.get('rr') is not None and t['rr']>=min_rr),None)
-    if target is None:
-        resultado['failure_reason']='SEM_LIQUIDEZ_ALVO_COM_RR'; return resultado
-    tp=target['nivel']; rr=abs(tp-entry)/risk
+    rr=abs(effective['nivel']-entry)/risk
+    if rr < min_rr:
+        resultado['rr']=round(rr,2)
+        resultado['failure_reason']='ALVO_EFETIVO_RR_INSUFICIENTE'; return resultado
+
+    tp=effective['nivel']
     resultado['tp']=round(tp,6); resultado['rr']=round(rr,2)
-    resultado['tp_origem']=f"LIQUIDEZ_{target['tf']}_{target['tipo']}"
+    if effective.get('classe')=='OBSTACULO_ZONA':
+        resultado['tp_origem']=f"OBSTACULO_{effective['tf']}_{effective['tipo']}"
+    else:
+        resultado['tp_origem']=f"LIQUIDEZ_{effective['tf']}_{effective['tipo']}"
 
     resultado['signal']=True; resultado['valid']=True
     liq_inside='SIM' if resultado['liquidity_inside_zone'] else 'NAO'
@@ -12147,10 +12242,15 @@ def _paper_v2_diag_resumo(pair, r):
         mtf = r.get('mtf_summary') or {}
         liq_inside = r.get('liquidity_inside_zone') or []
         targets = r.get('next_liquidity_targets') or []
+        obstacles = r.get('target_obstacles') or []
         alvo = targets[0] if targets else None
+        obst = obstacles[0] if obstacles else None
         alvo_txt = 'N/A'
+        obst_txt = 'N/A'
         if alvo:
             alvo_txt = f"{alvo.get('tf')}:{alvo.get('tipo')}@{alvo.get('nivel')} rr={alvo.get('rr')}"
+        if obst:
+            obst_txt = f"{obst.get('tf')}:{obst.get('tipo')}@{obst.get('nivel')} rr={obst.get('rr')}"
         tf_parts = []
         for tf in KAIROS_TF_ORDEM:
             d = mtf.get(tf)
@@ -12167,7 +12267,8 @@ def _paper_v2_diag_resumo(pair, r):
             f"momZ={r.get('momentum_z')} zone={r.get('zone_type')}[{r.get('zone_bottom')},{r.get('zone_top')}] "
             f"liq_inside={'SIM' if liq_inside else 'NAO'}({len(liq_inside)}) "
             f"entry={r.get('entry')} sl={r.get('sl')} sl_regra={r.get('sl_regra')} "
-            f"tp={r.get('tp')} tp_origem={r.get('tp_origem')} rr={r.get('rr')} next={alvo_txt} "
+            f"tp={r.get('tp')} tp_origem={r.get('tp_origem')} rr={r.get('rr')} "
+            f"next_liq={alvo_txt} first_obstacle={obst_txt} tp_final_liq={r.get('tp_final_liquidez')} "
             f"mtf={' '.join(tf_parts)}"
         )
     except Exception as e:

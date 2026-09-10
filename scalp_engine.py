@@ -10786,6 +10786,74 @@ def _kairos_zone_contains_liquidity(zone, mapa, max_items=10):
     return hits[:max_items]
 
 
+def _kairos_select_structural_sl(mapa, exec_tf, exec_candles, context_sweep, structure, retest, direction):
+    """Seleciona uma âncora de SL causal e ainda válida no momento da entrada.
+
+    Regras:
+    - prioriza sweep do TF de execução, na mesma direção da tese;
+    - o sweep local tem de acontecer depois do sweep narrativo e antes/até à quebra estrutural;
+    - uma âncora cujo SL buffered já tenha sido negociado antes da entrada é descartada;
+    - se nenhum sweep local servir, tenta o sweep narrativo HTF;
+    - nunca força stop do lado errado só para fabricar RR.
+    """
+    if not exec_candles or not context_sweep or not structure or not retest:
+        return None, {'motivo': 'DADOS_SL_INSUFICIENTES', 'candidatos': []}
+
+    entry = retest['c']
+    thesis_dir = context_sweep['direcao']
+    struct_ts = structure['t']
+    retest_ts = retest['t']
+    context_ts = context_sweep['sweep_ts']
+
+    local_sweeps = (mapa.get(exec_tf) or {}).get('sweeps', [])
+    locais = [
+        x for x in local_sweeps
+        if x.get('direcao') == thesis_dir
+        and context_ts <= x.get('sweep_ts', -1) <= struct_ts
+    ]
+    locais.sort(key=lambda x: x.get('sweep_ts', 0), reverse=True)
+
+    candidatos = [(exec_tf, x, 'EXECUCAO') for x in locais]
+    # Sweep narrativo sempre fica como fallback estrutural, sem duplicar o mesmo evento.
+    if not any(x.get('sweep_ts') == context_sweep.get('sweep_ts') and tf == context_sweep.get('tf')
+               for tf, x, _ in candidatos):
+        candidatos.append((context_sweep.get('tf'), context_sweep, 'NARRATIVA'))
+
+    audit=[]
+    for tf_anchor, sw, classe in candidatos:
+        base = sw.get('extremo')
+        candles_ate_entry = [c for c in exec_candles if c['t'] <= retest_ts]
+        sl = aplicar_buffer_stop_atr(base, thesis_dir, candles_ate_entry)
+        rec = {
+            'tf': tf_anchor, 'classe': classe, 'sweep_ts': sw.get('sweep_ts'),
+            'sweep_level': sw.get('nivel'), 'sweep_extreme': base, 'sl_buffered': sl,
+        }
+        if sl is None:
+            rec['status']='SEM_SL'; audit.append(rec); continue
+
+        right = (sl < entry) if direction == 'LONG' else (sl > entry)
+        if not right:
+            rec['status']='LADO_ERRADO'; audit.append(rec); continue
+
+        # A âncora não pode já ter sido violada ANTES da decisão de entrada.
+        posteriores = [c for c in exec_candles if sw.get('sweep_ts', 0) < c['t'] < retest_ts]
+        if direction == 'LONG':
+            violacao = next((c for c in posteriores if c['l'] <= sl), None)
+        else:
+            violacao = next((c for c in posteriores if c['h'] >= sl), None)
+        if violacao:
+            rec['status']='INVALIDADA_ANTES_ENTRY'; rec['invalidated_ts']=violacao['t']; audit.append(rec); continue
+
+        rec['status']='VALIDA'; audit.append(rec)
+        return {
+            'sl': sl, 'sl_base': base, 'sl_tf': tf_anchor, 'sl_classe': classe,
+            'sl_sweep_ts': sw.get('sweep_ts'), 'sl_sweep_level': sw.get('nivel'),
+            'sl_sweep_extreme': base,
+        }, {'motivo': 'OK', 'candidatos': audit}
+
+    return None, {'motivo': 'SEM_ANCORA_SL_CAUSAL_VALIDA', 'candidatos': audit}
+
+
 def _kairos_select_recent_sweep(mapa, now_ts):
     """Escolhe o evento de liquidez mais relevante ainda recente.
     H4/H1/M30/M15/M5/M1 competem por recência+timeframe; W1/D1 ficam como mapa/contexto.
@@ -10966,6 +11034,8 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
         'setup_type': None, 'context_bias': None, 'sweep_tf': None, 'sweep_level': None,
         'sweep_extreme': None, 'execution_tf': None, 'momentum_z': None,
         'liquidity_inside_zone': [], 'next_liquidity_targets': [], 'mtf_summary': {},
+        'sl_audit': None, 'sl_anchor_tf': None, 'sl_anchor_class': None,
+        'sl_anchor_sweep_ts': None, 'sl_anchor_extreme': None,
     }
     if not m15_ate_agora or not m5_ate_agora:
         resultado['failure_reason']='CANDLES_INSUFICIENTES'; return resultado
@@ -11054,20 +11124,25 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
     entry=retest['c']
     resultado['entry']=round(entry,6); resultado['timestamp']=retest['t']
 
-    # Invalidação da EXECUÇÃO: prefere sweep local posterior ao sweep de contexto.
-    local_sweeps=(mapa.get(exec_tf) or {}).get('sweeps',[])
-    local=[x for x in local_sweeps if x['direcao']==sweep['direcao'] and sweep['sweep_ts']<=x['sweep_ts']<=retest['t']]
-    stop_sweep=local[-1] if local else sweep
-    sl_base=stop_sweep['extremo']
-    sl=aplicar_buffer_stop_atr(sl_base,sweep['direcao'],[c for c in exec_candles if c['t']<=retest['t']])
-    if sl is None:
-        resultado['failure_reason']='SL_INVALIDO'; return resultado
+    # Invalidação estrutural CAUSAL: só usa sweep que já existia antes/até a quebra
+    # e que ainda não foi invalidado antes da decisão de entrada. Se o sweep local
+    # morreu, tenta a âncora narrativa HTF; não fabrica stop do lado errado.
+    sl_info, sl_audit = _kairos_select_structural_sl(
+        mapa, exec_tf, exec_candles, sweep, structure, retest, direction
+    )
+    resultado['sl_audit']=sl_audit
+    if not sl_info:
+        resultado['failure_reason']='SEM_ANCORA_SL_CAUSAL_VALIDA'; return resultado
+    sl=sl_info['sl']
     risk=abs(entry-sl)
-    right=(sl<entry) if direction=='LONG' else (sl>entry)
-    if risk<=0 or not right:
-        resultado['failure_reason']='SL_INVALIDO'; return resultado
+    if risk<=0:
+        resultado['failure_reason']='RISCO_ZERO_SL'; return resultado
     resultado['sl']=round(sl,6)
-    resultado['sl_regra']=f"sweep_{exec_tf if local else sweep['tf']}_extremo_atr"
+    resultado['sl_regra']=f"sweep_{sl_info['sl_tf']}_extremo_atr_{sl_info['sl_classe'].lower()}"
+    resultado['sl_anchor_tf']=sl_info['sl_tf']
+    resultado['sl_anchor_class']=sl_info['sl_classe']
+    resultado['sl_anchor_sweep_ts']=sl_info['sl_sweep_ts']
+    resultado['sl_anchor_extreme']=round(sl_info['sl_sweep_extreme'],6)
 
     targets=_kairos_nearest_liquidity_targets(mapa,entry,direction,limit=12)
     for t in targets:
@@ -12101,12 +12176,21 @@ def _paper_v2_diag_resumo(pair, r):
 
 def _paper_v2_diag_rejeicao(pair, r):
     """Linha curta para saber exatamente em que etapa um candidato morreu."""
+    sl_audit = r.get('sl_audit') or {}
+    sl_cands = sl_audit.get('candidatos') or []
+    sl_txt = 'N/A'
+    if sl_cands:
+        sl_txt = ';'.join(
+            f"{x.get('classe')}:{x.get('tf')}:{x.get('status')} ext={x.get('sweep_extreme')} sl={x.get('sl_buffered')}"
+            for x in sl_cands[:3]
+        )
     return (
         f"[paper_v2_reject] {pair} reason={r.get('failure_reason')} "
         f"ctx={(r.get('context_bias') or {}).get('final')} "
         f"sweep={r.get('sweep_tf')}:{r.get('sweep_level')} "
         f"exec={r.get('execution_tf')} choch={r.get('choch_level')} "
-        f"momZ={r.get('momentum_z')} zone={r.get('zone_type')}"
+        f"momZ={r.get('momentum_z')} zone={r.get('zone_type')} "
+        f"entry={r.get('entry')} sl_audit={sl_txt}"
     )
 
 

@@ -12061,6 +12061,55 @@ def _formatar_mensagem_resultado_paper_v2(sinal_row, resultado_status, r_obtido,
     )
 
 
+
+
+def _paper_v2_diag_resumo(pair, r):
+    """Telemetria compacta do MESMO Paper V2. Não altera decisão, banco,
+    dedup ou Telegram; só expõe nos logs o encadeamento matemático usado.
+    """
+    try:
+        ctx = r.get('context_bias') or {}
+        mtf = r.get('mtf_summary') or {}
+        liq_inside = r.get('liquidity_inside_zone') or []
+        targets = r.get('next_liquidity_targets') or []
+        alvo = targets[0] if targets else None
+        alvo_txt = 'N/A'
+        if alvo:
+            alvo_txt = f"{alvo.get('tf')}:{alvo.get('tipo')}@{alvo.get('nivel')} rr={alvo.get('rr')}"
+        tf_parts = []
+        for tf in KAIROS_TF_ORDEM:
+            d = mtf.get(tf)
+            if not d:
+                continue
+            tf_parts.append(
+                f"{tf}[piv={d.get('pivots',0)},eq={d.get('eq',0)},sw={d.get('sweeps',0)},z={d.get('zones',0)}]"
+            )
+        return (
+            f"[paper_v2_diag] {pair} "
+            f"valid={r.get('valid')} setup={r.get('setup_type')} dir={r.get('direction')} "
+            f"ctx={ctx.get('final')} sweep={r.get('sweep_tf')}:{r.get('sweep_level')} ext={r.get('sweep_extreme')} "
+            f"exec={r.get('execution_tf')} choch={r.get('choch_level')}@{r.get('choch_timestamp')} "
+            f"momZ={r.get('momentum_z')} zone={r.get('zone_type')}[{r.get('zone_bottom')},{r.get('zone_top')}] "
+            f"liq_inside={'SIM' if liq_inside else 'NAO'}({len(liq_inside)}) "
+            f"entry={r.get('entry')} sl={r.get('sl')} sl_regra={r.get('sl_regra')} "
+            f"tp={r.get('tp')} tp_origem={r.get('tp_origem')} rr={r.get('rr')} next={alvo_txt} "
+            f"mtf={' '.join(tf_parts)}"
+        )
+    except Exception as e:
+        return f"[paper_v2_diag] {pair} erro_formatando={e}"
+
+
+def _paper_v2_diag_rejeicao(pair, r):
+    """Linha curta para saber exatamente em que etapa um candidato morreu."""
+    return (
+        f"[paper_v2_reject] {pair} reason={r.get('failure_reason')} "
+        f"ctx={(r.get('context_bias') or {}).get('final')} "
+        f"sweep={r.get('sweep_tf')}:{r.get('sweep_level')} "
+        f"exec={r.get('execution_tf')} choch={r.get('choch_level')} "
+        f"momZ={r.get('momentum_z')} zone={r.get('zone_type')}"
+    )
+
+
 def paper_trading_v2_tick(pair, db_file, agora_ts_ms=None):
     """
     ÚNICO ponto de entrada por par. Busca candles recentes (janela
@@ -12109,6 +12158,8 @@ def paper_trading_v2_tick(pair, db_file, agora_ts_ms=None):
     m1, _  = _validar_e_limpar_candles(m1_bruto, '1')
 
     novos_detectados = 0
+    rejeicoes_diag = {}
+    ultimo_rejeitado = None
     if len(m15) >= 40 and len(m5) >= 80:
         idx_inicio = max(60, len(m5) - 300)
         for i in range(idx_inicio, len(m5)):
@@ -12137,6 +12188,9 @@ def paper_trading_v2_tick(pair, db_file, agora_ts_ms=None):
                 print(f"[paper_trading_v2] erro na decisão MTF de {pair}: {e}")
                 continue
             if not r['valid']:
+                motivo = r.get('failure_reason') or 'DESCONHECIDO'
+                rejeicoes_diag[motivo] = rejeicoes_diag.get(motivo, 0) + 1
+                ultimo_rejeitado = r
                 continue
             try:
                 with sqlite3.connect(db_file) as conn:
@@ -12156,6 +12210,7 @@ def paper_trading_v2_tick(pair, db_file, agora_ts_ms=None):
                     conn.commit()
                     if cursor.rowcount > 0:
                         novos_detectados += 1
+                        print(_paper_v2_diag_resumo(pair, r))
                         try:
                             _paper_trading_v2_enviar_telegram(_formatar_mensagem_novo_sinal_paper_v2(pair, r))
                         except Exception as e_tg:
@@ -12171,6 +12226,14 @@ def paper_trading_v2_tick(pair, db_file, agora_ts_ms=None):
                             print(f"[paper_trading_v2] erro ao marcar notificado_novo_sinal de {pair}: {e_flag}")
             except Exception as e:
                 print(f"[paper_trading_v2] erro ao gravar sinal de {pair}: {e}")
+
+    # Uma linha agregada por par/tick: evita spam de centenas de candles rejeitados,
+    # mas mostra exatamente onde a matemática está travando.
+    if rejeicoes_diag:
+        top_rej = sorted(rejeicoes_diag.items(), key=lambda kv: kv[1], reverse=True)[:6]
+        print(f"[paper_v2_funnel] {pair} novos={novos_detectados} rejeicoes={dict(top_rej)}")
+        if novos_detectados == 0 and ultimo_rejeitado is not None:
+            print(_paper_v2_diag_rejeicao(pair, ultimo_rejeitado))
 
     resolvidos = 0
     try:

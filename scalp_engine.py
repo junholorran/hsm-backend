@@ -10597,16 +10597,21 @@ def _kairos_confirmed_pivots(candles, left=KAIROS_SWEEP_LEFT, right=KAIROS_SWEEP
 
 
 def _kairos_sweeps_institucionais(candles, left=KAIROS_SWEEP_LEFT, right=KAIROS_SWEEP_RIGHT):
-    """Traduz a matemática útil do Sweep Institutional para eventos de dados.
-    Bullish: varre último swing low confirmado e fecha/abre de volta acima.
-    Bearish: espelho no último swing high confirmado. Também marca a confirmação
-    3 barras depois quando o preço permanece do lado recuperado do nível.
+    """Sweep/SFP causal de liquidez confirmada.
+
+    Regras operacionais, sem score:
+    - o pivô precisa estar confirmado ANTES do sweep;
+    - cada pool/pivô só pode ser consumido uma vez;
+    - bullish sweep: toma sell-side e recupera o nível no mesmo candle;
+    - bearish sweep: toma buy-side e recupera o nível no mesmo candle;
+    - confirmado_3b só fica True se os 3 fechamentos seguintes mantiverem a recuperação.
     """
     pivots = _kairos_confirmed_pivots(candles, left, right)
     by_confirm = {}
     for p in pivots:
         by_confirm.setdefault(p['confirm_idx'], []).append(p)
     last_low = last_high = None
+    consumed = set()
     sweeps = []
     for i, c in enumerate(candles):
         for p in by_confirm.get(i, []):
@@ -10621,29 +10626,40 @@ def _kairos_sweeps_institucionais(candles, left=KAIROS_SWEEP_LEFT, right=KAIROS_
         hp = max(x['h'] for x in janela)
         lowest_close = min(x['c'] for x in janela)
         highest_close = max(x['c'] for x in janela)
-        if last_low and c['l'] < last_low['nivel'] and c['c'] > last_low['nivel'] and c['o'] > last_low['nivel'] \
-                and c['l'] <= lp and lowest_close >= last_low['nivel']:
-            ev={'direcao':'alta','side':'SELL_SIDE','nivel':last_low['nivel'],'extremo':c['l'],
-                'sweep_idx':i,'sweep_ts':c['t'],'pivot':last_low,'confirmado_3b':False,'confirm_ts':None}
-            if i+3 < len(candles) and all(candles[j]['c'] > last_low['nivel'] for j in (i+1,i+2,i+3)):
-                ev['confirmado_3b']=True; ev['confirm_ts']=candles[i+3]['t']
-            sweeps.append(ev)
-        if last_high and c['h'] > last_high['nivel'] and c['c'] < last_high['nivel'] and c['o'] < last_high['nivel'] \
-                and c['h'] >= hp and highest_close <= last_high['nivel']:
-            ev={'direcao':'baixa','side':'BUY_SIDE','nivel':last_high['nivel'],'extremo':c['h'],
-                'sweep_idx':i,'sweep_ts':c['t'],'pivot':last_high,'confirmado_3b':False,'confirm_ts':None}
-            if i+3 < len(candles) and all(candles[j]['c'] < last_high['nivel'] for j in (i+1,i+2,i+3)):
-                ev['confirmado_3b']=True; ev['confirm_ts']=candles[i+3]['t']
-            sweeps.append(ev)
+
+        if last_low and last_low['confirm_idx'] < i:
+            key=('SELL_SIDE', last_low['origin_ts'])
+            if key not in consumed and c['l'] < last_low['nivel'] and c['c'] > last_low['nivel'] and c['o'] > last_low['nivel'] \
+                    and c['l'] <= lp and lowest_close >= last_low['nivel']:
+                ev={'direcao':'alta','side':'SELL_SIDE','nivel':last_low['nivel'],'extremo':c['l'],
+                    'sweep_idx':i,'sweep_ts':c['t'],'pivot':last_low,'confirmado_3b':False,'confirm_ts':None,
+                    'liquidity_origin_ts':last_low['origin_ts'],'liquidity_confirm_ts':last_low['confirm_ts']}
+                if i+3 < len(candles) and all(candles[j]['c'] > last_low['nivel'] for j in (i+1,i+2,i+3)):
+                    ev['confirmado_3b']=True; ev['confirm_ts']=candles[i+3]['t']
+                sweeps.append(ev); consumed.add(key)
+
+        if last_high and last_high['confirm_idx'] < i:
+            key=('BUY_SIDE', last_high['origin_ts'])
+            if key not in consumed and c['h'] > last_high['nivel'] and c['c'] < last_high['nivel'] and c['o'] < last_high['nivel'] \
+                    and c['h'] >= hp and highest_close <= last_high['nivel']:
+                ev={'direcao':'baixa','side':'BUY_SIDE','nivel':last_high['nivel'],'extremo':c['h'],
+                    'sweep_idx':i,'sweep_ts':c['t'],'pivot':last_high,'confirmado_3b':False,'confirm_ts':None,
+                    'liquidity_origin_ts':last_high['origin_ts'],'liquidity_confirm_ts':last_high['confirm_ts']}
+                if i+3 < len(candles) and all(candles[j]['c'] < last_high['nivel'] for j in (i+1,i+2,i+3)):
+                    ev['confirmado_3b']=True; ev['confirm_ts']=candles[i+3]['t']
+                sweeps.append(ev); consumed.add(key)
     return sweeps
 
 
 def _kairos_fvg_states(candles, lookback=250):
-    """FVG de 3 candles + ciclo de vida. IFVG não é detector separado:
-    FVG bullish fechada abaixo do bottom vira IFVG bearish; FVG bearish
-    fechada acima do top vira IFVG bullish. Mantém genealogia/timestamps.
+    """FVG/IFVG com ciclo de vida operacional.
+
+    Estados: ATIVA -> TOCADA/PARCIAL -> MITIGADA; fechamento através da
+    extremidade invalidadora transforma FVG em IFVG. IFVG pode ser INVALIDADA
+    se depois fechar de volta através do lado oposto. Zonas mitigadas/invalidadas
+    não servem como obstáculo nem zona de entrada.
     """
-    c = candles[-lookback:] if len(candles) > lookback else candles
+    c=candles[-lookback:] if len(candles) > lookback else candles
     if len(c) < 3:
         return []
     states=[]
@@ -10652,22 +10668,46 @@ def _kairos_fvg_states(candles, lookback=250):
         novo=None
         if atual['l'] > a['h'] and meio['c'] > a['h']:
             novo={'id':f"FVG_{meio['t']}_B",'tipo':'FVG_bullish','direcao':'alta','top':atual['l'],'bottom':a['h'],
-                  'created_ts':atual['t'],'origin_ts':meio['t'],'state':'ATIVA','flip_ts':None}
+                  'created_ts':atual['t'],'origin_ts':meio['t'],'state':'ATIVA','flip_ts':None,
+                  'first_touch_ts':None,'mitigated_ts':None,'invalidated_ts':None}
         elif atual['h'] < a['l'] and meio['c'] < a['l']:
             novo={'id':f"FVG_{meio['t']}_S",'tipo':'FVG_bearish','direcao':'baixa','top':a['l'],'bottom':atual['h'],
-                  'created_ts':atual['t'],'origin_ts':meio['t'],'state':'ATIVA','flip_ts':None}
+                  'created_ts':atual['t'],'origin_ts':meio['t'],'state':'ATIVA','flip_ts':None,
+                  'first_touch_ts':None,'mitigated_ts':None,'invalidated_ts':None}
         if novo:
             states.append(novo)
+
         for z in states:
             if z['created_ts'] >= atual['t']:
                 continue
-            if z['state'] == 'ATIVA':
-                if z['direcao']=='alta' and atual['c'] < z['bottom']:
+            # FVG original: primeiro verifica quebra/aceitação, depois mitigação.
+            if z['tipo'] == 'FVG_bullish':
+                if atual['c'] < z['bottom']:
                     z['state']='IFVG'; z['tipo']='IFVG_bearish'; z['direcao']='baixa'; z['flip_ts']=atual['t']
-                elif z['direcao']=='baixa' and atual['c'] > z['top']:
+                elif atual['l'] <= z['bottom']:
+                    z['state']='MITIGADA'; z['mitigated_ts']=z['mitigated_ts'] or atual['t']
+                elif atual['l'] < z['top']:
+                    z['state']='PARCIAL' if atual['l'] < (z['top']+z['bottom'])/2 else 'TOCADA'
+                    z['first_touch_ts']=z['first_touch_ts'] or atual['t']
+            elif z['tipo'] == 'FVG_bearish':
+                if atual['c'] > z['top']:
                     z['state']='IFVG'; z['tipo']='IFVG_bullish'; z['direcao']='alta'; z['flip_ts']=atual['t']
+                elif atual['h'] >= z['top']:
+                    z['state']='MITIGADA'; z['mitigated_ts']=z['mitigated_ts'] or atual['t']
+                elif atual['h'] > z['bottom']:
+                    z['state']='PARCIAL' if atual['h'] > (z['top']+z['bottom'])/2 else 'TOCADA'
+                    z['first_touch_ts']=z['first_touch_ts'] or atual['t']
+            elif z['tipo'] == 'IFVG_bearish' and z['state'] != 'INVALIDADA':
+                if atual['c'] > z['top']:
+                    z['state']='INVALIDADA'; z['invalidated_ts']=atual['t']
+                elif atual['h'] >= z['bottom']:
+                    z['first_touch_ts']=z['first_touch_ts'] or atual['t']
+            elif z['tipo'] == 'IFVG_bullish' and z['state'] != 'INVALIDADA':
+                if atual['c'] < z['bottom']:
+                    z['state']='INVALIDADA'; z['invalidated_ts']=atual['t']
+                elif atual['l'] <= z['top']:
+                    z['first_touch_ts']=z['first_touch_ts'] or atual['t']
     return states
-
 
 def _kairos_momentum_z(candles, period=50):
     if len(candles) < period + 1:
@@ -10725,23 +10765,227 @@ def _kairos_volume_context(candles, bins=24, lookback=200):
             'lvn':[round(centers[i],6) for i in lowrank[:3]]}
 
 
+def _kairos_liquidity_state(candles, tipo, nivel, confirm_ts):
+    """Estado causal de um pool: ATIVA até o primeiro trade através do nível."""
+    for c in candles:
+        if c['t'] <= confirm_ts:
+            continue
+        if tipo in ('high','EQH') and c['h'] > nivel:
+            return 'SWEPT', c['t']
+        if tipo in ('low','EQL') and c['l'] < nivel:
+            return 'SWEPT', c['t']
+    return 'ATIVA', None
+
+
+def _kairos_equal_liquidity_clusters(candles, pivots, atr):
+    """EQH/EQL em clusters confirmados de 2+ pivôs, sem score."""
+    if not atr:
+        return []
+    tol=0.1*atr
+    out=[]
+    for typ,name in (('high','EQH'),('low','EQL')):
+        pts=[p for p in pivots if p['tipo']==typ]
+        cluster=[]
+        for p in pts:
+            if not cluster:
+                cluster=[p]; continue
+            center=sum(x['nivel'] for x in cluster)/len(cluster)
+            if abs(p['nivel']-center) <= tol:
+                cluster.append(p)
+            else:
+                if len(cluster)>=2:
+                    nivel=sum(x['nivel'] for x in cluster)/len(cluster)
+                    cts=max(x['confirm_ts'] for x in cluster)
+                    state,swept_ts=_kairos_liquidity_state(candles,name,nivel,cts)
+                    out.append({'tipo':name,'nivel':nivel,'toques':len(cluster),'confirm_ts':cts,
+                                'origin_ts':min(x['origin_ts'] for x in cluster),'state':state,'swept_ts':swept_ts})
+                cluster=[p]
+        if len(cluster)>=2:
+            nivel=sum(x['nivel'] for x in cluster)/len(cluster)
+            cts=max(x['confirm_ts'] for x in cluster)
+            state,swept_ts=_kairos_liquidity_state(candles,name,nivel,cts)
+            out.append({'tipo':name,'nivel':nivel,'toques':len(cluster),'confirm_ts':cts,
+                        'origin_ts':min(x['origin_ts'] for x in cluster),'state':state,'swept_ts':swept_ts})
+    out.sort(key=lambda x:x['confirm_ts'])
+    return out
+
+
+
+def _kairos_liquidity_pools(candles, pivots=None, atr=None, min_touches=2):
+    """Pools operacionais de liquidez, não pivôs isolados.
+
+    Um pool nasce quando 2+ pivôs CONFIRMADOS do mesmo lado ficam na mesma
+    faixa de preço (tolerância = 0.10 * ATR200, matemática coerente com EQH/EQL
+    do Lux SMC já usado no projeto). O pool guarda uma ZONA [bottom, top],
+    número de toques, timestamps de origem/confirmação e estado causal.
+
+    BUY_SIDE  = cluster de highs / EQH.
+    SELL_SIDE = cluster de lows  / EQL.
+    """
+    if not candles:
+        return []
+    if pivots is None:
+        pivots=_kairos_confirmed_pivots(candles)
+    if atr is None:
+        atrs=compute_atr(candles, 200)
+        atr=next((v for v in reversed(atrs) if v is not None), None)
+    if not atr or atr <= 0:
+        return []
+    tol=0.10*atr
+    pools=[]
+    for typ,side,label in (('high','BUY_SIDE','EQH'),('low','SELL_SIDE','EQL')):
+        pts=sorted([p for p in pivots if p.get('tipo')==typ], key=lambda x:x['confirm_ts'])
+        clusters=[]
+        for p in pts:
+            best=None; best_d=None
+            for cl in clusters:
+                center=sum(x['nivel'] for x in cl)/len(cl)
+                d=abs(p['nivel']-center)
+                if d <= tol and (best_d is None or d<best_d):
+                    best=cl; best_d=d
+            if best is None:
+                clusters.append([p])
+            else:
+                best.append(p)
+        for cl in clusters:
+            if len(cl) < min_touches:
+                continue
+            levels=[x['nivel'] for x in cl]
+            center=sum(levels)/len(levels)
+            # pool é zona real dos toques; pequeno buffer evita tratar décimos de tick como outro pool
+            bottom=min(levels)-tol*0.15
+            top=max(levels)+tol*0.15
+            confirm_ts=max(x['confirm_ts'] for x in cl)
+            origin_ts=min(x['origin_ts'] for x in cl)
+            swept_ts=None
+            sweep_extreme=None
+            for c in candles:
+                if c['t'] <= confirm_ts:
+                    continue
+                if side=='BUY_SIDE' and c['h'] > top:
+                    swept_ts=c['t']; sweep_extreme=c['h']; break
+                if side=='SELL_SIDE' and c['l'] < bottom:
+                    swept_ts=c['t']; sweep_extreme=c['l']; break
+            pools.append({
+                'id':f"{side}_{origin_ts}_{confirm_ts}", 'side':side, 'tipo':label,
+                'nivel':center, 'bottom':bottom, 'top':top, 'toques':len(cl),
+                'origin_ts':origin_ts, 'confirm_ts':confirm_ts,
+                'touches':[{'nivel':x['nivel'],'origin_ts':x['origin_ts'],'confirm_ts':x['confirm_ts']} for x in cl],
+                'state':'SWEPT' if swept_ts is not None else 'ATIVA',
+                'swept_ts':swept_ts, 'sweep_extreme':sweep_extreme,
+            })
+    pools.sort(key=lambda x:(x['confirm_ts'],x['nivel']))
+    return pools
+
+
+def _kairos_order_blocks_map(candles, swing_size=20, lookback=300):
+    """OBs persistentes ligados a BOS/CHoCH, usando a matemática já escolhida:
+    quebra estrutural -> primeiro candle oposto nos 10 candles anteriores.
+    Mantém somente metadados causais e estado operacional simples.
+    """
+    if not candles or len(candles)<20:
+        return []
+    cs=candles[-lookback:] if len(candles)>lookback else candles
+    size=min(swing_size,max(5,len(cs)//6))
+    events=compute_lux_structure_events(cs,swing_size=size)
+    out=[]; seen=set()
+    for e in events:
+        ob=_kairos_ob_from_break(cs,e.get('index'),e.get('direcao'),search_back=10)
+        if not ob:
+            continue
+        key=(ob['t'],ob['direcao'],round(ob['top'],10),round(ob['bottom'],10))
+        if key in seen: continue
+        seen.add(key)
+        state='ATIVA'; invalidated_ts=None; first_touch_ts=None
+        for c in cs:
+            if c['t'] <= e['t']:
+                continue
+            if c['h']>=ob['bottom'] and c['l']<=ob['top'] and first_touch_ts is None:
+                first_touch_ts=c['t']
+            if ob['direcao']=='alta' and c['c'] < ob['bottom']:
+                state='INVALIDADA'; invalidated_ts=c['t']; break
+            if ob['direcao']=='baixa' and c['c'] > ob['top']:
+                state='INVALIDADA'; invalidated_ts=c['t']; break
+        out.append({**ob,'break_ts':e['t'],'break_tipo':e['tipo'],'state':state,
+                    'first_touch_ts':first_touch_ts,'invalidated_ts':invalidated_ts})
+    return out[-60:]
+
+
+def _kairos_pool_poi_overlaps(pool, zones=None, order_blocks=None):
+    """POIs que contêm/intersectam o pool. Isto é confluência geométrica real,
+    não score. Retorna FVG/IFVG/OB ativos que efetivamente cruzam o pool.
+    """
+    hits=[]
+    pb,pt=pool['bottom'],pool['top']
+    for z in zones or []:
+        if z.get('state') not in ('ATIVA','TOCADA','PARCIAL','IFVG'):
+            continue
+        if z.get('top') is None or z.get('bottom') is None: continue
+        if z['top'] >= pb and z['bottom'] <= pt:
+            hits.append({'tipo':z.get('tipo'),'top':z['top'],'bottom':z['bottom'],
+                         'origin_ts':z.get('origin_ts'),'created_ts':z.get('created_ts'),'state':z.get('state')})
+    for ob in order_blocks or []:
+        if ob.get('state')!='ATIVA': continue
+        if ob['top'] >= pb and ob['bottom'] <= pt:
+            hits.append({'tipo':ob.get('tipo'),'top':ob['top'],'bottom':ob['bottom'],
+                         'origin_ts':ob.get('t'),'created_ts':ob.get('break_ts'),'state':ob.get('state')})
+    return hits
+
+
+def _kairos_pool_sweeps(candles, pools):
+    """Sweep/SFP contra POOLS confirmados (não contra swing isolado).
+    Algoryze-style: atravessa o pool, recupera o nível médio no próprio candle
+    e mantém 3 fechamentos do lado recuperado. Cada pool gera no máximo 1 evento.
+    """
+    out=[]
+    for pool in pools:
+        for i,c in enumerate(candles):
+            if c['t'] <= pool['confirm_ts']:
+                continue
+            if pool['side']=='SELL_SIDE':
+                raw=(c['l'] < pool['bottom'] and c['c'] > pool['nivel'] and c['o'] > pool['nivel'])
+                direcao='alta'
+            else:
+                raw=(c['h'] > pool['top'] and c['c'] < pool['nivel'] and c['o'] < pool['nivel'])
+                direcao='baixa'
+            if not raw:
+                continue
+            confirmed=False; confirm_ts=None
+            if i+3 < len(candles):
+                if direcao=='alta':
+                    confirmed=all(candles[j]['c'] > pool['nivel'] for j in (i+1,i+2,i+3))
+                else:
+                    confirmed=all(candles[j]['c'] < pool['nivel'] for j in (i+1,i+2,i+3))
+                if confirmed: confirm_ts=candles[i+3]['t']
+            out.append({'direcao':direcao,'side':pool['side'],'nivel':pool['nivel'],
+                        'pool_bottom':pool['bottom'],'pool_top':pool['top'],'toques':pool['toques'],
+                        'extremo':c['l'] if direcao=='alta' else c['h'],
+                        'sweep_idx':i,'sweep_ts':c['t'],'confirmado_3b':confirmed,'confirm_ts':confirm_ts,
+                        'liquidity_origin_ts':pool['origin_ts'],'liquidity_confirm_ts':pool['confirm_ts'],
+                        'pool_id':pool['id'],'pool_poi':pool.get('poi_overlaps',[])})
+            break
+    out.sort(key=lambda x:x['sweep_ts'])
+    return out
+
 def _kairos_liquidity_map_tf(candles, tf):
     pivots=_kairos_confirmed_pivots(candles)
     atrs=compute_atr(candles, 200)
     atr=next((v for v in reversed(atrs) if v is not None), None)
-    eq=[]
-    if atr:
-        for typ,name in (('high','EQH'),('low','EQL')):
-            pts=[p for p in pivots if p['tipo']==typ]
-            for a,b in zip(pts, pts[1:]):
-                if abs(a['nivel']-b['nivel']) < 0.1*atr:
-                    eq.append({'tipo':name,'nivel':(a['nivel']+b['nivel'])/2,'toques':2,
-                               'confirm_ts':max(a['confirm_ts'],b['confirm_ts'])})
-    sweeps=_kairos_sweeps_institucionais(candles)
+    enriched=[]
+    for p in pivots:
+        q=dict(p)
+        q['state'],q['swept_ts']=_kairos_liquidity_state(candles,p['tipo'],p['nivel'],p['confirm_ts'])
+        enriched.append(q)
+    eq=_kairos_equal_liquidity_clusters(candles,enriched,atr)
     fvg=_kairos_fvg_states(candles)
-    return {'tf':tf,'pivots':pivots[-30:],'equal_liquidity':eq[-20:],'sweeps':sweeps[-20:],
-            'zones':fvg[-50:],'volume':_kairos_volume_context(candles)}
-
+    obs=_kairos_order_blocks_map(candles)
+    pools=_kairos_liquidity_pools(candles,pivots=enriched,atr=atr,min_touches=2)
+    for p in pools:
+        p['poi_overlaps']=_kairos_pool_poi_overlaps(p,fvg,obs)
+    sweeps=_kairos_pool_sweeps(candles,pools)
+    return {'tf':tf,'pivots':enriched[-40:],'equal_liquidity':eq[-30:],
+            'liquidity_pools':pools[-40:],'sweeps':sweeps[-30:],
+            'zones':fvg[-80:],'order_blocks':obs[-60:],'volume':_kairos_volume_context(candles)}
 
 def _kairos_build_mtf_map(candles_por_tf):
     mapa={}
@@ -10753,102 +10997,79 @@ def _kairos_build_mtf_map(candles_por_tf):
 
 
 def _kairos_nearest_liquidity_targets(mapa, entry, direction, limit=8):
-    """Alvos de liquidez semanticamente corretos por direção.
-
-    LONG  -> apenas buy-side liquidity acima: SWING_HIGH / EQH.
-    SHORT -> apenas sell-side liquidity abaixo: SWING_LOW / EQL.
-
-    Não escolhe um swing do tipo errado só porque está do lado do preço e
-    produz RR maior. Níveis praticamente duplicados são consolidados,
-    preservando o TF mais pesado.
+    """Targets = pools de liquidez AINDA ATIVOS, nunca pivô isolado.
+    LONG -> BUY_SIDE acima. SHORT -> SELL_SIDE abaixo.
+    Pool dentro de FVG/IFVG/OB mantém metadado POI para auditoria, mas não
+    recebe score nem permite saltar a primeira liquidez real.
     """
     alvos=[]
-    want_pivot = 'high' if direction == 'LONG' else 'low'
-    want_eq = 'EQH' if direction == 'LONG' else 'EQL'
+    wanted='BUY_SIDE' if direction=='LONG' else 'SELL_SIDE'
     for tf,data in mapa.items():
         peso=KAIROS_TF_PESO.get(tf,1)
-        for p in data.get('pivots',[]):
-            if p.get('tipo') != want_pivot:
-                continue
+        for p in data.get('liquidity_pools',[]):
+            if p.get('side')!=wanted or p.get('state')!='ATIVA': continue
             level=p['nivel']
-            if (direction=='LONG' and level<=entry) or (direction=='SHORT' and level>=entry):
-                continue
-            alvos.append({'tf':tf,'tipo':'SWING_HIGH' if direction=='LONG' else 'SWING_LOW',
-                          'nivel':level,'peso':peso,'dist':abs(level-entry),'classe':'LIQUIDEZ'})
-        for e in data.get('equal_liquidity',[]):
-            if e.get('tipo') != want_eq:
-                continue
-            level=e['nivel']
-            if (direction=='LONG' and level<=entry) or (direction=='SHORT' and level>=entry):
-                continue
-            alvos.append({'tf':tf,'tipo':want_eq,'nivel':level,
-                          'peso':peso+1,'dist':abs(level-entry),'classe':'LIQUIDEZ'})
-
+            if (direction=='LONG' and level<=entry) or (direction=='SHORT' and level>=entry): continue
+            alvos.append({'tf':tf,'tipo':p.get('tipo'),'side':wanted,'nivel':level,
+                          'bottom':p['bottom'],'top':p['top'],'toques':p['toques'],
+                          'poi_overlaps':p.get('poi_overlaps',[]),'peso':peso,
+                          'dist':abs(level-entry),'classe':'LIQUIDEZ_POOL'})
     alvos.sort(key=lambda x:(x['dist'],-x['peso']))
     dedup=[]
     for a in alvos:
-        tol=max(abs(entry)*1e-7, 1e-9)
+        tol=max(abs(entry)*1e-7,1e-9)
         igual=next((d for d in dedup if abs(d['nivel']-a['nivel'])<=tol),None)
         if igual:
-            if a['peso'] > igual['peso']:
-                igual.update(a)
+            if a['peso']>igual['peso']: igual.update(a)
             continue
         dedup.append(a)
     return dedup[:limit]
 
-
 def _kairos_opposing_zone_obstacles(mapa, entry, direction, target_level=None, limit=8):
-    """Mapeia a primeira oferta/demanda contrária no caminho do alvo.
-
-    É apenas geometria causal das zonas já existentes no mapa: para LONG,
-    FVG/IFVG bearish acima; para SHORT, FVG/IFVG bullish abaixo. A borda
-    mais próxima da entrada é usada como preço do obstáculo.
-    """
+    """FVG/IFVG/OB contrário no caminho até o pool-alvo."""
     obs=[]
     for tf,data in mapa.items():
+        candidates=[]
         for z in data.get('zones',[]):
+            if z.get('state') in ('ATIVA','TOCADA','PARCIAL','IFVG'):
+                candidates.append(z)
+        for ob in data.get('order_blocks',[]):
+            if ob.get('state')=='ATIVA': candidates.append(ob)
+        for z in candidates:
             zd=z.get('direcao')
-            if direction=='LONG' and zd!='baixa':
-                continue
-            if direction=='SHORT' and zd!='alta':
-                continue
+            if direction=='LONG' and zd!='baixa': continue
+            if direction=='SHORT' and zd!='alta': continue
             bottom=z.get('bottom'); top=z.get('top')
-            if bottom is None or top is None:
-                continue
+            if bottom is None or top is None: continue
             level=bottom if direction=='LONG' else top
             if direction=='LONG':
-                if level<=entry or (target_level is not None and level>=target_level):
-                    continue
+                if level<=entry or (target_level is not None and level>=target_level): continue
             else:
-                if level>=entry or (target_level is not None and level<=target_level):
-                    continue
-            obs.append({'tf':tf,'tipo':z.get('tipo','ZONA_OPPOSTA'),'nivel':level,
-                        'top':top,'bottom':bottom,'peso':KAIROS_TF_PESO.get(tf,1),
-                        'dist':abs(level-entry),'classe':'OBSTACULO_ZONA'})
+                if level>=entry or (target_level is not None and level<=target_level): continue
+            obs.append({'tf':tf,'tipo':z.get('tipo','POI_OPPOSTA'),'nivel':level,'top':top,'bottom':bottom,
+                        'peso':KAIROS_TF_PESO.get(tf,1),'dist':abs(level-entry),'classe':'OBSTACULO_POI'})
     obs.sort(key=lambda x:(x['dist'],-x['peso']))
     dedup=[]
     for o in obs:
-        tol=max(abs(entry)*1e-7, 1e-9)
-        if any(abs(d['nivel']-o['nivel'])<=tol and d['tipo']==o['tipo'] for d in dedup):
-            continue
+        tol=max(abs(entry)*1e-7,1e-9)
+        if any(abs(d['nivel']-o['nivel'])<=tol and d['tipo']==o['tipo'] for d in dedup): continue
         dedup.append(o)
     return dedup[:limit]
 
-
 def _kairos_zone_contains_liquidity(zone, mapa, max_items=10):
-    if not zone:
-        return []
+    """Somente pools 2+ toques contam como liquidez dentro da POI."""
+    if not zone: return []
     hits=[]
     for tf,data in mapa.items():
-        for p in data.get('pivots',[]):
-            if zone['bottom'] <= p['nivel'] <= zone['top']:
-                hits.append({'tf':tf,'tipo':'SWING_'+p['tipo'].upper(),'nivel':p['nivel']})
-        for e in data.get('equal_liquidity',[]):
-            if zone['bottom'] <= e['nivel'] <= zone['top']:
-                hits.append({'tf':tf,'tipo':e['tipo'],'nivel':e['nivel']})
-    hits.sort(key=lambda x:-KAIROS_TF_PESO.get(x['tf'],1))
+        for p in data.get('liquidity_pools',[]):
+            if p.get('state')!='ATIVA': continue
+            # interseção de zonas, não apenas centro dentro
+            if zone['top'] >= p['bottom'] and zone['bottom'] <= p['top']:
+                hits.append({'tf':tf,'tipo':p['tipo'],'side':p['side'],'nivel':p['nivel'],
+                             'bottom':p['bottom'],'top':p['top'],'toques':p['toques'],
+                             'poi_overlaps':p.get('poi_overlaps',[])})
+    hits.sort(key=lambda x:(-KAIROS_TF_PESO.get(x['tf'],1),-x.get('toques',0)))
     return hits[:max_items]
-
 
 def _kairos_select_structural_sl(mapa, exec_tf, exec_candles, context_sweep, structure, retest, direction):
     """Seleciona uma âncora de SL causal e ainda válida no momento da entrada.
@@ -10919,23 +11140,26 @@ def _kairos_select_structural_sl(mapa, exec_tf, exec_candles, context_sweep, str
 
 
 def _kairos_select_recent_sweep(mapa, now_ts):
-    """Escolhe o evento de liquidez mais relevante ainda recente.
-    H4/H1/M30/M15/M5/M1 competem por recência+timeframe; W1/D1 ficam como mapa/contexto.
+    """Seleciona sweep confirmado sem score.
+
+    Só aceita sweep com confirmação de 3 barras já ocorrida. Entre eventos
+    válidos e dentro da janela causal, usa o mais recente; em empate, o TF
+    estruturalmente maior vence.
     """
     candidatos=[]
     max_age={'H4':48*3600000,'H1':18*3600000,'M30':8*3600000,'M15':5*3600000,'M5':2*3600000,'M1':45*60000}
     for tf in ('H4','H1','M30','M15','M5','M1'):
-        for s in (mapa.get(tf) or {}).get('sweeps',[]):
-            age=now_ts-s['sweep_ts']
+        for sw in (mapa.get(tf) or {}).get('sweeps',[]):
+            if not sw.get('confirmado_3b') or sw.get('confirm_ts') is None or sw['confirm_ts'] > now_ts:
+                continue
+            age=now_ts-sw['sweep_ts']
             if 0 <= age <= max_age[tf]:
-                score=KAIROS_TF_PESO[tf]*10 - age/max_age[tf]*5 + (3 if s.get('confirmado_3b') else 0)
-                candidatos.append((score,tf,s))
+                candidatos.append((sw['sweep_ts'], KAIROS_TF_PESO[tf], tf, sw))
     if not candidatos:
         return None
-    candidatos.sort(key=lambda x:x[0], reverse=True)
-    _,tf,s=candidatos[0]
-    return {'tf':tf, **s}
-
+    candidatos.sort(key=lambda x:(x[0],x[1]), reverse=True)
+    _,_,tf,sw=candidatos[0]
+    return {'tf':tf, **sw}
 
 def _kairos_find_structure_after_sweep(candles, sweep, swing_size=5):
     if not candles or not sweep:
@@ -10955,30 +11179,44 @@ def _kairos_find_structure_after_sweep(candles, sweep, swing_size=5):
 
 
 def _kairos_select_entry_zone(exec_candles, sweep, structure, mapa):
+    """Zona causal sem score: IFVG/FVG/OB ligados ao evento, por ordem temporal."""
     if not structure:
         return None
     direction=sweep['direcao']
     st=structure['t']
-    zones=[z for z in _kairos_fvg_states(exec_candles) if z['direcao']==direction and
-           (z.get('flip_ts') or z.get('created_ts') or 0) >= sweep['sweep_ts']]
-    # prefer zones born/flipped no later than now and nearest current price
-    price=exec_candles[-1]['c']
-    candidates=[]
-    for z in zones:
-        z2=dict(z)
-        z2['liquidity_inside']=_kairos_zone_contains_liquidity(z2,mapa)
-        z2['score_zone']=2 + (3 if z2['liquidity_inside'] else 0) + (1 if z2['tipo'].startswith('IFVG') else 0)
-        candidates.append(z2)
+    zones=[]
+    for z in _kairos_fvg_states(exec_candles):
+        effective_ts=z.get('flip_ts') or z.get('created_ts') or 0
+        if z.get('direcao') != direction:
+            continue
+        if z.get('state') not in ('ATIVA','TOCADA','PARCIAL','IFVG'):
+            continue
+        if not (sweep['sweep_ts'] <= effective_ts <= st):
+            continue
+        z2=dict(z); z2['liquidity_inside']=_kairos_zone_contains_liquidity(z2,mapa)
+        zones.append(z2)
+
+    # Prioridade operacional: zona causal que contém/intersecta pool de liquidez,
+    # depois IFVG e FVG causais. Não é score; é relação geométrica POI<->liquidez.
+    with_pool=[z for z in zones if z.get('liquidity_inside')]
+    if with_pool:
+        ifvg_pool=[z for z in with_pool if z['tipo'].startswith('IFVG')]
+        if ifvg_pool:
+            return max(ifvg_pool,key=lambda z:(z.get('flip_ts') or z.get('created_ts') or 0))
+        return max(with_pool,key=lambda z:(z.get('created_ts') or 0))
+    ifvg=[z for z in zones if z['tipo'].startswith('IFVG')]
+    fvg=[z for z in zones if z['tipo'].startswith('FVG')]
+    if ifvg:
+        return max(ifvg,key=lambda z:(z.get('flip_ts') or z.get('created_ts') or 0))
+    if fvg:
+        return max(fvg,key=lambda z:(z.get('created_ts') or 0))
+
+    # OB é derivado diretamente do break e só entra se não houver imbalance causal.
     ob=_kairos_ob_from_break(exec_candles, structure.get('full_idx'), direction)
     if ob:
         ob['liquidity_inside']=_kairos_zone_contains_liquidity(ob,mapa)
-        ob['score_zone']=2 + (3 if ob['liquidity_inside'] else 0)
-        candidates.append(ob)
-    if not candidates:
-        return None
-    candidates.sort(key=lambda z:(-z.get('score_zone',0), abs(((z['top']+z['bottom'])/2)-price)))
-    return candidates[0]
-
+        return ob
+    return None
 
 def _kairos_retest_zone(candles, zone, after_ts):
     if not zone:
@@ -11094,7 +11332,7 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
         'entry': None, 'sl': None, 'sl_regra': None, 'tp': None, 'tp_origem': None, 'rr': None,
         'reason': None, 'timestamp': m5_ate_agora[-1]['t'] if m5_ate_agora else None,
         'valid': False, 'failure_reason': None,
-        'variante': 'V2_REFINADO_MTF',
+        'variante': 'V2_LIQUIDITY_POOLS_POI_CAUSAL',
         'setup_type': None, 'context_bias': None, 'sweep_tf': None, 'sweep_level': None,
         'sweep_extreme': None, 'execution_tf': None, 'momentum_z': None,
         'liquidity_inside_zone': [], 'next_liquidity_targets': [], 'target_obstacles': [],
@@ -11121,7 +11359,12 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
     resultado['bias']=contexto.get('final')
     resultado['mtf_summary']={tf:{
         'pivots':len(d.get('pivots',[])), 'eq':len(d.get('equal_liquidity',[])),
-        'sweeps':len(d.get('sweeps',[])), 'zones':len(d.get('zones',[])),
+        'liq_ativas':sum(1 for x in d.get('liquidity_pools',[]) if x.get('state')=='ATIVA'),
+        'liquidity_pools':len(d.get('liquidity_pools',[])),
+        'pools_em_poi':sum(1 for x in d.get('liquidity_pools',[]) if x.get('poi_overlaps')),
+        'sweeps':len(d.get('sweeps',[])), 'sweeps_confirmados':sum(1 for x in d.get('sweeps',[]) if x.get('confirmado_3b')),
+        'zones':len(d.get('zones',[])), 'order_blocks':len(d.get('order_blocks',[])),
+        'zones_operacionais':sum(1 for x in d.get('zones',[]) if x.get('state') in ('ATIVA','TOCADA','PARCIAL','IFVG')),
         'volume':d.get('volume')
     } for tf,d in mapa.items()}
 
@@ -11247,7 +11490,7 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
 
     tp=effective['nivel']
     resultado['tp']=round(tp,6); resultado['rr']=round(rr,2)
-    if effective.get('classe')=='OBSTACULO_ZONA':
+    if effective.get('classe') in ('OBSTACULO_ZONA','OBSTACULO_POI'):
         resultado['tp_origem']=f"OBSTACULO_{effective['tf']}_{effective['tipo']}"
     else:
         resultado['tp_origem']=f"LIQUIDEZ_{effective['tf']}_{effective['tipo']}"

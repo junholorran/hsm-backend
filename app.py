@@ -310,7 +310,67 @@ scalp_engine.init_4camadas_db(DB_FILE)
 scalp_engine.init_sfp_liquidez_db(DB_FILE)
 scalp_engine.init_sfp_diagnostico_db(DB_FILE)
 scalp_engine.init_sfp_cluster_db(DB_FILE)
+
 app.register_blueprint(scalp_engine.explicacao_bp)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# AUDITORIA BTC — execução automática UMA VEZ por arranque
+# Diagnóstico apenas. Não altera sinais, Entry, SL, TP, Telegram ou DB.
+# Roda em thread separada para não bloquear o boot/live cycle.
+# ─────────────────────────────────────────────────────────────────────────────
+_kairos_btc_audit_started = False
+_kairos_btc_audit_lock = threading.Lock()
+
+def _run_btc_math_audit_once():
+    global _kairos_btc_audit_started
+    with _kairos_btc_audit_lock:
+        if _kairos_btc_audit_started:
+            return
+        _kairos_btc_audit_started = True
+
+    try:
+        time.sleep(15)
+        print("[BTC_AUDIT] INICIO auditoria matematica BTCUSD eventos=100", flush=True)
+        r = scalp_engine.auditar_btc_liquidez_matematica(sample_limit=100)
+
+        print(
+            f"[BTC_AUDIT] RESUMO pair={r.get('pair')} "
+            f"all_math_pass={r.get('all_math_pass')} "
+            f"total_fail={r.get('total_fail')}",
+            flush=True,
+        )
+
+        for tf, x in (r.get("resultado") or {}).items():
+            piv = x.get("pivots") or {}
+            pools = x.get("pools") or {}
+            sweeps = x.get("sweeps") or {}
+            poi = x.get("poi_overlap") or {}
+            print(
+                f"[BTC_AUDIT] {tf} "
+                f"all_math_pass={x.get('all_math_pass')} "
+                f"pivots={piv.get('pass',0)}/{piv.get('total',0)} fail={piv.get('fail',0)} "
+                f"pools={pools.get('pass',0)}/{pools.get('total',0)} fail={pools.get('fail',0)} "
+                f"sweeps={sweeps.get('pass',0)}/{sweeps.get('total',0)} fail={sweeps.get('fail',0)} "
+                f"poi={poi.get('pass',0)}/{poi.get('total',0)} fail={poi.get('fail',0)}",
+                flush=True,
+            )
+
+        if r.get("total_fail", 0):
+            for tf, x in (r.get("resultado") or {}).items():
+                samples = x.get("samples") or {}
+                print(f"[BTC_AUDIT_FAIL] {tf} samples={samples}", flush=True)
+
+        print("[BTC_AUDIT] FIM", flush=True)
+    except Exception as e:
+        import traceback
+        print(f"[BTC_AUDIT] ERRO {type(e).__name__}: {e}", flush=True)
+        traceback.print_exc()
+
+threading.Thread(
+    target=_run_btc_math_audit_once,
+    name="btc-math-audit-once",
+    daemon=True,
+).start()
 
 ICT_SYSTEM_PROMPT = (
     "Es um mentor institucional ICT (Inner Circle Trader) e SMC de elite, com "

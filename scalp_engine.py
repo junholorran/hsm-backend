@@ -10987,6 +10987,211 @@ def _kairos_liquidity_map_tf(candles, tf):
             'liquidity_pools':pools[-40:],'sweeps':sweeps[-30:],
             'zones':fvg[-80:],'order_blocks':obs[-60:],'volume':_kairos_volume_context(candles)}
 
+
+# ═══════════════════════════════════════════════════════════════════════
+# BTC — AUDITORIA MATEMÁTICA INDEPENDENTE (SÓ LEITURA / SEM ALTERAR TRADES)
+# Valida pivôs 20/20, pools 2+ toques, overlap POI, sweeps e causalidade.
+# Não entra na decisão operacional, não envia Telegram e não grava DB.
+# ═══════════════════════════════════════════════════════════════════════
+
+KAIROS_BTC_AUDIT_TFS = {
+    'H4': ('240', 45),
+    'H1': ('60', 20),
+    'M30': ('30', 12),
+    'M15': ('15', 8),
+    'M5': ('5', 4),
+    'M1': ('1', 2),
+}
+
+
+def _kairos_audit_pivot_independente(candles, pivot, left=20, right=20):
+    """Recalcula o pivô sem chamar _kairos_confirmed_pivots()."""
+    oi = pivot.get('origin_idx')
+    ci = pivot.get('confirm_idx')
+    tipo = pivot.get('tipo')
+    if oi is None or ci is None or oi < left or oi + right >= len(candles):
+        return {'pass': False, 'reason': 'INDICES_INVALIDOS'}
+    if ci != oi + right:
+        return {'pass': False, 'reason': 'CONFIRM_IDX_INVALIDO', 'esperado': oi + right, 'recebido': ci}
+    c = candles[oi]
+    if pivot.get('origin_ts') != c['t'] or pivot.get('confirm_ts') != candles[ci]['t']:
+        return {'pass': False, 'reason': 'TIMESTAMP_INVALIDO'}
+    if pivot.get('nivel') != (c['h'] if tipo == 'high' else c['l']):
+        return {'pass': False, 'reason': 'NIVEL_NAO_BATE_CANDLE_ORIGEM'}
+    if tipo == 'high':
+        esquerda = max(x['h'] for x in candles[oi-left:oi])
+        direita = max(x['h'] for x in candles[oi+1:oi+right+1])
+        ok = c['h'] >= esquerda and c['h'] >= direita
+    elif tipo == 'low':
+        esquerda = min(x['l'] for x in candles[oi-left:oi])
+        direita = min(x['l'] for x in candles[oi+1:oi+right+1])
+        ok = c['l'] <= esquerda and c['l'] <= direita
+    else:
+        return {'pass': False, 'reason': 'TIPO_INVALIDO'}
+    return {
+        'pass': bool(ok), 'reason': 'OK' if ok else 'FORMULA_20_20_FALHOU',
+        'origin_idx': oi, 'confirm_idx': ci, 'origin_ts': c['t'], 'confirm_ts': candles[ci]['t'],
+        'tipo': tipo, 'nivel': pivot.get('nivel'), 'left_extreme': esquerda, 'right_extreme': direita,
+        'causal': candles[ci]['t'] > c['t'],
+    }
+
+
+def _kairos_audit_pool_independente(candles, pool, atr):
+    """Confere exatamente os toques declarados, pivôs 20/20, tolerância e causalidade."""
+    if not atr or atr <= 0:
+        return {'pass': False, 'reason': 'SEM_ATR200'}
+    tol = 0.1 * atr
+    side = pool.get('side')
+    wanted = 'high' if side == 'BUY_SIDE' else 'low'
+    declared = pool.get('touches') or []
+    if len(declared) < 2 or pool.get('toques') != len(declared):
+        return {'pass': False, 'reason': 'TOQUES_DECLARADOS_INVALIDOS',
+                'toques': pool.get('toques'), 'touches_len': len(declared)}
+
+    # Índice por timestamps dos pivôs realmente confirmados pela fórmula 20/20.
+    real = _kairos_confirmed_pivots(candles)
+    by_key = {(p['origin_ts'], p['confirm_ts'], p['tipo']): p for p in real}
+    checks=[]
+    levels=[]
+    for t in declared:
+        rp = by_key.get((t.get('origin_ts'), t.get('confirm_ts'), wanted))
+        if not rp:
+            checks.append(False); continue
+        same_level = abs(float(rp['nivel']) - float(t.get('nivel'))) <= 1e-12
+        aud = _kairos_audit_pivot_independente(candles, rp)
+        checks.append(bool(same_level and aud.get('pass') and aud.get('causal')))
+        levels.append(float(rp['nivel']))
+
+    center_expected = sum(levels)/len(levels) if levels else None
+    center_ok = center_expected is not None and abs(center_expected - float(pool.get('nivel'))) <= 1e-9
+    tolerance_ok = bool(levels) and all(abs(x - float(pool['nivel'])) <= tol for x in levels)
+    bounds_expected_bottom = min(levels) - tol*0.15 if levels else None
+    bounds_expected_top = max(levels) + tol*0.15 if levels else None
+    bounds_ok = bool(levels) and abs(bounds_expected_bottom - float(pool.get('bottom'))) <= 1e-9 and abs(bounds_expected_top - float(pool.get('top'))) <= 1e-9
+    confirm_expected = max(t['confirm_ts'] for t in declared) if declared else None
+    origin_expected = min(t['origin_ts'] for t in declared) if declared else None
+    timestamps_ok = pool.get('confirm_ts') == confirm_expected and pool.get('origin_ts') == origin_expected
+    causal_ok = bool(declared) and all(t['confirm_ts'] <= pool['confirm_ts'] for t in declared)
+    pass_all = all(checks) and center_ok and tolerance_ok and bounds_ok and timestamps_ok and causal_ok
+    return {
+        'pass': bool(pass_all), 'reason': 'OK' if pass_all else 'POOL_INVALIDO',
+        'side': side, 'nivel': pool.get('nivel'), 'bottom': pool.get('bottom'), 'top': pool.get('top'),
+        'toques': pool.get('toques'), 'tolerancia': tol, 'touches_reais': sum(checks),
+        'center_ok': center_ok, 'tolerance_ok': tolerance_ok, 'bounds_ok': bounds_ok,
+        'timestamps_ok': timestamps_ok, 'causal_ok': causal_ok,
+    }
+
+
+def _kairos_audit_sweep_independente(candles, sweep, pools):
+    """Recalcula travessia + recuperação + confirmação 3 barras."""
+    i = sweep.get('sweep_idx')
+    if i is None or i < 0 or i >= len(candles):
+        return {'pass': False, 'reason': 'SWEEP_IDX_INVALIDO'}
+    pool = next((p for p in pools if p.get('id') == sweep.get('pool_id')), None)
+    if not pool:
+        return {'pass': False, 'reason': 'POOL_DO_SWEEP_NAO_ENCONTRADO'}
+    if pool.get('confirm_ts', 0) >= candles[i]['t']:
+        return {'pass': False, 'reason': 'SWEEP_ANTES_DA_CONFIRMACAO_POOL'}
+    c = candles[i]
+    if sweep.get('direcao') == 'alta':
+        crossed = c['l'] < pool['bottom']
+        recovered = c['c'] > pool['nivel']
+        confirms = i + 3 < len(candles) and all(candles[j]['c'] > pool['nivel'] for j in (i+1, i+2, i+3))
+    else:
+        crossed = c['h'] > pool['top']
+        recovered = c['c'] < pool['nivel']
+        confirms = i + 3 < len(candles) and all(candles[j]['c'] < pool['nivel'] for j in (i+1, i+2, i+3))
+    declared = bool(sweep.get('confirmado_3b'))
+    pass_all = crossed and recovered and (declared == confirms)
+    return {
+        'pass': bool(pass_all), 'reason': 'OK' if pass_all else 'SWEEP_FORMULA_FALHOU',
+        'pool_id': pool.get('id'), 'pool_side': pool.get('side'), 'pool_nivel': pool.get('nivel'),
+        'sweep_ts': c['t'], 'crossed': crossed, 'recovered': recovered,
+        'confirm_3bars_recalc': confirms, 'confirm_3bars_declared': declared,
+        'causal': pool.get('confirm_ts', 0) < c['t'],
+    }
+
+
+def _kairos_auditar_tf_btc(candles, tf, sample_limit=100):
+    mapa = _kairos_liquidity_map_tf(candles, tf)
+    atrs = compute_atr(candles, 200)
+    atr = next((v for v in reversed(atrs) if v is not None), None)
+    pivots_all = _kairos_confirmed_pivots(candles)
+    pools_all = _kairos_liquidity_pools(candles, pivots=pivots_all, atr=atr, min_touches=2)
+    fvgs = _kairos_fvg_states(candles)
+    obs = _kairos_order_blocks_map(candles)
+    for p in pools_all:
+        p['poi_overlaps'] = _kairos_pool_poi_overlaps(p, fvgs, obs)
+    sweeps_all = _kairos_pool_sweeps(candles, pools_all)
+
+    pivot_checks = [_kairos_audit_pivot_independente(candles, p) for p in pivots_all[-sample_limit:]]
+    pool_checks = [_kairos_audit_pool_independente(candles, p, atr) for p in pools_all[-sample_limit:]]
+    sweep_checks = [_kairos_audit_sweep_independente(candles, s, pools_all) for s in sweeps_all[-sample_limit:]]
+
+    def resumo(xs):
+        return {'total': len(xs), 'pass': sum(1 for x in xs if x.get('pass')), 'fail': sum(1 for x in xs if not x.get('pass'))}
+
+    # Amostras úteis pro gráfico: últimos eventos, já com timestamps e preços.
+    samples = {
+        'pivots': pivot_checks[-10:],
+        'pools': [dict(p, audit=_kairos_audit_pool_independente(candles, p, atr)) for p in pools_all[-10:]],
+        'sweeps': [dict(s, audit=_kairos_audit_sweep_independente(candles, s, pools_all)) for s in sweeps_all[-10:]],
+    }
+    # Verifica overlap declarado POI geometricamente.
+    overlap_fail = 0
+    overlap_total = 0
+    for p in pools_all[-sample_limit:]:
+        for z in p.get('poi_overlaps', []):
+            overlap_total += 1
+            if not (p['top'] >= z.get('bottom', float('inf')) and p['bottom'] <= z.get('top', float('-inf'))):
+                overlap_fail += 1
+
+    return {
+        'tf': tf, 'candles': len(candles), 'atr200': atr,
+        'pivots': resumo(pivot_checks), 'pools': resumo(pool_checks), 'sweeps': resumo(sweep_checks),
+        'poi_overlap': {'total': overlap_total, 'pass': overlap_total-overlap_fail, 'fail': overlap_fail},
+        'all_math_pass': all(x.get('pass') for x in pivot_checks + pool_checks + sweep_checks) and overlap_fail == 0,
+        'samples': samples,
+    }
+
+
+def auditar_btc_liquidez_matematica(sample_limit=100, fim_ts_ms=None):
+    """Auditoria on-demand só de BTCUSD; não altera produção."""
+    sample_limit = max(10, min(int(sample_limit or 100), 300))
+    resultados = {}
+    for tf, (interval, dias) in KAIROS_BTC_AUDIT_TFS.items():
+        candles = _fetch_bybit_klines_historico('BTCUSD', interval, dias, fim_ts_ms=fim_ts_ms)
+        resultados[tf] = _kairos_auditar_tf_btc(candles, tf, sample_limit=sample_limit)
+    total_fail = sum(
+        r['pivots']['fail'] + r['pools']['fail'] + r['sweeps']['fail'] + r['poi_overlap']['fail']
+        for r in resultados.values()
+    )
+    return {
+        'pair': 'BTCUSD', 'sample_limit_por_tf': sample_limit,
+        'timeframes': list(KAIROS_BTC_AUDIT_TFS.keys()),
+        'total_fail': total_fail, 'all_math_pass': total_fail == 0,
+        'resultado': resultados,
+        'nota': 'Auditoria independente de pivô 20/20, pool 2+ toques, overlap POI e sweep causal. Não altera sinal/SL/TP.'
+    }
+
+
+@explicacao_bp.route('/scalp_gates_vortex/auditoria_btc_liquidez', methods=['GET'])
+def auditoria_btc_liquidez_endpoint():
+    try:
+        n = int(request.args.get('eventos', 100))
+    except Exception:
+        n = 100
+    try:
+        fim = request.args.get('fim_ts_ms')
+        fim = int(fim) if fim else None
+        r = auditar_btc_liquidez_matematica(sample_limit=n, fim_ts_ms=fim)
+        return jsonify(r), 200
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'erro': str(e), 'pair': 'BTCUSD'}), 500
+
+
 def _kairos_build_mtf_map(candles_por_tf):
     mapa={}
     for tf in KAIROS_TF_ORDEM:

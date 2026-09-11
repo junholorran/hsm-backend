@@ -11201,15 +11201,18 @@ def _kairos_build_mtf_map(candles_por_tf):
     return mapa
 
 
-def _kairos_nearest_liquidity_targets(mapa, entry, direction, limit=8):
+def _kairos_nearest_liquidity_targets(mapa, entry, direction, limit=8, allowed_tfs=None):
     """Targets = pools de liquidez AINDA ATIVOS, nunca pivô isolado.
     LONG -> BUY_SIDE acima. SHORT -> SELL_SIDE abaixo.
     Pool dentro de FVG/IFVG/OB mantém metadado POI para auditoria, mas não
     recebe score nem permite saltar a primeira liquidez real.
     """
     alvos=[]
+    allowed_tfs=set(allowed_tfs) if allowed_tfs else None
     wanted='BUY_SIDE' if direction=='LONG' else 'SELL_SIDE'
     for tf,data in mapa.items():
+        if allowed_tfs is not None and tf not in allowed_tfs:
+            continue
         peso=KAIROS_TF_PESO.get(tf,1)
         for p in data.get('liquidity_pools',[]):
             if p.get('side')!=wanted or p.get('state')!='ATIVA': continue
@@ -11230,10 +11233,13 @@ def _kairos_nearest_liquidity_targets(mapa, entry, direction, limit=8):
         dedup.append(a)
     return dedup[:limit]
 
-def _kairos_opposing_zone_obstacles(mapa, entry, direction, target_level=None, limit=8):
+def _kairos_opposing_zone_obstacles(mapa, entry, direction, target_level=None, limit=8, allowed_tfs=None):
     """FVG/IFVG/OB contrário no caminho até o pool-alvo."""
     obs=[]
+    allowed_tfs=set(allowed_tfs) if allowed_tfs else None
     for tf,data in mapa.items():
+        if allowed_tfs is not None and tf not in allowed_tfs:
+            continue
         candidates=[]
         for z in data.get('zones',[]):
             if z.get('state') in ('ATIVA','TOCADA','PARCIAL','IFVG'):
@@ -11260,6 +11266,24 @@ def _kairos_opposing_zone_obstacles(mapa, entry, direction, target_level=None, l
         if any(abs(d['nivel']-o['nivel'])<=tol and d['tipo']==o['tipo'] for d in dedup): continue
         dedup.append(o)
     return dedup[:limit]
+
+
+def _kairos_tp_horizon_tfs(execution_tf):
+    """Horizonte operacional do alvo coerente com o TF de execução.
+
+    M1/M5 = scalp: só liquidez/obstáculos próximos de M1/M5/M15.
+    M15 = intraday: M15/M30/H1.
+    Nunca usa H4/D1 para fabricar RR de uma entrada curta.
+    """
+    if execution_tf in ('M1','M5'):
+        return ('M1','M5','M15')
+    if execution_tf == 'M15':
+        return ('M15','M30','H1')
+    if execution_tf == 'M30':
+        return ('M30','H1','H4')
+    if execution_tf == 'H1':
+        return ('H1','H4','D1')
+    return (execution_tf,) if execution_tf else ()
 
 def _kairos_zone_contains_liquidity(zone, mapa, max_items=10):
     """Somente pools 2+ toques contam como liquidez dentro da POI."""
@@ -11537,11 +11561,12 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
         'entry': None, 'sl': None, 'sl_regra': None, 'tp': None, 'tp_origem': None, 'rr': None,
         'reason': None, 'timestamp': m5_ate_agora[-1]['t'] if m5_ate_agora else None,
         'valid': False, 'failure_reason': None,
-        'variante': 'V2_LIQUIDITY_POOLS_POI_CAUSAL',
+        'variante': 'V2_LIQUIDITY_POOLS_POI_CAUSAL_TP_TF',
         'setup_type': None, 'context_bias': None, 'sweep_tf': None, 'sweep_level': None,
         'sweep_extreme': None, 'execution_tf': None, 'momentum_z': None,
         'liquidity_inside_zone': [], 'next_liquidity_targets': [], 'target_obstacles': [],
         'first_liquidity_target': None, 'tp_final_liquidez': None, 'tp1_obstacle': None,
+        'tp_horizon_tfs': [], 'tp_horizon_mode': None,
         'mtf_summary': {},
         'sl_audit': None, 'sl_anchor_tf': None, 'sl_anchor_class': None,
         'sl_anchor_sweep_ts': None, 'sl_anchor_extreme': None,
@@ -11658,7 +11683,14 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
     resultado['sl_anchor_sweep_ts']=sl_info['sl_sweep_ts']
     resultado['sl_anchor_extreme']=round(sl_info['sl_sweep_extreme'],6)
 
-    targets=_kairos_nearest_liquidity_targets(mapa,entry,direction,limit=12)
+    # TP coerente com o horizonte do trade. Uma execução M1/M5 não pode
+    # procurar H4/D1 só para obter um RR artificialmente bonito.
+    tp_horizon=_kairos_tp_horizon_tfs(exec_tf)
+    resultado['tp_horizon_tfs']=list(tp_horizon)
+    resultado['tp_horizon_mode']='SCALP' if exec_tf in ('M1','M5') else 'INTRADAY'
+    targets=_kairos_nearest_liquidity_targets(
+        mapa,entry,direction,limit=12,allowed_tfs=tp_horizon
+    )
     for t in targets:
         t['rr']=round(t['dist']/risk,2) if risk else None
     resultado['next_liquidity_targets']=targets[:8]
@@ -11666,7 +11698,7 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
     # O alvo principal é SEMPRE a próxima liquidez correta do lado do trade.
     # Não salta uma liquidez próxima só para fabricar 2R num nível mais distante.
     if not targets:
-        resultado['failure_reason']='SEM_LIQUIDEZ_DIRECIONAL_ALVO'; return resultado
+        resultado['failure_reason']='SEM_LIQUIDEZ_ALVO_NO_HORIZONTE_TF'; return resultado
     target=targets[0]
     resultado['first_liquidity_target']=dict(target)
     resultado['tp_final_liquidez']=round(target['nivel'],6)
@@ -11675,7 +11707,9 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
     # próxima vira alvo operacional/TP1 conservador; a liquidez continua
     # guardada como alvo final. Assim o Paper V2 não ignora resistência/suporte
     # estrutural só para manter um RR bonito.
-    obstacles=_kairos_opposing_zone_obstacles(mapa,entry,direction,target_level=target['nivel'],limit=8)
+    obstacles=_kairos_opposing_zone_obstacles(
+        mapa,entry,direction,target_level=target['nivel'],limit=8,allowed_tfs=tp_horizon
+    )
     for o in obstacles:
         o['rr']=round(o['dist']/risk,2) if risk else None
     resultado['target_obstacles']=obstacles

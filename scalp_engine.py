@@ -11201,6 +11201,353 @@ def _kairos_build_mtf_map(candles_por_tf):
     return mapa
 
 
+
+# ═══════════════════════════════════════════════════════════════════════
+# TELEMETRIA DE LIQUIDEZ ESTRUTURAL — SOMENTE OBSERVABILIDADE
+# Não altera avaliar_vortex_decision_layer_v2(), Entry, SL, TP, RR,
+# sweep selector, scheduler, Telegram ou resolução de resultado.
+# ═══════════════════════════════════════════════════════════════════════
+KAIROS_STRUCTURAL_LIQUIDITY_TFS = ('W1', 'D1', 'H4', 'H1', 'M15')
+KAIROS_STRUCTURAL_SWING_SIZE = 50
+
+
+def _kairos_periodo_completo(candle, tf, now_ts):
+    """True apenas quando o candle do período já fechou no timestamp auditado."""
+    if not candle or candle.get('t') is None:
+        return False
+    dur = 7 * 86400000 if tf == 'W1' else 86400000 if tf == 'D1' else None
+    return bool(dur and candle['t'] + dur <= now_ts)
+
+
+def _kairos_previous_period_refs(candles_por_tf, now_ts):
+    """PDH/PDL/PWH/PWL vêm somente de períodos COMPLETOS anteriores.
+    Open atual e close anterior são contexto, nunca liquidity pool.
+    """
+    out = {
+        'PDH': None, 'PDL': None, 'PWH': None, 'PWL': None,
+        'daily_open': None, 'previous_daily_close': None,
+        'weekly_open': None, 'previous_weekly_close': None,
+    }
+    for tf, high_key, low_key, open_key, close_key in (
+        ('D1', 'PDH', 'PDL', 'daily_open', 'previous_daily_close'),
+        ('W1', 'PWH', 'PWL', 'weekly_open', 'previous_weekly_close'),
+    ):
+        cs = sorted([c for c in (candles_por_tf.get(tf) or []) if c.get('t') is not None and c['t'] <= now_ts], key=lambda x: x['t'])
+        if not cs:
+            continue
+        completos = [c for c in cs if _kairos_periodo_completo(c, tf, now_ts)]
+        if completos:
+            prev = completos[-1]
+            out[high_key] = {'level': prev['h'], 'period_open_ts': prev['t'], 'confirmed_ts': prev['t'] + (7 * 86400000 if tf == 'W1' else 86400000)}
+            out[low_key] = {'level': prev['l'], 'period_open_ts': prev['t'], 'confirmed_ts': prev['t'] + (7 * 86400000 if tf == 'W1' else 86400000)}
+            out[close_key] = {'level': prev['c'], 'period_open_ts': prev['t'], 'confirmed_ts': prev['t'] + (7 * 86400000 if tf == 'W1' else 86400000), 'role': 'CONTEXT'}
+        # candle vigente: último candle cujo open já aconteceu e cujo período ainda não terminou.
+        current = next((c for c in reversed(cs) if not _kairos_periodo_completo(c, tf, now_ts)), None)
+        if current:
+            out[open_key] = {'level': current['o'], 'period_open_ts': current['t'], 'role': 'CONTEXT'}
+        elif cs:
+            # em fronteira exata, o candle mais novo pode já estar completo; open continua apenas contexto.
+            out[open_key] = {'level': cs[-1]['o'], 'period_open_ts': cs[-1]['t'], 'role': 'CONTEXT'}
+    return out
+
+
+def _kairos_lux50_structural_levels(candles, tf, now_ts):
+    """Reusa _extrair_swings_lux_algo(swing_size=50) e expõe a confirmação
+    causal do próprio algoritmo (origin_idx + swing_size). Não redefine swing.
+    """
+    cs = [c for c in candles if c.get('t') is not None and c['t'] <= now_ts]
+    if len(cs) < KAIROS_STRUCTURAL_SWING_SIZE + 5:
+        return []
+    swings = _extrair_swings_lux_algo(cs, swing_size=KAIROS_STRUCTURAL_SWING_SIZE)
+    by_ts = {c['t']: i for i, c in enumerate(cs)}
+    out = []
+    for sw in swings:
+        oi = by_ts.get(sw.get('t'))
+        if oi is None:
+            continue
+        ci = oi + KAIROS_STRUCTURAL_SWING_SIZE
+        if ci >= len(cs):
+            continue
+        confirm_ts = cs[ci]['t']
+        if confirm_ts > now_ts:
+            continue
+        level = sw.get('valor')
+        typ = 'SWING_HIGH' if sw.get('tipo') == 'high' else 'SWING_LOW'
+        state = 'ACTIVE'
+        captured_ts = None
+        for c in cs[ci + 1:]:
+            if typ == 'SWING_HIGH' and c['h'] > level:
+                state, captured_ts = 'CAPTURED', c['t']; break
+            if typ == 'SWING_LOW' and c['l'] < level:
+                state, captured_ts = 'CAPTURED', c['t']; break
+        out.append({
+            'tf': tf, 'type': typ, 'level': level,
+            'origin_ts': sw.get('t'), 'confirmed_ts': confirm_ts,
+            'state': state, 'captured_ts': captured_ts,
+        })
+    return out[-40:]
+
+
+def _kairos_structural_poi_overlaps(levels, candles_por_tf, now_ts):
+    """Interseção geométrica entre níveis estruturais e FVG/IFVG/OB existentes."""
+    hits = []
+    for poi_tf in KAIROS_STRUCTURAL_LIQUIDITY_TFS:
+        cs = [c for c in (candles_por_tf.get(poi_tf) or []) if c.get('t') is not None and c['t'] <= now_ts]
+        if not cs:
+            continue
+        zones = _kairos_fvg_states(cs)
+        obs = _kairos_order_blocks_map(cs)
+        pois = []
+        for z in zones:
+            if z.get('state') in ('ATIVA', 'TOCADA', 'PARCIAL', 'IFVG'):
+                pois.append({'poi_tf': poi_tf, 'poi_type': z.get('tipo'), 'bottom': z.get('bottom'), 'top': z.get('top'), 'state': z.get('state'), 'created_ts': z.get('flip_ts') or z.get('created_ts')})
+        for ob in obs:
+            if ob.get('state') == 'ATIVA':
+                pois.append({'poi_tf': poi_tf, 'poi_type': ob.get('tipo'), 'bottom': ob.get('bottom'), 'top': ob.get('top'), 'state': ob.get('state'), 'created_ts': ob.get('break_ts') or ob.get('t')})
+        for liq in levels:
+            lv = liq.get('level')
+            if lv is None:
+                continue
+            for poi in pois:
+                if poi['bottom'] is None or poi['top'] is None:
+                    continue
+                if poi['bottom'] <= lv <= poi['top']:
+                    hits.append({
+                        'liquidity_tf': liq.get('tf'), 'liquidity_type': liq.get('type'),
+                        'liquidity_level': lv, **poi,
+                    })
+    return hits[-80:]
+
+
+
+def _kairos_structural_registry(candles_por_tf, now_ts):
+    """Registro operacional de liquidez principal, causal e sem score.
+
+    Principal = Lux50 W1/D1/H4/H1/M15 + PDH/PDL/PWH/PWL.
+    EQH/EQL continuam no mapa legado como liquidez complementar, mas não
+    substituem um swing estrutural isolado.
+    """
+    levels=[]
+    for tf in KAIROS_STRUCTURAL_LIQUIDITY_TFS:
+        levels.extend(_kairos_lux50_structural_levels(candles_por_tf.get(tf) or [], tf, now_ts))
+    refs=_kairos_previous_period_refs(candles_por_tf, now_ts)
+    for key,tf in (('PDH','D1'),('PDL','D1'),('PWH','W1'),('PWL','W1')):
+        rec=refs.get(key)
+        if not rec:
+            continue
+        typ=key
+        level=rec['level']
+        confirmed_ts=rec['confirmed_ts']
+        # Estado é calculado contra M15 para refletir captura intraday do nível HTF.
+        m15=[c for c in (candles_por_tf.get('M15') or []) if c.get('t') is not None and c['t'] <= now_ts]
+        is_high=typ in ('PDH','PWH')
+        captured=None
+        for c in m15:
+            if c['t'] <= confirmed_ts:
+                continue
+            if (is_high and c['h'] > level) or ((not is_high) and c['l'] < level):
+                captured=c['t']; break
+        levels.append({'tf':tf,'type':typ,'level':level,'origin_ts':rec['period_open_ts'],
+                       'confirmed_ts':confirmed_ts,'state':'CAPTURED' if captured else 'ACTIVE',
+                       'captured_ts':captured})
+    # dedup apenas por identidade estrutural exata; não funde TFs diferentes.
+    out=[]; seen=set()
+    for x in levels:
+        k=(x.get('tf'),x.get('type'),round(float(x.get('level')),10),x.get('origin_ts'))
+        if k in seen: continue
+        seen.add(k); out.append(x)
+    return out
+
+
+def _kairos_select_structural_first_capture_sweep(candles_por_tf, now_ts):
+    """Seleciona o sweep operacional da NOVA lógica.
+
+    - nível pode nascer em W1/D1/H4/H1/M15;
+    - captura é observada em M15;
+    - somente a PRIMEIRA captura após confirmação conta;
+    - se a primeira captura não recuperar o nível, o nível é consumido e
+      nenhuma captura posterior pode fabricar um sweep bonito;
+    - reclaim no candle de captura + 1 fechamento M15 do lado recuperado;
+    - M5/M1 nunca criam a narrativa de liquidez principal.
+    """
+    levels=_kairos_structural_registry(candles_por_tf, now_ts)
+    m15=[c for c in (candles_por_tf.get('M15') or []) if c.get('t') is not None and c['t'] <= now_ts]
+    if len(m15) < 3:
+        return None, {'levels':levels,'candidates':[]}
+    candidates=[]
+    for liq in levels:
+        level=liq.get('level'); confirm_ts=liq.get('confirmed_ts')
+        if level is None or confirm_ts is None or confirm_ts > now_ts:
+            continue
+        is_high=liq.get('type') in ('SWING_HIGH','PDH','PWH')
+        first_idx=None
+        for i,c in enumerate(m15):
+            if c['t'] <= confirm_ts:
+                continue
+            crossed=(c['h'] > level) if is_high else (c['l'] < level)
+            if crossed:
+                first_idx=i; break
+        if first_idx is None:
+            continue
+        c=m15[first_idx]
+        # primeira captura é definitiva: válida ou consumida.
+        reclaimed=(c['o'] < level and c['c'] < level) if is_high else (c['o'] > level and c['c'] > level)
+        rec={'liquidity_tf':liq['tf'],'liquidity_type':liq['type'],'nivel':level,
+             'liquidity_origin_ts':liq.get('origin_ts'),'liquidity_confirm_ts':confirm_ts,
+             'capture_tf':'M15','first_capture_ts':c['t'],'first_capture_idx':first_idx,
+             'extremo':c['h'] if is_high else c['l'],'first_capture_reclaimed':bool(reclaimed)}
+        if not reclaimed:
+            rec['status']='CONSUMED_INVALID_RECLAIM'; candidates.append(rec); continue
+        if first_idx+1 >= len(m15):
+            rec['status']='AWAITING_CONFIRMATION'; candidates.append(rec); continue
+        confirm_c=m15[first_idx+1]
+        confirmed=(confirm_c['c'] < level) if is_high else (confirm_c['c'] > level)
+        rec['confirm_ts']=confirm_c['t'] if confirmed else None
+        if not confirmed:
+            rec['status']='CONSUMED_CONFIRMATION_FAILED'; candidates.append(rec); continue
+        rec.update({'status':'VALID_SWEEP','confirmado_3b':True,
+                    'direcao':'baixa' if is_high else 'alta',
+                    'side':'BUY_SIDE' if is_high else 'SELL_SIDE',
+                    'sweep_ts':c['t'],'tf':liq['tf']})
+        # recência pelo TF do nível, não pelo TF da captura.
+        max_age={'W1':14*86400000,'D1':5*86400000,'H4':48*3600000,'H1':18*3600000,'M15':5*3600000}
+        age=now_ts-c['t']
+        rec['age_ms']=age
+        if 0 <= age <= max_age.get(liq['tf'],5*3600000):
+            candidates.append(rec)
+    valid=[x for x in candidates if x.get('status')=='VALID_SWEEP']
+    if not valid:
+        return None, {'levels':levels,'candidates':candidates}
+    valid.sort(key=lambda x:(x['sweep_ts'],KAIROS_TF_PESO.get(x['liquidity_tf'],1)), reverse=True)
+    return valid[0], {'levels':levels,'candidates':candidates}
+
+
+def _kairos_m5_refine_zone(m5_candles, m15_zone, structure_ts, direction):
+    """Refina uma zona M15 com FVG/IFVG/OB M5 causal. Nunca cria setup sozinho."""
+    if not m5_candles or not m15_zone:
+        return None
+    zones=[]
+    for z in _kairos_fvg_states(m5_candles):
+        eff=z.get('flip_ts') or z.get('created_ts') or 0
+        if eff < structure_ts or z.get('direcao') != direction:
+            continue
+        if z.get('state') not in ('ATIVA','TOCADA','PARCIAL','IFVG'):
+            continue
+        if z.get('top') is None or z.get('bottom') is None:
+            continue
+        if z['top'] < m15_zone['bottom'] or z['bottom'] > m15_zone['top']:
+            continue
+        q=dict(z); q['source_tf']='M5'; zones.append(q)
+    if zones:
+        return max(zones,key=lambda z:z.get('flip_ts') or z.get('created_ts') or 0)
+    # OB M5 só pode refinar se existir a partir de uma quebra estrutural M5 pós-M15-structure.
+    events=compute_lux_internal_structure(m5_candles,swing_size=5)
+    wanted=direction
+    ev=next((e for e in reversed(events) if e.get('t',0)>=structure_ts and e.get('direcao')==wanted and e.get('tipo') in ('CHoCH','BOS')),None)
+    if ev:
+        idx=next((i for i,c in enumerate(m5_candles) if c['t']==ev['t']),None)
+        ob=_kairos_ob_from_break(m5_candles,idx,wanted) if idx is not None else None
+        if ob and not (ob['top'] < m15_zone['bottom'] or ob['bottom'] > m15_zone['top']):
+            ob=dict(ob); ob['source_tf']='M5'; return ob
+    return None
+
+
+def _kairos_structural_targets(candles_por_tf, now_ts, entry, direction, limit=12):
+    """Próxima liquidez estrutural ATIVA do lado do trade, sem score."""
+    levels=_kairos_structural_registry(candles_por_tf, now_ts)
+    out=[]
+    for x in levels:
+        if x.get('state')!='ACTIVE':
+            continue
+        lv=x.get('level')
+        if lv is None: continue
+        if direction=='LONG' and lv<=entry: continue
+        if direction=='SHORT' and lv>=entry: continue
+        q=dict(x); q['nivel']=lv; q['tipo']=x.get('type'); q['dist']=abs(lv-entry); q['classe']='LIQUIDEZ_ESTRUTURAL'
+        out.append(q)
+    out.sort(key=lambda x:(x['dist'],-KAIROS_TF_PESO.get(x.get('tf'),1)))
+    return out[:limit]
+
+def _kairos_build_structural_liquidity_telemetry(candles_por_tf, now_ts, signal_result=None):
+    """Snapshot paralelo/auditável. Não participa da autorização do trade."""
+    structural = []
+    for tf in KAIROS_STRUCTURAL_LIQUIDITY_TFS:
+        structural.extend(_kairos_lux50_structural_levels(candles_por_tf.get(tf) or [], tf, now_ts))
+
+    refs = _kairos_previous_period_refs(candles_por_tf, now_ts)
+    for key, tf, typ in (
+        ('PDH', 'D1', 'PDH'), ('PDL', 'D1', 'PDL'),
+        ('PWH', 'W1', 'PWH'), ('PWL', 'W1', 'PWL'),
+    ):
+        rec = refs.get(key)
+        if rec:
+            structural.append({'tf': tf, 'type': typ, 'level': rec['level'], 'origin_ts': rec['period_open_ts'], 'confirmed_ts': rec['confirmed_ts'], 'state': 'ACTIVE', 'captured_ts': None})
+
+    # EQH/EQL/pools 20/20 atuais ficam como camada COMPLEMENTAR, somente HTF/M15.
+    equal_liquidity = []
+    liquidity_pools = []
+    for tf in KAIROS_STRUCTURAL_LIQUIDITY_TFS:
+        cs = [c for c in (candles_por_tf.get(tf) or []) if c.get('t') is not None and c['t'] <= now_ts]
+        if not cs:
+            continue
+        data = _kairos_liquidity_map_tf(cs, tf)
+        for e in data.get('equal_liquidity', []):
+            equal_liquidity.append({'tf': tf, **e})
+        for pool in data.get('liquidity_pools', []):
+            liquidity_pools.append({'tf': tf, **pool})
+
+    overlaps = _kairos_structural_poi_overlaps(structural, candles_por_tf, now_ts)
+    result = signal_result or {}
+    entry = result.get('entry')
+    direction = result.get('direction')
+    nearest = None
+    if entry is not None and structural:
+        wanted = [x for x in structural if (direction == 'LONG' and x['level'] > entry) or (direction == 'SHORT' and x['level'] < entry)]
+        if wanted:
+            nearest = min(wanted, key=lambda x: abs(x['level'] - entry)).copy()
+            nearest['distance_abs'] = abs(nearest['level'] - entry)
+
+    attacked = None
+    sweep_level = result.get('sweep_level')
+    if sweep_level is not None and structural:
+        attacked = min(structural, key=lambda x: abs(x['level'] - sweep_level)).copy()
+        attacked['distance_to_existing_sweep'] = abs(attacked['level'] - sweep_level)
+        attacked['match_basis'] = 'NEAREST_TO_EXISTING_PAPER_SWEEP'
+
+    return {
+        'telemetry_version': 'STRUCTURAL_LIQUIDITY_V2_ACTIVE',
+        'asof_ts': now_ts,
+        'structural_tfs': list(KAIROS_STRUCTURAL_LIQUIDITY_TFS),
+        'structural_liquidity': structural[-160:],
+        'previous_periods': {k: refs.get(k) for k in ('PDH', 'PDL', 'PWH', 'PWL')},
+        'context_refs': {
+            'daily_open': refs.get('daily_open'),
+            'previous_daily_close': refs.get('previous_daily_close'),
+            'weekly_open': refs.get('weekly_open'),
+            'previous_weekly_close': refs.get('previous_weekly_close'),
+        },
+        'equal_liquidity': equal_liquidity[-80:],
+        'liquidity_pools': liquidity_pools[-80:],
+        'poi_overlaps': overlaps,
+        'nearest_structural_liquidity': nearest,
+        'attacked_liquidity': attacked,
+        'existing_paper_sweep': {
+            'tf': result.get('sweep_tf'), 'level': result.get('sweep_level'),
+            'extreme': result.get('sweep_extreme'),
+        } if result.get('sweep_tf') else None,
+        'structure_event': {
+            'choch_timestamp': result.get('choch_timestamp'),
+            'choch_level': result.get('choch_level'),
+            'execution_tf': result.get('execution_tf'),
+        },
+        'entry_zone': {
+            'type': result.get('zone_type'), 'source': result.get('zone_source'),
+            'bottom': result.get('zone_bottom'), 'top': result.get('zone_top'),
+            'liquidity_inside_zone': result.get('liquidity_inside_zone') or [],
+        },
+        'non_gating': False,
+    }
+
 def _kairos_nearest_liquidity_targets(mapa, entry, direction, limit=8, allowed_tfs=None):
     """Targets = pools de liquidez AINDA ATIVOS, nunca pivô isolado.
     LONG -> BUY_SIDE acima. SHORT -> SELL_SIDE abaixo.
@@ -11547,200 +11894,151 @@ def _escolher_zona_entrada_v2(m15_ate_agora, bias, permitir_fallback_ema25=True)
 
 def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=None,
                                       permitir_fallback_ema25=True, candles_por_tf=None):
-    """Paper V2 refinado, MESMO motor/entry point.
+    """KAIROS Paper V2.1 — liquidez estrutural ativa, M15 executa, M5 refina.
 
-    A decisão deixa de ser "bias M15 -> zona -> CHoCH" e passa a consumir
-    um mapa MTF causal. O HTF é contexto, não prisão: um sweep M5/M1 contra
-    W1/D1/H4 pode gerar PULLBACK se houver estrutura/intenção local e alvo
-    de liquidez com RR suficiente.
+    Cadeia autorizadora:
+    HTF/M15 structural liquidity -> FIRST capture on M15 -> reclaim -> M15 MSS/CHoCH/BOS
+    -> displacement -> causal M15 FVG/IFVG/OB -> optional M5 refinement -> retest
+    -> SL behind causal sweep -> nearest active structural liquidity/obstacle TP.
+
+    W1/D1/H4/H1/M15 podem ORIGINAR liquidez. M5 não cria narrativa; M1 não participa.
     """
-    resultado = {
-        'signal': False, 'direction': None, 'bias': None,
-        'zone_type': None, 'zone_top': None, 'zone_bottom': None, 'zone_source': None,
-        'choch_confirmed': False, 'choch_timestamp': None, 'choch_level': None,
-        'entry': None, 'sl': None, 'sl_regra': None, 'tp': None, 'tp_origem': None, 'rr': None,
-        'reason': None, 'timestamp': m5_ate_agora[-1]['t'] if m5_ate_agora else None,
-        'valid': False, 'failure_reason': None,
-        'variante': 'V2_LIQUIDITY_POOLS_POI_CAUSAL_TP_TF',
-        'setup_type': None, 'context_bias': None, 'sweep_tf': None, 'sweep_level': None,
-        'sweep_extreme': None, 'execution_tf': None, 'momentum_z': None,
-        'liquidity_inside_zone': [], 'next_liquidity_targets': [], 'target_obstacles': [],
-        'first_liquidity_target': None, 'tp_final_liquidez': None, 'tp1_obstacle': None,
-        'tp_horizon_tfs': [], 'tp_horizon_mode': None,
-        'mtf_summary': {},
-        'sl_audit': None, 'sl_anchor_tf': None, 'sl_anchor_class': None,
-        'sl_anchor_sweep_ts': None, 'sl_anchor_extreme': None,
+    resultado={
+        'signal':False,'direction':None,'bias':None,'zone_type':None,'zone_top':None,'zone_bottom':None,'zone_source':None,
+        'choch_confirmed':False,'choch_timestamp':None,'choch_level':None,'entry':None,'sl':None,'sl_regra':None,
+        'tp':None,'tp_origem':None,'rr':None,'reason':None,'timestamp':m15_ate_agora[-1]['t'] if m15_ate_agora else None,
+        'valid':False,'failure_reason':None,'variante':'KAIROS_V2_1_STRUCTURAL_ACTIVE_M15_M5',
+        'setup_type':None,'context_bias':None,'sweep_tf':None,'sweep_level':None,'sweep_extreme':None,
+        'liquidity_tf':None,'liquidity_type':None,'capture_tf':None,'first_capture_ts':None,'sweep_confirm_ts':None,
+        'execution_tf':None,'refinement_tf':None,'momentum_z':None,'liquidity_inside_zone':[],
+        'next_liquidity_targets':[],'target_obstacles':[],'first_liquidity_target':None,'tp_final_liquidez':None,
+        'tp1_obstacle':None,'tp_horizon_tfs':[],'tp_horizon_mode':'STRUCTURAL_INTRADAY',
+        'mtf_summary':{},'sl_audit':None,'sl_anchor_tf':None,'sl_anchor_class':None,
+        'sl_anchor_sweep_ts':None,'sl_anchor_extreme':None,'structural_sweep_audit':None,
     }
     if not m15_ate_agora or not m5_ate_agora:
         resultado['failure_reason']='CANDLES_INSUFICIENTES'; return resultado
-
     if candles_por_tf is None:
-        candles_por_tf={'D1':d1_ate_agora or [], 'M15':m15_ate_agora, 'M5':m5_ate_agora}
+        candles_por_tf={'D1':d1_ate_agora or [],'M15':m15_ate_agora,'M5':m5_ate_agora}
     else:
         candles_por_tf=dict(candles_por_tf)
         candles_por_tf.setdefault('D1',d1_ate_agora or [])
         candles_por_tf.setdefault('M15',m15_ate_agora)
         candles_por_tf.setdefault('M5',m5_ate_agora)
 
-    now_ts=max((cs[-1]['t'] for cs in candles_por_tf.values() if cs), default=resultado['timestamp'] or 0)
+    now_ts=max((cs[-1]['t'] for cs in candles_por_tf.values() if cs),default=resultado['timestamp'] or 0)
     mapa=_kairos_build_mtf_map(candles_por_tf)
     contexto=_kairos_context_bias(candles_por_tf)
-    resultado['context_bias']=contexto
-    resultado['bias']=contexto.get('final')
+    resultado['context_bias']=contexto; resultado['bias']=contexto.get('final')
     resultado['mtf_summary']={tf:{
-        'pivots':len(d.get('pivots',[])), 'eq':len(d.get('equal_liquidity',[])),
+        'pivots':len(d.get('pivots',[])),'eq':len(d.get('equal_liquidity',[])),
         'liq_ativas':sum(1 for x in d.get('liquidity_pools',[]) if x.get('state')=='ATIVA'),
-        'liquidity_pools':len(d.get('liquidity_pools',[])),
-        'pools_em_poi':sum(1 for x in d.get('liquidity_pools',[]) if x.get('poi_overlaps')),
-        'sweeps':len(d.get('sweeps',[])), 'sweeps_confirmados':sum(1 for x in d.get('sweeps',[]) if x.get('confirmado_3b')),
-        'zones':len(d.get('zones',[])), 'order_blocks':len(d.get('order_blocks',[])),
-        'zones_operacionais':sum(1 for x in d.get('zones',[]) if x.get('state') in ('ATIVA','TOCADA','PARCIAL','IFVG')),
-        'volume':d.get('volume')
+        'liquidity_pools':len(d.get('liquidity_pools',[])),'pools_em_poi':sum(1 for x in d.get('liquidity_pools',[]) if x.get('poi_overlaps')),
+        'sweeps':len(d.get('sweeps',[])),'sweeps_confirmados':sum(1 for x in d.get('sweeps',[]) if x.get('confirmado_3b')),
+        'zones':len(d.get('zones',[])),'order_blocks':len(d.get('order_blocks',[])),'volume':d.get('volume')
     } for tf,d in mapa.items()}
 
-    sweep=_kairos_select_recent_sweep(mapa, now_ts)
+    sweep,sweep_audit=_kairos_select_structural_first_capture_sweep(candles_por_tf,now_ts)
+    resultado['structural_sweep_audit']=sweep_audit
     if not sweep:
-        resultado['failure_reason']='SEM_SWEEP_MTF_RECENTE'; return resultado
+        resultado['failure_reason']='SEM_SWEEP_ESTRUTURAL_FIRST_CAPTURE_VALIDO'; return resultado
+
     direction='LONG' if sweep['direcao']=='alta' else 'SHORT'
     resultado['direction']=direction
-    resultado['sweep_tf']=sweep['tf']; resultado['sweep_level']=round(sweep['nivel'],6)
-    resultado['sweep_extreme']=round(sweep['extremo'],6)
+    resultado['sweep_tf']=sweep['liquidity_tf']; resultado['liquidity_tf']=sweep['liquidity_tf']
+    resultado['liquidity_type']=sweep['liquidity_type']; resultado['capture_tf']='M15'
+    resultado['first_capture_ts']=sweep['first_capture_ts']; resultado['sweep_confirm_ts']=sweep.get('confirm_ts')
+    resultado['sweep_level']=round(sweep['nivel'],6); resultado['sweep_extreme']=round(sweep['extremo'],6)
 
-    ctx=contexto.get('final')
-    same_ctx=(ctx==sweep['direcao'])
+    ctx=contexto.get('final'); same_ctx=(ctx==sweep['direcao'])
     resultado['setup_type']='TREND' if same_ctx else ('PULLBACK' if ctx in ('alta','baixa') else 'LOCAL')
 
-    # TF menor procura intenção/quebra. Não exigimos que todos confirmem.
-    if sweep['tf'] in ('H4','H1','M30'):
-        exec_order=('M15','M5','M1')
-    elif sweep['tf']=='M15':
-        exec_order=('M5','M1','M15')
-    elif sweep['tf']=='M5':
-        exec_order=('M1','M5')
-    else:
-        exec_order=('M1',)
-
-    structure=None; exec_tf=None; exec_candles=None
-    for tf in exec_order:
-        cs=candles_por_tf.get(tf) or []
-        if len(cs)<12: continue
-        st=_kairos_find_structure_after_sweep(cs,sweep,swing_size=5)
-        if st:
-            structure=st; exec_tf=tf; exec_candles=cs; break
+    # M15 é o TF que autoriza estrutura/entrada. M5 só pode refinar depois.
+    exec_tf='M15'; exec_candles=candles_por_tf.get('M15') or []
+    structure=_kairos_find_structure_after_sweep(exec_candles,sweep,swing_size=5)
     if not structure:
-        resultado['failure_reason']='SEM_CHOCH_MSS_APOS_SWEEP'; return resultado
-
-    resultado['execution_tf']=exec_tf
-    resultado['choch_confirmed']=True
-    resultado['choch_timestamp']=structure['t']
-    resultado['choch_level']=round(structure['nivel'],6)
+        resultado['failure_reason']='SEM_CHOCH_MSS_M15_APOS_SWEEP'; return resultado
+    resultado['execution_tf']='M15'; resultado['choch_confirmed']=True
+    resultado['choch_timestamp']=structure['t']; resultado['choch_level']=round(structure['nivel'],6)
 
     break_idx=structure.get('full_idx')
-    z=_kairos_momentum_z(exec_candles[:break_idx+1] if break_idx is not None else exec_candles)
-    resultado['momentum_z']=round(z,3) if z is not None else None
-    atrs=compute_atr(exec_candles[:break_idx+1] if break_idx is not None else exec_candles,14)
-    atr=next((v for v in reversed(atrs) if v is not None),None)
+    causal_slice=exec_candles[:break_idx+1] if break_idx is not None else exec_candles
+    z=_kairos_momentum_z(causal_slice); resultado['momentum_z']=round(z,3) if z is not None else None
+    atrs=compute_atr(causal_slice,14); atr=next((v for v in reversed(atrs) if v is not None),None)
     bc=exec_candles[break_idx] if break_idx is not None else exec_candles[-1]
     body=abs(bc['c']-bc['o'])
-    displacement_ok=((z is not None and ((sweep['direcao']=='alta' and z>0.5) or (sweep['direcao']=='baixa' and z<-0.5)))
-                     or (atr and body>=0.5*atr))
+    displacement_ok=((z is not None and ((sweep['direcao']=='alta' and z>0.5) or (sweep['direcao']=='baixa' and z<-0.5))) or (atr and body>=0.5*atr))
     if not displacement_ok:
-        resultado['failure_reason']='SEM_INTENCAO_DISPLACEMENT'; return resultado
+        resultado['failure_reason']='SEM_INTENCAO_DISPLACEMENT_M15'; return resultado
 
     zone=_kairos_select_entry_zone(exec_candles,sweep,structure,mapa)
     if not zone:
-        resultado['failure_reason']='SEM_FVG_IFVG_OB_CAUSAL'; return resultado
-    resultado['zone_type']=zone['tipo']
-    resultado['zone_top']=round(zone['top'],6); resultado['zone_bottom']=round(zone['bottom'],6)
-    resultado['zone_source']=f"{zone['tipo']}_{exec_tf}_APOS_SWEEP"
-    resultado['liquidity_inside_zone']=zone.get('liquidity_inside',[])
-
+        resultado['failure_reason']='SEM_FVG_IFVG_OB_M15_CAUSAL'; return resultado
+    resultado['zone_type']=zone['tipo']; resultado['zone_top']=round(zone['top'],6); resultado['zone_bottom']=round(zone['bottom'],6)
+    resultado['zone_source']=f"{zone['tipo']}_M15_APOS_SWEEP"; resultado['liquidity_inside_zone']=zone.get('liquidity_inside',[])
     zone_ts=zone.get('flip_ts') or zone.get('created_ts') or zone.get('t') or structure['t']
     after_ts=max(structure['t'],zone_ts)
-    retest=_kairos_retest_zone(exec_candles,zone,after_ts)
+
+    # M5 refinement é opcional e nunca inventa setup sem a zona M15.
+    m5=candles_por_tf.get('M5') or []
+    refined=_kairos_m5_refine_zone(m5,zone,structure['t'],sweep['direcao'])
+    retest=None; active_zone=zone; entry_tf='M15'
+    if refined:
+        rz_ts=refined.get('flip_ts') or refined.get('created_ts') or refined.get('t') or structure['t']
+        r5=_kairos_retest_zone(m5,refined,max(structure['t'],rz_ts))
+        if r5:
+            retest=r5; active_zone=refined; entry_tf='M5'; resultado['refinement_tf']='M5'
+            resultado['zone_type']=refined.get('tipo',resultado['zone_type'])
+            resultado['zone_top']=round(refined['top'],6); resultado['zone_bottom']=round(refined['bottom'],6)
+            resultado['zone_source']=f"{refined.get('tipo','POI')}_M5_REFINO_DENTRO_M15"
+    if retest is None:
+        retest=_kairos_retest_zone(exec_candles,zone,after_ts)
     if not retest:
         resultado['failure_reason']='AGUARDANDO_RETESTE_ZONA'; return resultado
-    entry=retest['c']
-    resultado['entry']=round(entry,6); resultado['timestamp']=retest['t']
+    entry=retest['c']; resultado['entry']=round(entry,6); resultado['timestamp']=retest['t']
 
-    # Invalidação estrutural CAUSAL: só usa sweep que já existia antes/até a quebra
-    # e que ainda não foi invalidado antes da decisão de entrada. Se o sweep local
-    # morreu, tenta a âncora narrativa HTF; não fabrica stop do lado errado.
-    sl_info, sl_audit = _kairos_select_structural_sl(
-        mapa, exec_tf, exec_candles, sweep, structure, retest, direction
-    )
+    # SL atrás do sweep estrutural que autorizou a tese; M5 não move o stop para o lado errado.
+    sl_info,sl_audit=_kairos_select_structural_sl(mapa,'M15',exec_candles,sweep,structure,retest,direction)
     resultado['sl_audit']=sl_audit
     if not sl_info:
         resultado['failure_reason']='SEM_ANCORA_SL_CAUSAL_VALIDA'; return resultado
-    sl=sl_info['sl']
-    risk=abs(entry-sl)
+    sl=sl_info['sl']; risk=abs(entry-sl)
     if risk<=0:
         resultado['failure_reason']='RISCO_ZERO_SL'; return resultado
-    resultado['sl']=round(sl,6)
-    resultado['sl_regra']=f"sweep_{sl_info['sl_tf']}_extremo_atr_{sl_info['sl_classe'].lower()}"
-    resultado['sl_anchor_tf']=sl_info['sl_tf']
-    resultado['sl_anchor_class']=sl_info['sl_classe']
-    resultado['sl_anchor_sweep_ts']=sl_info['sl_sweep_ts']
-    resultado['sl_anchor_extreme']=round(sl_info['sl_sweep_extreme'],6)
+    resultado['sl']=round(sl,6); resultado['sl_regra']=f"first_capture_{sweep['liquidity_tf']}_extremo_atr"
+    resultado['sl_anchor_tf']=sweep['liquidity_tf']; resultado['sl_anchor_class']='STRUCTURAL_FIRST_CAPTURE'
+    resultado['sl_anchor_sweep_ts']=sweep['sweep_ts']; resultado['sl_anchor_extreme']=round(sweep['extremo'],6)
 
-    # TP coerente com o horizonte do trade. Uma execução M1/M5 não pode
-    # procurar H4/D1 só para obter um RR artificialmente bonito.
-    tp_horizon=_kairos_tp_horizon_tfs(exec_tf)
-    resultado['tp_horizon_tfs']=list(tp_horizon)
-    resultado['tp_horizon_mode']='SCALP' if exec_tf in ('M1','M5') else 'INTRADAY'
-    targets=_kairos_nearest_liquidity_targets(
-        mapa,entry,direction,limit=12,allowed_tfs=tp_horizon
-    )
-    for t in targets:
-        t['rr']=round(t['dist']/risk,2) if risk else None
+    # TP = primeira liquidez estrutural ATIVA do lado do trade. POI contrário antes dela pode virar TP conservador.
+    targets=_kairos_structural_targets(candles_por_tf,now_ts,entry,direction,limit=12)
+    for t in targets: t['rr']=round(t['dist']/risk,2) if risk else None
     resultado['next_liquidity_targets']=targets[:8]
-
-    # O alvo principal é SEMPRE a próxima liquidez correta do lado do trade.
-    # Não salta uma liquidez próxima só para fabricar 2R num nível mais distante.
     if not targets:
-        resultado['failure_reason']='SEM_LIQUIDEZ_ALVO_NO_HORIZONTE_TF'; return resultado
-    target=targets[0]
-    resultado['first_liquidity_target']=dict(target)
-    resultado['tp_final_liquidez']=round(target['nivel'],6)
+        resultado['failure_reason']='SEM_LIQUIDEZ_ESTRUTURAL_ALVO'; return resultado
+    target=targets[0]; resultado['first_liquidity_target']=dict(target); resultado['tp_final_liquidez']=round(target['nivel'],6)
 
-    # Antes dessa liquidez, mapeia zonas contrárias. Se houver uma, a borda
-    # próxima vira alvo operacional/TP1 conservador; a liquidez continua
-    # guardada como alvo final. Assim o Paper V2 não ignora resistência/suporte
-    # estrutural só para manter um RR bonito.
-    obstacles=_kairos_opposing_zone_obstacles(
-        mapa,entry,direction,target_level=target['nivel'],limit=8,allowed_tfs=tp_horizon
-    )
-    for o in obstacles:
-        o['rr']=round(o['dist']/risk,2) if risk else None
+    obstacle_tfs=('M15','H1','H4','D1','W1')
+    obstacles=_kairos_opposing_zone_obstacles(mapa,entry,direction,target_level=target['nivel'],limit=8,allowed_tfs=obstacle_tfs)
+    for o in obstacles: o['rr']=round(o['dist']/risk,2) if risk else None
     resultado['target_obstacles']=obstacles
-    effective=target
-    if obstacles:
-        effective=obstacles[0]
-        resultado['tp1_obstacle']=dict(effective)
+    effective=obstacles[0] if obstacles else target
+    if obstacles: resultado['tp1_obstacle']=dict(effective)
 
-    # Contra HTF: scalp pode aceitar 1R; a favor/LOCAL exige 2R.
-    # RR é validado contra o PRIMEIRO nível efetivamente enfrentado, nunca
-    # contra um alvo mais longe depois de ignorar liquidez/zona no caminho.
     min_rr=1.0 if resultado['setup_type']=='PULLBACK' else 2.0
     rr=abs(effective['nivel']-entry)/risk
     if rr < min_rr:
-        resultado['rr']=round(rr,2)
-        resultado['failure_reason']='ALVO_EFETIVO_RR_INSUFICIENTE'; return resultado
-
-    tp=effective['nivel']
-    resultado['tp']=round(tp,6); resultado['rr']=round(rr,2)
+        resultado['rr']=round(rr,2); resultado['failure_reason']='ALVO_EFETIVO_RR_INSUFICIENTE'; return resultado
+    tp=effective['nivel']; resultado['tp']=round(tp,6); resultado['rr']=round(rr,2)
     if effective.get('classe') in ('OBSTACULO_ZONA','OBSTACULO_POI'):
         resultado['tp_origem']=f"OBSTACULO_{effective['tf']}_{effective['tipo']}"
     else:
-        resultado['tp_origem']=f"LIQUIDEZ_{effective['tf']}_{effective['tipo']}"
+        resultado['tp_origem']=f"LIQUIDEZ_ESTRUTURAL_{effective['tf']}_{effective['tipo']}"
 
     resultado['signal']=True; resultado['valid']=True
-    liq_inside='SIM' if resultado['liquidity_inside_zone'] else 'NAO'
     resultado['reason']=(
-        f"MAPA_MTF + SWEEP_{sweep['tf']}({sweep['side']}@{sweep['nivel']}) + "
-        f"{structure['tipo']}_{exec_tf} + INTENCAO(z={resultado['momentum_z']}) + "
-        f"{zone['tipo']}({exec_tf},liq_inside={liq_inside}) + RETESTE + "
-        f"SL({resultado['sl_regra']}) + ALVO({resultado['tp_origem']},RR={resultado['rr']}) + "
+        f"LIQ={sweep['liquidity_tf']}:{sweep['liquidity_type']}@{sweep['nivel']} -> FIRST_CAPTURE_M15@{sweep['sweep_ts']} -> "
+        f"RECLAIM+CONFIRM -> {structure['tipo']}_M15 -> DISPLACEMENT(z={resultado['momentum_z']}) -> "
+        f"{resultado['zone_source']} -> RETEST_{entry_tf} -> SL_FIRST_CAPTURE -> {resultado['tp_origem']} RR={resultado['rr']} -> "
         f"SETUP={resultado['setup_type']}"
     )
     return resultado
@@ -12590,6 +12888,7 @@ def init_paper_trading_v2_db(db_file):
                     candles_ate_evento INTEGER,
                     r_obtido REAL, mfe_pct REAL, mae_pct REAL,
                     spread_no_sinal TEXT DEFAULT 'NAO_MEDIDO',
+                    telemetria_liquidity TEXT,
                     updated_at INTEGER,
                     UNIQUE(pair, choch_timestamp, direction, zone_type)
                 )
@@ -12605,6 +12904,17 @@ def init_paper_trading_v2_db(db_file):
         print(f"[paper_trading_v2] erro ao criar tabela: {e}")
 
     _migrar_colunas_notificacao_paper_v2(db_file)
+    _migrar_coluna_telemetria_liquidity_paper_v2(db_file)
+
+
+def _migrar_coluna_telemetria_liquidity_paper_v2(db_file):
+    """Migração aditiva e idempotente; não altera sinais históricos."""
+    try:
+        with sqlite3.connect(db_file) as conn:
+            conn.execute('ALTER TABLE paper_trading_v2_sinais ADD COLUMN telemetria_liquidity TEXT')
+            conn.commit()
+    except Exception:
+        pass
 
 
 def _migrar_colunas_notificacao_paper_v2(db_file):
@@ -12859,6 +13169,13 @@ def paper_trading_v2_tick(pair, db_file, agora_ts_ms=None):
                 rejeicoes_diag[motivo] = rejeicoes_diag.get(motivo, 0) + 1
                 ultimo_rejeitado = r
                 continue
+            # Telemetria paralela: não muda nenhuma decisão do Paper V2.
+            try:
+                telemetria_liquidity = _kairos_build_structural_liquidity_telemetry(tf_map, ts_corte, signal_result=r)
+                telemetria_liquidity_json = json.dumps(telemetria_liquidity, ensure_ascii=False, separators=(',', ':'))
+            except Exception as e_tel:
+                print(f"[paper_trading_v2] telemetria estrutural indisponível em {pair}: {e_tel}")
+                telemetria_liquidity_json = None
             try:
                 with sqlite3.connect(db_file) as conn:
                     cursor = conn.execute('''
@@ -12866,13 +13183,13 @@ def paper_trading_v2_tick(pair, db_file, agora_ts_ms=None):
                             pair, direction, choch_timestamp, zone_type, zone_source,
                             zone_top, zone_bottom, choch_level, entry, sl, tp, rr,
                             tp_origem, sl_regra, reason, candle_confirmacao_ts,
-                            detectado_em, status, spread_no_sinal, updated_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', 'NAO_MEDIDO', ?)
+                            detectado_em, status, spread_no_sinal, telemetria_liquidity, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', 'NAO_MEDIDO', ?, ?)
                     ''', (
                         pair, r['direction'], r['choch_timestamp'], r['zone_type'], r['zone_source'],
                         r['zone_top'], r['zone_bottom'], r['choch_level'], r['entry'], r['sl'], r['tp'], r['rr'],
                         r['tp_origem'], r['sl_regra'], r['reason'], r['timestamp'],
-                        agora_ts_ms, agora_ts_ms,
+                        agora_ts_ms, telemetria_liquidity_json, agora_ts_ms,
                     ))
                     conn.commit()
                     if cursor.rowcount > 0:

@@ -10564,8 +10564,8 @@ ZONA_EMA25_ATR_BUFFER_MULT = 0.5  # largura da "zona" EMA25 = ATR*este_mult pra 
 # momentum, volume e alvos de liquidez. Não é um gate “todos concordam”.
 # ═══════════════════════════════════════════════════════════════════════
 
-KAIROS_TF_ORDEM = ('W1', 'D1', 'H4', 'H1', 'M30', 'M15', 'M5', 'M1')
-KAIROS_TF_PESO = {'W1': 8, 'D1': 7, 'H4': 6, 'H1': 5, 'M30': 4, 'M15': 3, 'M5': 2, 'M1': 1}
+KAIROS_TF_ORDEM = ('MN', 'W1', 'D1', 'H4', 'H1', 'M30', 'M15', 'M5', 'M1')
+KAIROS_TF_PESO = {'MN': 9, 'W1': 8, 'D1': 7, 'H4': 6, 'H1': 5, 'M30': 4, 'M15': 3, 'M5': 2, 'M1': 1}
 KAIROS_SWEEP_LEFT = 20
 KAIROS_SWEEP_RIGHT = 20
 KAIROS_SWEEP_CONFIRM_BARS = 3
@@ -11208,7 +11208,7 @@ def _kairos_build_mtf_map(candles_por_tf):
 # Não altera avaliar_vortex_decision_layer_v2(), Entry, SL, TP, RR,
 # sweep selector, scheduler, Telegram ou resolução de resultado.
 # ═══════════════════════════════════════════════════════════════════════
-KAIROS_STRUCTURAL_LIQUIDITY_TFS = ('W1', 'D1', 'H4', 'H1', 'M15')
+KAIROS_STRUCTURAL_LIQUIDITY_TFS = ('MN', 'W1', 'D1', 'H4', 'H1', 'M15')
 KAIROS_STRUCTURAL_SWING_SIZE = 50
 
 
@@ -11322,24 +11322,35 @@ def _kairos_structural_poi_overlaps(levels, candles_por_tf, now_ts):
 
 
 def _kairos_structural_registry(candles_por_tf, now_ts):
-    """Registro operacional de liquidez principal, causal e sem score.
+    """Registro operacional causal de TODA liquidez estrutural relevante.
 
-    Principal = Lux50 W1/D1/H4/H1/M15 + PDH/PDL/PWH/PWL.
-    EQH/EQL continuam no mapa legado como liquidez complementar, mas não
-    substituem um swing estrutural isolado.
+    Principal: Lux50 MN/W1/D1/H4/H1/M15 + PDH/PDL/PWH/PWL.
+    Adicional: EQH/EQL confirmados nos mesmos TFs quando o mapa causal dispõe deles.
+    FVG/IFVG/OB continuam POIs; não são convertidos em liquidez por conveniência.
     """
     levels=[]
     for tf in KAIROS_STRUCTURAL_LIQUIDITY_TFS:
-        levels.extend(_kairos_lux50_structural_levels(candles_por_tf.get(tf) or [], tf, now_ts))
+        cs=[c for c in (candles_por_tf.get(tf) or []) if c.get('t') is not None and c['t'] <= now_ts]
+        levels.extend(_kairos_lux50_structural_levels(cs, tf, now_ts))
+        # EQH/EQL são classe própria de liquidez. Mantemos o detector causal existente.
+        if cs:
+            data=_kairos_liquidity_map_tf(cs, tf)
+            for eq in data.get('equal_liquidity', []):
+                level=eq.get('nivel'); cts=eq.get('confirm_ts')
+                if level is None or cts is None or cts > now_ts:
+                    continue
+                levels.append({
+                    'tf':tf,'type':eq.get('tipo'),'level':level,
+                    'origin_ts':eq.get('origin_ts'),'confirmed_ts':cts,
+                    'state':'CAPTURED' if eq.get('state')=='SWEPT' else 'ACTIVE',
+                    'captured_ts':eq.get('swept_ts'),'touches':eq.get('toques'),
+                })
     refs=_kairos_previous_period_refs(candles_por_tf, now_ts)
     for key,tf in (('PDH','D1'),('PDL','D1'),('PWH','W1'),('PWL','W1')):
         rec=refs.get(key)
         if not rec:
             continue
-        typ=key
-        level=rec['level']
-        confirmed_ts=rec['confirmed_ts']
-        # Estado é calculado contra M15 para refletir captura intraday do nível HTF.
+        typ=key; level=rec['level']; confirmed_ts=rec['confirmed_ts']
         m15=[c for c in (candles_por_tf.get('M15') or []) if c.get('t') is not None and c['t'] <= now_ts]
         is_high=typ in ('PDH','PWH')
         captured=None
@@ -11351,9 +11362,9 @@ def _kairos_structural_registry(candles_por_tf, now_ts):
         levels.append({'tf':tf,'type':typ,'level':level,'origin_ts':rec['period_open_ts'],
                        'confirmed_ts':confirmed_ts,'state':'CAPTURED' if captured else 'ACTIVE',
                        'captured_ts':captured})
-    # dedup apenas por identidade estrutural exata; não funde TFs diferentes.
     out=[]; seen=set()
     for x in levels:
+        if x.get('level') is None: continue
         k=(x.get('tf'),x.get('type'),round(float(x.get('level')),10),x.get('origin_ts'))
         if k in seen: continue
         seen.add(k); out.append(x)
@@ -11380,7 +11391,7 @@ def _kairos_select_structural_first_capture_sweep(candles_por_tf, now_ts):
         level=liq.get('level'); confirm_ts=liq.get('confirmed_ts')
         if level is None or confirm_ts is None or confirm_ts > now_ts:
             continue
-        is_high=liq.get('type') in ('SWING_HIGH','PDH','PWH')
+        is_high=liq.get('type') in ('SWING_HIGH','PDH','PWH','EQH')
         first_idx=None
         for i,c in enumerate(m15):
             if c['t'] <= confirm_ts:
@@ -11411,7 +11422,7 @@ def _kairos_select_structural_first_capture_sweep(candles_por_tf, now_ts):
                     'side':'BUY_SIDE' if is_high else 'SELL_SIDE',
                     'sweep_ts':c['t'],'tf':liq['tf']})
         # recência pelo TF do nível, não pelo TF da captura.
-        max_age={'W1':14*86400000,'D1':5*86400000,'H4':48*3600000,'H1':18*3600000,'M15':5*3600000}
+        max_age={'MN':45*86400000,'W1':14*86400000,'D1':5*86400000,'H4':48*3600000,'H1':18*3600000,'M15':5*3600000}
         age=now_ts-c['t']
         rec['age_ms']=age
         if 0 <= age <= max_age.get(liq['tf'],5*3600000):
@@ -11807,18 +11818,23 @@ def _kairos_retest_zone(candles, zone, after_ts):
 
 
 def _kairos_context_bias(candles_por_tf):
-    """Contexto, não trava. W1/D1/H4 votam direção; D1 recebe maior prioridade operacional.
-    Countertrend continua permitido pelo sweep/estrutura local.
+    """Narrativa HTF hierárquica; contexto, NUNCA trava de direção.
+
+    MN/W1/D1 descrevem o fluxo macro. H4/H1 descrevem a perna interna.
+    Não existe votação: cada TF mantém sua própria leitura. `final` é apenas
+    a referência operacional mais próxima disponível (D1 -> W1 -> MN -> H4 -> H1).
+    A direção do trade continua vindo da reação pós-liquidez + estrutura M15.
     """
     out={}
-    for tf,size in (('W1',20),('D1',50),('H4',50),('H1',50)):
+    for tf,size in (('MN',50),('W1',50),('D1',50),('H4',50),('H1',50)):
         cs=candles_por_tf.get(tf) or []
         out[tf]=compute_lux_structure_bias(cs,swing_size=min(size,max(5,len(cs)//3))) if len(cs)>=12 else 'neutro'
-    votes=[out[t] for t in ('W1','D1','H4') if out[t] in ('alta','baixa')]
-    if not votes:
-        final='neutro'
-    else:
-        final='alta' if votes.count('alta')>=votes.count('baixa') else 'baixa'
+    final='neutro'
+    for tf in ('D1','W1','MN','H4','H1'):
+        if out.get(tf) in ('alta','baixa'):
+            final=out[tf]; break
+    out['macro']={'MN':out.get('MN'),'W1':out.get('W1'),'D1':out.get('D1')}
+    out['internal']={'H4':out.get('H4'),'H1':out.get('H1')}
     out['final']=final
     return out
 
@@ -13081,22 +13097,22 @@ def _formatar_mensagem_prealerta_paper_v2(pair, r):
     mom = r.get('momentum_z')
     mom_txt = f"{mom:+.3f}Z" if isinstance(mom, (int, float)) else "N/A"
     return (
-        f"🔥 <b>KAIROS — SETUP ARMADO / LIMIT MENTAL</b>\\n"
-        f"Par: {pair}\\n"
-        f"Direção: {r.get('direction')}\\n"
-        f"Liquidez varrida: {r.get('liquidity_tf')} {r.get('liquidity_type')} @ {r.get('sweep_level')}\\n"
-        f"First capture: CONFIRMADO\\n"
-        f"CHoCH/MSS M15: {r.get('choch_level')}\\n"
-        f"Displacement: {mom_txt}\\n"
+        f"🔥 <b>KAIROS — SETUP ARMADO / LIMIT MENTAL</b>\n"
+        f"Par: {pair}\n"
+        f"Direção: {r.get('direction')}\n"
+        f"Liquidez varrida: {r.get('liquidity_tf')} {r.get('liquidity_type')} @ {r.get('sweep_level')}\n"
+        f"First capture: CONFIRMADO\n"
+        f"CHoCH/MSS M15: {r.get('choch_level')}\n"
+        f"Displacement: {mom_txt}\n"
         f"Zona: {r.get('zone_type')} {r.get('prealert_zone_tf') or 'M15'} "
-        f"[{r.get('zone_bottom')} — {r.get('zone_top')}]\\n"
-        f"🎯 LIMIT mental (CE 50%): {r.get('prealert_limit')}\\n"
-        f"🛑 SL ref.: {r.get('prealert_sl')}\\n"
-        f"🏁 TP ref.: {r.get('prealert_tp')}\\n"
-        f"R:R ref.: {r.get('prealert_rr')}\\n"
-        f"Origem TP: {r.get('prealert_tp_origem')}\\n"
-        f"Horário estrutura: {ts_str}\\n"
-        f"⏳ AGUARDANDO RETESTE — A LIMIT AINDA NÃO FOI PREENCHIDA.\\n"
+        f"[{r.get('zone_bottom')} — {r.get('zone_top')}]\n"
+        f"🎯 LIMIT mental (CE 50%): {r.get('prealert_limit')}\n"
+        f"🛑 SL ref.: {r.get('prealert_sl')}\n"
+        f"🏁 TP ref.: {r.get('prealert_tp')}\n"
+        f"R:R ref.: {r.get('prealert_rr')}\n"
+        f"Origem TP: {r.get('prealert_tp_origem')}\n"
+        f"Horário estrutura: {ts_str}\n"
+        f"⏳ AGUARDANDO RETESTE — A LIMIT AINDA NÃO FOI PREENCHIDA.\n"
         f"⚠️ Pré-alerta experimental/paper; não é ordem real."
     )
 
@@ -13308,6 +13324,7 @@ def paper_trading_v2_tick(pair, db_file, agora_ts_ms=None):
     # Mesmo Paper V2; apenas ampliamos o mapa que alimenta a decisão.
     # Janelas escolhidas para manter candles suficientes aos pivôs/ATR sem
     # multiplicar paginação desnecessariamente.
+    mn_bruto  = _fetch_bybit_klines_historico(symbol, 'M',  3650, fim_ts_ms=agora_ts_ms)
     w1_bruto  = _fetch_bybit_klines_historico(symbol, 'W',   900, fim_ts_ms=agora_ts_ms)
     d1_bruto  = _fetch_bybit_klines_historico(symbol, 'D',   260, fim_ts_ms=agora_ts_ms)
     h4_bruto  = _fetch_bybit_klines_historico(symbol, '240', 120, fim_ts_ms=agora_ts_ms)
@@ -13317,6 +13334,7 @@ def paper_trading_v2_tick(pair, db_file, agora_ts_ms=None):
     m5_bruto  = _fetch_bybit_klines_historico(symbol, '5',     4, fim_ts_ms=agora_ts_ms)
     m1_bruto  = _fetch_bybit_klines_historico(symbol, '1',     1, fim_ts_ms=agora_ts_ms)
 
+    mn, _  = _validar_e_limpar_candles(mn_bruto, 'M')
     w1, _  = _validar_e_limpar_candles(w1_bruto, 'W')
     d1, _  = _validar_e_limpar_candles(d1_bruto, 'D')
     h4, _  = _validar_e_limpar_candles(h4_bruto, '240')
@@ -13339,6 +13357,7 @@ def paper_trading_v2_tick(pair, db_file, agora_ts_ms=None):
             if len(m15_ate_agora) < 30:
                 continue
             tf_map = {
+                'MN': [c for c in mn if c['t'] <= ts_corte],
                 'W1': [c for c in w1 if c['t'] <= ts_corte],
                 'D1': d1_ate_agora,
                 'H4': [c for c in h4 if c['t'] <= ts_corte],

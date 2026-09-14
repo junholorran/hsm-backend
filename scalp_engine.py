@@ -4,6 +4,7 @@
 # ─────────────────────────────────────────────────────────────────────────
 
 import sqlite3
+import hashlib
 import time
 import os
 import random
@@ -11915,6 +11916,8 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
         'tp1_obstacle':None,'tp_horizon_tfs':[],'tp_horizon_mode':'STRUCTURAL_INTRADAY',
         'mtf_summary':{},'sl_audit':None,'sl_anchor_tf':None,'sl_anchor_class':None,
         'sl_anchor_sweep_ts':None,'sl_anchor_extreme':None,'structural_sweep_audit':None,
+        'prealert_limit':None,'prealert_sl':None,'prealert_tp':None,'prealert_rr':None,
+        'prealert_tp_origem':None,'prealert_zone_tf':None,
     }
     if not m15_ate_agora or not m5_ate_agora:
         resultado['failure_reason']='CANDLES_INSUFICIENTES'; return resultado
@@ -11994,6 +11997,49 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
     if retest is None:
         retest=_kairos_retest_zone(exec_candles,zone,after_ts)
     if not retest:
+        # PRE-ALERTA: o setup já está armado, mas o preço ainda NÃO retestou a zona.
+        # A referência de LIMIT é o CE (50%) da zona ativa. Isto é apenas para observação/manual demo;
+        # NÃO altera a regra oficial abaixo, que continua exigindo reteste e usa o close do reteste.
+        pre_limit = (float(active_zone['top']) + float(active_zone['bottom'])) / 2.0
+        resultado['prealert_limit'] = round(pre_limit, 6)
+        resultado['prealert_zone_tf'] = entry_tf
+
+        # SL de referência estritamente atrás do sweep estrutural narrativo + buffer ATR,
+        # sem permitir que o pré-alerta invente uma âncora local diferente.
+        try:
+            pre_sl = aplicar_buffer_stop_atr(sweep.get('extremo'), sweep['direcao'], exec_candles)
+        except Exception:
+            pre_sl = None
+        if pre_sl is not None:
+            right_side = (pre_sl < pre_limit) if direction == 'LONG' else (pre_sl > pre_limit)
+            if right_side:
+                pre_risk = abs(pre_limit - pre_sl)
+                resultado['prealert_sl'] = round(pre_sl, 6)
+                if pre_risk > 0:
+                    pre_targets = _kairos_structural_targets(
+                        candles_por_tf, now_ts, pre_limit, direction, limit=12
+                    )
+                    if pre_targets:
+                        pre_target = pre_targets[0]
+                        pre_obstacles = _kairos_opposing_zone_obstacles(
+                            mapa, pre_limit, direction,
+                            target_level=pre_target['nivel'], limit=8,
+                            allowed_tfs=('M15','H1','H4','D1','W1')
+                        )
+                        pre_effective = pre_obstacles[0] if pre_obstacles else pre_target
+                        pre_tp = float(pre_effective['nivel'])
+                        pre_rr = abs(pre_tp - pre_limit) / pre_risk
+                        resultado['prealert_tp'] = round(pre_tp, 6)
+                        resultado['prealert_rr'] = round(pre_rr, 2)
+                        if pre_effective.get('classe') in ('OBSTACULO_ZONA','OBSTACULO_POI'):
+                            resultado['prealert_tp_origem'] = (
+                                f"OBSTACULO_{pre_effective['tf']}_{pre_effective['tipo']}"
+                            )
+                        else:
+                            resultado['prealert_tp_origem'] = (
+                                f"LIQUIDEZ_ESTRUTURAL_{pre_effective['tf']}_{pre_effective['tipo']}"
+                            )
+
         resultado['failure_reason']='AGUARDANDO_RETESTE_ZONA'; return resultado
     entry=retest['c']; resultado['entry']=round(entry,6); resultado['timestamp']=retest['t']
 
@@ -12976,6 +13022,130 @@ def _migrar_colunas_notificacao_paper_v2(db_file):
             print(f"[paper_trading_v2] erro no backfill de notificação: {e}")
 
 
+
+def _garantir_tabela_prealerta_paper_v2(db_file):
+    """Estado mínimo e persistente do pré-alerta. Não toca na tabela de sinais."""
+    try:
+        with sqlite3.connect(db_file) as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS paper_trading_v2_prealertas (
+                    setup_key TEXT PRIMARY KEY,
+                    pair TEXT NOT NULL,
+                    direction TEXT,
+                    liquidity_tf TEXT,
+                    liquidity_type TEXT,
+                    sweep_level REAL,
+                    first_capture_ts INTEGER,
+                    sweep_confirm_ts INTEGER,
+                    choch_timestamp INTEGER,
+                    choch_level REAL,
+                    zone_type TEXT,
+                    zone_top REAL,
+                    zone_bottom REAL,
+                    limit_price REAL,
+                    sl_ref REAL,
+                    tp_ref REAL,
+                    rr_ref REAL,
+                    criado_em INTEGER NOT NULL
+                )
+            """)
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_paper_v2_prealert_pair "
+                "ON paper_trading_v2_prealertas(pair, criado_em)"
+            )
+            conn.commit()
+        return True
+    except Exception as e:
+        print(f"[paper_v2_prealert] erro ao garantir tabela: {e}")
+        return False
+
+
+def _paper_v2_prealert_setup_key(pair, r):
+    """Identidade causal: novo sweep/estrutura/zona = novo setup; ticks repetidos = mesma chave."""
+    parts = [
+        pair, r.get('direction'), r.get('liquidity_tf'), r.get('liquidity_type'),
+        r.get('sweep_level'), r.get('first_capture_ts'), r.get('sweep_confirm_ts'),
+        r.get('choch_timestamp'), r.get('choch_level'), r.get('zone_type'),
+        r.get('zone_top'), r.get('zone_bottom'),
+    ]
+    raw = "|".join("" if x is None else str(x) for x in parts)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _formatar_mensagem_prealerta_paper_v2(pair, r):
+    ts_ms = r.get('choch_timestamp') or r.get('sweep_confirm_ts')
+    ts_str = (
+        datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
+        if ts_ms else 'N/A'
+    )
+    mom = r.get('momentum_z')
+    mom_txt = f"{mom:+.3f}Z" if isinstance(mom, (int, float)) else "N/A"
+    return (
+        f"🔥 <b>KAIROS — SETUP ARMADO / LIMIT MENTAL</b>\\n"
+        f"Par: {pair}\\n"
+        f"Direção: {r.get('direction')}\\n"
+        f"Liquidez varrida: {r.get('liquidity_tf')} {r.get('liquidity_type')} @ {r.get('sweep_level')}\\n"
+        f"First capture: CONFIRMADO\\n"
+        f"CHoCH/MSS M15: {r.get('choch_level')}\\n"
+        f"Displacement: {mom_txt}\\n"
+        f"Zona: {r.get('zone_type')} {r.get('prealert_zone_tf') or 'M15'} "
+        f"[{r.get('zone_bottom')} — {r.get('zone_top')}]\\n"
+        f"🎯 LIMIT mental (CE 50%): {r.get('prealert_limit')}\\n"
+        f"🛑 SL ref.: {r.get('prealert_sl')}\\n"
+        f"🏁 TP ref.: {r.get('prealert_tp')}\\n"
+        f"R:R ref.: {r.get('prealert_rr')}\\n"
+        f"Origem TP: {r.get('prealert_tp_origem')}\\n"
+        f"Horário estrutura: {ts_str}\\n"
+        f"⏳ AGUARDANDO RETESTE — A LIMIT AINDA NÃO FOI PREENCHIDA.\\n"
+        f"⚠️ Pré-alerta experimental/paper; não é ordem real."
+    )
+
+
+def _paper_v2_tentar_prealerta(db_file, pair, r, agora_ts_ms):
+    """Envia UMA vez por setup causal. Reserva a chave no SQLite antes do Telegram para matar spam."""
+    if r.get('failure_reason') != 'AGUARDANDO_RETESTE_ZONA':
+        return False
+    if r.get('prealert_limit') is None:
+        return False
+    if not _garantir_tabela_prealerta_paper_v2(db_file):
+        return False
+
+    setup_key = _paper_v2_prealert_setup_key(pair, r)
+    try:
+        with sqlite3.connect(db_file) as conn:
+            cur = conn.execute("""
+                INSERT OR IGNORE INTO paper_trading_v2_prealertas (
+                    setup_key, pair, direction, liquidity_tf, liquidity_type,
+                    sweep_level, first_capture_ts, sweep_confirm_ts,
+                    choch_timestamp, choch_level, zone_type, zone_top, zone_bottom,
+                    limit_price, sl_ref, tp_ref, rr_ref, criado_em
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                setup_key, pair, r.get('direction'), r.get('liquidity_tf'), r.get('liquidity_type'),
+                r.get('sweep_level'), r.get('first_capture_ts'), r.get('sweep_confirm_ts'),
+                r.get('choch_timestamp'), r.get('choch_level'), r.get('zone_type'),
+                r.get('zone_top'), r.get('zone_bottom'), r.get('prealert_limit'),
+                r.get('prealert_sl'), r.get('prealert_tp'), r.get('prealert_rr'), agora_ts_ms,
+            ))
+            conn.commit()
+            novo = cur.rowcount > 0
+        if not novo:
+            return False
+
+        ok = _paper_trading_v2_enviar_telegram(_formatar_mensagem_prealerta_paper_v2(pair, r))
+        if ok:
+            print(
+                f"[paper_v2_prealert] ENVIADO {pair} key={setup_key[:12]} "
+                f"limit={r.get('prealert_limit')} zone={r.get('zone_type')}"
+            )
+        else:
+            print(f"[paper_v2_prealert] Telegram não confirmou envio {pair} key={setup_key[:12]}")
+        return ok
+    except Exception as e:
+        print(f"[paper_v2_prealert] erro em {pair}: {e}")
+        return False
+
+
 def _paper_trading_v2_enviar_telegram(mensagem):
     """
     Envio de notificação Telegram — SECUNDÁRIO, nunca pode derrubar o
@@ -13190,6 +13360,13 @@ def paper_trading_v2_tick(pair, db_file, agora_ts_ms=None):
                 motivo = r.get('failure_reason') or 'DESCONHECIDO'
                 rejeicoes_diag[motivo] = rejeicoes_diag.get(motivo, 0) + 1
                 ultimo_rejeitado = r
+                # PRÉ-ALERTA somente para o estado MAIS RECENTE do mercado.
+                # Nunca envia os AGUARDANDO_RETESTE históricos percorridos pelo replay de 300 M5.
+                if motivo == 'AGUARDANDO_RETESTE_ZONA' and i == len(m5) - 1:
+                    try:
+                        _paper_v2_tentar_prealerta(db_file, pair, r, agora_ts_ms)
+                    except Exception as e_pre:
+                        print(f"[paper_v2_prealert] falha isolada em {pair}: {e_pre}")
                 continue
             # Telemetria paralela: não muda nenhuma decisão do Paper V2.
             try:

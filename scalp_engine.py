@@ -12908,13 +12908,30 @@ def init_paper_trading_v2_db(db_file):
 
 
 def _migrar_coluna_telemetria_liquidity_paper_v2(db_file):
-    """Migração aditiva e idempotente; não altera sinais históricos."""
+    """
+    Migração aditiva e idempotente da telemetria V2.1.
+    Não recria a tabela, não apaga nem altera sinais históricos.
+    """
     try:
         with sqlite3.connect(db_file) as conn:
-            conn.execute('ALTER TABLE paper_trading_v2_sinais ADD COLUMN telemetria_liquidity TEXT')
-            conn.commit()
-    except Exception:
-        pass
+            colunas = {
+                row[1]
+                for row in conn.execute("PRAGMA table_info(paper_trading_v2_sinais)").fetchall()
+            }
+            if not colunas:
+                # A tabela ainda não existe; init_paper_trading_v2_db() cuidará da criação.
+                return False
+            if 'telemetria_liquidity' not in colunas:
+                conn.execute(
+                    'ALTER TABLE paper_trading_v2_sinais '
+                    'ADD COLUMN telemetria_liquidity TEXT'
+                )
+                conn.commit()
+                print('[paper_trading_v2] migração OK: coluna telemetria_liquidity adicionada')
+            return True
+    except Exception as e:
+        print(f'[paper_trading_v2] erro na migração telemetria_liquidity: {e}')
+        return False
 
 
 def _migrar_colunas_notificacao_paper_v2(db_file):
@@ -13102,6 +13119,11 @@ def paper_trading_v2_tick(pair, db_file, agora_ts_ms=None):
     (mesmo _fetch_bybit_klines_historico já usado no replay) e grava
     na tabela própria.
     """
+    # Garantia de schema no próprio caminho automático: deployments antigos
+    # podem ter a tabela persistida no volume sem a coluna nova da V2.1.
+    # Esta migração é aditiva/idempotente e preserva todo o histórico.
+    _migrar_coluna_telemetria_liquidity_paper_v2(db_file)
+
     if agora_ts_ms is None:
         agora_ts_ms = int(time.time() * 1000)
 

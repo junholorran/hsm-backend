@@ -11940,16 +11940,16 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
         'signal':False,'direction':None,'bias':None,'zone_type':None,'zone_top':None,'zone_bottom':None,'zone_source':None,
         'choch_confirmed':False,'choch_timestamp':None,'choch_level':None,'entry':None,'sl':None,'sl_regra':None,
         'tp':None,'tp_origem':None,'rr':None,'reason':None,'timestamp':m15_ate_agora[-1]['t'] if m15_ate_agora else None,
-        'valid':False,'failure_reason':None,'variante':'KAIROS_V2_2_AMD_PO3_DIRECTION_NEUTRAL',
+        'valid':False,'failure_reason':None,'variante':'KAIROS_V2_2_TP1_TP2_CORRIGIDO',
         'setup_type':None,'context_bias':None,'sweep_tf':None,'sweep_level':None,'sweep_extreme':None,
         'liquidity_tf':None,'liquidity_type':None,'capture_tf':None,'first_capture_ts':None,'sweep_confirm_ts':None,
         'execution_tf':None,'refinement_tf':None,'momentum_z':None,'liquidity_inside_zone':[],
         'next_liquidity_targets':[],'target_obstacles':[],'first_liquidity_target':None,'tp_final_liquidez':None,
-        'tp1_obstacle':None,'tp_horizon_tfs':[],'tp_horizon_mode':'STRUCTURAL_INTRADAY',
+        'tp1_obstacle':None,'tp1':None,'tp1_origem':None,'tp1_rr':None,'tp2':None,'tp2_origem':None,'tp2_rr':None,'tp_horizon_tfs':[],'tp_horizon_mode':'STRUCTURAL_INTRADAY',
         'mtf_summary':{},'sl_audit':None,'sl_anchor_tf':None,'sl_anchor_class':None,
         'sl_anchor_sweep_ts':None,'sl_anchor_extreme':None,'structural_sweep_audit':None,
         'prealert_limit':None,'prealert_sl':None,'prealert_tp':None,'prealert_rr':None,
-        'prealert_tp_origem':None,'prealert_zone_tf':None,
+        'prealert_tp_origem':None,'prealert_tp1':None,'prealert_tp1_origem':None,'prealert_tp1_rr':None,'prealert_tp2':None,'prealert_tp2_origem':None,'prealert_tp2_rr':None,'prealert_zone_tf':None,
     }
     if not m15_ate_agora or not m5_ate_agora:
         resultado['failure_reason']='CANDLES_INSUFICIENTES'; return resultado
@@ -12056,19 +12056,25 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
                             target_level=pre_target['nivel'], limit=8,
                             allowed_tfs=('M15','H1','H4','D1','W1')
                         )
-                        pre_effective = pre_obstacles[0] if pre_obstacles else pre_target
-                        pre_tp = float(pre_effective['nivel'])
-                        pre_rr = abs(pre_tp - pre_limit) / pre_risk
-                        resultado['prealert_tp'] = round(pre_tp, 6)
-                        resultado['prealert_rr'] = round(pre_rr, 2)
-                        if pre_effective.get('classe') in ('OBSTACULO_ZONA','OBSTACULO_POI'):
-                            resultado['prealert_tp_origem'] = (
-                                f"OBSTACULO_{pre_effective['tf']}_{pre_effective['tipo']}"
-                            )
-                        else:
-                            resultado['prealert_tp_origem'] = (
-                                f"LIQUIDEZ_ESTRUTURAL_{pre_effective['tf']}_{pre_effective['tipo']}"
-                            )
+                        # TP1 = primeiro obstáculo relevante (gestão/parcial).
+                        # TP2/TP final = liquidez estrutural causal. O obstáculo NÃO encurta
+                        # automaticamente o alvo final nem mata o setup pelo RR do TP1.
+                        if pre_obstacles:
+                            pre_o = pre_obstacles[0]
+                            pre_tp1 = float(pre_o['nivel'])
+                            pre_tp1_rr = abs(pre_tp1 - pre_limit) / pre_risk
+                            resultado['prealert_tp1'] = round(pre_tp1, 6)
+                            resultado['prealert_tp1_rr'] = round(pre_tp1_rr, 2)
+                            resultado['prealert_tp1_origem'] = f"OBSTACULO_{pre_o['tf']}_{pre_o['tipo']}"
+                        pre_tp2 = float(pre_target['nivel'])
+                        pre_tp2_rr = abs(pre_tp2 - pre_limit) / pre_risk
+                        resultado['prealert_tp2'] = round(pre_tp2, 6)
+                        resultado['prealert_tp2_rr'] = round(pre_tp2_rr, 2)
+                        resultado['prealert_tp2_origem'] = f"LIQUIDEZ_ESTRUTURAL_{pre_target['tf']}_{pre_target['tipo']}"
+                        # Compatibilidade com tabela/Telegram antigos: tp_ref passa a ser o TP final estrutural.
+                        resultado['prealert_tp'] = resultado['prealert_tp2']
+                        resultado['prealert_rr'] = resultado['prealert_tp2_rr']
+                        resultado['prealert_tp_origem'] = resultado['prealert_tp2_origem']
 
         resultado['failure_reason']='AGUARDANDO_RETESTE_ZONA'; return resultado
     entry=retest['c']; resultado['entry']=round(entry,6); resultado['timestamp']=retest['t']
@@ -12105,18 +12111,26 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
     obstacles=_kairos_opposing_zone_obstacles(mapa,entry,direction,target_level=target['nivel'],limit=8,allowed_tfs=obstacle_tfs)
     for o in obstacles: o['rr']=round(o['dist']/risk,2) if risk else None
     resultado['target_obstacles']=obstacles
-    effective=obstacles[0] if obstacles else target
-    if obstacles: resultado['tp1_obstacle']=dict(effective)
+    # TP1 é gestão/parcial no primeiro obstáculo; TP2 é o alvo estrutural final.
+    # O filtro de RR usa TP2, evitando rejeitar um setup bom só porque existe um
+    # FVG/IFVG/OB próximo. Não ignoramos o obstáculo: ele fica explícito como TP1.
+    if obstacles:
+        tp1=obstacles[0]
+        resultado['tp1_obstacle']=dict(tp1)
+        resultado['tp1']=round(float(tp1['nivel']),6)
+        resultado['tp1_rr']=round(abs(float(tp1['nivel'])-entry)/risk,2)
+        resultado['tp1_origem']=f"OBSTACULO_{tp1['tf']}_{tp1['tipo']}"
+
+    tp2=float(target['nivel'])
+    rr2=abs(tp2-entry)/risk
+    resultado['tp2']=round(tp2,6)
+    resultado['tp2_rr']=round(rr2,2)
+    resultado['tp2_origem']=f"LIQUIDEZ_ESTRUTURAL_{target['tf']}_{target['tipo']}"
 
     min_rr=1.0 if resultado['setup_type'] in ('PULLBACK','PULLBACK_REVERSAL','INTERNAL_CONTINUATION') else 2.0
-    rr=abs(effective['nivel']-entry)/risk
-    if rr < min_rr:
-        resultado['rr']=round(rr,2); resultado['failure_reason']='ALVO_EFETIVO_RR_INSUFICIENTE'; return resultado
-    tp=effective['nivel']; resultado['tp']=round(tp,6); resultado['rr']=round(rr,2)
-    if effective.get('classe') in ('OBSTACULO_ZONA','OBSTACULO_POI'):
-        resultado['tp_origem']=f"OBSTACULO_{effective['tf']}_{effective['tipo']}"
-    else:
-        resultado['tp_origem']=f"LIQUIDEZ_ESTRUTURAL_{effective['tf']}_{effective['tipo']}"
+    if rr2 < min_rr:
+        resultado['rr']=round(rr2,2); resultado['failure_reason']='ALVO_ESTRUTURAL_RR_INSUFICIENTE'; return resultado
+    resultado['tp']=resultado['tp2']; resultado['rr']=resultado['tp2_rr']; resultado['tp_origem']=resultado['tp2_origem']
 
     resultado['signal']=True; resultado['valid']=True
     resultado['reason']=(
@@ -13130,9 +13144,11 @@ def _formatar_mensagem_prealerta_paper_v2(pair, r):
         f"[{r.get('zone_bottom')} — {r.get('zone_top')}]\n"
         f"🎯 LIMIT mental (CE 50%): {r.get('prealert_limit')}\n"
         f"🛑 SL ref.: {r.get('prealert_sl')}\n"
-        f"🏁 TP ref.: {r.get('prealert_tp')}\n"
-        f"R:R ref.: {r.get('prealert_rr')}\n"
-        f"Origem TP: {r.get('prealert_tp_origem')}\n"
+        f"🏁 TP1 obstáculo/parcial: {r.get('prealert_tp1') or 'N/A'}\n"
+        f"R:R TP1: {r.get('prealert_tp1_rr') if r.get('prealert_tp1') is not None else 'N/A'}\n"
+        f"🎯 TP2 liquidez estrutural: {r.get('prealert_tp2') or r.get('prealert_tp')}\n"
+        f"R:R TP2: {r.get('prealert_tp2_rr') or r.get('prealert_rr')}\n"
+        f"Origem TP2: {r.get('prealert_tp2_origem') or r.get('prealert_tp_origem')}\n"
         f"Horário estrutura: {ts_str}\n"
         f"⏳ AGUARDANDO RETESTE — A LIMIT AINDA NÃO FOI PREENCHIDA.\n"
         f"⚠️ Pré-alerta experimental/paper; não é ordem real."
@@ -13222,9 +13238,10 @@ def _formatar_mensagem_novo_sinal_paper_v2(pair, sinal):
         f"Timestamp: {ts_str}\n"
         f"Entry: {sinal['entry']}\n"
         f"SL: {sinal['sl']}\n"
-        f"TP: {sinal['tp']}\n"
-        f"R:R: {sinal['rr']}\n"
-        f"Origem do TP: {sinal['tp_origem']}\n"
+        f"TP1 obstáculo/parcial: {sinal.get('tp1') or 'N/A'}\n"
+        f"TP2 final: {sinal['tp']}\n"
+        f"R:R final: {sinal['rr']}\n"
+        f"Origem TP2: {sinal['tp_origem']}\n"
         f"Estado: PENDING\n"
         f"⚠️ 100% experimental — paper trading, zero dinheiro real."
     )
@@ -15072,9 +15089,10 @@ def _formatar_mensagem_novo_sinal_paper_v2_fvg_only(pair, sinal):
         f"Timestamp: {ts_str}\n"
         f"Entry: {sinal['entry']}\n"
         f"SL: {sinal['sl']}\n"
-        f"TP: {sinal['tp']}\n"
-        f"R:R: {sinal['rr']}\n"
-        f"Origem do TP: {sinal['tp_origem']}\n"
+        f"TP1 obstáculo/parcial: {sinal.get('tp1') or 'N/A'}\n"
+        f"TP2 final: {sinal['tp']}\n"
+        f"R:R final: {sinal['rr']}\n"
+        f"Origem TP2: {sinal['tp_origem']}\n"
         f"Estado: PENDING\n"
         f"⚠️ 100% experimental — paper trading, zero dinheiro real. FALLBACK EMA25 DESLIGADO."
     )

@@ -11372,67 +11372,83 @@ def _kairos_structural_registry(candles_por_tf, now_ts):
 
 
 def _kairos_select_structural_first_capture_sweep(candles_por_tf, now_ts):
-    """Seleciona o sweep operacional da NOVA lógica.
+    """Primeira captura estrutural NEUTRA.
 
-    - nível pode nascer em W1/D1/H4/H1/M15;
-    - captura é observada em M15;
-    - somente a PRIMEIRA captura após confirmação conta;
-    - se a primeira captura não recuperar o nível, o nível é consumido e
-      nenhuma captura posterior pode fabricar um sweep bonito;
-    - reclaim no candle de captura + 1 fechamento M15 do lado recuperado;
-    - M5/M1 nunca criam a narrativa de liquidez principal.
+    A liquidez localiza o evento; NÃO escolhe LONG/SHORT. A primeira captura
+    fica congelada e nunca é substituída por uma captura posterior mais bonita.
+    Reclaim/rejeição e aceitação/continuação são classificados depois no M15.
     """
     levels=_kairos_structural_registry(candles_por_tf, now_ts)
     m15=[c for c in (candles_por_tf.get('M15') or []) if c.get('t') is not None and c['t'] <= now_ts]
     if len(m15) < 3:
         return None, {'levels':levels,'candidates':[]}
     candidates=[]
+    max_age={'MN':45*86400000,'W1':14*86400000,'D1':5*86400000,'H4':48*3600000,'H1':18*3600000,'M15':5*3600000}
     for liq in levels:
         level=liq.get('level'); confirm_ts=liq.get('confirmed_ts')
         if level is None or confirm_ts is None or confirm_ts > now_ts:
             continue
-        is_high=liq.get('type') in ('SWING_HIGH','PDH','PWH','EQH')
+        is_high=liq.get('type') in ('SWING_HIGH','PDH','PWH','PMH','EQH')
         first_idx=None
         for i,c in enumerate(m15):
-            if c['t'] <= confirm_ts:
-                continue
-            crossed=(c['h'] > level) if is_high else (c['l'] < level)
-            if crossed:
+            if c['t'] <= confirm_ts: continue
+            if (is_high and c['h'] > level) or ((not is_high) and c['l'] < level):
                 first_idx=i; break
-        if first_idx is None:
-            continue
+        if first_idx is None: continue
         c=m15[first_idx]
-        # primeira captura é definitiva: válida ou consumida.
-        reclaimed=(c['o'] < level and c['c'] < level) if is_high else (c['o'] > level and c['c'] > level)
+        nxt=m15[first_idx+1] if first_idx+1 < len(m15) else None
+        # Estado pós-captura: rejeição/reclaim OU aceitação além do nível.
+        if is_high:
+            reclaimed=(c['c'] < level) and (nxt is not None and nxt['c'] < level)
+            accepted=(c['c'] > level) and (nxt is not None and nxt['c'] > level)
+        else:
+            reclaimed=(c['c'] > level) and (nxt is not None and nxt['c'] > level)
+            accepted=(c['c'] < level) and (nxt is not None and nxt['c'] < level)
+        state='REJECTION_RECLAIM' if reclaimed else ('ACCEPTANCE_CONTINUATION' if accepted else 'UNRESOLVED_REACTION')
         rec={'liquidity_tf':liq['tf'],'liquidity_type':liq['type'],'nivel':level,
              'liquidity_origin_ts':liq.get('origin_ts'),'liquidity_confirm_ts':confirm_ts,
              'capture_tf':'M15','first_capture_ts':c['t'],'first_capture_idx':first_idx,
-             'extremo':c['h'] if is_high else c['l'],'first_capture_reclaimed':bool(reclaimed)}
-        if not reclaimed:
-            rec['status']='CONSUMED_INVALID_RECLAIM'; candidates.append(rec); continue
-        if first_idx+1 >= len(m15):
-            rec['status']='AWAITING_CONFIRMATION'; candidates.append(rec); continue
-        confirm_c=m15[first_idx+1]
-        confirmed=(confirm_c['c'] < level) if is_high else (confirm_c['c'] > level)
-        rec['confirm_ts']=confirm_c['t'] if confirmed else None
-        if not confirmed:
-            rec['status']='CONSUMED_CONFIRMATION_FAILED'; candidates.append(rec); continue
-        rec.update({'status':'VALID_SWEEP','confirmado_3b':True,
-                    'direcao':'baixa' if is_high else 'alta',
-                    'side':'BUY_SIDE' if is_high else 'SELL_SIDE',
-                    'sweep_ts':c['t'],'tf':liq['tf']})
-        # recência pelo TF do nível, não pelo TF da captura.
-        max_age={'MN':45*86400000,'W1':14*86400000,'D1':5*86400000,'H4':48*3600000,'H1':18*3600000,'M15':5*3600000}
-        age=now_ts-c['t']
-        rec['age_ms']=age
-        if 0 <= age <= max_age.get(liq['tf'],5*3600000):
-            candidates.append(rec)
-    valid=[x for x in candidates if x.get('status')=='VALID_SWEEP']
+             'extremo':c['h'] if is_high else c['l'],'liquidity_side':'HIGH' if is_high else 'LOW',
+             'post_capture_state':state,'first_capture_reclaimed':bool(reclaimed),
+             'first_capture_accepted':bool(accepted),'sweep_ts':c['t'],'tf':liq['tf'],
+             'confirm_ts':nxt['t'] if nxt is not None and state!='UNRESOLVED_REACTION' else None}
+        age=now_ts-c['t']; rec['age_ms']=age
+        rec['status']='VALID_FIRST_CAPTURE_NEUTRAL' if state!='UNRESOLVED_REACTION' else 'AWAITING_REACTION'
+        candidates.append(rec)
+    valid=[x for x in candidates if x.get('status')=='VALID_FIRST_CAPTURE_NEUTRAL' and 0 <= x['age_ms'] <= max_age.get(x['liquidity_tf'],5*3600000)]
     if not valid:
         return None, {'levels':levels,'candidates':candidates}
+    # Recência primeiro; TF maior só desempata. M15 não ganha poder sobre HTF por score/votação.
     valid.sort(key=lambda x:(x['sweep_ts'],KAIROS_TF_PESO.get(x['liquidity_tf'],1)), reverse=True)
     return valid[0], {'levels':levels,'candidates':candidates}
 
+
+def _kairos_direction_after_first_capture(candles, capture, swing_size=5):
+    """Deriva direção da REAÇÃO + intenção + MSS/CHoCH, nunca do lado da liquidez."""
+    if not candles or not capture: return None
+    side=capture.get('liquidity_side'); state=capture.get('post_capture_state')
+    # Quatro caminhos causais AMD/PO3 permitidos.
+    expected = ('baixa' if side=='HIGH' else 'alta') if state=='REJECTION_RECLAIM' else ('alta' if side=='HIGH' else 'baixa')
+    idx=next((i for i,c in enumerate(candles) if c['t']>=capture['sweep_ts']),None)
+    if idx is None: return None
+    sub=candles[max(0,idx-swing_size-2):]
+    events=compute_lux_internal_structure(sub,swing_size=swing_size)
+    for e in events:
+        if e.get('t',0) <= capture['sweep_ts'] or e.get('direcao') != expected or e.get('tipo') not in ('CHoCH','BOS'):
+            continue
+        full_idx=next((j for j,c in enumerate(candles) if c['t']==e['t']),None)
+        if full_idx is None: continue
+        causal=candles[:full_idx+1]
+        z=_kairos_momentum_z(causal)
+        atrs=compute_atr(causal,14); atr=next((v for v in reversed(atrs) if v is not None),None)
+        bc=candles[full_idx]; body=abs(bc['c']-bc['o'])
+        signed_ok=(z is not None and ((expected=='alta' and z>0.5) or (expected=='baixa' and z<-0.5)))
+        body_ok=bool(atr and body>=0.5*atr and ((expected=='alta' and bc['c']>bc['o']) or (expected=='baixa' and bc['c']<bc['o'])))
+        if signed_ok or body_ok:
+            return {'direction':'LONG' if expected=='alta' else 'SHORT','direcao':expected,
+                    'mode':'REVERSAL' if state=='REJECTION_RECLAIM' else 'CONTINUATION',
+                    'structure':{**e,'full_idx':full_idx},'momentum_z':z}
+    return None
 
 def _kairos_m5_refine_zone(m5_candles, m15_zone, structure_ts, direction):
     """Refina uma zona M15 com FVG/IFVG/OB M5 causal. Nunca cria setup sozinho."""
@@ -11914,7 +11930,7 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
     """KAIROS Paper V2.1 — liquidez estrutural ativa, M15 executa, M5 refina.
 
     Cadeia autorizadora:
-    HTF/M15 structural liquidity -> FIRST capture on M15 -> reclaim -> M15 MSS/CHoCH/BOS
+    HTF/M15 structural liquidity -> neutral FIRST capture on M15 -> rejection/reclaim OR acceptance/continuation -> intention -> M15 MSS/CHoCH/BOS
     -> displacement -> causal M15 FVG/IFVG/OB -> optional M5 refinement -> retest
     -> SL behind causal sweep -> nearest active structural liquidity/obstacle TP.
 
@@ -11924,7 +11940,7 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
         'signal':False,'direction':None,'bias':None,'zone_type':None,'zone_top':None,'zone_bottom':None,'zone_source':None,
         'choch_confirmed':False,'choch_timestamp':None,'choch_level':None,'entry':None,'sl':None,'sl_regra':None,
         'tp':None,'tp_origem':None,'rr':None,'reason':None,'timestamp':m15_ate_agora[-1]['t'] if m15_ate_agora else None,
-        'valid':False,'failure_reason':None,'variante':'KAIROS_V2_1_STRUCTURAL_ACTIVE_M15_M5',
+        'valid':False,'failure_reason':None,'variante':'KAIROS_V2_2_AMD_PO3_DIRECTION_NEUTRAL',
         'setup_type':None,'context_bias':None,'sweep_tf':None,'sweep_level':None,'sweep_extreme':None,
         'liquidity_tf':None,'liquidity_type':None,'capture_tf':None,'first_capture_ts':None,'sweep_confirm_ts':None,
         'execution_tf':None,'refinement_tf':None,'momentum_z':None,'liquidity_inside_zone':[],
@@ -11962,33 +11978,26 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
     if not sweep:
         resultado['failure_reason']='SEM_SWEEP_ESTRUTURAL_FIRST_CAPTURE_VALIDO'; return resultado
 
-    direction='LONG' if sweep['direcao']=='alta' else 'SHORT'
-    resultado['direction']=direction
     resultado['sweep_tf']=sweep['liquidity_tf']; resultado['liquidity_tf']=sweep['liquidity_tf']
     resultado['liquidity_type']=sweep['liquidity_type']; resultado['capture_tf']='M15'
     resultado['first_capture_ts']=sweep['first_capture_ts']; resultado['sweep_confirm_ts']=sweep.get('confirm_ts')
     resultado['sweep_level']=round(sweep['nivel'],6); resultado['sweep_extreme']=round(sweep['extremo'],6)
 
-    ctx=contexto.get('final'); same_ctx=(ctx==sweep['direcao'])
-    resultado['setup_type']='TREND' if same_ctx else ('PULLBACK' if ctx in ('alta','baixa') else 'LOCAL')
-
-    # M15 é o TF que autoriza estrutura/entrada. M5 só pode refinar depois.
+    # M15 lê intenção/estrutura APÓS a captura neutra e só então escolhe LONG/SHORT.
     exec_tf='M15'; exec_candles=candles_por_tf.get('M15') or []
-    structure=_kairos_find_structure_after_sweep(exec_candles,sweep,swing_size=5)
-    if not structure:
-        resultado['failure_reason']='SEM_CHOCH_MSS_M15_APOS_SWEEP'; return resultado
-    resultado['execution_tf']='M15'; resultado['choch_confirmed']=True
+    intent=_kairos_direction_after_first_capture(exec_candles,sweep,swing_size=5)
+    if not intent:
+        resultado['failure_reason']='SEM_INTENCAO_CHOCH_MSS_M15_APOS_FIRST_CAPTURE'; return resultado
+    direction=intent['direction']; sweep['direcao']=intent['direcao']; structure=intent['structure']
+    resultado['direction']=direction; resultado['execution_tf']='M15'; resultado['choch_confirmed']=True
     resultado['choch_timestamp']=structure['t']; resultado['choch_level']=round(structure['nivel'],6)
+    z=intent.get('momentum_z'); resultado['momentum_z']=round(z,3) if z is not None else None
 
-    break_idx=structure.get('full_idx')
-    causal_slice=exec_candles[:break_idx+1] if break_idx is not None else exec_candles
-    z=_kairos_momentum_z(causal_slice); resultado['momentum_z']=round(z,3) if z is not None else None
-    atrs=compute_atr(causal_slice,14); atr=next((v for v in reversed(atrs) if v is not None),None)
-    bc=exec_candles[break_idx] if break_idx is not None else exec_candles[-1]
-    body=abs(bc['c']-bc['o'])
-    displacement_ok=((z is not None and ((sweep['direcao']=='alta' and z>0.5) or (sweep['direcao']=='baixa' and z<-0.5))) or (atr and body>=0.5*atr))
-    if not displacement_ok:
-        resultado['failure_reason']='SEM_INTENCAO_DISPLACEMENT_M15'; return resultado
+    ctx=contexto.get('final'); trade_dir=intent['direcao']
+    if ctx==trade_dir: resultado['setup_type']='TREND'
+    elif intent['mode']=='CONTINUATION': resultado['setup_type']='INTERNAL_CONTINUATION'
+    elif ctx in ('alta','baixa'): resultado['setup_type']='PULLBACK_REVERSAL'
+    else: resultado['setup_type']='LOCAL'
 
     zone=_kairos_select_entry_zone(exec_candles,sweep,structure,mapa)
     if not zone:
@@ -12023,7 +12032,12 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
         # SL de referência estritamente atrás do sweep estrutural narrativo + buffer ATR,
         # sem permitir que o pré-alerta invente uma âncora local diferente.
         try:
-            pre_sl = aplicar_buffer_stop_atr(sweep.get('extremo'), sweep['direcao'], exec_candles)
+            if intent.get('mode')=='CONTINUATION':
+                seg=[c for c in exec_candles if sweep['sweep_ts'] <= c['t'] <= structure['t']]
+                base=(min(c['l'] for c in seg) if direction=='LONG' else max(c['h'] for c in seg)) if seg else sweep.get('extremo')
+                pre_sl=aplicar_buffer_stop_atr(base, sweep['direcao'], exec_candles)
+            else:
+                pre_sl=aplicar_buffer_stop_atr(sweep.get('extremo'), sweep['direcao'], exec_candles)
         except Exception:
             pre_sl = None
         if pre_sl is not None:
@@ -12060,14 +12074,22 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
     entry=retest['c']; resultado['entry']=round(entry,6); resultado['timestamp']=retest['t']
 
     # SL atrás do sweep estrutural que autorizou a tese; M5 não move o stop para o lado errado.
-    sl_info,sl_audit=_kairos_select_structural_sl(mapa,'M15',exec_candles,sweep,structure,retest,direction)
+    if intent.get('mode')=='CONTINUATION':
+        seg=[c for c in exec_candles if sweep['sweep_ts'] <= c['t'] <= structure['t']]
+        base=(min(c['l'] for c in seg) if direction=='LONG' else max(c['h'] for c in seg)) if seg else None
+        slc=aplicar_buffer_stop_atr(base,sweep['direcao'],[c for c in exec_candles if c['t']<=retest['t']]) if base is not None else None
+        right=(slc < retest['c']) if direction=='LONG' else (slc > retest['c'])
+        sl_info={'sl':slc,'sl_base':base,'sl_tf':'M15','sl_classe':'CONTINUATION_STRUCTURE','sl_sweep_ts':sweep['sweep_ts'],'sl_sweep_level':sweep['nivel'],'sl_sweep_extreme':base} if slc is not None and right else None
+        sl_audit={'motivo':'OK_CONTINUATION_STRUCTURE' if sl_info else 'SEM_ANCORA_CONTINUATION_VALIDA','candidatos':[]}
+    else:
+        sl_info,sl_audit=_kairos_select_structural_sl(mapa,'M15',exec_candles,sweep,structure,retest,direction)
     resultado['sl_audit']=sl_audit
     if not sl_info:
         resultado['failure_reason']='SEM_ANCORA_SL_CAUSAL_VALIDA'; return resultado
     sl=sl_info['sl']; risk=abs(entry-sl)
     if risk<=0:
         resultado['failure_reason']='RISCO_ZERO_SL'; return resultado
-    resultado['sl']=round(sl,6); resultado['sl_regra']=f"first_capture_{sweep['liquidity_tf']}_extremo_atr"
+    resultado['sl']=round(sl,6); resultado['sl_regra']=(f"continuation_structure_M15_atr" if intent.get('mode')=='CONTINUATION' else f"first_capture_{sweep['liquidity_tf']}_extremo_atr")
     resultado['sl_anchor_tf']=sweep['liquidity_tf']; resultado['sl_anchor_class']='STRUCTURAL_FIRST_CAPTURE'
     resultado['sl_anchor_sweep_ts']=sweep['sweep_ts']; resultado['sl_anchor_extreme']=round(sweep['extremo'],6)
 
@@ -12086,7 +12108,7 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
     effective=obstacles[0] if obstacles else target
     if obstacles: resultado['tp1_obstacle']=dict(effective)
 
-    min_rr=1.0 if resultado['setup_type']=='PULLBACK' else 2.0
+    min_rr=1.0 if resultado['setup_type'] in ('PULLBACK','PULLBACK_REVERSAL','INTERNAL_CONTINUATION') else 2.0
     rr=abs(effective['nivel']-entry)/risk
     if rr < min_rr:
         resultado['rr']=round(rr,2); resultado['failure_reason']='ALVO_EFETIVO_RR_INSUFICIENTE'; return resultado
@@ -12099,7 +12121,7 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
     resultado['signal']=True; resultado['valid']=True
     resultado['reason']=(
         f"LIQ={sweep['liquidity_tf']}:{sweep['liquidity_type']}@{sweep['nivel']} -> FIRST_CAPTURE_M15@{sweep['sweep_ts']} -> "
-        f"RECLAIM+CONFIRM -> {structure['tipo']}_M15 -> DISPLACEMENT(z={resultado['momentum_z']}) -> "
+        f"{sweep.get('post_capture_state')} -> INTENT={intent['mode']}:{direction} -> {structure['tipo']}_M15 -> DISPLACEMENT(z={resultado['momentum_z']}) -> "
         f"{resultado['zone_source']} -> RETEST_{entry_tf} -> SL_FIRST_CAPTURE -> {resultado['tp_origem']} RR={resultado['rr']} -> "
         f"SETUP={resultado['setup_type']}"
     )

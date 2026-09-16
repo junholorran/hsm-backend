@@ -12957,6 +12957,11 @@ def resolver_resultado_v2_todos_pares_iniciar_endpoint():
 PAPER_TRADING_V2_JANELA_LOOKBACK_DIAS = 5  # janela de fetch por tick — pequena, só pra pegar candles recentes
 PAPER_TRADING_V2_EXPIRACAO_DIAS = 15  # EXPERIMENTAL — sinal PENDING por mais tempo que isso vira EXPIRED, documentado
 
+# Auditoria REPLAY x FORWARD — NÃO altera a lógica de trading.
+# Watermark = início da versão TP1/TP2 em produção (2026-09-15 15:21:58 UTC).
+PAPER_TRADING_V2_FORWARD_WATERMARK_MS = 1789485718000
+PAPER_TRADING_V2_STRATEGY_VARIANT = 'KAIROS_V2_2_TP1_TP2_DIRECTION_NEUTRAL'
+
 
 def init_paper_trading_v2_db(db_file):
     """Cria a tabela de paper trading v2, se não existir. Auto-blindada
@@ -13003,6 +13008,7 @@ def init_paper_trading_v2_db(db_file):
 
     _migrar_colunas_notificacao_paper_v2(db_file)
     _migrar_coluna_telemetria_liquidity_paper_v2(db_file)
+    _migrar_colunas_cohort_paper_v2(db_file)
 
 
 def _migrar_coluna_telemetria_liquidity_paper_v2(db_file):
@@ -13030,6 +13036,45 @@ def _migrar_coluna_telemetria_liquidity_paper_v2(db_file):
     except Exception as e:
         print(f'[paper_trading_v2] erro na migração telemetria_liquidity: {e}')
         return False
+
+
+def _migrar_colunas_cohort_paper_v2(db_file):
+    """Migração aditiva/idempotente REPLAY x FORWARD. Não altera decisões."""
+    try:
+        with sqlite3.connect(db_file) as conn:
+            cols = {row[1] for row in conn.execute("PRAGMA table_info(paper_trading_v2_sinais)").fetchall()}
+            if not cols:
+                return False
+            if 'cohort' not in cols:
+                conn.execute("ALTER TABLE paper_trading_v2_sinais ADD COLUMN cohort TEXT")
+            if 'strategy_variant' not in cols:
+                conn.execute("ALTER TABLE paper_trading_v2_sinais ADD COLUMN strategy_variant TEXT")
+            conn.execute("""
+                UPDATE paper_trading_v2_sinais
+                SET cohort = CASE
+                    WHEN COALESCE(candle_confirmacao_ts, choch_timestamp) >= ? THEN 'FORWARD'
+                    ELSE 'REPLAY'
+                END
+                WHERE cohort IS NULL OR cohort = ''
+            """, (PAPER_TRADING_V2_FORWARD_WATERMARK_MS,))
+            conn.execute("""
+                UPDATE paper_trading_v2_sinais SET strategy_variant = ?
+                WHERE strategy_variant IS NULL OR strategy_variant = ''
+            """, (PAPER_TRADING_V2_STRATEGY_VARIANT,))
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_paper_v2_cohort ON paper_trading_v2_sinais(cohort)")
+            conn.commit()
+        return True
+    except Exception as e:
+        print(f"[paper_trading_v2] erro na migração cohort: {e}")
+        return False
+
+
+def _paper_v2_classificar_cohort(candle_confirmacao_ts):
+    try:
+        ts = int(candle_confirmacao_ts or 0)
+    except Exception:
+        ts = 0
+    return 'FORWARD' if ts >= PAPER_TRADING_V2_FORWARD_WATERMARK_MS else 'REPLAY'
 
 
 def _migrar_colunas_notificacao_paper_v2(db_file):
@@ -13229,10 +13274,12 @@ def _paper_trading_v2_enviar_telegram(mensagem):
         return False
 
 
-def _formatar_mensagem_novo_sinal_paper_v2(pair, sinal):
+def _formatar_mensagem_novo_sinal_paper_v2(pair, sinal, cohort=None):
     ts_str = datetime.fromtimestamp(sinal['choch_timestamp'] / 1000, tz=timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
+    cohort = cohort or sinal.get('cohort') or _paper_v2_classificar_cohort(sinal.get('timestamp') or sinal.get('candle_confirmacao_ts'))
+    titulo = "🟢 <b>FORWARD — NOVO SINAL</b>" if cohort == 'FORWARD' else "🔵 <b>REPLAY/HISTÓRICO — SINAL</b>"
     return (
-        f"📝 <b>PAPER TRADING — NOVO SINAL</b>\n"
+        f"{titulo}\n"
         f"Par: {pair}\n"
         f"Direção: {sinal['direction']}\n"
         f"Timestamp: {ts_str}\n"
@@ -13251,8 +13298,18 @@ def _formatar_mensagem_resultado_paper_v2(sinal_row, resultado_status, r_obtido,
     ts_str = datetime.fromtimestamp(ts_evento_ms / 1000, tz=timezone.utc).strftime('%Y-%m-%d %H:%M UTC') if ts_evento_ms else 'N/A'
     emoji = {'TP': '✅', 'SL': '❌', 'AMBIGUO': '⚠️', 'EXPIRED': '⌛'}.get(resultado_status, 'ℹ️')
     r_str = f"{r_obtido:+.2f}R" if r_obtido is not None else "N/A"
+    try:
+        cohort = sinal_row['cohort']
+    except Exception:
+        cohort = None
+    if not cohort:
+        try:
+            cohort = _paper_v2_classificar_cohort(sinal_row['candle_confirmacao_ts'])
+        except Exception:
+            cohort = 'REPLAY'
+    titulo = f"{emoji} <b>FORWARD — RESULTADO</b>" if cohort == 'FORWARD' else f"{emoji} <b>REPLAY/HISTÓRICO — RESULTADO</b>"
     return (
-        f"{emoji} <b>PAPER TRADING — RESULTADO</b>\n"
+        f"{titulo}\n"
         f"Par: {sinal_row['pair']}\n"
         f"Direção: {sinal_row['direction']}\n"
         f"Entry: {sinal_row['entry']}\n"
@@ -13348,6 +13405,7 @@ def paper_trading_v2_tick(pair, db_file, agora_ts_ms=None):
     # podem ter a tabela persistida no volume sem a coluna nova da V2.1.
     # Esta migração é aditiva/idempotente e preserva todo o histórico.
     _migrar_coluna_telemetria_liquidity_paper_v2(db_file)
+    _migrar_colunas_cohort_paper_v2(db_file)
 
     if agora_ts_ms is None:
         agora_ts_ms = int(time.time() * 1000)
@@ -13440,20 +13498,24 @@ def paper_trading_v2_tick(pair, db_file, agora_ts_ms=None):
                             pair, direction, choch_timestamp, zone_type, zone_source,
                             zone_top, zone_bottom, choch_level, entry, sl, tp, rr,
                             tp_origem, sl_regra, reason, candle_confirmacao_ts,
-                            detectado_em, status, spread_no_sinal, telemetria_liquidity, updated_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', 'NAO_MEDIDO', ?, ?)
+                            detectado_em, status, spread_no_sinal, telemetria_liquidity, updated_at,
+                            cohort, strategy_variant
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', 'NAO_MEDIDO', ?, ?, ?, ?)
                     ''', (
                         pair, r['direction'], r['choch_timestamp'], r['zone_type'], r['zone_source'],
                         r['zone_top'], r['zone_bottom'], r['choch_level'], r['entry'], r['sl'], r['tp'], r['rr'],
                         r['tp_origem'], r['sl_regra'], r['reason'], r['timestamp'],
                         agora_ts_ms, telemetria_liquidity_json, agora_ts_ms,
+                        _paper_v2_classificar_cohort(r['timestamp']), PAPER_TRADING_V2_STRATEGY_VARIANT,
                     ))
                     conn.commit()
                     if cursor.rowcount > 0:
                         novos_detectados += 1
                         print(_paper_v2_diag_resumo(pair, r))
+                        cohort_sinal = _paper_v2_classificar_cohort(r['timestamp'])
+                        print(f"[paper_v2_cohort] {pair} cohort={cohort_sinal} event_ts={r['timestamp']} watermark={PAPER_TRADING_V2_FORWARD_WATERMARK_MS}")
                         try:
-                            _paper_trading_v2_enviar_telegram(_formatar_mensagem_novo_sinal_paper_v2(pair, r))
+                            _paper_trading_v2_enviar_telegram(_formatar_mensagem_novo_sinal_paper_v2(pair, r, cohort=cohort_sinal))
                         except Exception as e_tg:
                             print(f"[paper_trading_v2] erro ao notificar novo sinal de {pair}: {e_tg}")
                         try:

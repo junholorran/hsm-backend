@@ -10670,11 +10670,13 @@ def _kairos_fvg_states(candles, lookback=250):
         if atual['l'] > a['h'] and meio['c'] > a['h']:
             novo={'id':f"FVG_{meio['t']}_B",'tipo':'FVG_bullish','direcao':'alta','top':atual['l'],'bottom':a['h'],
                   'created_ts':atual['t'],'origin_ts':meio['t'],'state':'ATIVA','flip_ts':None,
-                  'first_touch_ts':None,'mitigated_ts':None,'invalidated_ts':None}
+                  'first_touch_ts':None,'mitigated_ts':None,'invalidated_ts':None,
+                  'source_a':dict(a),'source_mid':dict(meio),'source_c':dict(atual),'flip_candle':None}
         elif atual['h'] < a['l'] and meio['c'] < a['l']:
             novo={'id':f"FVG_{meio['t']}_S",'tipo':'FVG_bearish','direcao':'baixa','top':a['l'],'bottom':atual['h'],
                   'created_ts':atual['t'],'origin_ts':meio['t'],'state':'ATIVA','flip_ts':None,
-                  'first_touch_ts':None,'mitigated_ts':None,'invalidated_ts':None}
+                  'first_touch_ts':None,'mitigated_ts':None,'invalidated_ts':None,
+                  'source_a':dict(a),'source_mid':dict(meio),'source_c':dict(atual),'flip_candle':None}
         if novo:
             states.append(novo)
 
@@ -10684,7 +10686,7 @@ def _kairos_fvg_states(candles, lookback=250):
             # FVG original: primeiro verifica quebra/aceitação, depois mitigação.
             if z['tipo'] == 'FVG_bullish':
                 if atual['c'] < z['bottom']:
-                    z['state']='IFVG'; z['tipo']='IFVG_bearish'; z['direcao']='baixa'; z['flip_ts']=atual['t']
+                    z['state']='IFVG'; z['tipo']='IFVG_bearish'; z['direcao']='baixa'; z['flip_ts']=atual['t']; z['flip_candle']=dict(atual)
                 elif atual['l'] <= z['bottom']:
                     z['state']='MITIGADA'; z['mitigated_ts']=z['mitigated_ts'] or atual['t']
                 elif atual['l'] < z['top']:
@@ -10692,7 +10694,7 @@ def _kairos_fvg_states(candles, lookback=250):
                     z['first_touch_ts']=z['first_touch_ts'] or atual['t']
             elif z['tipo'] == 'FVG_bearish':
                 if atual['c'] > z['top']:
-                    z['state']='IFVG'; z['tipo']='IFVG_bullish'; z['direcao']='alta'; z['flip_ts']=atual['t']
+                    z['state']='IFVG'; z['tipo']='IFVG_bullish'; z['direcao']='alta'; z['flip_ts']=atual['t']; z['flip_candle']=dict(atual)
                 elif atual['h'] >= z['top']:
                     z['state']='MITIGADA'; z['mitigated_ts']=z['mitigated_ts'] or atual['t']
                 elif atual['h'] > z['bottom']:
@@ -12004,6 +12006,14 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
         resultado['failure_reason']='SEM_FVG_IFVG_OB_M15_CAUSAL'; return resultado
     resultado['zone_type']=zone['tipo']; resultado['zone_top']=round(zone['top'],6); resultado['zone_bottom']=round(zone['bottom'],6)
     resultado['zone_source']=f"{zone['tipo']}_M15_APOS_SWEEP"; resultado['liquidity_inside_zone']=zone.get('liquidity_inside',[])
+    # Auditoria causal da zona: não altera seleção/entrada; apenas expõe os candles exatos.
+    resultado['zone_created_ts']=zone.get('created_ts')
+    resultado['zone_origin_ts']=zone.get('origin_ts')
+    resultado['zone_flip_ts']=zone.get('flip_ts')
+    resultado['zone_source_a']=zone.get('source_a')
+    resultado['zone_source_mid']=zone.get('source_mid')
+    resultado['zone_source_c']=zone.get('source_c')
+    resultado['zone_flip_candle']=zone.get('flip_candle')
     zone_ts=zone.get('flip_ts') or zone.get('created_ts') or zone.get('t') or structure['t']
     after_ts=max(structure['t'],zone_ts)
 
@@ -13285,6 +13295,15 @@ def _paper_v2_tentar_prealerta(db_file, pair, r, agora_ts_ms):
                 f"[paper_v2_prealert] ENVIADO {pair} key={setup_key[:12]} "
                 f"limit={r.get('prealert_limit')} zone={r.get('zone_type')}"
             )
+            if str(r.get('zone_type') or '').startswith('IFVG'):
+                print(
+                    f"[paper_v2_ifvg_audit] {pair} type={r.get('zone_type')} "
+                    f"bottom={r.get('zone_bottom')} top={r.get('zone_top')} "
+                    f"origin_ts={r.get('zone_origin_ts')} created_ts={r.get('zone_created_ts')} "
+                    f"flip_ts={r.get('zone_flip_ts')} A={r.get('zone_source_a')} "
+                    f"MID={r.get('zone_source_mid')} C={r.get('zone_source_c')} "
+                    f"FLIP={r.get('zone_flip_candle')}"
+                )
         else:
             print(f"[paper_v2_prealert] Telegram não confirmou envio {pair} key={setup_key[:12]}")
         return ok

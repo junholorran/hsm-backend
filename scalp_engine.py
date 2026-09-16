@@ -9521,7 +9521,7 @@ def auditar_relevancia_choch_todos_pares_iniciar_endpoint():
     thread.start()
 
     return jsonify({
-        "job_id": job_id, "status": "iniciado", "dias_historico": dias,
+        "job_id": job_id, "status": "iniciado", "dias_historico": dias, "fim_ts_ms": fim_ts_ms,
         "pares": pares_lista or PARES_MONITORADOS_REPLAY,
         "como_consultar": f"/scalp_gates_vortex/replay_comparativo_luxalgo_status/{job_id}",
         "aviso": "MUITO pesado — roda em background sem prazo de conexão, mas pode levar bastante tempo",
@@ -12185,18 +12185,30 @@ def replay_vortex_decision_layer_v2(pair, dias_historico=7, janelas_mfe_mae=JANE
     }
     symbol = symbol_map.get(pair.upper(), pair.upper().replace('USD', 'USDT'))
 
-    d1_bruto = _fetch_bybit_klines_historico(symbol, 'D', dias_historico + 20, fim_ts_ms=fim_ts_ms)
-    m15_bruto = _fetch_bybit_klines_historico(symbol, '15', dias_historico + 3, fim_ts_ms=fim_ts_ms)
-    m5_bruto = _fetch_bybit_klines_historico(symbol, '5', dias_historico + 2, fim_ts_ms=fim_ts_ms)
+    # REPLAY V2.2 ATUAL: mesmos TFs e mesma decision layer do Paper/Forward.
+    # Mantemos pre-historia suficiente para formar swings/ATR/POIs antes do inicio
+    # da janela auditada; somente os ts_corte dentro [inicio,fim] viram ciclos.
+    mn_bruto  = _fetch_bybit_klines_historico(symbol, 'M',  3650, fim_ts_ms=fim_ts_ms)
+    w1_bruto  = _fetch_bybit_klines_historico(symbol, 'W',   dias_historico + 900, fim_ts_ms=fim_ts_ms)
+    d1_bruto  = _fetch_bybit_klines_historico(symbol, 'D',   dias_historico + 260, fim_ts_ms=fim_ts_ms)
+    h4_bruto  = _fetch_bybit_klines_historico(symbol, '240', dias_historico + 120, fim_ts_ms=fim_ts_ms)
+    h1_bruto  = _fetch_bybit_klines_historico(symbol, '60',  dias_historico + 35, fim_ts_ms=fim_ts_ms)
+    m30_bruto = _fetch_bybit_klines_historico(symbol, '30',  dias_historico + 18, fim_ts_ms=fim_ts_ms)
+    m15_bruto = _fetch_bybit_klines_historico(symbol, '15',  dias_historico + 9, fim_ts_ms=fim_ts_ms)
+    m5_bruto  = _fetch_bybit_klines_historico(symbol, '5',   dias_historico + 4, fim_ts_ms=fim_ts_ms)
+    m1_bruto  = _fetch_bybit_klines_historico(symbol, '1',   dias_historico + 1, fim_ts_ms=fim_ts_ms)
 
-    d1, val_d1 = _validar_e_limpar_candles(d1_bruto, 'D')
+    mn, val_mn   = _validar_e_limpar_candles(mn_bruto, 'M')
+    w1, val_w1   = _validar_e_limpar_candles(w1_bruto, 'W')
+    d1, val_d1   = _validar_e_limpar_candles(d1_bruto, 'D')
+    h4, val_h4   = _validar_e_limpar_candles(h4_bruto, '240')
+    h1, val_h1   = _validar_e_limpar_candles(h1_bruto, '60')
+    m30, val_m30 = _validar_e_limpar_candles(m30_bruto, '30')
     m15, val_m15 = _validar_e_limpar_candles(m15_bruto, '15')
-    m5, val_m5 = _validar_e_limpar_candles(m5_bruto, '5')
+    m5, val_m5   = _validar_e_limpar_candles(m5_bruto, '5')
+    m1, val_m1   = _validar_e_limpar_candles(m1_bruto, '1')
 
     inicio_ts_ms = fim_ts_ms - dias_historico * 86400000
-    d1 = [c for c in d1 if inicio_ts_ms <= c['t'] <= fim_ts_ms]
-    m15 = [c for c in m15 if inicio_ts_ms <= c['t'] <= fim_ts_ms]
-    m5 = [c for c in m5 if inicio_ts_ms <= c['t'] <= fim_ts_ms]
 
     MIN_M5_IDX = 60
     if len(m15) < 40 or len(m5) < MIN_M5_IDX + 20:
@@ -12214,6 +12226,8 @@ def replay_vortex_decision_layer_v2(pair, dias_historico=7, janelas_mfe_mae=JANE
 
     for i in range(MIN_M5_IDX, len(m5)):
         ts_corte = m5[i]['t']
+        if ts_corte < inicio_ts_ms or ts_corte > fim_ts_ms:
+            continue
         m5_ate_agora = m5[:i + 1]
         m15_ate_agora = [c for c in m15 if c['t'] <= ts_corte]
         d1_ate_agora = [c for c in d1 if c['t'] <= ts_corte]
@@ -12221,8 +12235,21 @@ def replay_vortex_decision_layer_v2(pair, dias_historico=7, janelas_mfe_mae=JANE
             continue
 
         funil['total_ciclos_avaliados'] += 1
+        tf_map = {
+            'MN': [c for c in mn if c['t'] <= ts_corte],
+            'W1': [c for c in w1 if c['t'] <= ts_corte],
+            'D1': d1_ate_agora,
+            'H4': [c for c in h4 if c['t'] <= ts_corte],
+            'H1': [c for c in h1 if c['t'] <= ts_corte],
+            'M30': [c for c in m30 if c['t'] <= ts_corte],
+            'M15': m15_ate_agora,
+            'M5': m5_ate_agora,
+            'M1': [c for c in m1 if c['t'] <= ts_corte],
+        }
         try:
-            r = avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora)
+            r = avaliar_vortex_decision_layer_v2(
+                m15_ate_agora, m5_ate_agora, d1_ate_agora, candles_por_tf=tf_map
+            )
         except Exception as e:
             distribuicao_motivos[f'EXCECAO: {e}'] = distribuicao_motivos.get(f'EXCECAO: {e}', 0) + 1
             continue
@@ -12316,6 +12343,7 @@ def replay_vortex_decision_layer_v2(pair, dias_historico=7, janelas_mfe_mae=JANE
 
     return {
         'pair': pair, 'dias_historico': dias_historico,
+        'cohort': 'REPLAY', 'strategy_variant': PAPER_TRADING_V2_STRATEGY_VARIANT,
         'versao_pipeline': VORTEX_DECISION_LAYER_V2_VERSAO,
         'janela_fixa': {
             'data_inicio_ts_ms': inicio_ts_ms,
@@ -12325,20 +12353,22 @@ def replay_vortex_decision_layer_v2(pair, dias_historico=7, janelas_mfe_mae=JANE
             'quantidade_candles_m5': len(m5),
             'quantidade_candles_m15': len(m15),
             'quantidade_candles_d1': len(d1),
+            'quantidade_candles_h1': len(h1), 'quantidade_candles_h4': len(h4),
+            'quantidade_candles_w1': len(w1), 'quantidade_candles_mn': len(mn),
             'nota': (
                 'Janela histórica FIXA e reproduzível — para repetir exatamente este período '
                 'numa chamada futura, passe fim_ts_ms=' + str(fim_ts_ms) + ' explicitamente.'
             ),
         },
         'nota_metodologica': (
-            'REPLAY SOMENTE AUDITORIA — pipeline experimental avaliar_vortex_decision_layer_v2(), '
-            'não chamado por nenhum caminho de produção. Não altera CHoCH, FVG, Premium/Discount, '
+            'REPLAY SOMENTE AUDITORIA — MESMA avaliar_vortex_decision_layer_v2() V2.2 usada pelo Paper/Forward, '
+            'com mapa MN/W1/D1/H4/H1/M30/M15/M5/M1 truncado causalmente. Não altera CHoCH, FVG, Premium/Discount, '
             'SL/TP existentes, gates ou process_pair_gates_vortex()/process_pair_4camadas(). Mesma '
             'metodologia causal já aprovada — cada ciclo só enxerga candles com t <= ts_corte. '
             'Sinais deduplicados por (choch_timestamp, direction, zone_type) — o mesmo CHoCH pode '
             'permanecer "válido" em vários ciclos M5 consecutivos até ser invalidado.'
         ),
-        'validacao_dados': {'M15': val_m15, 'M5': val_m5},
+        'validacao_dados': {'MN': val_mn, 'W1': val_w1, 'D1': val_d1, 'H4': val_h4, 'H1': val_h1, 'M30': val_m30, 'M15': val_m15, 'M5': val_m5, 'M1': val_m1},
         'funil': funil,
         'distribuicao_motivos_todos_ciclos': distribuicao_motivos,
         'total_sinais_unicos': len(sinais_unicos),
@@ -12355,7 +12385,7 @@ def replay_vortex_decision_layer_v2(pair, dias_historico=7, janelas_mfe_mae=JANE
     }
 
 
-def replay_vortex_decision_layer_v2_todos_pares(dias_historico=7, pares=None):
+def replay_vortex_decision_layer_v2_todos_pares(dias_historico=7, pares=None, fim_ts_ms=None):
     """Roda replay_vortex_decision_layer_v2() (sem alteração) pra cada
     par, agrega funil/RR/MFE-MAE globalmente. Erro num par não derruba
     os demais."""
@@ -12365,7 +12395,7 @@ def replay_vortex_decision_layer_v2_todos_pares(dias_historico=7, pares=None):
 
     for p in pares:
         try:
-            r = replay_vortex_decision_layer_v2(p, dias_historico=dias_historico)
+            r = replay_vortex_decision_layer_v2(p, dias_historico=dias_historico, fim_ts_ms=fim_ts_ms)
         except Exception as e:
             r = {'erro': str(e)}
         resultados_por_pair[p] = r
@@ -12435,9 +12465,9 @@ def _executar_decision_layer_v2_job(db_file, job_id, pair, dias_historico, fim_t
             print(f"[scalp_engine replay_jobs] erro ao registrar falha do job {job_id}: {e2}")
 
 
-def _executar_decision_layer_v2_todos_pares_job(db_file, job_id, dias_historico, pares):
+def _executar_decision_layer_v2_todos_pares_job(db_file, job_id, dias_historico, pares, fim_ts_ms=None):
     try:
-        resultado = replay_vortex_decision_layer_v2_todos_pares(dias_historico=dias_historico, pares=pares)
+        resultado = replay_vortex_decision_layer_v2_todos_pares(dias_historico=dias_historico, pares=pares, fim_ts_ms=fim_ts_ms)
         with sqlite3.connect(db_file) as conn:
             conn.execute('''
                 UPDATE scalp_replay_jobs SET status='concluido', resultado_json=?, finished_at=? WHERE job_id=?
@@ -12519,6 +12549,8 @@ def decision_layer_v2_todos_pares_iniciar_endpoint():
         }), 400
 
     dias = int(request.args.get('dias', 7))
+    fim_ts_ms_param = request.args.get('fim_ts_ms')
+    fim_ts_ms = int(fim_ts_ms_param) if fim_ts_ms_param else None
     pares_param = request.args.get('pares')
     pares_lista = None
     if pares_param:
@@ -12540,7 +12572,7 @@ def decision_layer_v2_todos_pares_iniciar_endpoint():
 
     thread = threading.Thread(
         target=_executar_decision_layer_v2_todos_pares_job,
-        args=(db_file, job_id, dias, pares_lista), daemon=True,
+        args=(db_file, job_id, dias, pares_lista, fim_ts_ms), daemon=True,
     )
     thread.start()
 
@@ -12611,6 +12643,9 @@ def resolver_resultado_sinais_v2(pair, dias_historico=30, fim_ts_ms=None):
             'primeiro_evento': primeiro_evento, 'timestamp_evento': timestamp_evento,
             'candles_ate_evento': candles_ate_evento, 'mfe_pct': res['mfe_pct'], 'mae_pct': res['mae_pct'],
             'r_obtido': r_obtido,
+            'setup_type': s.get('setup_type'), 'liquidity_tf': s.get('liquidity_tf'),
+            'liquidity_type': s.get('liquidity_type'), 'zone_type': s.get('zone_type'),
+            'cohort': 'REPLAY', 'strategy_variant': PAPER_TRADING_V2_STRATEGY_VARIANT,
         })
 
     def _agregar_grupo(lista):
@@ -12651,6 +12686,17 @@ def resolver_resultado_sinais_v2(pair, dias_historico=30, fim_ts_ms=None):
             max_win_streak = max(max_win_streak, cur_win)
             max_loss_streak = max(max_loss_streak, cur_loss)
 
+        # Equity em R cronologica; AMBIGUO fica fora do caso-base, igual expectancy principal.
+        equity = 0.0; peak = 0.0; max_dd = 0.0
+        for a in lista_cronologica:
+            if a['primeiro_evento'] == 'TP':
+                rv = float(a['r_obtido'])
+            elif a['primeiro_evento'] == 'SL':
+                rv = -1.0
+            else:
+                continue
+            equity += rv; peak = max(peak, equity); max_dd = max(max_dd, peak - equity)
+
         return {
             'total_sinais': total, 'tp_primeiro': n_tp, 'sl_primeiro': n_sl,
             'ambiguo': n_ambiguo, 'nenhum_nao_resolvido': n_nenhum,
@@ -12661,6 +12707,8 @@ def resolver_resultado_sinais_v2(pair, dias_historico=30, fim_ts_ms=None):
             'expectancy_R_ambiguo_como_loss': expectancy_amb_loss,
             'media_R_ambiguo_como_loss': media_r_amb_loss, 'mediana_R_ambiguo_como_loss': mediana_r_amb_loss,
             'max_win_streak': max_win_streak, 'max_loss_streak': max_loss_streak,
+            'soma_R_excluindo_ambiguo': round(sum(rs_excluindo_ambiguo), 4) if rs_excluindo_ambiguo else 0.0,
+            'max_drawdown_R_excluindo_ambiguo': round(max_dd, 4),
         }
 
     sinais_long = [a for a in auditoria_sinais if a['direction'] == 'LONG']
@@ -12772,7 +12820,7 @@ def resolver_resultado_sinais_v2_todos_pares(dias_historico=30, fim_ts_ms=None, 
     comparação justa entre pares no mesmo período exato. Erro num par
     não derruba os demais.
     """
-    pares = pares or [p for p in PARES_MONITORADOS_REPLAY if p.upper() != 'BTCUSD']
+    pares = pares or list(PARES_MONITORADOS_REPLAY)
     resultados_por_pair = {}
     pares_com_erro = []
 
@@ -12893,7 +12941,7 @@ def _executar_resolver_resultado_v2_todos_pares_job(db_file, job_id, dias_histor
 def resolver_resultado_v2_todos_pares_iniciar_endpoint():
     """
     Roda resolver_resultado_sinais_v2_todos_pares() em BACKGROUND, 13
-    pares (por padrão, todos menos BTCUSD). Consultar no MESMO
+    pares (por padrão, todos os PARES_MONITORADOS_REPLAY, incluindo BTCUSD). Consultar no MESMO
     endpoint de status genérico já existente.
     Uso: ?dias=30&fim_ts_ms=<ts_do_btc>&confirm=RODAR_RESOLVER_RESULTADO_V2_TODOS_PARES
     Opcional &pares=ETHUSD,SOLUSD,...
@@ -12935,7 +12983,7 @@ def resolver_resultado_v2_todos_pares_iniciar_endpoint():
 
     return jsonify({
         "job_id": job_id, "status": "iniciado", "dias_historico": dias, "fim_ts_ms": fim_ts_ms,
-        "pares": pares_lista or [p for p in PARES_MONITORADOS_REPLAY if p.upper() != 'BTCUSD'],
+        "pares": pares_lista or list(PARES_MONITORADOS_REPLAY),
         "como_consultar": f"/scalp_gates_vortex/replay_comparativo_luxalgo_status/{job_id}",
         "aviso": "MUITO pesado — roda em background sem prazo de conexão, mas pode levar bastante tempo",
     })

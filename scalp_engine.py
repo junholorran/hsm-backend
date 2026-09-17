@@ -11880,23 +11880,63 @@ def _kairos_shadow_validate_poi(zone, candles, sweep=None, structure=None, tf='M
         if sweep and break_ok: causal_ok=candles[break_idx]['t']>sweep.get('sweep_ts',0)
         if structure and break_ok: causal_ok=causal_ok and candles[break_idx]['t']==structure.get('t')
         ok=idx_ok and break_ok and opposite and bounds_ok and causal_ok
+        break_candle=candles[break_idx] if break_ok else None
         out.update({'pass':bool(ok),'reason':'OK' if ok else 'OB_ORIGEM_OU_BREAK_CAUSAL_INVALIDO','origin_candle':candle,
-                    'idx_ok':idx_ok,'break_ok':break_ok,'opposite_candle_ok':opposite,'bounds_ok':bounds_ok,'causal_ok':causal_ok})
+                    'break_candle':break_candle,'idx_ok':idx_ok,'break_ok':break_ok,'opposite_candle_ok':opposite,
+                    'bounds_ok':bounds_ok,'causal_ok':causal_ok})
         return out
     out['reason']='TIPO_POI_DESCONHECIDO'; return out
 
 
-def _kairos_shadow_log_poi(pair, zone, audit):
-    """Uma linha compacta por POI selecionado; falha de log nunca afeta trading."""
-    try:
-        print('[POI_SHADOW_AUDIT] '
-              f"pair={pair or 'NA'} tf={audit.get('tf')} tipo={audit.get('tipo')} pass={audit.get('pass')} "
-              f"reason={audit.get('reason')} zone=[{zone.get('bottom')},{zone.get('top')}] "
-              f"created={zone.get('created_ts') or zone.get('t')} flip={zone.get('flip_ts')} "
-              f"A={audit.get('source_a')} B={audit.get('source_mid')} C={audit.get('source_c')} FLIP={audit.get('flip_candle')}")
-    except Exception as exc:
-        print(f'[POI_SHADOW_AUDIT_ERR] {exc}')
+_KAIROS_POI_SHADOW_SEEN = set()
+_KAIROS_POI_SHADOW_SEEN_MAX = 5000
 
+def _kairos_shadow_log_poi(pair, zone, audit):
+    """Shadow log deduplicado. Nunca altera a decisão do trade."""
+    try:
+        pair_label = pair or 'NA'
+        tf = audit.get('tf')
+        tipo = audit.get('tipo')
+        bottom, top = zone.get('bottom'), zone.get('top')
+        created = zone.get('created_ts') or zone.get('t')
+        flip_ts = zone.get('flip_ts')
+        key = (pair_label, tf, tipo, created, flip_ts, bottom, top, audit.get('reason'), bool(audit.get('pass')))
+        if key in _KAIROS_POI_SHADOW_SEEN:
+            return
+        if len(_KAIROS_POI_SHADOW_SEEN) >= _KAIROS_POI_SHADOW_SEEN_MAX:
+            _KAIROS_POI_SHADOW_SEEN.clear()
+        _KAIROS_POI_SHADOW_SEEN.add(key)
+
+        base = (f"[POI_SHADOW_AUDIT] pair={pair_label} tf={tf} tipo={tipo} "
+                f"pass={audit.get('pass')} reason={audit.get('reason')} "
+                f"zone=[{bottom},{top}] created={created} flip={flip_ts}")
+
+        if str(tipo or '').startswith(('FVG_', 'IFVG_')):
+            print(base
+                  + f" mother={audit.get('mother_type')}"
+                  + f" geometry_ok={audit.get('geometry_ok')}"
+                  + f" bounds_ok={audit.get('bounds_ok')}"
+                  + f" created_ok={audit.get('created_ts_ok')}"
+                  + f" causal_ok={audit.get('causal_window_ok')}"
+                  + f" flip_after={audit.get('flip_after_creation')}"
+                  + f" flip_geometry_ok={audit.get('flip_geometry_ok')}"
+                  + f" A={audit.get('source_a')}"
+                  + f" B={audit.get('source_mid')}"
+                  + f" C={audit.get('source_c')}"
+                  + f" FLIP={audit.get('flip_candle')}")
+        elif str(tipo or '').startswith('OB_'):
+            print(base
+                  + f" origin={audit.get('origin_candle')}"
+                  + f" break={audit.get('break_candle')}"
+                  + f" idx_ok={audit.get('idx_ok')}"
+                  + f" break_ok={audit.get('break_ok')}"
+                  + f" opposite_ok={audit.get('opposite_candle_ok')}"
+                  + f" bounds_ok={audit.get('bounds_ok')}"
+                  + f" causal_ok={audit.get('causal_ok')}")
+        else:
+            print(base)
+    except Exception as exc:
+        print(f"[POI_SHADOW_AUDIT_ERR] {exc}")
 
 def _kairos_retest_zone(candles, zone, after_ts):
     if not zone:
@@ -12002,7 +12042,8 @@ def _escolher_zona_entrada_v2(m15_ate_agora, bias, permitir_fallback_ema25=True)
 
 
 def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=None,
-                                      permitir_fallback_ema25=True, candles_por_tf=None):
+                                      permitir_fallback_ema25=True, candles_por_tf=None,
+                                      audit_pair=None):
     """KAIROS Paper V2.1 — liquidez estrutural ativa, M15 executa, M5 refina.
 
     Cadeia autorizadora:
@@ -12082,7 +12123,7 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
     try:
         poi_shadow=_kairos_shadow_validate_poi(zone, exec_candles, sweep=sweep, structure=structure, tf='M15')
         resultado['poi_shadow_audit']=poi_shadow
-        _kairos_shadow_log_poi(None, zone, poi_shadow)
+        _kairos_shadow_log_poi(audit_pair, zone, poi_shadow)
     except Exception as _poi_shadow_exc:
         resultado['poi_shadow_audit']={'shadow_only':True,'pass':False,'reason':f'AUDIT_EXCEPTION:{_poi_shadow_exc}'}
     resultado['zone_type']=zone['tipo']; resultado['zone_top']=round(zone['top'],6); resultado['zone_bottom']=round(zone['bottom'],6)
@@ -12339,7 +12380,8 @@ def replay_vortex_decision_layer_v2(pair, dias_historico=7, janelas_mfe_mae=JANE
         }
         try:
             r = avaliar_vortex_decision_layer_v2(
-                m15_ate_agora, m5_ate_agora, d1_ate_agora, candles_por_tf=tf_map
+                m15_ate_agora, m5_ate_agora, d1_ate_agora, candles_por_tf=tf_map,
+                audit_pair=pair
             )
         except Exception as e:
             distribuicao_motivos[f'EXCECAO: {e}'] = distribuicao_motivos.get(f'EXCECAO: {e}', 0) + 1
@@ -13616,6 +13658,7 @@ def paper_trading_v2_tick(pair, db_file, agora_ts_ms=None):
                 r = avaliar_vortex_decision_layer_v2(
                     m15_ate_agora, m5_ate_agora, d1_ate_agora,
                     candles_por_tf=tf_map,
+                    audit_pair=pair,
                 )
             except Exception as e:
                 print(f"[paper_trading_v2] erro na decisão MTF de {pair}: {e}")

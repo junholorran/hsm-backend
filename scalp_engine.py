@@ -11824,6 +11824,80 @@ def _kairos_select_entry_zone(exec_candles, sweep, structure, mapa):
         return ob
     return None
 
+def _kairos_shadow_validate_poi(zone, candles, sweep=None, structure=None, tf='M15'):
+    """Auditoria paralela FVG/IFVG/OB. NÃO altera autorização do trade.
+
+    Recalcula a origem geométrica/casual do POI selecionado e devolve PASS/FAIL
+    com evidência suficiente para reproduzir no gráfico. FVG/IFVG usa a mesma
+    regra 3-candles em qualquer TF; IFVG exige FVG-mãe + flip posterior. OB
+    exige candle oposto anterior ao break e break posterior ao sweep.
+    """
+    out={'shadow_only':True,'tf':tf,'pass':False,'reason':None,'tipo':zone.get('tipo') if zone else None}
+    if not zone:
+        out['reason']='SEM_ZONA'; return out
+    typ=str(zone.get('tipo') or '')
+    if typ.startswith(('FVG_','IFVG_')):
+        a=zone.get('source_a'); b=zone.get('source_mid'); c=zone.get('source_c')
+        if not all(isinstance(x,dict) for x in (a,b,c)):
+            out['reason']='SEM_CANDLES_ORIGEM_ABC'; return out
+        ordered=(a.get('t') is not None and b.get('t') is not None and c.get('t') is not None and a['t'] < b['t'] < c['t'])
+        bull_geom=(c.get('l') is not None and a.get('h') is not None and c['l'] > a['h'])
+        bear_geom=(c.get('h') is not None and a.get('l') is not None and c['h'] < a['l'])
+        mother='FVG_bullish' if bull_geom else ('FVG_bearish' if bear_geom else None)
+        bounds_ok=False
+        if mother=='FVG_bullish': bounds_ok=abs(float(zone['bottom'])-float(a['h']))<1e-9 and abs(float(zone['top'])-float(c['l']))<1e-9
+        elif mother=='FVG_bearish': bounds_ok=abs(float(zone['top'])-float(a['l']))<1e-9 and abs(float(zone['bottom'])-float(c['h']))<1e-9
+        created_ok=zone.get('created_ts')==c.get('t')
+        causal_ok=True
+        if sweep: causal_ok=causal_ok and zone.get('created_ts',0) >= sweep.get('sweep_ts',0)
+        if structure: causal_ok=causal_ok and (zone.get('flip_ts') or zone.get('created_ts') or 0) <= structure.get('t',0)
+        out.update({'mother_type':mother,'ordered_abc':ordered,'geometry_ok':bool(mother),'bounds_ok':bounds_ok,
+                    'created_ts_ok':created_ok,'causal_window_ok':causal_ok,'source_a':a,'source_mid':b,'source_c':c,
+                    'top':zone.get('top'),'bottom':zone.get('bottom'),'created_ts':zone.get('created_ts'),'flip_ts':zone.get('flip_ts')})
+        if typ.startswith('IFVG_'):
+            flip=zone.get('flip_candle'); fts=zone.get('flip_ts')
+            flip_after=bool(isinstance(flip,dict) and fts==flip.get('t') and fts and fts>zone.get('created_ts',0))
+            if mother=='FVG_bearish': flip_geom=bool(flip and flip.get('c') is not None and flip['c'] > zone['top'] and typ=='IFVG_bullish')
+            elif mother=='FVG_bullish': flip_geom=bool(flip and flip.get('c') is not None and flip['c'] < zone['bottom'] and typ=='IFVG_bearish')
+            else: flip_geom=False
+            out.update({'flip_after_creation':flip_after,'flip_geometry_ok':flip_geom,'flip_candle':flip})
+            ok=ordered and bool(mother) and bounds_ok and created_ok and causal_ok and flip_after and flip_geom
+            out['pass']=bool(ok); out['reason']='OK' if ok else 'IFVG_SEM_CADEIA_MAE_FLIP_CAUSAL_VALIDA'
+            return out
+        expected='FVG_bullish' if mother=='FVG_bullish' else ('FVG_bearish' if mother=='FVG_bearish' else None)
+        ok=ordered and bool(mother) and typ==expected and bounds_ok and created_ok and causal_ok
+        out['pass']=bool(ok); out['reason']='OK' if ok else 'FVG_GEOMETRIA_OU_CAUSALIDADE_INVALIDA'
+        return out
+    if typ.startswith('OB_'):
+        t=zone.get('t'); idx=zone.get('idx'); break_idx=zone.get('break_idx')
+        idx_ok=isinstance(idx,int) and 0<=idx<len(candles) and candles[idx].get('t')==t
+        break_ok=isinstance(break_idx,int) and 0<=break_idx<len(candles) and idx_ok and idx<break_idx
+        direction='alta' if typ=='OB_bullish' else 'baixa'
+        candle=candles[idx] if idx_ok else None
+        opposite=bool(candle and ((direction=='alta' and candle['c']<candle['o']) or (direction=='baixa' and candle['c']>candle['o'])))
+        bounds_ok=bool(candle and abs(float(zone['top'])-float(candle['h']))<1e-9 and abs(float(zone['bottom'])-float(candle['l']))<1e-9)
+        causal_ok=True
+        if sweep and break_ok: causal_ok=candles[break_idx]['t']>sweep.get('sweep_ts',0)
+        if structure and break_ok: causal_ok=causal_ok and candles[break_idx]['t']==structure.get('t')
+        ok=idx_ok and break_ok and opposite and bounds_ok and causal_ok
+        out.update({'pass':bool(ok),'reason':'OK' if ok else 'OB_ORIGEM_OU_BREAK_CAUSAL_INVALIDO','origin_candle':candle,
+                    'idx_ok':idx_ok,'break_ok':break_ok,'opposite_candle_ok':opposite,'bounds_ok':bounds_ok,'causal_ok':causal_ok})
+        return out
+    out['reason']='TIPO_POI_DESCONHECIDO'; return out
+
+
+def _kairos_shadow_log_poi(pair, zone, audit):
+    """Uma linha compacta por POI selecionado; falha de log nunca afeta trading."""
+    try:
+        print('[POI_SHADOW_AUDIT] '
+              f"pair={pair or 'NA'} tf={audit.get('tf')} tipo={audit.get('tipo')} pass={audit.get('pass')} "
+              f"reason={audit.get('reason')} zone=[{zone.get('bottom')},{zone.get('top')}] "
+              f"created={zone.get('created_ts') or zone.get('t')} flip={zone.get('flip_ts')} "
+              f"A={audit.get('source_a')} B={audit.get('source_mid')} C={audit.get('source_c')} FLIP={audit.get('flip_candle')}")
+    except Exception as exc:
+        print(f'[POI_SHADOW_AUDIT_ERR] {exc}')
+
+
 def _kairos_retest_zone(candles, zone, after_ts):
     if not zone:
         return None
@@ -12004,6 +12078,13 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
     zone=_kairos_select_entry_zone(exec_candles,sweep,structure,mapa)
     if not zone:
         resultado['failure_reason']='SEM_FVG_IFVG_OB_M15_CAUSAL'; return resultado
+    # SHADOW ONLY: prova matemática/causal do POI escolhido. Não bloqueia nem altera sinal.
+    try:
+        poi_shadow=_kairos_shadow_validate_poi(zone, exec_candles, sweep=sweep, structure=structure, tf='M15')
+        resultado['poi_shadow_audit']=poi_shadow
+        _kairos_shadow_log_poi(None, zone, poi_shadow)
+    except Exception as _poi_shadow_exc:
+        resultado['poi_shadow_audit']={'shadow_only':True,'pass':False,'reason':f'AUDIT_EXCEPTION:{_poi_shadow_exc}'}
     resultado['zone_type']=zone['tipo']; resultado['zone_top']=round(zone['top'],6); resultado['zone_bottom']=round(zone['bottom'],6)
     resultado['zone_source']=f"{zone['tipo']}_M15_APOS_SWEEP"; resultado['liquidity_inside_zone']=zone.get('liquidity_inside',[])
     # Auditoria causal da zona: não altera seleção/entrada; apenas expõe os candles exatos.

@@ -277,6 +277,7 @@ def check_alerts_inline():
 
 init_db()
 scalp_engine.init_paper_trading_v2_db(DB_FILE)
+app.register_blueprint(scalp_engine.explicacao_bp)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # AUDITORIA BTC — execução automática UMA VEZ por arranque

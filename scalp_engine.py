@@ -179,7 +179,6 @@ def _db_file_explicacao():
     return current_app.config.get('DB_FILE') or current_app.config.get('DB_PATH', '/data/alerts.db')
 
 
-@explicacao_bp.route("/scalp/sinal/<signal_id>/explicacao", methods=["GET"])
 def _remover_candle_em_formacao(candles, interval_label):
     """
     Remove o último candle se ele ainda estiver em formação — checado por

@@ -193,17 +193,34 @@ def _remover_candle_em_formacao(candles, interval_label):
     return candles, False
 
 
+def _kairos_candle_close_ts(open_ts, interval_label):
+    """Fecho causal do kline Bybit. Mês usa calendário UTC real, não 30 dias fixos."""
+    if interval_label == 'M':
+        dt=datetime.fromtimestamp(open_ts / 1000, tz=timezone.utc)
+        if dt.month == 12:
+            nxt=datetime(dt.year + 1, 1, 1, tzinfo=timezone.utc)
+        else:
+            nxt=datetime(dt.year, dt.month + 1, 1, tzinfo=timezone.utc)
+        return int(nxt.timestamp() * 1000)
+    dur=INTERVALO_MS_POR_LABEL.get(interval_label)
+    return open_ts + dur if dur is not None else None
+
+
 def _kairos_candles_fechados_ate(candles, interval_label, cutoff_ts):
     """Snapshot causal: só devolve candles cujo FECHO já era conhecido no cutoff.
 
     Bybit usa timestamp de ABERTURA em kline.t. Portanto c['t'] <= cutoff
-    não basta: o OHLC final só pode entrar quando abertura + duração <= cutoff.
-    Para replay M5, cutoff representa o instante após o fecho do candle M5 avaliado.
+    não basta: o OHLC final só pode entrar quando o candle fechou.
     """
-    dur=INTERVALO_MS_POR_LABEL.get(interval_label)
-    if not candles or dur is None:
+    if not candles:
         return []
-    return [c for c in candles if c.get('t') is not None and c['t'] + dur <= cutoff_ts]
+    out=[]
+    for candle in candles:
+        ts=candle.get('t')
+        close_ts=_kairos_candle_close_ts(ts, interval_label) if ts is not None else None
+        if close_ts is not None and close_ts <= cutoff_ts:
+            out.append(candle)
+    return out
 
 
 def _deduplicar_e_ordenar_candles(candles):

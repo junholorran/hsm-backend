@@ -4252,24 +4252,6 @@ def gerenciar_trades_abertos(db_file, pair, exec_candles, table, send_telegram_f
                 msg += f"💡 Sugestão: mova o Stop pra entrada ({entry}) — trava o risco em zero, deixa o resto correr\n"
                 msg += f"📍 Preço atual: {round(preco_atual, 6)}"
                 send_telegram_fn(msg)
-def _save_rapido_signal(db_file, pair, exec_tf_label, resultado, alerted):
-    try:
-        signal_id = f"rapido_{pair}_{int(time.time()*1000)}"
-        with sqlite3.connect(db_file) as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                INSERT INTO scalp_rapido_signal_state (id, pair, created_at, exec_tf, direcao, entry, sl, tp, zona_tipo, alerted)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (
-                signal_id, pair, int(time.time()), exec_tf_label,
-                resultado['direcao'], resultado['entry'], resultado['sl'], resultado['tp'],
-                resultado.get('zona_tipo'), 1 if alerted else 0,
-            ))
-            conn.commit()
-    except Exception as e:
-        print(f"[scalp_engine] erro ao salvar signal rápido de {pair}: {e}")
-
-
 def detect_sweep_zona_diaria_movel(exec_candles, zona_diaria, lookback=10):
     resistencia = zona_diaria['resistencia']
     suporte = zona_diaria['suporte']
@@ -4294,68 +4276,6 @@ def detect_sweep_zona_diaria_movel(exec_candles, zona_diaria, lookback=10):
 
 
 CASCATA_COOLDOWN_SECONDS = 30 * 60
-
-
-def _save_cascata_signal(db_file, pair, exec_tf_label, resultado, alerted):
-    try:
-        signal_id = f"cascata_{pair}_{int(time.time()*1000)}"
-        with sqlite3.connect(db_file) as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                INSERT INTO scalp_cascata_signal_state
-                    (id, pair, created_at, exec_tf, direcao, entry, sl, tp,
-                     bias_semanal, bias_d1, bias_h4, bias_h1, evento_tipo, alerted)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (
-                signal_id, pair, int(time.time()), exec_tf_label,
-                resultado['direcao'], resultado['entry'], resultado['sl'], resultado['tp'],
-                resultado.get('bias_semanal'), resultado.get('bias_d1'),
-                resultado.get('bias_h4'), resultado.get('bias_h1'),
-                resultado.get('evento_tipo'), 1 if alerted else 0,
-            ))
-            conn.commit()
-    except Exception as e:
-        print(f"[scalp_engine] erro ao salvar signal cascata de {pair}: {e}")
-
-
-
-
-RSI_EXTREMO_BAIXA = 20
-RSI_EXTREMO_ALTA = 80
-LIQUIDEZ_LOOKBACK = 40
-RR_FIXO_ANTECIPADO = 2.0
-ANTECIPADO_SWEEP_LOOKBACK = 10
-
-
-def _save_antecipado_signal(db_file, pair, exec_tf_label, resultado, alerted):
-    try:
-        signal_id = f"antecip_{pair}_{int(time.time()*1000)}"
-        with sqlite3.connect(db_file) as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                INSERT INTO scalp_antecipado_signal_state
-                    (id, pair, created_at, exec_tf, direcao, rsi, liquidez_varrida, entry, sl, tp, alerted, divergencia_rsi)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (
-                signal_id, pair, int(time.time()), exec_tf_label,
-                resultado['direcao'], resultado['rsi'], resultado['liquidez_varrida'],
-                resultado['entry'], resultado['sl'], resultado['tp'], 1 if alerted else 0,
-                1 if resultado.get('divergencia_rsi') else 0,
-            ))
-            conn.commit()
-    except Exception as e:
-        print(f"[scalp_engine] erro ao salvar signal antecipado de {pair}: {e}")
-
-
-
-
-VOTOS_MINIMOS_SINAL = 8
-ATR_MULT_STOP = 1.5
-RR_INDICADORES = 2.0
-
-VWAP_POC_MIN_DIST_PCT = 0.003
-EMA_SLOPE_MIN_PCT = 0.001
-MONTE_CARLO_GATE_VOTE_MIN_PROB = 62
 
 
 def _votos_indicadores(indicadores, preco_atual):
@@ -5203,16 +5123,6 @@ def salvar_explicacao_ultimo_sinal(db_file, modo, pair, resultado, regime_info=N
 
 
 
-def process_pair_4camadas_com_explicacao(db_file, pair, d1_candles, h4_candles, h1_candles, exec_candles,
-                                           exec_tf_label, send_telegram_fn=None):
-    resultado = process_pair_4camadas(db_file, pair, d1_candles, h4_candles, h1_candles, exec_candles,
-                                       exec_tf_label, send_telegram_fn)
-    salvar_explicacao_ultimo_sinal(db_file, '4camadas', pair, resultado, exec_candles=exec_candles)
-    return resultado
-
-
-
-
 def process_pair_gates_vortex_com_explicacao(db_file, pair, candles_por_tf, exec_tf_label='M5',
                                                send_telegram_fn=None):
     resolver_expirados_gates_vortex(db_file, pair)
@@ -5445,21 +5355,6 @@ def sfp_telemetria_endpoint():
 
 
 @explicacao_bp.route("/scalp_gates_vortex/diagnostico_sfp", methods=["GET"])
-def diagnostico_sfp_gates_vortex():
-    """
-    Estado mais recente e detalhado da análise de SFP por par: liquidez
-    calculada, se tocou, se fechou fora, se voltou, candle responsável.
-    Responde objetivamente os Casos A-E (nunca tocou / tocou sem reclaim /
-    breakout / SFP confirmado / sem dados). 'pair' opcional filtra 1 par.
-    """
-    pair = request.args.get('pair')
-    try:
-        report = sfp_diagnostico_report(_db_file_explicacao(), pair=pair)
-    except Exception as e:
-        return jsonify({"erro": str(e)}), 500
-    return jsonify(report)
-
-
 def audit_breakout_cancel_report(db_file):
     """
     Roda as 4 análises combinadas sobre audit_breakout_cancel:
@@ -16871,48 +16766,6 @@ def _identificar_liquidez_alvo_m15(m15_ate_agora, bias):
         'liquidez_evento_ts': escolhido['evento_ts'],
         'tipo': escolhido['tipo'],
     }
-
-def _contexto_htf_cascata_kairos(d1, h4, h1, m15):
-    """
-    CONTEXTO HTF EM CASCATA — item aprovado do ticket, correcao de
-    escopo. NAO e so M15. Reaproveita compute_htf_narrative()
-    (D1->H4->H1, hierarquia estrita, ja existente, sem alteracao) e
-    adiciona o refinamento final em M15 (item 4 do seu desenho:
-    'refinamento FINAL do contexto, estrutura local, zona de
-    interesse, liquidez que queremos que o preco busque').
-
-    Retorna None se o contexto D1->H4->H1 nao tiver forca suficiente
-    (bias NEUTRAL ou strength WEAK) OU se o M15 nao concordar com a
-    direcao do contexto HTF -- SEM TRADE nesse caso, nao forca nada.
-    """
-    htf = compute_htf_narrative(d1, h4, h1)
-    if htf['bias'] not in ('LONG', 'SHORT'):
-        return None, 'HTF_NEUTRO'
-    if htf['strength'] == 'WEAK':
-        return None, 'HTF_FRACO'
-
-    bias_alta_baixa = 'alta' if htf['bias'] == 'LONG' else 'baixa'
-
-    if len(m15) < 55:
-        return None, 'M15_INSUFICIENTE'
-    m15_bias = compute_lux_structure_bias(m15, swing_size=50)
-    if m15_bias != bias_alta_baixa:
-        return None, 'M15_NAO_CONFIRMA_HTF'
-
-    liquidez_alvo = _identificar_liquidez_alvo_m15(m15, bias_alta_baixa)
-    if not liquidez_alvo:
-        return None, 'SEM_LIQUIDEZ_M15_IDENTIFICAVEL'
-
-    return {
-        'bias': bias_alta_baixa,
-        'htf_bias_label': htf['bias'],
-        'htf_strength': htf['strength'],
-        'htf_alignment': htf['alignment'],
-        'htf_premium_discount': htf['premium_discount'],
-        'm15_bias_confirma': True,
-        'liquidez_alvo': liquidez_alvo,
-    }, None
-
 
 def _confirmar_reteste_com_rejeicao(candles_pos_zona, zona_top, zona_bottom, direcao):
     """

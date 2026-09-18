@@ -1278,10 +1278,16 @@ def _kairos_select_structural_first_capture_sweep(candles_por_tf, now_ts):
     valid=[x for x in candidates if x.get('status')=='VALID_FIRST_CAPTURE_NEUTRAL' and 0 <= x['age_ms'] <= max_age.get(x['liquidity_tf'],5*3600000)]
     if not valid:
         return None, {'levels':levels,'candidates':candidates}
-    # Hierarquia primeiro, recência apenas dentro da mesma classe estrutural.
-    # Assim um evento local mais novo nunca atropela W1/D1/H4.
-    valid.sort(key=lambda x:(KAIROS_PRIMARY_LIQUIDITY_PRIORITY.get(x['liquidity_tf'],0),x['sweep_ts']), reverse=True)
-    return valid[0], {'levels':levels,'setup_levels':setup_levels,'candidates':candidates}
+    # Hierarquia estrutural sem deixar uma captura HTF velha bloquear para sempre
+    # uma tese mais recente. A prioridade vale entre eventos ainda pertencentes
+    # ao MESMO contexto temporal; fora disso, recência causal vence.
+    # W1/D1 podem naturalmente viver mais; H4/H1 têm janelas menores acima.
+    valid.sort(key=lambda x:x['sweep_ts'], reverse=True)
+    newest_ts=valid[0]['sweep_ts']
+    context_window_ms=4*3600000
+    contemporaneous=[x for x in valid if newest_ts-x['sweep_ts'] <= context_window_ms]
+    contemporaneous.sort(key=lambda x:(KAIROS_PRIMARY_LIQUIDITY_PRIORITY.get(x['liquidity_tf'],0),x['sweep_ts']), reverse=True)
+    return contemporaneous[0], {'levels':levels,'setup_levels':setup_levels,'candidates':candidates}
 
 
 def _kairos_direction_after_first_capture(candles, capture, swing_size=5):

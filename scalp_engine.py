@@ -1,7 +1,4 @@
-# scalp_engine.py
-# ─────────────────────────────────────────────────────────────────────────
-# Motor de Scalp Ao Vivo — aditivo, não mexe em nada do cascade_engine.
-# ─────────────────────────────────────────────────────────────────────────
+# scalp_engine.py — KAIROS Paper V2.2 causal engine
 
 import sqlite3
 import hashlib
@@ -15,33 +12,11 @@ from flask import Blueprint, jsonify, current_app, request
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 
-SCORE_THRESHOLD_SINAL = 75
-COOLDOWN_SECONDS = 45 * 60
-TOLERANCIA_CLUSTER_PCT = 0.006
-MIN_EVENTOS_BANDA = 2
-MIN_FVG_GAP_PCT = 0.0005
-MIN_CANDLE_BODY_RATIO = 0.35
 STOP_BUFFER_PCT = 0.001
-D1_LOOKBACK_DIAS = 200
-ZONA_FORTE_TOLERANCIA_PCT = 0.0015
-ZONA_FORTE_MIN_TOQUES = 3
-SCALP_RAPIDO_COOLDOWN_SECONDS = 5 * 60
-ZONA_MOVEL_LOOKBACK = 20
-ZONA_MOVEL_MAX_LARGURA_PCT = 0.01
-SWING_LOOKBACK = 5
-SWEEP_MEMORY_MAX_AGE_SECONDS = 12 * 3600
+ATR_BUFFER_MULT = 0.25
 
-REGIME_ADX_THRESHOLD = 20
-REGIME_GATE_ATIVO = True
-
-MIN_RR_GATE = 1.5
-RR_GATE_ATIVO = True
-
-RR_TARGET_NORMAL = 2.5
-RR_TARGET_CONTINUACAO = 2.5
-RR_TARGET_RAPIDO = 2.0
-RR_TARGET_CASCATA = 3.0
-
+explicacao_bp = Blueprint('kairos_v2', __name__)
+INTERVALO_MS_POR_LABEL = {'M': 2592000000, 'W': 604800000, 'D': 86400000, '240': 14400000, '60': 3600000, '30': 1800000, '15': 900000, '5': 300000, '1': 60000}
 
 
 def _extrair_swings_lux_algo(candles, swing_size=50):
@@ -165,8 +140,6 @@ def aplicar_buffer_stop(nivel, direcao, buffer_pct=STOP_BUFFER_PCT):
         return nivel * (1 - buffer_pct)
     return nivel * (1 + buffer_pct)
 
-
-ATR_BUFFER_MULT = 0.25
 
 
 def aplicar_buffer_stop_atr(nivel, direcao, exec_candles, atr_mult=ATR_BUFFER_MULT, fallback_pct=STOP_BUFFER_PCT):

@@ -549,6 +549,11 @@ def _agregar_mfe_mae(lista_medicoes, janelas):
     return resultado
 
 
+KAIROS_SWEEP_LEFT = 20
+KAIROS_SWEEP_RIGHT = 20
+KAIROS_SWEEP_CONFIRM_BARS = 3
+
+
 def _kairos_confirmed_pivots(candles, left=KAIROS_SWEEP_LEFT, right=KAIROS_SWEEP_RIGHT):
     """Pivôs simétricos estilo Sweep Institutional, mas com causalidade explícita.
     O preço do pivô pertence ao candle origin_idx; ele só fica elegível em

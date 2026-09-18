@@ -276,25 +276,7 @@ def check_alerts_inline():
 
 
 init_db()
-scalp_engine.init_scalp_db(DB_FILE)
-scalp_engine.init_explicacao_db(DB_FILE)
-# ── FIX (13/08): faltavam estas 5 chamadas de inicialização de tabela.
-# Sem elas, scalp_gates_vortex_signal_state, scalp_4camadas_signal_state,
-# scalp_sfp_liquidez_signal_state e as tabelas de diagnóstico/cluster de
-# SFP nunca eram criadas no boot — só existiam se algum código auto-
-# blindado (tipo _garantir_tabela_diagnostico_gates_vortex) criasse por
-# conta própria em algum caminho específico. gerenciar_trades_abertos()
-# e process_pair_gates_vortex()/process_pair_4camadas() tentavam ler/
-# gravar nessas tabelas todo ciclo e falhavam com "no such table" — é
-# exatamente o erro visto no log do Railway. Bug pré-existente, não
-# relacionado à remoção do filtro de horário tóxico. ──
-scalp_engine.init_gates_vortex_db(DB_FILE)
-scalp_engine.init_4camadas_db(DB_FILE)
-scalp_engine.init_sfp_liquidez_db(DB_FILE)
-scalp_engine.init_sfp_diagnostico_db(DB_FILE)
-scalp_engine.init_sfp_cluster_db(DB_FILE)
-
-app.register_blueprint(scalp_engine.explicacao_bp)
+scalp_engine.init_paper_trading_v2_db(DB_FILE)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # AUDITORIA BTC — execução automática UMA VEZ por arranque
@@ -1096,20 +1078,6 @@ LIVE_SYMBOL_MAP = {
     'FILUSD': 'FILUSDT', 'HBARUSD': 'HBARUSDT', 'ICPUSD': 'ICPUSDT',
     'LTCUSD': 'LTCUSDT', 'ATOMUSD': 'ATOMUSDT', 'ENSUSD': 'ENSUSDT', 'FETUSD': 'FETUSDT',
 }
-# ── CORREÇÃO M1: adicionado 'M1': '1'. Antes, M1 nunca era buscado no
-# loop principal de run_live_cycle — só era buscado à parte quando
-# exec_tf=='M1', e nesse caminho o resultado NUNCA era gravado em
-# candles_por_tf_cache. Resultado: candles_por_tf_gates['M1'] chegava
-# sempre None no gates_vortex, mesmo com exec_tf='M1' configurado. ──
-LIVE_TF_INTERVALS = {'W': 'W', 'D1': 'D', 'H4': '240', 'H1': '60', 'M15': '15', 'M5': '5', 'M1': '1'}
-AUTO_ALERT_SCORE_THRESHOLD = 65
-
-LIVE_TF_CANDLE_LIMIT = {
-    'D1': 300,
-}
-DEFAULT_CANDLE_LIMIT = 200
-
-
 def fetch_bybit_klines(symbol, interval, limit=200):
     url = 'https://api.bybit.com/v5/market/kline'
     params = {'category': 'linear', 'symbol': symbol, 'interval': interval, 'limit': limit}

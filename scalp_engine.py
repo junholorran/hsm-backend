@@ -4,13 +4,10 @@ import sqlite3
 import hashlib
 import time
 import os
-import random
 import requests
 import json
-import threading
 from flask import Blueprint, jsonify, current_app, request
 from datetime import datetime, timezone, timedelta
-from zoneinfo import ZoneInfo
 
 STOP_BUFFER_PCT = 0.001
 ATR_BUFFER_MULT = 0.25
@@ -317,7 +314,7 @@ def _percentil(valores_ordenados, p):
 
 def _resolver_tp_sl_futuro(candles_gatilho_futuros, direcao, entry, sl, tp1, tp2, max_candles):
     """
-    Réplica do padrão já usado em _avaliar_qualidade_sfp_evento(): anda
+    Cálculo causal de momentum: anda
     candle a candle nos candles FUTUROS reais (nunca usa preço do
     momento em que o replay roda), verifica qual nível é atingido
     primeiro. Sem lookahead: só olha pra frente do candle de entrada,
@@ -383,7 +380,7 @@ def _resolver_tp_sl_futuro(candles_gatilho_futuros, direcao, entry, sl, tp1, tp2
 def _medir_mfe_mae_janela(candles_futuros, direcao, entry, janela):
     """
     Mede MFE/MAE numa única janela, reaproveitando exatamente a mesma
-    fórmula já usada em _avaliar_qualidade_sfp_evento() (não duplicada
+    fórmula causal compartilhada (não duplicada
     por reimplementação diferente, só reescrita isolada pra aceitar
     qualquer janela, não só as fixas de HORIZONTES_CANDLES). Se houver
     menos candles disponíveis que a janela pedida, NÃO inventa dado —
@@ -768,7 +765,7 @@ def _kairos_pool_poi_overlaps(pool, zones=None, order_blocks=None):
 
 
 def _kairos_pool_sweeps(candles, pools):
-    """Sweep/SFP contra POOLS confirmados (não contra swing isolado).
+    """Sweep contra POOLS confirmados (não contra swing isolado).
     Algoryze-style: atravessa o pool, recupera o nível médio no próprio candle
     e mantém 3 fechamentos do lado recuperado. Cada pool gera no máximo 1 evento.
     """
@@ -2234,7 +2231,7 @@ def replay_vortex_decision_layer_v2(pair, dias_historico=7, janelas_mfe_mae=JANE
         'nota_metodologica': (
             'REPLAY SOMENTE AUDITORIA — MESMA avaliar_vortex_decision_layer_v2() V2.2 usada pelo Paper/Forward, '
             'com mapa MN/W1/D1/H4/H1/M30/M15/M5/M1 truncado causalmente. Não altera a matemática causal de MSS/CHoCH, FVG/IFVG/OB, '
-            'SL/TP existentes, gates ou motores legados removidos. Mesma '
+            'SL/TP existentes. Mesma '
             'metodologia causal já aprovada — cada ciclo só enxerga candles com t <= ts_corte. '
             'Sinais deduplicados por (choch_timestamp, direction, zone_type) — o mesmo CHoCH pode '
             'permanecer "válido" em vários ciclos M5 consecutivos até ser invalidado.'

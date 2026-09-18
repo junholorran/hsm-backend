@@ -292,207 +292,6 @@ KILLZONES = [
 ]
 
 
-def init_scalp_db(db_file):
-    with sqlite3.connect(db_file) as conn:
-        cursor = conn.cursor()
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS scalp_watch (
-                pair TEXT PRIMARY KEY,
-                exec_tf TEXT DEFAULT 'M5',
-                enabled INTEGER DEFAULT 1,
-                created_at INTEGER DEFAULT 0
-            )
-        ''')
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS scalp_zone_state (
-                pair TEXT PRIMARY KEY,
-                zona_top REAL,
-                zona_bottom REAL,
-                fase TEXT,
-                sweep_ts INTEGER,
-                sweep_nivel REAL,
-                sweep_lado TEXT,
-                choch_ts INTEGER,
-                choch_nivel REAL,
-                updated_at INTEGER
-            )
-        ''')
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS scalp_signal_state (
-                id TEXT PRIMARY KEY,
-                pair TEXT,
-                created_at INTEGER,
-                exec_tf TEXT,
-                direcao TEXT,
-                score INTEGER,
-                entry REAL,
-                sl REAL,
-                tp REAL,
-                na_killzone INTEGER,
-                alerted INTEGER DEFAULT 0
-            )
-        ''')
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS scalp_antecipado_signal_state (
-                id TEXT PRIMARY KEY,
-                pair TEXT,
-                created_at INTEGER,
-                exec_tf TEXT,
-                direcao TEXT,
-                rsi REAL,
-                liquidez_varrida REAL,
-                entry REAL,
-                sl REAL,
-                tp REAL,
-                alerted INTEGER DEFAULT 0
-            )
-        ''')
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS scalp_indicadores_signal_state (
-                id TEXT PRIMARY KEY,
-                pair TEXT,
-                created_at INTEGER,
-                exec_tf TEXT,
-                direcao TEXT,
-                score INTEGER,
-                votos_favor INTEGER,
-                votos_total INTEGER,
-                entry REAL,
-                sl REAL,
-                tp REAL,
-                alerted INTEGER DEFAULT 0
-            )
-        ''')
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS scalp_zone_state_continuacao (
-                pair TEXT PRIMARY KEY,
-                zona_top REAL,
-                zona_bottom REAL,
-                fase TEXT,
-                sweep_ts INTEGER,
-                sweep_nivel REAL,
-                sweep_lado TEXT,
-                choch_ts INTEGER,
-                choch_nivel REAL,
-                updated_at INTEGER
-            )
-        ''')
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS scalp_signal_state_continuacao (
-                id TEXT PRIMARY KEY,
-                pair TEXT,
-                created_at INTEGER,
-                exec_tf TEXT,
-                direcao TEXT,
-                score INTEGER,
-                entry REAL,
-                sl REAL,
-                tp REAL,
-                na_killzone INTEGER,
-                alerted INTEGER DEFAULT 0
-            )
-        ''')
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS scalp_filtros_shadow (
-                id TEXT PRIMARY KEY,
-                pair TEXT,
-                created_at INTEGER,
-                exec_tf TEXT,
-                direcao TEXT,
-                score INTEGER,
-                entry REAL,
-                sl REAL,
-                tp REAL,
-                filtros_que_bloqueariam TEXT,
-                resultado TEXT DEFAULT 'pendente'
-            )
-        ''')
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS scalp_rapido_signal_state (
-                id TEXT PRIMARY KEY,
-                pair TEXT,
-                created_at INTEGER,
-                exec_tf TEXT,
-                direcao TEXT,
-                entry REAL,
-                sl REAL,
-                tp REAL,
-                zona_tipo TEXT,
-                alerted INTEGER DEFAULT 0
-            )
-        ''')
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS scalp_cascata_signal_state (
-                id TEXT PRIMARY KEY,
-                pair TEXT,
-                created_at INTEGER,
-                exec_tf TEXT,
-                direcao TEXT,
-                entry REAL,
-                sl REAL,
-                tp REAL,
-                bias_semanal TEXT,
-                bias_d1 TEXT,
-                bias_h4 TEXT,
-                bias_h1 TEXT,
-                evento_tipo TEXT,
-                alerted INTEGER DEFAULT 0
-            )
-        ''')
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS scalp_cascata_zone_state (
-                pair TEXT PRIMARY KEY,
-                zona_top REAL,
-                zona_bottom REAL,
-                fase TEXT,
-                sweep_ts INTEGER,
-                sweep_nivel REAL,
-                sweep_lado TEXT,
-                choch_ts INTEGER,
-                choch_nivel REAL,
-                updated_at INTEGER
-            )
-        ''')
-        conn.commit()
-        try:
-            cursor.execute("ALTER TABLE scalp_antecipado_signal_state ADD COLUMN divergencia_rsi INTEGER DEFAULT 0")
-            conn.commit()
-        except Exception:
-            pass
-        try:
-            cursor.execute("ALTER TABLE scalp_filtros_shadow ADD COLUMN resultado TEXT DEFAULT 'pendente'")
-            conn.commit()
-        except Exception:
-            pass
-        tabelas_com_gestao = [
-            'scalp_signal_state', 'scalp_signal_state_continuacao',
-            'scalp_rapido_signal_state', 'scalp_cascata_signal_state',
-            'scalp_antecipado_signal_state', 'scalp_indicadores_signal_state',
-        ]
-        for tabela in tabelas_com_gestao:
-            for alter_sql in [
-                f"ALTER TABLE {tabela} ADD COLUMN be_movido INTEGER DEFAULT 0",
-                f"ALTER TABLE {tabela} ADD COLUMN parcial_feita INTEGER DEFAULT 0",
-                f"ALTER TABLE {tabela} ADD COLUMN status_gestao TEXT DEFAULT ''",
-                f"ALTER TABLE {tabela} ADD COLUMN resultado_final TEXT DEFAULT 'pendente'",
-            ]:
-                try:
-                    cursor.execute(alter_sql)
-                    conn.commit()
-                except Exception:
-                    pass
-
-        tabelas_com_motivo = [
-            'scalp_signal_state', 'scalp_signal_state_continuacao', 'scalp_indicadores_signal_state',
-        ]
-        for tabela in tabelas_com_motivo:
-            try:
-                cursor.execute(f"ALTER TABLE {tabela} ADD COLUMN motivo_score TEXT DEFAULT ''")
-                conn.commit()
-            except Exception:
-                pass
-
-
 def is_in_killzone(now_utc=None):
     now_utc = now_utc or datetime.now(timezone.utc)
     pt_hour = (now_utc + timedelta(hours=PT_UTC_OFFSET_HOURS)).hour
@@ -1080,80 +879,6 @@ def find_equal_highs_lows_luxalgo(candles, length=3, atr_mult=0.1, atr_period=20
         {'tipo': 'EQH' if g['tipo'] == 'high' else 'EQL', 'nivel': round(g['nivel'], 6), 'toques': len(g['pontos'])}
         for g in grupos if len(g['pontos']) >= 2
     ]
-
-
-def avaliar_legacy_decision_layer(candles_swing, candles_exec):
-    """
-    Espelho de avaliar_vortex_decision_layer(), mas usando SÓ as funções
-    LEGADAS do Kairos (as que já existiam antes deste ticket), pra dar
-    uma comparação maçã-com-maçã contra o caminho LUXALGO/VORTEX:
-      - bias: compute_lux_structure_bias() — ATENÇÃO: essa função JÁ
-        EXISTIA antes deste ticket e já era matematicamente idêntica ao
-        leg() do LuxAlgo (confirmado na auditoria). Por isso o campo
-        'bias' aqui SEMPRE vai bater com o bias do caminho LUXALGO —
-        isso não é bug, é o resultado esperado de uma peça que já
-        estava correta antes de qualquer mudança.
-      - zona: compute_premium_discount()/compute_zona_movel() — janela
-        fixa de 20 candles, split 50/50 (diferente do trailing dinâmico
-        do LuxAlgo).
-      - choch: precisa de um 'sweep' — usa detect_sweep_in_zone() sobre
-        a mesma zona legada, depois detect_choch_after_sweep(). Esse é
-        o mecanismo SWEEP_BASED_CHoCH, oficialmente distinto do
-        LUX_INTERNAL_CHoCH.
-      - fvg: find_open_fvgs() — threshold fixo.
-    Também NUNCA gera entrada — mesma restrição do caminho Vortex,
-    porque SL/TP legado (calcular_sl_estrito) pertence a um pipeline
-    diferente (SFP causal) que não faz parte deste comparativo
-    estrutural. Não decide nada de produção, não chama
-    process_pair_gates_vortex() nem process_pair_4camadas().
-    """
-    resultado = {
-        'decisao': 'SEM_ENTRADA', 'motivo_rejeicao': None,
-        'bias': None, 'zona': None, 'choch': None, 'fvg_candidatos': [],
-        'entry': None, 'sl': None, 'tp': None,
-    }
-
-    bias = compute_lux_structure_bias(candles_swing, swing_size=50)
-    resultado['bias'] = bias
-    if bias == 'neutro':
-        resultado['motivo_rejeicao'] = 'BIAS_FAIL'
-        return resultado
-
-    zona_calc = compute_premium_discount(candles_swing)
-    preco_atual = candles_swing[-1]['c'] if candles_swing else None
-    zona = None
-    if zona_calc and preco_atual is not None:
-        if preco_atual >= zona_calc['equilibrium']:
-            zona = 'premium'
-        else:
-            zona = 'discount'
-    resultado['zona'] = zona
-
-    if bias == 'alta' and zona != 'discount':
-        resultado['motivo_rejeicao'] = 'ZONE_FAIL'
-        return resultado
-    if bias == 'baixa' and zona != 'premium':
-        resultado['motivo_rejeicao'] = 'ZONE_FAIL'
-        return resultado
-
-    sweep = detect_sweep_in_zone(candles_exec, zona_calc) if zona_calc else None
-    choch = detect_choch_after_sweep(candles_exec, sweep) if sweep else None
-    resultado['choch'] = choch
-    if not choch or choch['direcao'] != bias:
-        resultado['motivo_rejeicao'] = 'NO_CHOCH'
-        return resultado
-
-    fvgs = find_open_fvgs(candles_exec)
-    tipo_fvg_desejado = 'FVG_bullish' if bias == 'alta' else 'FVG_bearish'
-    candidatos = [f for f in fvgs if f['tipo'] == tipo_fvg_desejado]
-    resultado['fvg_candidatos'] = candidatos
-
-    if not candidatos:
-        resultado['motivo_rejeicao'] = 'NO_VALID_FVG'
-        return resultado
-
-    resultado['motivo_rejeicao'] = 'FVG_CHOCH_RELATION_UNKNOWN'
-    return resultado
 
 
 def avaliar_vortex_decision_layer(candles_swing, candles_internal, direcao_desejada=None):
@@ -2372,45 +2097,6 @@ def _save_signal(db_file, pair, exec_tf_label, resultado, alerted, table='scalp_
         print(f"[scalp_engine] erro ao salvar signal de {pair} ({table}): {e}")
 
 
-def scalp_signal_history(db_file, pair=None, limit=30, table='scalp_signal_state'):
-    try:
-        with sqlite3.connect(db_file) as conn:
-            cursor = conn.cursor()
-            if pair:
-                cursor.execute(f'''
-                    SELECT id, pair, created_at, exec_tf, direcao, score, entry, sl, tp, na_killzone, alerted
-                    FROM {table} WHERE pair=? ORDER BY created_at DESC LIMIT ?
-                ''', (pair, limit))
-            else:
-                cursor.execute(f'''
-                    SELECT id, pair, created_at, exec_tf, direcao, score, entry, sl, tp, na_killzone, alerted
-                    FROM {table} ORDER BY created_at DESC LIMIT ?
-                ''', (limit,))
-            rows = cursor.fetchall()
-
-        signals = []
-        for r in rows:
-            signals.append({
-                'id': r[0], 'pair': r[1], 'created_at': r[2], 'exec_tf': r[3],
-                'direcao': r[4], 'score': r[5], 'entry': r[6], 'sl': r[7], 'tp': r[8],
-                'na_killzone': bool(r[9]), 'alerted': bool(r[10]),
-            })
-        return {'signals': signals}
-    except Exception as e:
-        print(f"[scalp_engine] erro ao gerar histórico de {pair} ({table}): {e}")
-        return {'signals': [], 'error': str(e)}
-# ═══════════════════════════════════════════════════════════════════════
-# TP DINÂMICO — decisão explícita do usuário (10/08): nada de RR fixo
-# tipo "sempre 2.5x". O alvo passa a vir da análise real do gráfico —
-# a próxima liquidez de verdade (zona D1 oposta, Order Block, Equal
-# Highs/Lows) que o preço tem motivo real pra buscar. Só cai pro
-# Monte Carlo real (nunca decorativo) ou pro RR mínimo se não houver
-# nenhuma liquidez real mapeada na direção do trade.
-# ═══════════════════════════════════════════════════════════════════════
-
-TP_DINAMICO_MAX_RR = 6.0  # teto de sanidade — nunca mira mais que isso
-
-
 def _find_liquidez_alvo(direcao, entry, exec_candles, d1_candles):
     """Mapeia alvos que o preço realmente pode buscar primeiro.
 
@@ -2592,31 +2278,6 @@ def compute_session_high_low(candles, sessao, dias_atras=1):
     return {'high': max(highs), 'low': min(lows), 'sessao': sessao, 'dia': str(dia_alvo)}
 
 
-def detect_sfp_sessao(exec_candles, session_range):
-    """
-    Swing Failure Pattern contra o High/Low de uma sessão específica:
-    candle que ultrapassa o nível com o pavio mas FECHA de volta dentro
-    — a assinatura clássica de caça de liquidez SMC. Procura nos
-    últimos candles (mais recente primeiro).
-    """
-    if not session_range:
-        return None
-    high, low = session_range['high'], session_range['low']
-    for i in range(len(exec_candles) - 1, max(0, len(exec_candles) - 40), -1):
-        c = exec_candles[i]
-        if c['h'] > high and c['c'] < high:
-            return {
-                'index': i, 'tipo': 'SFP_bearish', 'nivel': high,
-                'sl_nivel': c['h'], 't': c['t'], 'sessao': session_range['sessao'],
-            }
-        if c['l'] < low and c['c'] > low:
-            return {
-                'index': i, 'tipo': 'SFP_bullish', 'nivel': low,
-                'sl_nivel': c['l'], 't': c['t'], 'sessao': session_range['sessao'],
-            }
-    return None
-
-
 def compute_wick_atr(candles, period=14):
     """ATR calculado só em cima do tamanho dos pavios (rejeição), não do
     range total do candle. Cripto costuma ter pavios muito mais longos
@@ -2670,68 +2331,6 @@ MSS_CORPO_MIN_PCT = 0.5  # corpo/range mínimo pra considerar "momentum forte"
 TP1_MIN_RR = 2.0
 TP2_MIN_RR = 3.0
 
-
-def init_sfp_liquidez_db(db_file):
-    with sqlite3.connect(db_file) as conn:
-        conn.execute('''
-            CREATE TABLE IF NOT EXISTS scalp_sfp_liquidez_signal_state (
-                id TEXT PRIMARY KEY,
-                pair TEXT,
-                created_at INTEGER,
-                exec_tf TEXT,
-                direcao TEXT,
-                entry REAL,
-                sl REAL,
-                tp1 REAL,
-                tp2 REAL,
-                bias_context TEXT,
-                resultado_final TEXT DEFAULT 'pendente',
-                alerted INTEGER DEFAULT 0
-            )
-        ''')
-        conn.commit()
-        # ── FIX (13/08): gerenciar_trades_abertos() é genérica e roda pra
-        # TODAS as tabelas de MODOS_SCALP, esperando as colunas tp,
-        # be_movido, parcial_feita em cada uma. Esta tabela só tinha
-        # tp1/tp2 (sem "tp") e não tinha be_movido/parcial_feita —
-        # causava "no such column" toda vez que o gerenciador rodava
-        # pra este modo. Adiciona as colunas que faltam; "tp" é
-        # preenchida no INSERT (ver _save_sfp_liquidez_signal) com o
-        # valor de tp1, que é o alvo primário usado pra resolver
-        # win/loss. ──
-        for alter_sql in [
-            "ALTER TABLE scalp_sfp_liquidez_signal_state ADD COLUMN tp REAL",
-            "ALTER TABLE scalp_sfp_liquidez_signal_state ADD COLUMN be_movido INTEGER DEFAULT 0",
-            "ALTER TABLE scalp_sfp_liquidez_signal_state ADD COLUMN parcial_feita INTEGER DEFAULT 0",
-            "ALTER TABLE scalp_sfp_liquidez_signal_state ADD COLUMN status_gestao TEXT DEFAULT ''",
-        ]:
-            try:
-                conn.execute(alter_sql)
-                conn.commit()
-            except Exception:
-                pass
-
-
-def _save_sfp_liquidez_signal(db_file, pair, exec_tf_label, resultado, alerted):
-    try:
-        signal_id = f"sfp_{pair}_{int(time.time()*1000)}"
-        with sqlite3.connect(db_file) as conn:
-            conn.execute('''
-                INSERT INTO scalp_sfp_liquidez_signal_state
-                    (id, pair, created_at, exec_tf, direcao, entry, sl, tp, tp1, tp2, bias_context, alerted)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (
-                signal_id, pair, int(time.time()), exec_tf_label,
-                resultado['direcao'], resultado['entry'], resultado['sl'],
-                resultado.get('tp1'), resultado['tp1'], resultado['tp2'], resultado.get('bias_context'),
-                1 if alerted else 0,
-            ))
-            conn.commit()
-    except Exception as e:
-        print(f"[scalp_engine sfp_liquidez] erro ao salvar sinal de {pair}: {e}")
-
-
-# ── PASSO 1: Bias via Midnight Open ─────────────────────────────────────
 
 def compute_bias_midnight_open_estrito(pair, candles_por_tf):
     """
@@ -2997,28 +2596,6 @@ def _registrar_diagnostico_sfp(db_file, pair, direcao_permitida, bias_context, d
             conn.commit()
     except Exception as e:
         print(f"[scalp_engine sfp_diag] erro ao registrar {pair}: {e}")
-
-
-def sfp_diagnostico_report(db_file, pair=None):
-    init_sfp_diagnostico_db(db_file)
-    try:
-        with sqlite3.connect(db_file) as conn:
-            cursor = conn.cursor()
-            if pair:
-                cursor.execute('SELECT pair, direcao_permitida, bias_context, payload_json, updated_at FROM scalp_gates_vortex_sfp_diagnostico WHERE pair=?', (pair,))
-            else:
-                cursor.execute('SELECT pair, direcao_permitida, bias_context, payload_json, updated_at FROM scalp_gates_vortex_sfp_diagnostico')
-            rows = cursor.fetchall()
-    except Exception as e:
-        return {'erro': str(e)}
-
-    resultado = {}
-    for p, direcao, bias_context, payload_json, updated_at in rows:
-        resultado[p] = {
-            'direcao_permitida': direcao, 'bias_context': bias_context,
-            'diagnostico': json.loads(payload_json), 'updated_at': updated_at,
-        }
-    return resultado
 
 
 def validar_sfp_cascata_tf(candles_por_tf, liquidez, direcao_permitida):
@@ -3346,79 +2923,6 @@ def _confianca_padrao_candle(padrao, exec_candles, idx=None):
     razao = max(pavio_sup, pavio_inf) / corpo
     confianca = min(95, round(50 + razao * 10))
     return confianca
-
-
-def init_gates_vortex_db(db_file):
-    with sqlite3.connect(db_file) as conn:
-        conn.execute('''
-            CREATE TABLE IF NOT EXISTS scalp_gates_vortex_signal_state (
-                id TEXT PRIMARY KEY,
-                pair TEXT,
-                created_at INTEGER,
-                exec_tf TEXT,
-                direcao TEXT,
-                score INTEGER,
-                entry REAL,
-                sl REAL,
-                tp1 REAL,
-                tp2 REAL,
-                resultado_final TEXT DEFAULT 'pendente',
-                alerted INTEGER DEFAULT 0
-            )
-        ''')
-        conn.execute('''
-            CREATE TABLE IF NOT EXISTS scalp_gates_vortex_diagnostico (
-                pair TEXT,
-                categoria TEXT,
-                contagem INTEGER DEFAULT 0,
-                ultimo_motivo TEXT,
-                updated_at INTEGER,
-                PRIMARY KEY (pair, categoria)
-            )
-        ''')
-        conn.commit()
-        # ── FIX (13/08): mesma causa do fix em init_sfp_liquidez_db —
-        # gerenciar_trades_abertos() espera tp/be_movido/parcial_feita
-        # em TODA tabela de MODOS_SCALP. Esta tabela só tinha tp1/tp2.
-        # "tp" é preenchida no INSERT (ver _save_gates_vortex_signal)
-        # com o valor de tp1 (alvo primário, usado pra resolver
-        # win/loss e pra BE/parcial). ──
-        for alter_sql in [
-            "ALTER TABLE scalp_gates_vortex_signal_state ADD COLUMN tp REAL",
-            "ALTER TABLE scalp_gates_vortex_signal_state ADD COLUMN be_movido INTEGER DEFAULT 0",
-            "ALTER TABLE scalp_gates_vortex_signal_state ADD COLUMN parcial_feita INTEGER DEFAULT 0",
-            "ALTER TABLE scalp_gates_vortex_signal_state ADD COLUMN status_gestao TEXT DEFAULT ''",
-        ]:
-            try:
-                conn.execute(alter_sql)
-                conn.commit()
-            except Exception:
-                pass
-
-
-# ── Classificação do motivo em categoria de gargalo ─────────────────────
-# Cada ciclo do gates_vortex termina com um `motivo` (texto livre). Isso
-# classifica esse texto num "balde" fixo, pra dar contagem real de ONDE
-# o pipeline está travando mais — sem isso, "não veio sinal" é um
-# palpite; com isso, vira um número.
-
-_CATEGORIAS_MOTIVO_GATES_VORTEX = [
-    ('hora_toxica', 'horário tóxico'),
-    ('dados_obsoletos', 'dados obsoletos'),
-    ('candles_insuficientes', 'candles insuficientes'),
-    ('sem_bias', 'calcular Midnight Open'),
-    ('sfp_breakout_cancelado', 'breakout_cancela_analise'),
-    ('sem_sfp', 'sem_sfp_ainda'),
-    ('sem_sfp', 'sem_liquidez_mapeada'),
-    ('sem_sfp', 'sem_candles_sfp'),
-    ('padrao_fraco', 'padrão de rejeição fraco'),
-    ('sem_candles_mss', 'pra validar MSS'),
-    ('sem_mss', 'sem MSS de corpo forte'),
-    ('sem_fvg', 'sem FVG real após a expansão'),
-    ('risco_invalido', 'risco calculado inválido'),
-    ('gates_reprovados', 'falhou nos gates'),
-    ('em_cooldown', 'em cooldown'),
-]
 
 
 def _classificar_motivo_gates_vortex(motivo):
@@ -3990,42 +3494,6 @@ def process_pair_gates_vortex(db_file, pair, candles_por_tf, exec_tf_label='M5',
     return resultado
 
 
-def formatar_saida_gates_json(resultado):
-    """Formato de saída EXATO pedido, no estilo do sistema de Gates."""
-    if resultado.get('status') != 'SIGNAL_DISPARADO':
-        return {'status': 'NEUTRAL', 'ativo': resultado.get('pair'), 'motivo': resultado.get('motivo'), 'gates': resultado.get('gates')}
-
-    return {
-        'status': 'SIGNAL_DISPARADO',
-        'ativo': resultado.get('pair'),
-        'sinal': 'COMPRA' if resultado.get('direcao') == 'alta' else 'VENDA',
-        'score': resultado.get('score'),
-        'confianca': f"{resultado.get('prob_acerto')}% (Monte Carlo, não calibrado)" if resultado.get('prob_acerto') is not None else None,
-        'prob_acerto': f"{resultado.get('prob_acerto')}%" if resultado.get('prob_acerto') is not None else None,
-        'risco_retorno': resultado.get('risco_recompensa'),
-        'execucao': {
-            'entrada': resultado.get('entry'),
-            'stop_loss': resultado.get('sl'),
-            'take_profit_1': resultado.get('tp1'),
-            'take_profit_2': resultado.get('tp2'),
-        },
-        'motivos_principais': {
-            'regime': resultado.get('regime'),
-            'estrutura': resultado.get('estrutura'),
-            'gatilho': resultado.get('gatilho'),
-            'tipo': 'CONTINUATION',
-            'padrao': f"{resultado.get('gatilho')} ({resultado.get('confianca_padrao')}%)" if resultado.get('gatilho') else None,
-        },
-        'contexto_mercado': {
-            'adx_14': resultado.get('adx'),
-            'volatilidade': resultado.get('volatilidade'),
-            'vies_contexto': resultado.get('vies_contexto'),
-            'atr_multiplo': resultado.get('atr_multiplo'),
-        },
-        'gates_validacao': resultado.get('gates'),
-    }
-
-
 def _save_filtro_shadow(db_file, pair, exec_tf_label, direcao, score, entry, sl, tp, filtros_bloqueados):
     try:
         shadow_id = f"shadow_{pair}_{int(time.time()*1000)}"
@@ -4276,86 +3744,6 @@ def detect_sweep_zona_diaria_movel(exec_candles, zona_diaria, lookback=10):
 
 
 CASCATA_COOLDOWN_SECONDS = 30 * 60
-
-
-def _votos_indicadores(indicadores, preco_atual):
-    votos = []
-
-    macd_hist = indicadores.get('macd_hist')
-    if macd_hist is not None:
-        votos.append(('macd', 'alta' if macd_hist > 0 else 'baixa'))
-
-    ema9, ema21, ema50 = indicadores.get('ema9'), indicadores.get('ema21'), indicadores.get('ema50')
-    ema9_slope = indicadores.get('ema9_slope')
-    if ema9 is not None and ema21 is not None and ema50 is not None and ema9_slope is not None:
-        slope_min = preco_atual * EMA_SLOPE_MIN_PCT
-        if ema9 > ema21 > ema50 and ema9_slope > slope_min:
-            votos.append(('emas', 'alta'))
-        elif ema9 < ema21 < ema50 and ema9_slope < -slope_min:
-            votos.append(('emas', 'baixa'))
-
-    rsi = indicadores.get('rsi14')
-    if rsi is not None:
-        if rsi <= 35:
-            votos.append(('rsi', 'alta'))
-        elif rsi >= 65:
-            votos.append(('rsi', 'baixa'))
-
-    stoch_k, stoch_d = indicadores.get('stoch_k'), indicadores.get('stoch_d')
-    if stoch_k is not None and stoch_d is not None:
-        if stoch_k <= 30 and stoch_d <= 30:
-            votos.append(('stochastic', 'alta'))
-        elif stoch_k >= 70 and stoch_d >= 70:
-            votos.append(('stochastic', 'baixa'))
-
-    bb_lower, bb_upper = indicadores.get('bollinger_lower'), indicadores.get('bollinger_upper')
-    if bb_lower is not None and bb_upper is not None:
-        if preco_atual <= bb_lower:
-            votos.append(('bollinger', 'alta'))
-        elif preco_atual >= bb_upper:
-            votos.append(('bollinger', 'baixa'))
-
-    vwap = indicadores.get('vwap')
-    if vwap is not None and vwap > 0:
-        dist_pct = abs(preco_atual - vwap) / vwap
-        if dist_pct >= VWAP_POC_MIN_DIST_PCT:
-            votos.append(('vwap', 'alta' if preco_atual > vwap else 'baixa'))
-
-    poc = indicadores.get('volume_profile_poc')
-    if poc is not None and poc > 0:
-        dist_pct = abs(preco_atual - poc) / poc
-        if dist_pct >= VWAP_POC_MIN_DIST_PCT:
-            votos.append(('volume_profile_poc', 'alta' if preco_atual > poc else 'baixa'))
-
-    ichimoku = indicadores.get('ichimoku') or {}
-    senkou_a, senkou_b = ichimoku.get('senkou_a'), ichimoku.get('senkou_b')
-    if senkou_a is not None and senkou_b is not None:
-        topo_nuvem, fundo_nuvem = max(senkou_a, senkou_b), min(senkou_a, senkou_b)
-        if preco_atual > topo_nuvem:
-            votos.append(('ichimoku', 'alta'))
-        elif preco_atual < fundo_nuvem:
-            votos.append(('ichimoku', 'baixa'))
-
-    mc = indicadores.get('monte_carlo') or {}
-    prob_alta, prob_baixa = mc.get('prob_alta_pct'), mc.get('prob_baixa_pct')
-    if prob_alta is not None and prob_baixa is not None:
-        if prob_alta >= MONTE_CARLO_GATE_VOTE_MIN_PROB:
-            votos.append(('monte_carlo', 'alta'))
-        elif prob_baixa >= MONTE_CARLO_GATE_VOTE_MIN_PROB:
-            votos.append(('monte_carlo', 'baixa'))
-
-    padrao = indicadores.get('candle_pattern')
-    if padrao in ('Engolfo de Alta', 'Martelo (Hammer)'):
-        votos.append(('candle_pattern', 'alta'))
-    elif padrao in ('Engolfo de Baixa', 'Estrela Cadente (Shooting Star)'):
-        votos.append(('candle_pattern', 'baixa'))
-
-    adx = indicadores.get('adx14')
-    tendencia_forte = adx is not None and adx >= 25
-
-    votos_alta = sum(1 for _, v in votos if v == 'alta')
-    votos_baixa = sum(1 for _, v in votos if v == 'baixa')
-    return votos_alta, votos_baixa, len(votos), votos, tendencia_forte
 
 
 def _stop_via_ultimo_swing(exec_candles, direcao, lookback=SWING_LOOKBACK):
@@ -4613,40 +4001,6 @@ COOLDOWN_4CAMADAS_SECONDS = 30 * 60
 
 CANDLE_PATTERNS_BULLISH = ('Martelo (Hammer)', 'Engolfo de Alta')
 CANDLE_PATTERNS_BEARISH = ('Estrela Cadente (Shooting Star)', 'Engolfo de Baixa')
-
-
-def init_4camadas_db(db_file):
-    with sqlite3.connect(db_file) as conn:
-        conn.execute('''
-            CREATE TABLE IF NOT EXISTS scalp_4camadas_signal_state (
-                id TEXT PRIMARY KEY,
-                pair TEXT,
-                created_at INTEGER,
-                exec_tf TEXT,
-                direcao TEXT,
-                score INTEGER,
-                entry REAL,
-                sl REAL,
-                tp REAL,
-                resultado_final TEXT DEFAULT 'pendente',
-                alerted INTEGER DEFAULT 0
-            )
-        ''')
-        conn.commit()
-        # ── FIX (13/08): mesma causa dos fixes acima — esta tabela já
-        # tinha "tp", mas faltavam be_movido/parcial_feita/status_gestao,
-        # que gerenciar_trades_abertos() usa pra TODAS as tabelas de
-        # MODOS_SCALP. ──
-        for alter_sql in [
-            "ALTER TABLE scalp_4camadas_signal_state ADD COLUMN be_movido INTEGER DEFAULT 0",
-            "ALTER TABLE scalp_4camadas_signal_state ADD COLUMN parcial_feita INTEGER DEFAULT 0",
-            "ALTER TABLE scalp_4camadas_signal_state ADD COLUMN status_gestao TEXT DEFAULT ''",
-        ]:
-            try:
-                conn.execute(alter_sql)
-                conn.commit()
-            except Exception:
-                pass
 
 
 def _camada_regime_mtf(d1_candles, h4_candles, h1_candles):
@@ -5270,56 +4624,6 @@ def explicacao_ultimo(modo, pair):
 
 
 @explicacao_bp.route("/scalp_gates_vortex/export_signal_state", methods=["GET"])
-def gates_vortex_export_signal_state_endpoint():
-    segredo_configurado = os.environ.get('PAPER_TRADING_TICK_SECRET')
-    if not segredo_configurado:
-        return jsonify({"erro": "endpoint não configurado"}), 503
-    segredo_recebido = request.headers.get('X-Paper-Tick-Secret') or request.args.get('token')
-    if not segredo_recebido or segredo_recebido != segredo_configurado:
-        return jsonify({"erro": "não autorizado"}), 401
-
-
-
-
-    LIMIT_MAXIMO_SEGURO = 5000
-    limit = request.args.get('limit', default=1500, type=int)
-    if limit is None or limit <= 0:
-        limit = 1500
-    limit = min(limit, LIMIT_MAXIMO_SEGURO)
-
-
-
-
-    db_file = _db_file_explicacao()
-    try:
-        with sqlite3.connect(db_file) as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                SELECT id, pair, created_at, direcao, score, entry, sl, tp,
-                       resultado_final, alerted
-                FROM scalp_gates_vortex_signal_state
-                ORDER BY created_at DESC
-                LIMIT ?
-            ''', (limit,))
-            rows = cursor.fetchall()
-            cols = ['id','pair','created_at','direcao','score','entry','sl','tp','resultado_final','alerted']
-    except Exception as e:
-        return jsonify({"erro": str(e)}), 500
-
-
-
-
-    sinais = [dict(zip(cols, row)) for row in rows]
-    return jsonify({"total": len(sinais), "limit_usado": limit, "limit_maximo": LIMIT_MAXIMO_SEGURO, "sinais": sinais})
-
-
-
-
-
-
-
-
-@explicacao_bp.route("/scalp_gates_vortex/diagnostico", methods=["GET"])
 def diagnostico_gates_vortex():
     """
     Mostra ONDE o pipeline do gates_vortex está travando mais, por par e
@@ -5335,26 +4639,6 @@ def diagnostico_gates_vortex():
 
 
 @explicacao_bp.route("/scalp_gates_vortex/sfp_telemetria", methods=["GET"])
-def sfp_telemetria_endpoint():
-    """
-    Telemetria crua de cada SFP confirmado (bloqueado como repetido ou
-    não) — cluster_id, sfp_position, cluster_size_so_far,
-    candles_since_first_sfp/previous_sfp, contexto HTF e premium/
-    discount no momento do evento. Só coleta, não influencia nenhuma
-    decisão do gates_vortex (ver comentário em process_pair_gates_vortex).
-    'pair' opcional filtra 1 par. 'limit' controla quantos registros
-    (default 200, mais recentes primeiro).
-    """
-    pair = request.args.get('pair')
-    limit = int(request.args.get('limit', 200))
-    try:
-        report = sfp_telemetria_report(_db_file_explicacao(), pair=pair, limit=limit)
-    except Exception as e:
-        return jsonify({"erro": str(e)}), 500
-    return jsonify(report)
-
-
-@explicacao_bp.route("/scalp_gates_vortex/diagnostico_sfp", methods=["GET"])
 def audit_breakout_cancel_report(db_file):
     """
     Roda as 4 análises combinadas sobre audit_breakout_cancel:

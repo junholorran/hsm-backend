@@ -31,9 +31,6 @@ ZONA_MOVEL_MAX_LARGURA_PCT = 0.01
 SWING_LOOKBACK = 5
 SWEEP_MEMORY_MAX_AGE_SECONDS = 12 * 3600
 
-RSI_GATE_BLOQUEIA_LONG_ACIMA = 60
-RSI_GATE_BLOQUEIA_SHORT_ABAIXO = 40
-
 REGIME_ADX_THRESHOLD = 20
 REGIME_GATE_ATIVO = True
 
@@ -4272,8 +4269,7 @@ def _kairos_context_bias(candles_por_tf):
 
 
 def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=None,
-                                      permitir_fallback_ema25=True, candles_por_tf=None,
-                                      audit_pair=None):
+                                      candles_por_tf=None, audit_pair=None):
     """KAIROS Paper V2.1 — liquidez estrutural ativa, M15 executa, M5 refina.
 
     Cadeia autorizadora:
@@ -4579,7 +4575,7 @@ def replay_vortex_decision_layer_v2(pair, dias_historico=7, janelas_mfe_mae=JANE
 
     funil = {
         'total_ciclos_avaliados': 0, 'bias_ok': 0, 'zona_encontrada': 0,
-        'zona_tipo_fvg': 0, 'zona_tipo_ema25': 0,
+        'zona_tipo_fvg': 0,
         'choch_confirmado': 0, 'choch_invalidado_antes_gatilho': 0,
         'sl_ok': 0, 'tp_ok': 0, 'sinais_validos_brutos': 0,
     }
@@ -4623,8 +4619,6 @@ def replay_vortex_decision_layer_v2(pair, dias_historico=7, janelas_mfe_mae=JANE
             funil['zona_encontrada'] += 1
             if r['zone_type'] == 'FVG':
                 funil['zona_tipo_fvg'] += 1
-            elif r['zone_type'] == 'EMA25':
-                funil['zona_tipo_ema25'] += 1
         if r['choch_confirmed']:
             funil['choch_confirmado'] += 1
         if r['failure_reason'] == 'CHOCH_INVALIDADO_ANTES_DO_GATILHO':

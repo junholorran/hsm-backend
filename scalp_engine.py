@@ -1932,13 +1932,15 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
                 pre_risk = abs(pre_limit - pre_sl)
                 resultado['prealert_sl'] = round(pre_sl, 6)
                 if pre_risk > 0:
+                    pre_ts=structure['t']
+                    pre_tf_map={tf:[c for c in cs if c.get('t') is not None and c['t'] <= pre_ts] for tf,cs in candles_por_tf.items()}
                     pre_targets = _kairos_structural_targets(
-                        candles_por_tf, now_ts, pre_limit, direction, limit=12
+                        pre_tf_map, pre_ts, pre_limit, direction, limit=12
                     )
                     if pre_targets:
                         pre_target = pre_targets[0]
                         pre_obstacles = _kairos_opposing_zone_obstacles(
-                            mapa, pre_limit, direction,
+                            _kairos_build_mtf_map(pre_tf_map), pre_limit, direction,
                             target_level=pre_target['nivel'], limit=8,
                             allowed_tfs=('M15','H1','H4','D1','W1')
                         )
@@ -1986,7 +1988,11 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
     resultado['sl_anchor_sweep_ts']=sweep['sweep_ts']; resultado['sl_anchor_extreme']=round(sweep['extremo'],6)
 
     # TP = primeira liquidez estrutural ATIVA do lado do trade. POI contrário antes dela pode virar TP conservador.
-    targets=_kairos_structural_targets(candles_por_tf,now_ts,entry,direction,limit=12)
+    # Congela mapa/targets no timestamp da entrada: nenhum candle posterior ao
+    # reteste pode criar, consumir ou mover a liquidez usada como TP.
+    entry_ts=retest['t']
+    target_tf_map={tf:[c for c in cs if c.get('t') is not None and c['t'] <= entry_ts] for tf,cs in candles_por_tf.items()}
+    targets=_kairos_structural_targets(target_tf_map,entry_ts,entry,direction,limit=12)
     for t in targets: t['rr']=round(t['dist']/risk,2) if risk else None
     resultado['next_liquidity_targets']=targets[:8]
     if not targets:
@@ -1994,7 +2000,7 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
     target=targets[0]; resultado['first_liquidity_target']=dict(target); resultado['tp_final_liquidez']=round(target['nivel'],6)
 
     obstacle_tfs=('M15','H1','H4','D1','W1')
-    obstacles=_kairos_opposing_zone_obstacles(mapa,entry,direction,target_level=target['nivel'],limit=8,allowed_tfs=obstacle_tfs)
+    obstacles=_kairos_opposing_zone_obstacles(_kairos_build_mtf_map(target_tf_map),entry,direction,target_level=target['nivel'],limit=8,allowed_tfs=obstacle_tfs)
     for o in obstacles: o['rr']=round(o['dist']/risk,2) if risk else None
     resultado['target_obstacles']=obstacles
     # TP1 é gestão/parcial no primeiro obstáculo; TP2 é o alvo estrutural final.

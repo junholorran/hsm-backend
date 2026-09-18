@@ -377,6 +377,74 @@ def _resolver_tp_sl_futuro(candles_gatilho_futuros, direcao, entry, sl, tp1, tp2
     }
 
 
+
+def _resolver_gestao_2r_3r_be(candles_futuros, direction, entry, sl, tp2, max_candles):
+    """Resolve o plano operacional do Kairos sem inventar ordem intrabar.
+
+    Antes de 2R: SL original continua válido.
+    Ao tocar 2R: parcial é considerada atingida e, a partir do candle
+    SEGUINTE, o stop do restante vai para BE (entry).
+    TP final: 3R. Se 2R e SL original aparecem no mesmo candle, AMBIGUO.
+    Se 2R e 3R aparecem no mesmo candle sem SL original, TP.
+    """
+    janela = candles_futuros[:max_candles]
+    if not janela:
+        return {'resultado':'NENHUM','candles_ate_resolucao':None,'mfe_pct':0.0,'mae_pct':0.0}
+
+    risk = abs(entry - sl)
+    if risk <= 0:
+        return {'resultado':'AMBIGUO','candles_ate_resolucao':None,'mfe_pct':0.0,'mae_pct':0.0}
+    sign = 1.0 if direction == 'LONG' else -1.0
+    tp1 = entry + sign * 2.0 * risk
+    be_ativo = False
+    mfe = 0.0
+    mae = 0.0
+
+    for idx, candle in enumerate(janela):
+        if direction == 'LONG':
+            mfe = max(mfe, candle['h'] - entry)
+            mae = max(mae, entry - candle['l'])
+            hit_tp1 = candle['h'] >= tp1
+            hit_tp2 = candle['h'] >= tp2
+            hit_sl_original = candle['l'] <= sl
+            hit_be = be_ativo and candle['l'] <= entry
+        else:
+            mfe = max(mfe, entry - candle['l'])
+            mae = max(mae, candle['h'] - entry)
+            hit_tp1 = candle['l'] <= tp1
+            hit_tp2 = candle['l'] <= tp2
+            hit_sl_original = candle['h'] >= sl
+            hit_be = be_ativo and candle['h'] >= entry
+
+        stats = {
+            'candles_ate_resolucao': idx + 1,
+            'mfe_pct': round(mfe / entry * 100, 4),
+            'mae_pct': round(mae / entry * 100, 4),
+        }
+
+        if not be_ativo:
+            if hit_sl_original and (hit_tp1 or hit_tp2):
+                return {'resultado':'AMBIGUO', **stats}
+            if hit_tp2:
+                return {'resultado':'TP', **stats}
+            if hit_sl_original:
+                return {'resultado':'SL', **stats}
+            if hit_tp1:
+                be_ativo = True
+                continue
+        else:
+            if hit_tp2 and hit_be:
+                return {'resultado':'AMBIGUO', **stats}
+            if hit_tp2:
+                return {'resultado':'TP', **stats}
+            if hit_be:
+                return {'resultado':'BE', **stats}
+
+    return {
+        'resultado':'NENHUM','candles_ate_resolucao':None,
+        'mfe_pct':round(mfe / entry * 100,4),'mae_pct':round(mae / entry * 100,4),
+    }
+
 def _medir_mfe_mae_janela(candles_futuros, direcao, entry, janela):
     """
     Mede MFE/MAE numa única janela, reaproveitando exatamente a mesma
@@ -2680,7 +2748,7 @@ def _formatar_mensagem_novo_sinal_paper_v2(pair, sinal, cohort=None):
 
 def _formatar_mensagem_resultado_paper_v2(sinal_row, resultado_status, r_obtido, ts_evento_ms):
     ts_str = datetime.fromtimestamp(ts_evento_ms / 1000, tz=timezone.utc).strftime('%Y-%m-%d %H:%M UTC') if ts_evento_ms else 'N/A'
-    emoji = {'TP': '✅', 'SL': '❌', 'AMBIGUO': '⚠️', 'EXPIRED': '⌛'}.get(resultado_status, 'ℹ️')
+    emoji = {'TP': '✅', 'SL': '❌', 'BE': '🟰', 'AMBIGUO': '⚠️', 'EXPIRED': '⌛'}.get(resultado_status, 'ℹ️')
     r_str = f"{r_obtido:+.2f}R" if r_obtido is not None else "N/A"
     try:
         cohort = sinal_row['cohort']
@@ -2964,14 +3032,14 @@ def paper_trading_v2_tick(pair, db_file, agora_ts_ms=None):
 
             candles_futuros = m5[idx_candle_entrada + 1:]
             direcao_lower = 'alta' if sinal['direction'] == 'LONG' else 'baixa'
-            res = _resolver_tp_sl_futuro(
-                candles_futuros, direcao_lower, sinal['entry'], sinal['sl'], sinal['tp'], None,
+            res = _resolver_gestao_2r_3r_be(
+                candles_futuros, sinal['direction'], sinal['entry'], sinal['sl'], sinal['tp'],
                 max_candles=len(candles_futuros),
             )
-            evento = 'TP' if res['resultado'] == 'TP1' else res['resultado']
+            evento = res['resultado']
 
-            if evento in ('TP', 'SL', 'AMBIGUO'):
-                r_obtido = sinal['rr'] if evento == 'TP' else (-1.0 if evento == 'SL' else None)
+            if evento in ('TP', 'SL', 'BE', 'AMBIGUO'):
+                r_obtido = (3.0 if evento == 'TP' else (-1.0 if evento == 'SL' else (0.0 if evento == 'BE' else None)))
                 ts_evento = None
                 if res['candles_ate_resolucao'] and res['candles_ate_resolucao'] - 1 < len(candles_futuros):
                     ts_evento = candles_futuros[res['candles_ate_resolucao'] - 1]['t']
@@ -3054,9 +3122,12 @@ def paper_trading_v2_relatorio(db_file):
     pendentes = [s for s in todos if s['status'] == 'PENDING']
     tp = [s for s in todos if s['status'] == 'TP']
     sl = [s for s in todos if s['status'] == 'SL']
+    be = [s for s in todos if s['status'] == 'BE']
     ambiguo = [s for s in todos if s['status'] == 'AMBIGUO']
     expired = [s for s in todos if s['status'] == 'EXPIRED']
 
+    # BE é resolução neutra do restante após TP1; não entra como win nem loss
+    # no win-rate binário, mas é exposto separadamente no relatório.
     resolvidos = tp + sl
     rs = [s['r_obtido'] for s in resolvidos if s['r_obtido'] is not None]
     win_rate = round(100 * len(tp) / len(resolvidos), 2) if resolvidos else None

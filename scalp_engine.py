@@ -193,6 +193,19 @@ def _remover_candle_em_formacao(candles, interval_label):
     return candles, False
 
 
+def _kairos_candles_fechados_ate(candles, interval_label, cutoff_ts):
+    """Snapshot causal: só devolve candles cujo FECHO já era conhecido no cutoff.
+
+    Bybit usa timestamp de ABERTURA em kline.t. Portanto c['t'] <= cutoff
+    não basta: o OHLC final só pode entrar quando abertura + duração <= cutoff.
+    Para replay M5, cutoff representa o instante após o fecho do candle M5 avaliado.
+    """
+    dur=INTERVALO_MS_POR_LABEL.get(interval_label)
+    if not candles or dur is None:
+        return []
+    return [c for c in candles if c.get('t') is not None and c['t'] + dur <= cutoff_ts]
+
+
 def _deduplicar_e_ordenar_candles(candles):
     """Deduplica por timestamp (defensivo — a paginação já deveria evitar
     isso, mas não confiamos só nisso) e ordena cronologicamente."""
@@ -1384,18 +1397,22 @@ def _kairos_direction_after_first_capture(candles, capture, swing_size=5):
                     'structure':{**e,'full_idx':full_idx},'momentum_z':z}
     return None
 
-def _kairos_m5_refine_zone(m5_candles, m15_zone, structure_ts, direction):
-    """Refina uma zona M15 com FVG/IFVG/OB M5 causal. Nunca cria setup sozinho."""
+def _kairos_m5_refine_zone(m5_candles, m15_zone, sweep_ts, structure_ts, direction):
+    """Refina M15 com POI M5 da MESMA perna causal sweep→MSS.
+
+    O FVG pode nascer durante o displacement, antes do candle que confirma
+    MSS/CHoCH: SWEEP_TS <= FVG_CREATED_TS <= STRUCTURE_TS. A entrada/reteste,
+    porém, continua proibida antes da confirmação estrutural.
+    """
     if not m5_candles or not m15_zone:
         return None
     zones=[]
     for z in _kairos_fvg_states(m5_candles):
-        eff=z.get('flip_ts') or z.get('created_ts') or 0
-        if eff < structure_ts or z.get('direcao') != direction:
+        created=z.get('created_ts')
+        eff=z.get('flip_ts') or created or 0
+        if created is None or created < sweep_ts or created > structure_ts:
             continue
-        # Refinamento também tem de nascer depois da estrutura M15; uma IFVG M5
-        # não pode reciclar FVG-mãe criada antes do MSS/CHoCH que autorizou o setup.
-        if z.get('created_ts') is not None and z.get('created_ts') < structure_ts:
+        if eff > structure_ts or z.get('direcao') != direction:
             continue
         if z.get('state') not in ('ATIVA','TOCADA','PARCIAL','IFVG'):
             continue
@@ -1937,7 +1954,7 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
 
     # M5 refinement é opcional e nunca inventa setup sem a zona M15.
     m5=candles_por_tf.get('M5') or []
-    refined=_kairos_m5_refine_zone(m5,zone,structure['t'],sweep['direcao'])
+    refined=_kairos_m5_refine_zone(m5,zone,sweep['sweep_ts'],structure['t'],sweep['direcao'])
     retest=None; active_zone=zone; entry_tf='M15'
     if refined:
         rz_ts=refined.get('flip_ts') or refined.get('created_ts') or refined.get('t') or structure['t']
@@ -2182,26 +2199,27 @@ def replay_vortex_decision_layer_v2(pair, dias_historico=7, janelas_mfe_mae=JANE
     sinais_completos_brutos = []
 
     for i in range(MIN_M5_IDX, len(m5)):
-        ts_corte = m5[i]['t']
+        # Avaliamos o estado imediatamente APÓS o fecho deste M5.
+        ts_corte = m5[i]['t'] + INTERVALO_MS_POR_LABEL['5']
         if ts_corte < inicio_ts_ms or ts_corte > fim_ts_ms:
             continue
-        m5_ate_agora = m5[:i + 1]
-        m15_ate_agora = [c for c in m15 if c['t'] <= ts_corte]
-        d1_ate_agora = [c for c in d1 if c['t'] <= ts_corte]
+        m5_ate_agora = _kairos_candles_fechados_ate(m5, '5', ts_corte)
+        m15_ate_agora = _kairos_candles_fechados_ate(m15, '15', ts_corte)
+        d1_ate_agora = _kairos_candles_fechados_ate(d1, 'D', ts_corte)
         if len(m15_ate_agora) < 30:
             continue
 
         funil['total_ciclos_avaliados'] += 1
         tf_map = {
-            'MN': [c for c in mn if c['t'] <= ts_corte],
-            'W1': [c for c in w1 if c['t'] <= ts_corte],
+            'MN': _kairos_candles_fechados_ate(mn, 'M', ts_corte),
+            'W1': _kairos_candles_fechados_ate(w1, 'W', ts_corte),
             'D1': d1_ate_agora,
-            'H4': [c for c in h4 if c['t'] <= ts_corte],
-            'H1': [c for c in h1 if c['t'] <= ts_corte],
-            'M30': [c for c in m30 if c['t'] <= ts_corte],
+            'H4': _kairos_candles_fechados_ate(h4, '240', ts_corte),
+            'H1': _kairos_candles_fechados_ate(h1, '60', ts_corte),
+            'M30': _kairos_candles_fechados_ate(m30, '30', ts_corte),
             'M15': m15_ate_agora,
             'M5': m5_ate_agora,
-            'M1': [c for c in m1 if c['t'] <= ts_corte],
+            'M1': _kairos_candles_fechados_ate(m1, '1', ts_corte),
         }
         try:
             r = avaliar_vortex_decision_layer_v2(

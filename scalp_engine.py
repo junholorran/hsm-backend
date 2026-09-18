@@ -2389,6 +2389,12 @@ def replay_vortex_decision_layer_v2(pair, dias_historico=7, janelas_mfe_mae=JANE
     }
 
 
+PARES_MONITORADOS_REPLAY = [
+    'BTCUSD', 'ETHUSD', 'SOLUSD', 'XRPUSD', 'LINKUSD', 'ADAUSD',
+    'AVAXUSD', 'BNBUSD', 'AAVEUSD', 'NEARUSD', 'PENDLEUSD', 'INJUSD', 'ONDOUSD',
+]
+
+
 def replay_vortex_decision_layer_v2_todos_pares(dias_historico=7, pares=None, fim_ts_ms=None):
     """Roda replay_vortex_decision_layer_v2() (sem alteração) pra cada
     par, agrega funil/RR/MFE-MAE globalmente. Erro num par não derruba
@@ -2447,6 +2453,10 @@ def replay_vortex_decision_layer_v2_todos_pares(dias_historico=7, pares=None, fi
         ),
         'resultados_por_pair': resultados_por_pair,
     }
+
+
+PAPER_TRADING_V2_FORWARD_WATERMARK_MS = 1789485718000
+PAPER_TRADING_V2_STRATEGY_VARIANT = 'KAIROS_V2_2_TP1_TP2_DIRECTION_NEUTRAL'
 
 
 def init_paper_trading_v2_db(db_file):

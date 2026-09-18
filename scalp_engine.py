@@ -1319,6 +1319,10 @@ def _kairos_direction_after_first_capture(candles, capture, swing_size=5):
     """Deriva direção da REAÇÃO + intenção + MSS/CHoCH, nunca do lado da liquidez."""
     if not candles or not capture: return None
     side=capture.get('liquidity_side'); state=capture.get('post_capture_state')
+    # Sem reação resolvida não existe direção. Nunca transformar estado desconhecido
+    # silenciosamente em continuação.
+    if side not in ('HIGH','LOW') or state not in ('REJECTION_RECLAIM','ACCEPTANCE_CONTINUATION'):
+        return None
     # Quatro caminhos causais AMD/PO3 permitidos.
     expected = ('baixa' if side=='HIGH' else 'alta') if state=='REJECTION_RECLAIM' else ('alta' if side=='HIGH' else 'baixa')
     idx=next((i for i,c in enumerate(candles) if c['t']>=capture['sweep_ts']),None)
@@ -1802,7 +1806,7 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
 
     Cadeia autorizadora:
     W1/D1/H4/H1 structural liquidity -> neutral FIRST capture -> rejection/reclaim OR acceptance/continuation -> intention/displacement -> M15 MSS/CHoCH/BOS
-    -> displacement -> causal M15 FVG/IFVG/OB -> optional M5 refinement -> retest
+    -> causal M15 FVG/IFVG/OB -> optional M5 refinement -> retest
     -> SL behind causal sweep -> nearest active structural liquidity/obstacle TP.
 
     W1/D1/H4 podem originar a tese principal; H1 pode atuar como estrutura intermediária relevante.\n    M15/M5 executam, refinam e podem servir como alvo/obstáculo local; não autorizam sozinhos o setup. M1 não participa.
@@ -2048,8 +2052,8 @@ KAIROS_DECISION_LAYER_V2_VERSAO = 'KAIROS V2.2 — HTF LIQUIDITY→FIRST CAPTURE
 
 def replay_vortex_decision_layer_v2(pair, dias_historico=7, janelas_mfe_mae=JANELAS_MFE_MAE_PADRAO, fim_ts_ms=None):
     """
-    Replay causal completo do pipeline v2 (BIAS→ZONA→CHoCH M5→ENTRY→
-    SL→TP→RR). Mesma metodologia já aprovada (fetch único por
+    Replay causal completo do KAIROS V2.2 (HTF liquidity→FIRST CAPTURE→
+    reaction/displacement→M15 MSS/CHoCH/BOS→causal FVG/IFVG/OB→retest→ENTRY→SL→TP1/TP2). Mesma metodologia já aprovada (fetch único por
     timeframe, truncamento causal m15/d1 pelo mesmo ts_corte do ciclo
     M5). Deduplica sinais válidos por (choch_timestamp, direction,
     zone_type) — o mesmo sinal permanece "válido" em vários ciclos
@@ -2108,7 +2112,7 @@ def replay_vortex_decision_layer_v2(pair, dias_historico=7, janelas_mfe_mae=JANE
 
     funil = {
         'total_ciclos_avaliados': 0, 'bias_ok': 0, 'zona_encontrada': 0,
-        'zona_tipo_fvg': 0,
+        'zona_tipo_fvg': 0, 'zona_tipo_ifvg': 0, 'zona_tipo_ob': 0,
         'choch_confirmado': 0, 'choch_invalidado_antes_gatilho': 0,
         'sl_ok': 0, 'tp_ok': 0, 'sinais_validos_brutos': 0,
     }
@@ -2150,8 +2154,13 @@ def replay_vortex_decision_layer_v2(pair, dias_historico=7, janelas_mfe_mae=JANE
             funil['bias_ok'] += 1
         if r['zone_top'] is not None:
             funil['zona_encontrada'] += 1
-            if r['zone_type'] == 'FVG':
+            zt=str(r['zone_type'] or '')
+            if zt.startswith('FVG_'):
                 funil['zona_tipo_fvg'] += 1
+            elif zt.startswith('IFVG_'):
+                funil['zona_tipo_ifvg'] += 1
+            elif zt.startswith('OB_'):
+                funil['zona_tipo_ob'] += 1
         if r['choch_confirmed']:
             funil['choch_confirmado'] += 1
         if r['failure_reason'] == 'CHOCH_INVALIDADO_ANTES_DO_GATILHO':

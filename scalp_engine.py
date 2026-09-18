@@ -475,6 +475,9 @@ def _resolver_gestao_2r_3r_be(candles_futuros, direction, entry, sl, tp2, max_ca
         'mfe_pct':round(mfe / entry * 100,4),'mae_pct':round(mae / entry * 100,4),
     }
 
+JANELAS_MFE_MAE_PADRAO = (20, 50)
+
+
 def _medir_mfe_mae_janela(candles_futuros, direcao, entry, janela):
     """
     Mede MFE/MAE numa única janela, reaproveitando exatamente a mesma

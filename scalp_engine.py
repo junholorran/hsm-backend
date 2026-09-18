@@ -74,233 +74,6 @@ NOMES_PADRAO_CANDLE_PT = {
 }
 
 
-def _formatar_motivos_principais(regime, adx_val, evento_tipo, evento_direcao, entry_zone_tipo,
-                                  score, gates, candle_pattern=None, na_killzone=False, killzone_nome=None):
-    direcao_label = 'BULLISH' if evento_direcao == 'alta' else 'BEARISH'
-    linhas = [
-        f"• Regime: {regime.upper()}{f' (ADX {adx_val})' if adx_val is not None else ''}",
-        f"• Estrutura: {evento_tipo}",
-        f"• Gatilho: {entry_zone_tipo}" + (f" + {NOMES_PADRAO_CANDLE_PT.get(candle_pattern, candle_pattern)}" if candle_pattern else ""),
-        f"• Direção: {direcao_label}",
-        f"• Score: {score}/100",
-    ]
-    if na_killzone:
-        linhas.append(f"• Killzone: {killzone_nome}")
-    gates_txt = ', '.join(f"{g['nome'].replace('GATE_', '').replace('_', ' ')} ✅" for g in gates if g['passou'])
-    if gates_txt:
-        linhas.append(f"• Gates aprovados: {gates_txt}")
-    return "\n".join(linhas)
-
-
-def classificar_qualidade_rr(rr):
-    if rr is None:
-        return None
-    if rr < 1.5:
-        return f"BAIXA — Relação de 1:{rr} exige taxa de acerto alta (>{round(100/(1+rr))}%) pra ser lucrativo no longo prazo."
-    elif rr < 2.5:
-        return f"MODERADA — Relação de 1:{rr} é equilibrada, taxa de acerto de ~{round(100/(1+rr))}% já cobre o breakeven."
-    else:
-        return f"ALTA — Relação de 1:{rr} permite ser lucrativo mesmo com taxa de acerto abaixo de {round(100/(1+rr))}%."
-
-
-CAPITAL_USUARIO_USD = None
-
-PERFIS_RISCO = {
-    'conservador': 0.0075,
-    'moderado': 0.015,
-    'agressivo': 0.025,
-}
-
-
-def calcular_position_sizing(capital, entry, sl, perfil='moderado'):
-    if not capital or not entry or not sl or entry == sl:
-        return None
-    risco_pct = PERFIS_RISCO.get(perfil, PERFIS_RISCO['moderado'])
-    valor_risco_usd = round(capital * risco_pct, 2)
-    distancia_stop = abs(entry - sl)
-    quantidade_sugerida = round(valor_risco_usd / distancia_stop, 6) if distancia_stop > 0 else None
-    return {
-        'perfil': perfil,
-        'risco_pct': round(risco_pct * 100, 2),
-        'valor_em_risco_usd': valor_risco_usd,
-        'quantidade_sugerida': quantidade_sugerida,
-    }
-
-
-def classificar_forca_swing(swing_nivel, swing_tipo, candles, tolerancia_pct=0.001):
-    if swing_nivel is None or not candles:
-        return None
-    for c in candles:
-        if swing_tipo == 'high' and c['h'] > swing_nivel * (1 + tolerancia_pct):
-            return 'weak'
-        if swing_tipo == 'low' and c['l'] < swing_nivel * (1 - tolerancia_pct):
-            return 'weak'
-    return 'strong'
-
-
-HORARIOS_RUINS_UTC = [
-    {'nome': 'Transição Ásia-Europa', 'inicio_h': 5, 'fim_h': 7},
-    {'nome': 'Fechamento de NY', 'inicio_h': 21, 'fim_h': 23},
-]
-
-
-def esta_em_horario_ruim():
-    import datetime
-    hora_utc = datetime.datetime.utcnow().hour
-    for janela in HORARIOS_RUINS_UTC:
-        if janela['inicio_h'] <= hora_utc < janela['fim_h']:
-            return True, janela['nome']
-    return False, None
-
-
-def compute_sazonalidade_mensal(db_file, pair, meses_historico=24):
-    import datetime
-    tabelas = [
-        'scalp_signal_state', 'scalp_signal_state_continuacao',
-        'scalp_rapido_signal_state', 'scalp_cascata_signal_state',
-        'scalp_antecipado_signal_state', 'scalp_indicadores_signal_state',
-    ]
-    mes_atual = datetime.datetime.utcnow().month
-    cutoff = int(time.time()) - meses_historico * 30 * 86400
-    wins, losses = 0, 0
-    try:
-        with sqlite3.connect(db_file) as conn:
-            cursor = conn.cursor()
-            for tabela in tabelas:
-                try:
-                    cursor.execute(
-                        f"SELECT created_at, resultado_final FROM {tabela} "
-                        f"WHERE pair=? AND alerted=1 AND created_at >= ? "
-                        f"AND resultado_final IN ('win','loss')",
-                        (pair, cutoff)
-                    )
-                    for created_at, resultado in cursor.fetchall():
-                        mes_do_sinal = datetime.datetime.utcfromtimestamp(created_at).month
-                        if mes_do_sinal == mes_atual:
-                            if resultado == 'win':
-                                wins += 1
-                            else:
-                                losses += 1
-                except Exception:
-                    continue
-    except Exception as e:
-        print(f"[scalp_engine] erro ao calcular sazonalidade de {pair}: {e}")
-        return None
-
-    total = wins + losses
-    if total == 0:
-        return {'mes': mes_atual, 'amostras': 0, 'motivo': 'sem histórico suficiente ainda nesse mês'}
-    return {
-        'mes': mes_atual,
-        'amostras': total,
-        'win_rate_pct': round(100 * wins / total, 1),
-        'wins': wins,
-        'losses': losses,
-    }
-
-
-_FEAR_GREED_CACHE = {'valor': None, 'classificacao': None, 'timestamp': 0}
-FEAR_GREED_CACHE_TTL = 3600
-
-
-def get_fear_greed_index():
-    agora = time.time()
-    if _FEAR_GREED_CACHE['valor'] is not None and (agora - _FEAR_GREED_CACHE['timestamp']) < FEAR_GREED_CACHE_TTL:
-        return {'valor': _FEAR_GREED_CACHE['valor'], 'classificacao': _FEAR_GREED_CACHE['classificacao']}
-
-    try:
-        resp = requests.get('https://api.alternative.me/fng/?limit=1', timeout=5)
-        resp.raise_for_status()
-        data = resp.json()
-        item = data['data'][0]
-        valor = int(item['value'])
-        classificacao_raw = item['value_classification']
-        traducao = {
-            'Extreme Fear': 'Medo Extremo', 'Fear': 'Medo', 'Neutral': 'Neutro',
-            'Greed': 'Ganância', 'Extreme Greed': 'Ganância Extrema',
-        }
-        classificacao = traducao.get(classificacao_raw, classificacao_raw)
-        _FEAR_GREED_CACHE.update({'valor': valor, 'classificacao': classificacao, 'timestamp': agora})
-        return {'valor': valor, 'classificacao': classificacao}
-    except Exception as e:
-        print(f"[scalp_engine] erro ao buscar Fear & Greed Index: {e}")
-        return None
-
-
-def montar_bloco_analise_extra(db_file, pair, direcao, entry, sl, tp, tabela_para_sazonalidade,
-                                sweep_nivel=None, sweep_tipo=None, exec_candles=None,
-                                entry_zone_tipo=None, obs_com_mitigacao=None):
-    linhas = []
-
-    if entry and sl and tp:
-        risco = abs(entry - sl)
-        retorno = abs(tp - entry)
-        if risco > 0:
-            rr = round(retorno / risco, 2)
-            qualidade = classificar_qualidade_rr(rr)
-            if qualidade:
-                linhas.append(f"📐 {qualidade}")
-
-    if sweep_nivel is not None and sweep_tipo is not None and exec_candles:
-        swing_tipo_liquidez = 'high' if sweep_tipo == 'alta' else 'low'
-        forca = classificar_forca_swing(sweep_nivel, swing_tipo_liquidez, exec_candles)
-        if forca:
-            linhas.append(f"💧 Liquidez varrida: {'Strong (intacta até agora)' if forca=='strong' else 'Weak (já tinha sido testada antes)'}")
-
-    if entry_zone_tipo and 'OB' in entry_zone_tipo and obs_com_mitigacao:
-        ob_correspondente = next(
-            (ob for ob in obs_com_mitigacao if ob.get('bottom') is not None and ob.get('top') is not None
-             and ob['bottom'] <= (entry or 0) <= ob['top']), None
-        )
-        if ob_correspondente is not None:
-            linhas.append(f"⚠️ Order Block {'já mitigado antes' if ob_correspondente['mitigado'] else 'ainda intacto (primeira vez)'}")
-
-    try:
-        saz = compute_sazonalidade_mensal(db_file, pair)
-        if saz and saz.get('amostras', 0) > 0:
-            linhas.append(f"📅 Sazonalidade real ({pair}, esse mês): {saz['win_rate_pct']}% de acerto em {saz['amostras']} sinais resolvidos")
-    except Exception:
-        pass
-
-    try:
-        fg = get_fear_greed_index()
-        if fg:
-            linhas.append(f"🌡️ Fear & Greed Index: {fg['valor']}/100 ({fg['classificacao']})")
-    except Exception:
-        pass
-
-    if CAPITAL_USUARIO_USD and entry and sl:
-        try:
-            sizing = calcular_position_sizing(CAPITAL_USUARIO_USD, entry, sl, perfil='moderado')
-            if sizing:
-                linhas.append(
-                    f"💼 Sizing sugerido (moderado, {sizing['risco_pct']}% de ${CAPITAL_USUARIO_USD}): "
-                    f"risco de ${sizing['valor_em_risco_usd']} nesse trade"
-                )
-        except Exception:
-            pass
-
-    return "\n".join(linhas)
-
-
-PT_UTC_OFFSET_HOURS = 1
-
-KILLZONES = [
-    {'nome': 'Ásia', 'inicio_h': 0, 'fim_h': 3},
-    {'nome': 'London', 'inicio_h': 7, 'fim_h': 10},
-    {'nome': 'New York', 'inicio_h': 13, 'fim_h': 16},
-]
-
-
-def is_in_killzone(now_utc=None):
-    now_utc = now_utc or datetime.now(timezone.utc)
-    pt_hour = (now_utc + timedelta(hours=PT_UTC_OFFSET_HOURS)).hour
-    for kz in KILLZONES:
-        if kz['inicio_h'] <= pt_hour < kz['fim_h']:
-            return True, kz['nome']
-    return False, None
-
-
 def _extrair_swings_lux_algo(candles, swing_size=50):
     n = len(candles)
     if n < swing_size + 5:
@@ -332,96 +105,6 @@ def _extrair_swings_lux_algo(candles, swing_size=50):
         else:
             swings.append({'valor': candles[idx_pivot]['h'], 'tipo': 'high', 't': candles[idx_pivot]['t']})
     return swings
-
-
-def find_d1_order_blocks(d1_candles, swing_size=50, atr_period=14, atr_mult=1.0, lookback_dias=D1_LOOKBACK_DIAS):
-    n = len(d1_candles)
-    if n < swing_size + atr_period + 5:
-        return []
-
-    atr_series = compute_atr(d1_candles, atr_period)
-
-    legs = [0] * n
-    current_leg = 0
-    swing_high_level = None
-    swing_low_level = None
-    swing_high_crossed = False
-    swing_low_crossed = False
-
-    obs = []
-
-    for i in range(swing_size, n):
-        window = d1_candles[i - swing_size + 1:i + 1]
-        highest = max(c['h'] for c in window)
-        lowest = min(c['l'] for c in window)
-        high_back = d1_candles[i - swing_size]['h']
-        low_back = d1_candles[i - swing_size]['l']
-        if high_back > highest:
-            current_leg = 0
-        elif low_back < lowest:
-            current_leg = 1
-        legs[i] = current_leg
-
-        if i > swing_size and legs[i] != legs[i - 1]:
-            idx_pivot = i - swing_size
-            if idx_pivot >= 0:
-                if legs[i] == 1:
-                    swing_low_level = d1_candles[idx_pivot]['l']
-                    swing_low_crossed = False
-                else:
-                    swing_high_level = d1_candles[idx_pivot]['h']
-                    swing_high_crossed = False
-
-        c = d1_candles[i]
-        atr_val = atr_series[i]
-
-        if swing_high_level is not None and not swing_high_crossed and c['c'] > swing_high_level:
-            swing_high_crossed = True
-            for k in range(i, max(0, i - swing_size), -1):
-                cand = d1_candles[k]
-                if cand['c'] < cand['o']:
-                    rng = cand['h'] - cand['l']
-                    if atr_val and rng >= atr_val * atr_mult:
-                        obs.append({
-                            'top': cand['h'], 'bottom': cand['l'],
-                            'tipo': 'demanda', 't': cand['t'],
-                        })
-                    break
-
-        if swing_low_level is not None and not swing_low_crossed and c['c'] < swing_low_level:
-            swing_low_crossed = True
-            for k in range(i, max(0, i - swing_size), -1):
-                cand = d1_candles[k]
-                if cand['c'] > cand['o']:
-                    rng = cand['h'] - cand['l']
-                    if atr_val and rng >= atr_val * atr_mult:
-                        obs.append({
-                            'top': cand['h'], 'bottom': cand['l'],
-                            'tipo': 'oferta', 't': cand['t'],
-                        })
-                    break
-
-    if lookback_dias and obs:
-        cutoff_ms = d1_candles[-1]['t'] - lookback_dias * 24 * 3600 * 1000
-        obs = [o for o in obs if o['t'] >= cutoff_ms]
-
-    vistos = set()
-    unicos = []
-    for o in obs:
-        chave = (o['t'], o['tipo'])
-        if chave not in vistos:
-            vistos.add(chave)
-            unicos.append(o)
-
-    return unicos
-
-
-SR_CHANNEL_PIVOT_PERIOD = 10
-SR_CHANNEL_MAX_WIDTH_PCT = 2
-SR_CHANNEL_MIN_STRENGTH = 1
-SR_CHANNEL_MAX_NUMBER = 6
-SR_CHANNEL_LOOKBACK_PERIOD = 290
-SR_CHANNEL_WIDTH_BASIS_BARS = 300
 
 
 def compute_sr_channels(
@@ -542,110 +225,11 @@ def compute_d1_zones(d1_candles, lookback_dias=None, swing_size=50):
     return compute_sr_channels(d1_candles)
 
 
-def compute_d1_zones_swing_cluster(d1_candles, lookback_dias=D1_LOOKBACK_DIAS, swing_size=50):
-    swings = _extrair_swings_lux_algo(d1_candles, swing_size=swing_size)
-
-    if lookback_dias and swings:
-        cutoff_ms = d1_candles[-1]['t'] - lookback_dias * 24 * 3600 * 1000
-        swings = [s for s in swings if s['t'] >= cutoff_ms]
-
-    grupos = []
-    for s in swings:
-        colocado = False
-        for g in grupos:
-            diff_pct = abs(s['valor'] - g['nivel']) / g['nivel']
-            if diff_pct <= TOLERANCIA_CLUSTER_PCT:
-                g['pontos'].append(s['valor'])
-                g['nivel'] = sum(g['pontos']) / len(g['pontos'])
-                g['timestamps'].append(s['t'])
-                g['tipos'].append(s['tipo'])
-                colocado = True
-                break
-        if not colocado:
-            grupos.append({'nivel': s['valor'], 'pontos': [s['valor']], 'timestamps': [s['t']], 'tipos': [s['tipo']]})
-
-    bandas = []
-    for g in grupos:
-        if len(g['pontos']) >= MIN_EVENTOS_BANDA:
-            largura = g['nivel'] * TOLERANCIA_CLUSTER_PCT
-            n_low = g['tipos'].count('low')
-            n_high = g['tipos'].count('high')
-            if n_low > n_high:
-                tipo_predominante = 'demanda'
-            elif n_high > n_low:
-                tipo_predominante = 'oferta'
-            else:
-                tipo_predominante = 'mista'
-            bandas.append({
-                'top': g['nivel'] + largura,
-                'bottom': g['nivel'] - largura,
-                'toques': len(g['pontos']),
-                'ultimo_toque_ts': max(g['timestamps']),
-                'tipo_predominante': tipo_predominante,
-            })
-    return bandas
-
-
 def find_active_zone(bandas, preco_atual):
     candidatas = [b for b in bandas if b['bottom'] <= preco_atual <= b['top']]
     if not candidatas:
         return None
     return max(candidatas, key=lambda b: b.get('ultimo_toque_ts', 0))
-
-
-def compute_zona_diaria_movel(d1_candles):
-    if len(d1_candles) < 2:
-        return None
-    candle_ontem = d1_candles[-2]
-    corpo_top = max(candle_ontem['o'], candle_ontem['c'])
-    corpo_bottom = min(candle_ontem['o'], candle_ontem['c'])
-    return {
-        'resistencia': {'top': candle_ontem['h'], 'bottom': corpo_top},
-        'suporte': {'top': corpo_bottom, 'bottom': candle_ontem['l']},
-        'candle_ts': candle_ontem['t'],
-    }
-
-
-def compute_zona_forte(d1_candles, tolerancia_pct=ZONA_FORTE_TOLERANCIA_PCT, min_toques=ZONA_FORTE_MIN_TOQUES, lookback_dias=D1_LOOKBACK_DIAS):
-    if lookback_dias and len(d1_candles) > lookback_dias:
-        d1_candles = d1_candles[-lookback_dias:]
-
-    swings = []
-    lb = 3
-    for i in range(lb, len(d1_candles) - lb):
-        c = d1_candles[i]
-        is_high = all(c['h'] >= d1_candles[j]['h'] for j in range(i - lb, i + lb + 1) if j != i)
-        is_low = all(c['l'] <= d1_candles[j]['l'] for j in range(i - lb, i + lb + 1) if j != i)
-        if is_high:
-            swings.append({'valor': c['h'], 'tipo': 'high', 't': c['t']})
-        if is_low:
-            swings.append({'valor': c['l'], 'tipo': 'low', 't': c['t']})
-
-    grupos = []
-    for s in swings:
-        colocado = False
-        for g in grupos:
-            diff_pct = abs(s['valor'] - g['nivel']) / g['nivel']
-            if diff_pct <= tolerancia_pct:
-                g['pontos'].append(s['valor'])
-                g['nivel'] = sum(g['pontos']) / len(g['pontos'])
-                g['timestamps'].append(s['t'])
-                colocado = True
-                break
-        if not colocado:
-            grupos.append({'nivel': s['valor'], 'pontos': [s['valor']], 'timestamps': [s['t']]})
-
-    zonas = []
-    for g in grupos:
-        if len(g['pontos']) >= min_toques:
-            largura = g['nivel'] * tolerancia_pct
-            zonas.append({
-                'top': g['nivel'] + largura,
-                'bottom': g['nivel'] - largura,
-                'toques': len(g['pontos']),
-                'ultimo_toque_ts': max(g['timestamps']),
-            })
-    return zonas
 
 
 def compute_zona_movel(candles, lookback=ZONA_MOVEL_LOOKBACK):
@@ -852,35 +436,6 @@ def find_open_fvgs_adaptive(exec_candles, lookback=100, extend_bars=1):
     return abertas
 
 
-def find_equal_highs_lows_luxalgo(candles, length=3, atr_mult=0.1, atr_period=200):
-    """
-    Item 4 do ticket — mesma lógica de find_equal_highs_lows(), só troca
-    o período do ATR de 14 (Kairos legado) pra 200 (LuxAlgo real).
-    Reaproveita detect_exec_swings() e compute_atr() sem duplicar nada.
-    NÃO substitui find_equal_highs_lows() — mantida intacta.
-    """
-    atr_series = compute_atr(candles, atr_period)
-    atr_atual = next((v for v in reversed(atr_series) if v is not None), None)
-    if not atr_atual:
-        return []
-    swings = detect_exec_swings(candles, lookback=length)
-    grupos = []
-    for s in swings:
-        colocado = False
-        for g in grupos:
-            if s['tipo'] == g['tipo'] and abs(s['valor'] - g['nivel']) < atr_mult * atr_atual:
-                g['pontos'].append(s['valor'])
-                g['nivel'] = sum(g['pontos']) / len(g['pontos'])
-                colocado = True
-                break
-        if not colocado:
-            grupos.append({'tipo': s['tipo'], 'nivel': s['valor'], 'pontos': [s['valor']]})
-    return [
-        {'tipo': 'EQH' if g['tipo'] == 'high' else 'EQL', 'nivel': round(g['nivel'], 6), 'toques': len(g['pontos'])}
-        for g in grupos if len(g['pontos']) >= 2
-    ]
-
-
 def avaliar_vortex_decision_layer(candles_swing, candles_internal, direcao_desejada=None):
     """
     Item 9 do ticket — VORTEX DECISION LAYER (camada de composição).
@@ -1003,20 +558,6 @@ def find_order_blocks(exec_candles, lookback=100):
     return obs[-10:]
 
 
-def find_order_blocks_com_mitigacao(exec_candles, lookback=100):
-    candles = exec_candles[-lookback:] if len(exec_candles) > lookback else exec_candles
-    obs = find_order_blocks(exec_candles, lookback)
-    for ob in obs:
-        idx = ob.pop('idx', None)
-        if idx is None:
-            ob['mitigado'] = None
-            continue
-        candles_depois = candles[idx + 2:]
-        mitigado = any(c['l'] <= ob['top'] and c['h'] >= ob['bottom'] for c in candles_depois)
-        ob['mitigado'] = mitigado
-    return obs
-
-
 def find_equal_highs_lows(candles, length=3, atr_mult=0.1):
     atr_series = compute_atr(candles, 14)
     atr_atual = next((v for v in reversed(atr_series) if v is not None), None)
@@ -1038,17 +579,6 @@ def find_equal_highs_lows(candles, length=3, atr_mult=0.1):
         {'tipo': 'EQH' if g['tipo'] == 'high' else 'EQL', 'nivel': round(g['nivel'], 6), 'toques': len(g['pontos'])}
         for g in grupos if len(g['pontos']) >= 2
     ]
-
-
-def debug_zonas_completo(d1_candles, exec_candles):
-    return {
-        'zonas_sr_channel_d1': compute_d1_zones(d1_candles),
-        'zona_diaria': compute_zona_diaria_movel(d1_candles),
-        'premium_discount': compute_premium_discount(exec_candles),
-        'fvgs_abertas': find_open_fvgs(exec_candles),
-        'order_blocks_recentes': find_order_blocks(exec_candles),
-        'liquidez_eqh_eql': find_equal_highs_lows(exec_candles),
-    }
 
 
 def detect_exec_swings(exec_candles, lookback=SWING_LOOKBACK):
@@ -1096,20 +626,6 @@ def detect_choch_after_sweep(exec_candles, sweep):
         if sweep['lado'] == 'alta' and c['c'] < ref['valor']:
             return {'index': i, 'direcao': 'baixa', 'nivel': ref['valor'], 't': c['t']}
     return None
-
-
-def detect_bos_continuation_after_sweep(exec_candles, sweep):
-    for i, c in enumerate(exec_candles):
-        if c['t'] <= sweep['t']:
-            continue
-        if sweep['lado'] == 'baixa' and c['c'] < sweep['nivel']:
-            return {'index': i, 'direcao': 'baixa', 'nivel': sweep['nivel'], 't': c['t']}
-        if sweep['lado'] == 'alta' and c['c'] > sweep['nivel']:
-            return {'index': i, 'direcao': 'alta', 'nivel': sweep['nivel'], 't': c['t']}
-    return None
-
-
-MICRO_BOS_LOOKBACK = 3
 
 
 def detect_micro_bos(exec_candles, direcao, lookback=MICRO_BOS_LOOKBACK):
@@ -1199,62 +715,6 @@ def find_ifvg_after_choch(exec_candles, choch):
     return None
 
 
-def find_breaker_block_after_choch(exec_candles, choch):
-    start = max(0, choch['index'] - 12)
-    for i in range(choch['index'] - 1, start, -1):
-        c = exec_candles[i]
-        up = c['c'] >= c['o']
-        if choch['direcao'] == 'alta' and up:
-            continue
-        if choch['direcao'] == 'baixa' and not up:
-            continue
-        ob_top = c['o'] if choch['direcao'] == 'alta' else c['c']
-        ob_bottom = c['c'] if choch['direcao'] == 'alta' else c['o']
-        if ob_top <= ob_bottom:
-            continue
-
-        violado_idx = None
-        for k in range(i + 1, choch['index'] + 1):
-            cc = exec_candles[k]
-            if choch['direcao'] == 'alta' and cc['c'] < ob_bottom:
-                violado_idx = k
-                break
-            if choch['direcao'] == 'baixa' and cc['c'] > ob_top:
-                violado_idx = k
-                break
-        if violado_idx is None:
-            continue
-
-        for k in range(violado_idx + 1, len(exec_candles)):
-            cc = exec_candles[k]
-            tocou = cc['l'] <= ob_top and cc['h'] >= ob_bottom
-            if not tocou:
-                continue
-            rejeitou = cc['c'] > ob_top if choch['direcao'] == 'alta' else cc['c'] < ob_bottom
-            if rejeitou:
-                return {'tipo': 'Breaker', 'top': ob_top, 'bottom': ob_bottom}
-            break
-    return None
-
-
-def price_in_zone(entry_zone, preco):
-    return entry_zone['bottom'] <= preco <= entry_zone['top']
-
-
-def melhor_preco_na_zona(entry_zone, direcao, preco_atual_fallback=None):
-    if not entry_zone or entry_zone.get('top') is None or entry_zone.get('bottom') is None:
-        return preco_atual_fallback
-    return entry_zone['bottom'] if direcao == 'alta' else entry_zone['top']
-
-
-def candle_e_decisivo(candle, min_body_ratio=MIN_CANDLE_BODY_RATIO):
-    range_total = candle['h'] - candle['l']
-    if range_total <= 0:
-        return True
-    corpo = abs(candle['c'] - candle['o'])
-    return (corpo / range_total) >= min_body_ratio
-
-
 def aplicar_buffer_stop(nivel, direcao, buffer_pct=STOP_BUFFER_PCT):
     if direcao == 'alta':
         return nivel * (1 - buffer_pct)
@@ -1278,43 +738,6 @@ def aplicar_buffer_stop_atr(nivel, direcao, exec_candles, atr_mult=ATR_BUFFER_MU
     if direcao == 'alta':
         return nivel - folga
     return nivel + folga
-
-
-def _load_saved_state(db_file, pair, table='scalp_zone_state'):
-    try:
-        with sqlite3.connect(db_file) as conn:
-            cursor = conn.cursor()
-            cursor.execute(f'''
-                SELECT zona_top, zona_bottom, sweep_ts, sweep_nivel, sweep_lado, updated_at
-                FROM {table} WHERE pair=?
-            ''', (pair,))
-            row = cursor.fetchone()
-        if not row:
-            return None
-        return {
-            'zona_top': row[0], 'zona_bottom': row[1],
-            'sweep_ts': row[2], 'sweep_nivel': row[3], 'sweep_lado': row[4],
-            'updated_at': row[5],
-        }
-    except Exception as e:
-        print(f"[scalp_engine] erro ao carregar estado salvo de {pair} ({table}): {e}")
-        return None
-
-
-def _sweep_ainda_valido(saved, zona, now):
-    if not saved or saved.get('sweep_nivel') is None or not saved.get('sweep_lado'):
-        return False
-    if saved.get('zona_top') is None or saved.get('zona_bottom') is None:
-        return False
-    largura = zona['top'] - zona['bottom']
-    if largura <= 0:
-        return False
-    if abs(saved['zona_top'] - zona['top']) > largura or abs(saved['zona_bottom'] - zona['bottom']) > largura:
-        return False
-    idade = now - (saved.get('updated_at') or 0)
-    if idade > SWEEP_MEMORY_MAX_AGE_SECONDS:
-        return False
-    return True
 
 
 def compute_rsi(closes, period=14):
@@ -1446,76 +869,6 @@ def compute_adx(candles, period=14):
             continue
         adx[i] = (adx[i - 1] * (period - 1) + dx[i]) / period
     return adx
-
-
-def compute_adx_com_direcao(candles, period=14):
-    n = len(candles)
-    if n < period * 2 + 2:
-        return None, None
-
-    plus_dm = [0.0] * n
-    minus_dm = [0.0] * n
-    tr = [0.0] * n
-    for i in range(1, n):
-        up_move = candles[i]['h'] - candles[i - 1]['h']
-        down_move = candles[i - 1]['l'] - candles[i]['l']
-        plus_dm[i] = up_move if (up_move > down_move and up_move > 0) else 0.0
-        minus_dm[i] = down_move if (down_move > up_move and down_move > 0) else 0.0
-        h, l, prev_c = candles[i]['h'], candles[i]['l'], candles[i - 1]['c']
-        tr[i] = max(h - l, abs(h - prev_c), abs(l - prev_c))
-
-    atr_s = [None] * n
-    plus_di_s = [None] * n
-    minus_di_s = [None] * n
-    dx = [None] * n
-
-    atr_s[period] = sum(tr[1:period + 1])
-    plus_di_s[period] = sum(plus_dm[1:period + 1])
-    minus_di_s[period] = sum(minus_dm[1:period + 1])
-
-    def _dx_de(plus_s, minus_s, atr_val):
-        if not atr_val:
-            return None
-        pdi = 100 * plus_s / atr_val
-        mdi = 100 * minus_s / atr_val
-        if pdi + mdi == 0:
-            return 0.0
-        return 100 * abs(pdi - mdi) / (pdi + mdi)
-
-    dx[period] = _dx_de(plus_di_s[period], minus_di_s[period], atr_s[period])
-
-    for i in range(period + 1, n):
-        atr_s[i] = atr_s[i - 1] - (atr_s[i - 1] / period) + tr[i]
-        plus_di_s[i] = plus_di_s[i - 1] - (plus_di_s[i - 1] / period) + plus_dm[i]
-        minus_di_s[i] = minus_di_s[i - 1] - (minus_di_s[i - 1] / period) + minus_dm[i]
-        dx[i] = _dx_de(plus_di_s[i], minus_di_s[i], atr_s[i])
-
-    adx = [None] * n
-    janela_inicial = [v for v in dx[period:period * 2] if v is not None]
-    if len(janela_inicial) < period:
-        return None, None
-    idx_primeiro_adx = period * 2 - 1
-    adx[idx_primeiro_adx] = sum(janela_inicial) / period
-    for i in range(idx_primeiro_adx + 1, n):
-        if dx[i] is None:
-            continue
-        adx[i] = (adx[i - 1] * (period - 1) + dx[i]) / period
-
-    adx_atual = next((v for v in reversed(adx) if v is not None), None)
-    if adx_atual is None:
-        return None, None
-
-    idx_atual = len(adx) - 1
-    while idx_atual >= 0 and adx[idx_atual] is None:
-        idx_atual -= 1
-    if idx_atual < 0 or atr_s[idx_atual] is None or not atr_s[idx_atual]:
-        return round(adx_atual, 2), None
-
-    pdi_final = 100 * plus_di_s[idx_atual] / atr_s[idx_atual]
-    mdi_final = 100 * minus_di_s[idx_atual] / atr_s[idx_atual]
-    direcao = 'alta' if pdi_final > mdi_final else 'baixa'
-
-    return round(adx_atual, 2), direcao
 
 
 def compute_bollinger(closes, period=20, std_mult=2):
@@ -1764,41 +1117,6 @@ def compute_technical_indicators(exec_candles):
     return indicadores
 
 
-def compute_score(zona, sweep, choch, entry_zone, exec_candles, na_killzone, indicadores=None):
-    detalhes = []
-    score = 0
-
-    pts_zona = 20 if zona['toques'] >= 3 else 15
-    score += pts_zona
-    detalhes.append(('banda_d1', pts_zona))
-
-    if na_killzone:
-        score += 10
-        detalhes.append(('dentro_killzone', 10))
-
-    score += 25
-    detalhes.append(('sweep_choch', 25))
-
-    if entry_zone['tipo'] in ('FVG', 'iFVG'):
-        pts_fvg_ob = 20
-    elif entry_zone['tipo'] == 'Breaker':
-        pts_fvg_ob = 18
-    else:
-        pts_fvg_ob = 15
-    score += pts_fvg_ob
-    detalhes.append(('fvg_ob_retorno', pts_fvg_ob))
-
-    vols = [c.get('v', 0) for c in exec_candles[-20:]]
-    if vols:
-        media_vol = sum(vols) / len(vols)
-        choch_candle = exec_candles[choch['index']] if choch['index'] < len(exec_candles) else None
-        if choch_candle and choch_candle.get('v', 0) > media_vol * 1.3:
-            score += 8
-            detalhes.append(('volume_choch_forte', 8))
-
-    return min(score, 100), detalhes
-
-
 def compute_bias_from_swings(candles, lookback=SWING_LOOKBACK):
     if not candles or len(candles) < (lookback * 2 + 5):
         return 'neutro'
@@ -1941,71 +1259,6 @@ def compute_htf_narrative(d1, h4, h1):
     }
 
 
-def rsi_extremo_no_candle(exec_candles, idx):
-    closes = [c['c'] for c in exec_candles[:idx + 1]]
-    if len(closes) < 15:
-        return None
-    rsi_series = compute_rsi(closes)
-    return rsi_series[-1]
-
-
-def rsi_no_candle(exec_candles, idx):
-    if idx is None or idx < 0:
-        return None
-    closes = [c['c'] for c in exec_candles[:idx + 1]]
-    if len(closes) < 15:
-        return None
-    rsi_series = compute_rsi(closes)
-    return rsi_series[-1]
-
-
-def check_rsi_divergence(exec_candles, sweep):
-    liq_index = sweep.get('liquidez_index')
-    if liq_index is None:
-        return False
-
-    rsi_liquidez_antiga = rsi_no_candle(exec_candles, liq_index)
-    rsi_sweep_atual = rsi_no_candle(exec_candles, sweep['index'])
-    if rsi_liquidez_antiga is None or rsi_sweep_atual is None:
-        return False
-
-    if sweep['lado'] == 'alta':
-        preco_igual_ou_mais_baixo = sweep['nivel_pavio'] <= sweep['liquidez_varrida']
-        rsi_mais_alto = rsi_sweep_atual > rsi_liquidez_antiga
-        return preco_igual_ou_mais_baixo and rsi_mais_alto
-
-    if sweep['lado'] == 'baixa':
-        preco_igual_ou_mais_alto = sweep['nivel_pavio'] >= sweep['liquidez_varrida']
-        rsi_mais_baixo = rsi_sweep_atual < rsi_liquidez_antiga
-        return preco_igual_ou_mais_alto and rsi_mais_baixo
-
-    return False
-
-
-def _save_zone_state(db_file, pair, zona, fase, now, sweep=None, choch=None, table='scalp_zone_state'):
-    try:
-        with sqlite3.connect(db_file) as conn:
-            cursor = conn.cursor()
-            cursor.execute(f'''
-                INSERT INTO {table} (pair, zona_top, zona_bottom, fase, sweep_ts, sweep_nivel, sweep_lado, choch_ts, choch_nivel, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(pair) DO UPDATE SET
-                    zona_top=excluded.zona_top, zona_bottom=excluded.zona_bottom, fase=excluded.fase,
-                    sweep_ts=excluded.sweep_ts, sweep_nivel=excluded.sweep_nivel, sweep_lado=excluded.sweep_lado,
-                    choch_ts=excluded.choch_ts, choch_nivel=excluded.choch_nivel, updated_at=excluded.updated_at
-            ''', (
-                pair,
-                zona['top'] if zona else None, zona['bottom'] if zona else None,
-                fase,
-                sweep['t'] if sweep else None, sweep['nivel'] if sweep else None, sweep['lado'] if sweep else None,
-                choch['t'] if choch else None, choch['nivel'] if choch else None,
-                now,
-            ))
-            conn.commit()
-    except Exception as e:
-        print(f"[scalp_engine] erro ao salvar zone_state de {pair} ({table}): {e}")
-
-
 def _segundos_desde_ultimo_alerta(db_file, table, pair):
     try:
         with sqlite3.connect(db_file) as conn:
@@ -2021,30 +1274,6 @@ def _segundos_desde_ultimo_alerta(db_file, table, pair):
     except Exception as e:
         print(f"[scalp_engine] erro ao checar cooldown ({table}, {pair}): {e}")
         return None
-
-
-def _save_signal(db_file, pair, exec_tf_label, resultado, alerted, table='scalp_signal_state'):
-    try:
-        prefixo = 'cont' if table == 'scalp_signal_state_continuacao' else 'scalp'
-        signal_id = f"{prefixo}_{pair}_{int(time.time()*1000)}"
-
-        detalhes = resultado.get('detalhes') or []
-        motivo_texto = ','.join(f"{nome}:{pts}" for nome, pts in detalhes)
-
-        with sqlite3.connect(db_file) as conn:
-            cursor = conn.cursor()
-            cursor.execute(f'''
-                INSERT INTO {table}
-                    (id, pair, created_at, exec_tf, direcao, score, entry, sl, tp, na_killzone, alerted, motivo_score)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (
-                signal_id, pair, int(time.time()), exec_tf_label,
-                resultado['direcao'], resultado['score'], resultado['entry'], resultado['sl'], resultado['tp'],
-                1 if resultado['na_killzone'] else 0, 1 if alerted else 0, motivo_texto,
-            ))
-            conn.commit()
-    except Exception as e:
-        print(f"[scalp_engine] erro ao salvar signal de {pair} ({table}): {e}")
 
 
 def _find_liquidez_alvo(direcao, entry, exec_candles, d1_candles):
@@ -2168,10 +1397,6 @@ def get_asset_class(pair):
     return 'metal' if pair.upper() in PARES_METAL else 'crypto'
 
 
-def get_asset_profile(pair):
-    return ASSET_PROFILES[get_asset_class(pair)]
-
-
 def _find_open_at_hour(candles, hora_alvo, tz):
     """Acha o open do candle mais recente que abriu na hora alvo, no
     fuso horário indicado — serve de 'linha de água' de referência
@@ -2195,19 +1420,6 @@ def compute_midnight_open_ny(candles):
     return _find_open_at_hour(candles, 0, NY_TZ)
 
 
-def compute_bias_midnight_open(candles, midnight_open_fn=compute_midnight_open_ny):
-    """Bias de Compra/Venda: preço atual acima ou abaixo do Midnight
-    Open. Retorna ('alta'|'baixa'|None, midnight_open)."""
-    if not candles:
-        return None, None
-    midnight_open = midnight_open_fn(candles)
-    if midnight_open is None:
-        return None, None
-    preco_atual = candles[-1]['c']
-    bias = 'alta' if preco_atual > midnight_open else 'baixa'
-    return bias, midnight_open
-
-
 def compute_session_high_low(candles, sessao, dias_atras=1):
     """High/Low de uma sessão (Ásia ou Londres) de N dias atrás — nível
     de liquidez real que o SFP vai testar."""
@@ -2226,60 +1438,6 @@ def compute_session_high_low(candles, sessao, dias_atras=1):
     if not highs:
         return None
     return {'high': max(highs), 'low': min(lows), 'sessao': sessao, 'dia': str(dia_alvo)}
-
-
-def compute_wick_atr(candles, period=14):
-    """ATR calculado só em cima do tamanho dos pavios (rejeição), não do
-    range total do candle. Cripto costuma ter pavios muito mais longos
-    que XAU/forex — um ATR de corpo comum fica curto demais pro stop."""
-    n = len(candles)
-    if n < period + 1:
-        return None
-    pavios = []
-    for c in candles[-period:]:
-        corpo_top = max(c['o'], c['c'])
-        corpo_bottom = min(c['o'], c['c'])
-        pavio_sup = c['h'] - corpo_top
-        pavio_inf = corpo_bottom - c['l']
-        pavios.append(max(pavio_sup, pavio_inf))
-    return sum(pavios) / len(pavios) if pavios else None
-
-
-def aplicar_buffer_stop_multiativo(nivel, direcao, exec_candles, pair, fallback_pct=STOP_BUFFER_PCT):
-    """Buffer de stop ajustado pela CLASSE do ativo. Cripto usa o pavio
-    médio (wick ATR) multiplicado pelo perfil do ativo; XAU/metal usa o
-    ATR normal, que já é adequado pro comportamento mais 'liso' dele."""
-    classe = get_asset_class(pair)
-    perfil = get_asset_profile(pair)
-
-    if classe == 'crypto':
-        wick_atr = compute_wick_atr(exec_candles, 14)
-        if wick_atr and wick_atr > 0:
-            folga = wick_atr * perfil['wick_buffer_mult']
-            return nivel - folga if direcao == 'alta' else nivel + folga
-        return aplicar_buffer_stop_atr(nivel, direcao, exec_candles, fallback_pct=fallback_pct)
-
-    return aplicar_buffer_stop_atr(nivel, direcao, exec_candles, fallback_pct=fallback_pct)
-
-
-# ═══════════════════════════════════════════════════════════════════════
-# PIPELINE SMC/ICT ESTRITO — Bias (Midnight Open) → SFP → MSS (M1) → FVG.
-# Só retorna sinal quando 100% das condições passarem em sequência; se
-# qualquer passo falhar ou for invalidado (breakout real), devolve
-# status NEUTRAL (equivalente a NULL) — nunca força um sinal.
-#
-# Funciona igual pra XAU/USD e Cripto (BTC/ETH/SOL/...) — só troca a
-# fonte do Midnight Open (NY pro ouro, UTC pra cripto) e a janela de
-# liquidez (sessão anterior pro ouro, últimos 3-7 dias pra cripto).
-# ═══════════════════════════════════════════════════════════════════════
-
-SFP_LIQUIDEZ_COOLDOWN_SECONDS = 45 * 60
-XAU_PIP_SIZE = 0.01  # ajusta aqui se a tua corretora usar outra convenção de pip pro XAU
-XAU_SL_BUFFER_PIPS = 2
-CRYPTO_SL_BUFFER_PCT = 0.002  # 0.2%
-MSS_CORPO_MIN_PCT = 0.5  # corpo/range mínimo pra considerar "momentum forte"
-TP1_MIN_RR = 2.0
-TP2_MIN_RR = 3.0
 
 
 def compute_bias_midnight_open_estrito(pair, candles_por_tf):
@@ -2634,69 +1792,6 @@ def calcular_sl_estrito(pair, sfp):
     fator = (1 + CRYPTO_SL_BUFFER_PCT) if venda else (1 - CRYPTO_SL_BUFFER_PCT)
     return sfp['sl_pavio'] * fator
 
-
-def _buscar_alvo_eqh_eql(direcao, entry, risco, candles_liquidez, min_rr):
-    """TP2 — Equal Highs/Lows da própria janela de liquidez (sessão
-    anterior no XAU, últimos dias na cripto), do lado oposto ao SFP."""
-    if not candles_liquidez or risco <= 0:
-        return None, None
-    try:
-        eqs = find_equal_highs_lows(candles_liquidez)
-    except Exception:
-        return None, None
-
-    candidatos = []
-    for eq in eqs:
-        nivel = eq['nivel']
-        if direcao == 'alta' and nivel > entry:
-            candidatos.append(nivel)
-        elif direcao == 'baixa' and nivel < entry:
-            candidatos.append(nivel)
-
-    validos = [(n, abs(n - entry) / risco) for n in candidatos if abs(n - entry) / risco >= min_rr]
-    if not validos:
-        return None, None
-    validos.sort(key=lambda x: x[1])
-    nivel, rr = validos[0]
-    return nivel, rr
-
-
-
-
-def formatar_saida_kairos_json(resultado):
-    """Formato de saída EXATO pedido pra alimentar a interface do Kairos."""
-    if resultado.get('status') != 'SIGNAL_DISPARADO':
-        return {'status': 'NEUTRAL', 'ativo': resultado.get('pair'), 'motivo': resultado.get('motivo')}
-
-    return {
-        'status': 'SIGNAL_DISPARADO',
-        'ativo': resultado.get('pair'),
-        'direcao': 'LONG' if resultado.get('direcao') == 'alta' else 'SHORT',
-        'bias_context': resultado.get('bias_context'),
-        'setup': 'SFP_SWEEP + MSS + FVG_RETRACE',
-        'execucao': {
-            'preco_entrada': resultado.get('entry'),
-            'stop_loss': resultado.get('sl'),
-            'take_profit_1': resultado.get('tp1'),
-            'take_profit_2': resultado.get('tp2'),
-            'risco_recompensa': resultado.get('risco_recompensa'),
-        },
-        'fvg_zone': resultado.get('fvg_zone'),
-    }
-
-
-# ═══════════════════════════════════════════════════════════════════════
-# PIPELINE DE GATES (A-G) — "modelo avançado da Vortex", com uma diferença
-# de propósito: o Gate C (Monte Carlo) usa a simulação REAL que já existe
-# no engine (compute_monte_carlo), não um número decorativo. Se a Vortex
-# mostra 91% fixo, aqui o número é o que a simulação realmente calcular
-# — mesmo que isso signifique o gate falhar com mais frequência.
-#
-# Reaproveita quase tudo que já existe: indicadores técnicos, camadas de
-# score do modo '4camadas', Bias/SFP/MSS/FVG do modo 'sfp_liquidez',
-# Monte Carlo, Ichimoku, TP dinâmico, SMC quality, buffer multi-ativo.
-# Só duas peças novas: Supertrend e detector de Wyckoff Spring/UTAD.
-# ═══════════════════════════════════════════════════════════════════════
 
 def compute_supertrend(candles, period=10, multiplier=3.0):
     """
@@ -3442,93 +2537,6 @@ def process_pair_gates_vortex(db_file, pair, candles_por_tf, exec_tf_label='M5',
         resultado['motivo'] = f'entrada_confirmada, mas em cooldown ({restante_min}min restantes)'
 
     return resultado
-
-
-def _progresso_ate_tp(preco_atual, entry, sl, tp, direcao):
-    dist_total = abs(tp - entry)
-    if dist_total <= 0:
-        return 0
-    avanco = (preco_atual - entry) if direcao == 'alta' else (entry - preco_atual)
-    return avanco / dist_total
-
-
-def detect_sweep_zona_diaria_movel(exec_candles, zona_diaria, lookback=10):
-    resistencia = zona_diaria['resistencia']
-    suporte = zona_diaria['suporte']
-    sweep_resistencia = None
-    sweep_suporte = None
-
-    for i in range(len(exec_candles) - 1, max(0, len(exec_candles) - lookback), -1):
-        c = exec_candles[i]
-        if sweep_resistencia is None and c['h'] > resistencia['top'] and c['c'] < resistencia['top']:
-            sweep_resistencia = {'index': i, 'lado': 'alta', 'nivel': c['h'], 't': c['t'], 'tipo_zona': 'resistencia'}
-        if sweep_suporte is None and c['l'] < suporte['bottom'] and c['c'] > suporte['bottom']:
-            sweep_suporte = {'index': i, 'lado': 'baixa', 'nivel': c['l'], 't': c['t'], 'tipo_zona': 'suporte'}
-        if sweep_resistencia and sweep_suporte:
-            break
-
-    candidatos = [s for s in (sweep_resistencia, sweep_suporte) if s]
-    if not candidatos:
-        return None
-    return max(candidatos, key=lambda s: s['t'])
-
-
-
-
-CASCATA_COOLDOWN_SECONDS = 30 * 60
-
-
-def _stop_via_ultimo_swing(exec_candles, direcao, lookback=SWING_LOOKBACK):
-    swings = detect_exec_swings(exec_candles, lookback=lookback)
-    if direcao == 'alta':
-        lows = [s for s in swings if s['tipo'] == 'low']
-        if lows:
-            return lows[-1]['valor']
-    else:
-        highs = [s for s in swings if s['tipo'] == 'high']
-        if highs:
-            return highs[-1]['valor']
-    return None
-
-
-
-
-MODOS_SCALP = {
-    'normal_choch': 'scalp_signal_state',
-    'continuacao_bos': 'scalp_signal_state_continuacao',
-    'antecipado_v2': 'scalp_antecipado_signal_state',
-    'confluencia_indicadores': 'scalp_indicadores_signal_state',
-    'scalp_rapido': 'scalp_rapido_signal_state',
-    'cascata_smc': 'scalp_cascata_signal_state',
-    '4camadas': 'scalp_4camadas_signal_state',
-    'sfp_liquidez': 'scalp_sfp_liquidez_signal_state',
-    'gates_vortex': 'scalp_gates_vortex_signal_state',
-}
-
-_TABELAS_COM_SCORE = {
-    'scalp_signal_state', 'scalp_signal_state_continuacao', 'scalp_indicadores_signal_state'
-}
-
-_TABELAS_COM_MOTIVO = {
-    'scalp_signal_state', 'scalp_signal_state_continuacao', 'scalp_indicadores_signal_state'
-}
-
-_COLUNAS_POR_TABELA = {
-    'scalp_signal_state':
-        "id, pair, created_at, exec_tf, direcao, score, entry, sl, tp, na_killzone, resultado_final, motivo_score",
-    'scalp_signal_state_continuacao':
-        "id, pair, created_at, exec_tf, direcao, score, entry, sl, tp, na_killzone, resultado_final, motivo_score",
-    'scalp_antecipado_signal_state':
-        "id, pair, created_at, exec_tf, direcao, rsi, liquidez_varrida, divergencia_rsi, entry, sl, tp, resultado_final",
-    'scalp_indicadores_signal_state':
-        "id, pair, created_at, exec_tf, direcao, score, votos_favor, votos_total, entry, sl, tp, resultado_final, motivo_score",
-    'scalp_rapido_signal_state':
-        "id, pair, created_at, exec_tf, direcao, entry, sl, tp, zona_tipo, resultado_final",
-    'scalp_cascata_signal_state':
-        "id, pair, created_at, exec_tf, direcao, entry, sl, tp, bias_semanal, bias_d1, bias_h4, bias_h1, evento_tipo, resultado_final",
-    'scalp_4camadas_signal_state':
-        "id, pair, created_at, exec_tf, direcao, score, entry, sl, tp, resultado_final",
-}
 
 
 def _camada_regime_mtf(d1_candles, h4_candles, h1_candles):

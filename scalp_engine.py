@@ -3578,7 +3578,13 @@ def _kairos_build_mtf_map(candles_por_tf):
 # Não altera avaliar_vortex_decision_layer_v2(), Entry, SL, TP, RR,
 # sweep selector, scheduler, Telegram ou resolução de resultado.
 # ═══════════════════════════════════════════════════════════════════════
+# Universo completo do mapa estrutural. M15 continua visível para execução,
+# POIs, obstáculos e alvos locais, mas NÃO pode autorizar sozinho o setup.
 KAIROS_STRUCTURAL_LIQUIDITY_TFS = ('MN', 'W1', 'D1', 'H4', 'H1', 'M15')
+# Liquidez que pode originar a tese principal do Paper V2.2.
+# Prioridade institucional: W1/D1/H4; H1 apenas como estrutura intermediária.
+KAIROS_PRIMARY_SETUP_LIQUIDITY_TFS = ('W1', 'D1', 'H4', 'H1')
+KAIROS_PRIMARY_LIQUIDITY_PRIORITY = {'W1': 4, 'D1': 3, 'H4': 2, 'H1': 1}
 KAIROS_STRUCTURAL_SWING_SIZE = 50
 
 
@@ -3749,12 +3755,15 @@ def _kairos_select_structural_first_capture_sweep(candles_por_tf, now_ts):
     Reclaim/rejeição e aceitação/continuação são classificados depois no M15.
     """
     levels=_kairos_structural_registry(candles_por_tf, now_ts)
+    # M15 permanece no registry/auditoria, mas não pode ser a liquidez
+    # primária que autoriza um setup. MN fica como mapa macro/contexto.
+    setup_levels=[x for x in levels if x.get('tf') in KAIROS_PRIMARY_SETUP_LIQUIDITY_TFS]
     m15=[c for c in (candles_por_tf.get('M15') or []) if c.get('t') is not None and c['t'] <= now_ts]
     if len(m15) < 3:
         return None, {'levels':levels,'candidates':[]}
     candidates=[]
     max_age={'MN':45*86400000,'W1':14*86400000,'D1':5*86400000,'H4':48*3600000,'H1':18*3600000,'M15':5*3600000}
-    for liq in levels:
+    for liq in setup_levels:
         level=liq.get('level'); confirm_ts=liq.get('confirmed_ts')
         if level is None or confirm_ts is None or confirm_ts > now_ts:
             continue
@@ -3788,9 +3797,10 @@ def _kairos_select_structural_first_capture_sweep(candles_por_tf, now_ts):
     valid=[x for x in candidates if x.get('status')=='VALID_FIRST_CAPTURE_NEUTRAL' and 0 <= x['age_ms'] <= max_age.get(x['liquidity_tf'],5*3600000)]
     if not valid:
         return None, {'levels':levels,'candidates':candidates}
-    # Recência primeiro; TF maior só desempata. M15 não ganha poder sobre HTF por score/votação.
-    valid.sort(key=lambda x:(x['sweep_ts'],KAIROS_TF_PESO.get(x['liquidity_tf'],1)), reverse=True)
-    return valid[0], {'levels':levels,'candidates':candidates}
+    # Hierarquia primeiro, recência apenas dentro da mesma classe estrutural.
+    # Assim um evento local mais novo nunca atropela W1/D1/H4.
+    valid.sort(key=lambda x:(KAIROS_PRIMARY_LIQUIDITY_PRIORITY.get(x['liquidity_tf'],0),x['sweep_ts']), reverse=True)
+    return valid[0], {'levels':levels,'setup_levels':setup_levels,'candidates':candidates}
 
 
 def _kairos_direction_after_first_capture(candles, capture, swing_size=5):
@@ -4262,7 +4272,7 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
     -> displacement -> causal M15 FVG/IFVG/OB -> optional M5 refinement -> retest
     -> SL behind causal sweep -> nearest active structural liquidity/obstacle TP.
 
-    W1/D1/H4/H1/M15 podem ORIGINAR liquidez. M5 não cria narrativa; M1 não participa.
+    W1/D1/H4 podem originar a tese principal; H1 pode atuar como estrutura intermediária relevante.\n    M15/M5 executam, refinam e podem servir como alvo/obstáculo local; não autorizam sozinhos o setup. M1 não participa.
     """
     resultado={
         'signal':False,'direction':None,'bias':None,'zone_type':None,'zone_top':None,'zone_bottom':None,'zone_source':None,

@@ -1918,25 +1918,29 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
                             target_level=pre_target['nivel'], limit=8,
                             allowed_tfs=('M15','H1','H4','D1','W1')
                         )
-                        # TP1 = primeiro obstáculo relevante (gestão/parcial).
-                        # TP2/TP final = liquidez estrutural causal. O obstáculo NÃO encurta
-                        # automaticamente o alvo final nem mata o setup pelo RR do TP1.
+                        # Pré-alerta usa a mesma gestão operacional do sinal:
+                        # 2R parcial + BE, 3R final. Liquidez/POIs continuam como
+                        # validação de espaço; não viram alvo remoto arbitrário.
+                        pre_sign = 1.0 if direction == 'LONG' else -1.0
+                        pre_blocked = False
                         if pre_obstacles:
                             pre_o = pre_obstacles[0]
-                            pre_tp1 = float(pre_o['nivel'])
-                            pre_tp1_rr = abs(pre_tp1 - pre_limit) / pre_risk
-                            resultado['prealert_tp1'] = round(pre_tp1, 6)
-                            resultado['prealert_tp1_rr'] = round(pre_tp1_rr, 2)
-                            resultado['prealert_tp1_origem'] = f"OBSTACULO_{pre_o['tf']}_{pre_o['tipo']}"
-                        pre_tp2 = float(pre_target['nivel'])
-                        pre_tp2_rr = abs(pre_tp2 - pre_limit) / pre_risk
-                        resultado['prealert_tp2'] = round(pre_tp2, 6)
-                        resultado['prealert_tp2_rr'] = round(pre_tp2_rr, 2)
-                        resultado['prealert_tp2_origem'] = f"LIQUIDEZ_ESTRUTURAL_{pre_target['tf']}_{pre_target['tipo']}"
-                        # Compatibilidade com tabela/Telegram antigos: tp_ref passa a ser o TP final estrutural.
-                        resultado['prealert_tp'] = resultado['prealert_tp2']
-                        resultado['prealert_rr'] = resultado['prealert_tp2_rr']
-                        resultado['prealert_tp_origem'] = resultado['prealert_tp2_origem']
+                            pre_o_rr = abs(float(pre_o['nivel']) - pre_limit) / pre_risk
+                            if pre_o_rr < 2.0:
+                                pre_blocked = True
+                        pre_struct_rr = abs(float(pre_target['nivel']) - pre_limit) / pre_risk
+                        if pre_struct_rr < 2.0:
+                            pre_blocked = True
+                        if not pre_blocked:
+                            resultado['prealert_tp1'] = round(pre_limit + pre_sign * 2.0 * pre_risk, 6)
+                            resultado['prealert_tp1_rr'] = 2.0
+                            resultado['prealert_tp1_origem'] = 'GESTAO_FIXA_2R_PARCIAL_BE'
+                            resultado['prealert_tp2'] = round(pre_limit + pre_sign * 3.0 * pre_risk, 6)
+                            resultado['prealert_tp2_rr'] = 3.0
+                            resultado['prealert_tp2_origem'] = 'GESTAO_FIXA_3R'
+                            resultado['prealert_tp'] = resultado['prealert_tp2']
+                            resultado['prealert_rr'] = 3.0
+                            resultado['prealert_tp_origem'] = resultado['prealert_tp2_origem']
 
         resultado['failure_reason']='AGUARDANDO_RETESTE_ZONA'; return resultado
     entry=retest['c']; resultado['entry']=round(entry,6); resultado['timestamp']=retest['t']
@@ -1977,26 +1981,46 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
     obstacles=_kairos_opposing_zone_obstacles(_kairos_build_mtf_map(target_tf_map),entry,direction,target_level=target['nivel'],limit=8,allowed_tfs=obstacle_tfs)
     for o in obstacles: o['rr']=round(o['dist']/risk,2) if risk else None
     resultado['target_obstacles']=obstacles
-    # TP1 é gestão/parcial no primeiro obstáculo; TP2 é o alvo estrutural final.
-    # O filtro de RR usa TP2, evitando rejeitar um setup bom só porque existe um
-    # FVG/IFVG/OB próximo. Não ignoramos o obstáculo: ele fica explícito como TP1.
-    if obstacles:
-        tp1=obstacles[0]
-        resultado['tp1_obstacle']=dict(tp1)
-        resultado['tp1']=round(float(tp1['nivel']),6)
-        resultado['tp1_rr']=round(abs(float(tp1['nivel'])-entry)/risk,2)
-        resultado['tp1_origem']=f"OBSTACULO_{tp1['tf']}_{tp1['tipo']}"
+    # Gestão operacional fixa e auditável:
+    # TP1 = 2R (parcial + mover SL para BE); TP2 = 3R.
+    # A liquidez estrutural continua mapeada como contexto/obstáculo, mas não
+    # transforma um swing remoto em TP de 10R/30R. Se houver obstáculo estrutural
+    # relevante ANTES de 2R, rejeitamos o setup em vez de fabricar RR.
+    sign = 1.0 if direction == 'LONG' else -1.0
+    tp1_2r = entry + sign * (2.0 * risk)
+    tp2_3r = entry + sign * (3.0 * risk)
 
-    tp2=float(target['nivel'])
-    rr2=abs(tp2-entry)/risk
-    resultado['tp2']=round(tp2,6)
-    resultado['tp2_rr']=round(rr2,2)
-    resultado['tp2_origem']=f"LIQUIDEZ_ESTRUTURAL_{target['tf']}_{target['tipo']}"
+    first_obstacle = obstacles[0] if obstacles else None
+    if first_obstacle:
+        obstacle_level = float(first_obstacle['nivel'])
+        obstacle_rr = abs(obstacle_level - entry) / risk
+        resultado['tp1_obstacle'] = dict(first_obstacle)
+        if obstacle_rr < 2.0:
+            resultado['failure_reason']='OBSTACULO_ESTRUTURAL_ANTES_2R'
+            resultado['rr']=round(obstacle_rr,2)
+            return resultado
 
-    min_rr=1.0 if resultado['setup_type'] in ('PULLBACK','PULLBACK_REVERSAL','INTERNAL_CONTINUATION') else 2.0
-    if rr2 < min_rr:
-        resultado['rr']=round(rr2,2); resultado['failure_reason']='ALVO_ESTRUTURAL_RR_INSUFICIENTE'; return resultado
-    resultado['tp']=resultado['tp2']; resultado['rr']=resultado['tp2_rr']; resultado['tp_origem']=resultado['tp2_origem']
+    # A primeira liquidez estrutural do lado do trade também precisa deixar
+    # espaço mínimo para o plano 2R. Ela continua registrada como alvo/contexto.
+    structural_rr = abs(float(target['nivel']) - entry) / risk
+    if structural_rr < 2.0:
+        resultado['rr']=round(structural_rr,2)
+        resultado['failure_reason']='LIQUIDEZ_ESTRUTURAL_ANTES_2R'
+        return resultado
+
+    resultado['tp1']=round(tp1_2r,6)
+    resultado['tp1_rr']=2.0
+    resultado['tp1_origem']='GESTAO_FIXA_2R_PARCIAL_BE'
+    resultado['tp2']=round(tp2_3r,6)
+    resultado['tp2_rr']=3.0
+    resultado['tp2_origem']='GESTAO_FIXA_3R'
+    resultado['tp']=resultado['tp2']
+    resultado['rr']=3.0
+    resultado['tp_origem']=resultado['tp2_origem']
+    resultado['be_trigger']=resultado['tp1']
+    resultado['be_price']=round(entry,6)
+    resultado['structural_target_context']=round(float(target['nivel']),6)
+    resultado['structural_target_context_origin']=f"LIQUIDEZ_ESTRUTURAL_{target['tf']}_{target['tipo']}"
 
     resultado['signal']=True; resultado['valid']=True
     resultado['reason']=(
@@ -2540,9 +2564,9 @@ def _formatar_mensagem_prealerta_paper_v2(pair, r):
         f"[{r.get('zone_bottom')} — {r.get('zone_top')}]\n"
         f"🎯 LIMIT mental (CE 50%): {r.get('prealert_limit')}\n"
         f"🛑 SL ref.: {r.get('prealert_sl')}\n"
-        f"🏁 TP1 obstáculo/parcial: {r.get('prealert_tp1') or 'N/A'}\n"
+        f"🏁 TP1 2R / parcial + BE: {r.get('prealert_tp1') or 'N/A'}\n"
         f"R:R TP1: {r.get('prealert_tp1_rr') if r.get('prealert_tp1') is not None else 'N/A'}\n"
-        f"🎯 TP2 liquidez estrutural: {r.get('prealert_tp2') or r.get('prealert_tp')}\n"
+        f"🎯 TP2 final 3R: {r.get('prealert_tp2') or r.get('prealert_tp')}\n"
         f"R:R TP2: {r.get('prealert_tp2_rr') or r.get('prealert_rr')}\n"
         f"Origem TP2: {r.get('prealert_tp2_origem') or r.get('prealert_tp_origem')}\n"
         f"Horário estrutura: {ts_str}\n"
@@ -2645,8 +2669,8 @@ def _formatar_mensagem_novo_sinal_paper_v2(pair, sinal, cohort=None):
         f"Timestamp: {ts_str}\n"
         f"Entry: {sinal['entry']}\n"
         f"SL: {sinal['sl']}\n"
-        f"TP1 obstáculo/parcial: {sinal.get('tp1') or 'N/A'}\n"
-        f"TP2 final: {sinal['tp']}\n"
+        f"TP1 2R / parcial + BE: {sinal.get('tp1') or 'N/A'}\n"
+        f"TP2 final 3R: {sinal['tp']}\n"
         f"R:R final: {sinal['rr']}\n"
         f"Origem TP2: {sinal['tp_origem']}\n"
         f"Estado: PENDING\n"

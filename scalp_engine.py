@@ -42,13 +42,6 @@ RR_TARGET_CONTINUACAO = 2.5
 RR_TARGET_RAPIDO = 2.0
 RR_TARGET_CASCATA = 3.0
 
-MONTE_CARLO_GATE_MIN_PROB = 55
-MONTE_CARLO_GATE_ATIVO = True
-
-MODOS_ATIVOS = {
-    '4camadas': True,                # réplica intencional da Vortex — mesma lógica de entrada, sem trava
-    'gates_vortex': True,            # motor restrito — 8 passos + 7 gates, com trava de contradição
-}
 
 
 def _extrair_swings_lux_algo(candles, swing_size=50):
@@ -1045,7 +1038,7 @@ def auditar_btc_liquidez_matematica(sample_limit=100, fim_ts_ms=None):
     }
 
 
-@explicacao_bp.route('/scalp_gates_vortex/auditoria_btc_liquidez', methods=['GET'])
+@explicacao_bp.route('/kairos_v2/auditoria_btc_liquidez', methods=['GET'])
 def auditoria_btc_liquidez_endpoint():
     try:
         n = int(request.args.get('eventos', 100))
@@ -2004,8 +1997,7 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
 # pipeline experimental candle a candle, causal, sem lookahead, e
 # agrega funil completo + distribuição de R:R + exemplos + MFE/MAE
 # causal (reaproveitando _medir_mfe_mae_janela/_agregar_mfe_mae já
-# testados). NÃO chama process_pair_gates_vortex() nem
-# process_pair_4camadas() nem avaliar_vortex_decision_layer() (v1).
+# testados). Executa somente a decision layer Paper V2.2 atual.
 # ═══════════════════════════════════════════════════════════════════════
 
 VORTEX_DECISION_LAYER_V2_VERSAO = 'avaliar_vortex_decision_layer_v2 — pipeline BIAS→ZONA→CHoCH_M5→ENTRY→SL→TP→RR, sem alteração desde a Execução 1/2 de 7 dias'
@@ -3084,7 +3076,7 @@ def paper_trading_v2_relatorio(db_file):
     }
 
 
-@explicacao_bp.route("/scalp_gates_vortex/paper_trading_v2_tick", methods=["GET"])
+@explicacao_bp.route("/kairos_v2/paper_trading_tick", methods=["GET"])
 def paper_trading_v2_tick_endpoint():
     """
     Roda paper_trading_v2_tick_todos_pares() SINCRONAMENTE (rápido —
@@ -3133,7 +3125,7 @@ def paper_trading_v2_tick_endpoint():
         return jsonify({"erro": f"erro no tick de paper trading: {e}"}), 500
 
 
-@explicacao_bp.route("/scalp_gates_vortex/paper_trading_v2_relatorio", methods=["GET"])
+@explicacao_bp.route("/kairos_v2/paper_trading_relatorio", methods=["GET"])
 def paper_trading_v2_relatorio_endpoint():
     """Telemetria completa do paper trading — somente leitura."""
     db_file = _db_file_explicacao()
@@ -3185,7 +3177,7 @@ def paper_trading_v2_export_completo(db_file, limit=None, offset=None, desde_ts_
     return {"total": len(sinais), "sinais": sinais}
 
 
-@explicacao_bp.route("/scalp_gates_vortex/paper_trading_v2_export", methods=["GET"])
+@explicacao_bp.route("/kairos_v2/paper_trading_export", methods=["GET"])
 def paper_trading_v2_export_endpoint():
     """
     Export somente-leitura de TODOS os registros crus da tabela

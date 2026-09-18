@@ -3039,7 +3039,7 @@ def paper_trading_v2_tick(pair, db_file, agora_ts_ms=None):
             evento = res['resultado']
 
             if evento in ('TP', 'SL', 'BE', 'AMBIGUO'):
-                r_obtido = (3.0 if evento == 'TP' else (-1.0 if evento == 'SL' else (0.0 if evento == 'BE' else None)))
+                r_obtido = (3.0 if evento == 'TP' else (-1.0 if evento == 'SL' else None))
                 ts_evento = None
                 if res['candles_ate_resolucao'] and res['candles_ate_resolucao'] - 1 < len(candles_futuros):
                     ts_evento = candles_futuros[res['candles_ate_resolucao'] - 1]['t']
@@ -3154,7 +3154,7 @@ def paper_trading_v2_relatorio(db_file):
         por_par.setdefault(s['pair'], []).append(s)
     resultado_por_par = {p: bloco_direcao(lista) for p, lista in por_par.items()}
 
-    cronologico = sorted([s for s in todos if s['status'] in ('TP', 'SL', 'AMBIGUO')], key=lambda s: s['choch_timestamp'])
+    cronologico = sorted([s for s in todos if s['status'] in ('TP', 'SL')], key=lambda s: s['choch_timestamp'])
     max_win, max_loss, cur_win, cur_loss = 0, 0, 0, 0
     for s in cronologico:
         if s['status'] == 'TP':
@@ -3175,7 +3175,7 @@ def paper_trading_v2_relatorio(db_file):
     }
 
     return {
-        'total_sinais': total, 'pendentes': len(pendentes), 'tp': len(tp), 'sl': len(sl),
+        'total_sinais': total, 'pendentes': len(pendentes), 'tp': len(tp), 'sl': len(sl), 'be': len(be),
         'ambiguo': len(ambiguo), 'expired': len(expired),
         'win_rate_pct': win_rate, 'expectancy_R': expectancy, 'mediana_R': mediana_r,
         'max_win_streak': max_win, 'max_loss_streak': max_loss,
@@ -3187,7 +3187,7 @@ def paper_trading_v2_relatorio(db_file):
         'nota_metodologica': (
             'FORWARD TEST / PAPER TRADING — 100% experimental, ZERO dinheiro real, ZERO ordem '
             'enviada a qualquer exchange. Reaproveita avaliar_vortex_decision_layer_v2() e '
-            '_resolver_tp_sl_futuro() SEM ALTERAÇÃO NENHUMA. Tabela isolada '
+            '_resolver_gestao_2r_3r_be() para gestão 2R→BE→3R. BE fica separado e sem R realizado porque o tamanho da parcial ainda não foi definido. Tabela isolada '
             '(paper_trading_v2_sinais), nunca compartilhada com produção.'
         ),
     }

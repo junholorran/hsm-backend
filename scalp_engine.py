@@ -552,6 +552,8 @@ def _agregar_mfe_mae(lista_medicoes, janelas):
     return resultado
 
 
+KAIROS_TF_ORDEM = ('MN', 'W1', 'D1', 'H4', 'H1', 'M30', 'M15', 'M5', 'M1')
+KAIROS_TF_PESO = {'MN': 9, 'W1': 8, 'D1': 7, 'H4': 6, 'H1': 5, 'M30': 4, 'M15': 3, 'M5': 2, 'M1': 1}
 KAIROS_SWEEP_LEFT = 20
 KAIROS_SWEEP_RIGHT = 20
 KAIROS_SWEEP_CONFIRM_BARS = 3
@@ -2455,6 +2457,8 @@ def replay_vortex_decision_layer_v2_todos_pares(dias_historico=7, pares=None, fi
     }
 
 
+PAPER_TRADING_V2_JANELA_LOOKBACK_DIAS = 5
+PAPER_TRADING_V2_EXPIRACAO_DIAS = 15
 PAPER_TRADING_V2_FORWARD_WATERMARK_MS = 1789485718000
 PAPER_TRADING_V2_STRATEGY_VARIANT = 'KAIROS_V2_2_TP1_TP2_DIRECTION_NEUTRAL'
 

@@ -1351,6 +1351,10 @@ def _kairos_m5_refine_zone(m5_candles, m15_zone, structure_ts, direction):
         eff=z.get('flip_ts') or z.get('created_ts') or 0
         if eff < structure_ts or z.get('direcao') != direction:
             continue
+        # Refinamento também tem de nascer depois da estrutura M15; uma IFVG M5
+        # não pode reciclar FVG-mãe criada antes do MSS/CHoCH que autorizou o setup.
+        if z.get('created_ts') is not None and z.get('created_ts') < structure_ts:
+            continue
         if z.get('state') not in ('ATIVA','TOCADA','PARCIAL','IFVG'):
             continue
         if z.get('top') is None or z.get('bottom') is None:
@@ -1752,10 +1756,17 @@ def _kairos_shadow_log_poi(pair, zone, audit):
         print(f"[POI_SHADOW_AUDIT_ERR] {exc}")
 
 def _kairos_retest_zone(candles, zone, after_ts):
+    """Primeiro reteste causal em candle POSTERIOR à estrutura/POI.
+
+    O candle que confirma MSS/BOS, cria a FVG ou confirma o flip IFVG nunca
+    pode ser simultaneamente o candle de reteste/entrada.
+    """
     if not zone:
         return None
+    zone_ready_ts=zone.get('flip_ts') or zone.get('created_ts') or zone.get('break_ts') or zone.get('t') or 0
+    ready_ts=max(after_ts or 0, zone_ready_ts)
     for c in candles:
-        if c['t'] <= after_ts:
+        if c['t'] <= ready_ts:
             continue
         if c['h'] >= zone['bottom'] and c['l'] <= zone['top']:
             return c

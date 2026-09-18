@@ -3023,10 +3023,10 @@ def _kairos_confirmed_pivots(candles, left=KAIROS_SWEEP_LEFT, right=KAIROS_SWEEP
 def _kairos_fvg_states(candles, lookback=250):
     """FVG/IFVG com ciclo de vida operacional.
 
-    Estados: ATIVA -> TOCADA/PARCIAL -> MITIGADA; fechamento através da
-    extremidade invalidadora transforma FVG em IFVG. IFVG pode ser INVALIDADA
-    se depois fechar de volta através do lado oposto. Zonas mitigadas/invalidadas
-    não servem como obstáculo nem zona de entrada.
+    Estados operacionais: ATIVA -> TOCADA/PARCIAL. Wick profundo/full-fill
+    não mata sozinho a FVG. Fechamento através da extremidade invalidadora
+    confirma inversão e transforma a FVG em IFVG. IFVG pode ser INVALIDADA
+    se depois fechar de volta através do lado oposto.
     """
     c=candles[-lookback:] if len(candles) > lookback else candles
     if len(c) < 3:
@@ -3051,12 +3051,15 @@ def _kairos_fvg_states(candles, lookback=250):
         for z in states:
             if z['created_ts'] >= atual['t']:
                 continue
-            # FVG original: primeiro verifica quebra/aceitação, depois mitigação.
+            # FVG original: wick/touch NÃO mata a zona. O estado progride
+            # por profundidade de preenchimento; somente um CLOSE através da
+            # extremidade invalidadora confirma inversão e cria IFVG.
             if z['tipo'] == 'FVG_bullish':
                 if atual['c'] < z['bottom']:
                     z['state']='IFVG'; z['tipo']='IFVG_bearish'; z['direcao']='baixa'; z['flip_ts']=atual['t']; z['flip_candle']=dict(atual)
                 elif atual['l'] <= z['bottom']:
-                    z['state']='MITIGADA'; z['mitigated_ts']=z['mitigated_ts'] or atual['t']
+                    z['state']='PARCIAL'; z['first_touch_ts']=z['first_touch_ts'] or atual['t']
+                    z['mitigated_ts']=z['mitigated_ts'] or atual['t']
                 elif atual['l'] < z['top']:
                     z['state']='PARCIAL' if atual['l'] < (z['top']+z['bottom'])/2 else 'TOCADA'
                     z['first_touch_ts']=z['first_touch_ts'] or atual['t']
@@ -3064,7 +3067,8 @@ def _kairos_fvg_states(candles, lookback=250):
                 if atual['c'] > z['top']:
                     z['state']='IFVG'; z['tipo']='IFVG_bullish'; z['direcao']='alta'; z['flip_ts']=atual['t']; z['flip_candle']=dict(atual)
                 elif atual['h'] >= z['top']:
-                    z['state']='MITIGADA'; z['mitigated_ts']=z['mitigated_ts'] or atual['t']
+                    z['state']='PARCIAL'; z['first_touch_ts']=z['first_touch_ts'] or atual['t']
+                    z['mitigated_ts']=z['mitigated_ts'] or atual['t']
                 elif atual['h'] > z['bottom']:
                     z['state']='PARCIAL' if atual['h'] > (z['top']+z['bottom'])/2 else 'TOCADA'
                     z['first_touch_ts']=z['first_touch_ts'] or atual['t']

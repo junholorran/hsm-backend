@@ -3872,9 +3872,14 @@ def _kairos_structural_targets(candles_por_tf, now_ts, entry, direction, limit=1
         if direction=='LONG' and lv<=entry: continue
         if direction=='SHORT' and lv>=entry: continue
         q=dict(x); q['nivel']=lv; q['tipo']=x.get('type'); q['dist']=abs(lv-entry); q['classe']='LIQUIDEZ_ESTRUTURAL'
+        # M15 pode ser alvo/local obstacle, mas TP2 estrutural deve apontar
+        # primeiro para H1/H4/D1/W1 quando houver liquidez ativa nessa direção.
+        q['primary_target']=x.get('tf') in KAIROS_PRIMARY_SETUP_LIQUIDITY_TFS
         out.append(q)
-    out.sort(key=lambda x:(x['dist'],-KAIROS_TF_PESO.get(x.get('tf'),1)))
-    return out[:limit]
+    primary=[x for x in out if x.get('primary_target')]
+    selected=primary if primary else out
+    selected.sort(key=lambda x:(x['dist'],-KAIROS_TF_PESO.get(x.get('tf'),1)))
+    return selected[:limit]
 
 def _kairos_build_structural_liquidity_telemetry(candles_por_tf, now_ts, signal_result=None):
     """Snapshot paralelo/auditável. Não participa da autorização do trade."""

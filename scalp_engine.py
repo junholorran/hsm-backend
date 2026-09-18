@@ -509,7 +509,7 @@ def _kairos_confirmed_pivots(candles, left=KAIROS_SWEEP_LEFT, right=KAIROS_SWEEP
 
 
 def _kairos_fvg_states(candles, lookback=250):
-    """FVG/IFVG com ciclo de vida operacional.
+    """FVG/IFVG com geometria ICT canônica de 3 candles e ciclo de vida operacional.
 
     Estados operacionais: ATIVA -> TOCADA/PARCIAL. Wick profundo/full-fill
     não mata sozinho a FVG. Fechamento através da extremidade invalidadora
@@ -523,12 +523,12 @@ def _kairos_fvg_states(candles, lookback=250):
     for i in range(2, len(c)):
         a, meio, atual = c[i-2], c[i-1], c[i]
         novo=None
-        if atual['l'] > a['h'] and meio['c'] > a['h']:
+        if atual['l'] > a['h']:
             novo={'id':f"FVG_{meio['t']}_B",'tipo':'FVG_bullish','direcao':'alta','top':atual['l'],'bottom':a['h'],
                   'created_ts':atual['t'],'origin_ts':meio['t'],'state':'ATIVA','flip_ts':None,
                   'first_touch_ts':None,'mitigated_ts':None,'invalidated_ts':None,
                   'source_a':dict(a),'source_mid':dict(meio),'source_c':dict(atual),'flip_candle':None}
-        elif atual['h'] < a['l'] and meio['c'] < a['l']:
+        elif atual['h'] < a['l']:
             novo={'id':f"FVG_{meio['t']}_S",'tipo':'FVG_bearish','direcao':'baixa','top':a['l'],'bottom':atual['h'],
                   'created_ts':atual['t'],'origin_ts':meio['t'],'state':'ATIVA','flip_ts':None,
                   'first_touch_ts':None,'mitigated_ts':None,'invalidated_ts':None,
@@ -1604,7 +1604,13 @@ def _kairos_select_entry_zone(exec_candles, sweep, structure, mapa):
             continue
         if z.get('state') not in ('ATIVA','TOCADA','PARCIAL','IFVG'):
             continue
+        # O POI de entrada tem de NASCER da perna estrutural e existir até o break.
+        # A geometria pode começar no candle do sweep, mas nunca antes dele nem depois do MSS/BOS.
         if not (sweep['sweep_ts'] <= effective_ts <= st):
+            continue
+        if z.get('created_ts') is not None and z.get('created_ts') < sweep['sweep_ts']:
+            # IFVG também precisa de FVG-mãe criada dentro da perna causal; não aceitamos
+            # inverter uma FVG antiga e chamá-la de POI produzido pelo displacement atual.
             continue
         z2=dict(z); z2['liquidity_inside']=_kairos_zone_contains_liquidity(z2,mapa)
         zones.append(z2)

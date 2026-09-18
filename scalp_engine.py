@@ -1761,10 +1761,10 @@ def _kairos_context_bias(candles_por_tf):
 
 def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=None,
                                       candles_por_tf=None, audit_pair=None):
-    """KAIROS Paper V2.1 — liquidez estrutural ativa, M15 executa, M5 refina.
+    """KAIROS Paper V2.2 — liquidez HTF estrutural, M15 executa, M5 refina.
 
     Cadeia autorizadora:
-    HTF/M15 structural liquidity -> neutral FIRST capture on M15 -> rejection/reclaim OR acceptance/continuation -> intention -> M15 MSS/CHoCH/BOS
+    W1/D1/H4/H1 structural liquidity -> neutral FIRST capture -> rejection/reclaim OR acceptance/continuation -> intention/displacement -> M15 MSS/CHoCH/BOS
     -> displacement -> causal M15 FVG/IFVG/OB -> optional M5 refinement -> retest
     -> SL behind causal sweep -> nearest active structural liquidity/obstacle TP.
 
@@ -2000,7 +2000,7 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
 # testados). Executa somente a decision layer Paper V2.2 atual.
 # ═══════════════════════════════════════════════════════════════════════
 
-VORTEX_DECISION_LAYER_V2_VERSAO = 'avaliar_vortex_decision_layer_v2 — pipeline BIAS→ZONA→CHoCH_M5→ENTRY→SL→TP→RR, sem alteração desde a Execução 1/2 de 7 dias'
+KAIROS_DECISION_LAYER_V2_VERSAO = 'KAIROS V2.2 — HTF LIQUIDITY→FIRST CAPTURE→REACTION→DISPLACEMENT→M15 MSS/CHoCH/BOS→CAUSAL FVG/IFVG/OB→RETEST→STRUCTURAL SL→TP1/TP2'
 
 
 def replay_vortex_decision_layer_v2(pair, dias_historico=7, janelas_mfe_mae=JANELAS_MFE_MAE_PADRAO, fim_ts_ms=None):
@@ -2191,7 +2191,7 @@ def replay_vortex_decision_layer_v2(pair, dias_historico=7, janelas_mfe_mae=JANE
     return {
         'pair': pair, 'dias_historico': dias_historico,
         'cohort': 'REPLAY', 'strategy_variant': PAPER_TRADING_V2_STRATEGY_VARIANT,
-        'versao_pipeline': VORTEX_DECISION_LAYER_V2_VERSAO,
+        'versao_pipeline': KAIROS_DECISION_LAYER_V2_VERSAO,
         'janela_fixa': {
             'data_inicio_ts_ms': inicio_ts_ms,
             'data_fim_ts_ms': fim_ts_ms,
@@ -2209,7 +2209,7 @@ def replay_vortex_decision_layer_v2(pair, dias_historico=7, janelas_mfe_mae=JANE
         },
         'nota_metodologica': (
             'REPLAY SOMENTE AUDITORIA — MESMA avaliar_vortex_decision_layer_v2() V2.2 usada pelo Paper/Forward, '
-            'com mapa MN/W1/D1/H4/H1/M30/M15/M5/M1 truncado causalmente. Não altera CHoCH, FVG, Premium/Discount, '
+            'com mapa MN/W1/D1/H4/H1/M30/M15/M5/M1 truncado causalmente. Não altera a matemática causal de MSS/CHoCH, FVG/IFVG/OB, '
             'SL/TP existentes, gates ou motores legados removidos. Mesma '
             'metodologia causal já aprovada — cada ciclo só enxerga candles com t <= ts_corte. '
             'Sinais deduplicados por (choch_timestamp, direction, zone_type) — o mesmo CHoCH pode '
@@ -2342,7 +2342,7 @@ def init_paper_trading_v2_db(db_file):
 
 def _migrar_coluna_telemetria_liquidity_paper_v2(db_file):
     """
-    Migração aditiva e idempotente da telemetria V2.1.
+    Migração aditiva e idempotente da telemetria V2.2.
     Não recria a tabela, não apaga nem altera sinais históricos.
     """
     try:
@@ -2740,7 +2740,7 @@ def paper_trading_v2_tick(pair, db_file, agora_ts_ms=None):
     na tabela própria.
     """
     # Garantia de schema no próprio caminho automático: deployments antigos
-    # podem ter a tabela persistida no volume sem a coluna nova da V2.1.
+    # podem ter a tabela persistida no volume sem a coluna nova da V2.2.
     # Esta migração é aditiva/idempotente e preserva todo o histórico.
     _migrar_coluna_telemetria_liquidity_paper_v2(db_file)
     _migrar_colunas_cohort_paper_v2(db_file)

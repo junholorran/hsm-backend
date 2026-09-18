@@ -1260,12 +1260,32 @@ def _kairos_select_structural_first_capture_sweep(candles_por_tf, now_ts):
         if level is None or confirm_ts is None or confirm_ts > now_ts:
             continue
         is_high=liq.get('type') in ('SWING_HIGH','PDH','PWH','PMH','EQH')
+
+        # FIRST CAPTURE precisa ser demonstrável no TF nativo ANTES de refinarmos
+        # o instante no M15. Isso impede uma captura antiga/consumida de reaparecer
+        # como "nova" só porque a janela M15 curta não contém o primeiro sweep.
+        native_capture_ts=liq.get('captured_ts')
+        if liq.get('state') != 'CAPTURED' or native_capture_ts is None:
+            continue
+        tf_ms={'W1':7*86400000,'D1':86400000,'H4':4*3600000,'H1':3600000}.get(liq.get('tf'))
+        if tf_ms is None:
+            continue
+        native_capture_end=native_capture_ts + tf_ms
+        # Se o candle nativo da PRIMEIRA captura ficou fora do histórico M15,
+        # não inventamos timing: o nível é consumido e inelegível para setup.
+        if not m15 or native_capture_end <= m15[0]['t']:
+            continue
+
         first_idx=None
         for i,c in enumerate(m15):
-            if c['t'] <= confirm_ts: continue
+            if c['t'] <= confirm_ts:
+                continue
+            if c['t'] < native_capture_ts or c['t'] >= native_capture_end:
+                continue
             if (is_high and c['h'] > level) or ((not is_high) and c['l'] < level):
                 first_idx=i; break
-        if first_idx is None: continue
+        if first_idx is None:
+            continue
         c=m15[first_idx]
         nxt=m15[first_idx+1] if first_idx+1 < len(m15) else None
         # Estado pós-captura: rejeição/reclaim OU aceitação além do nível.

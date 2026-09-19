@@ -293,7 +293,7 @@ def _fetch_bybit_klines_historico(symbol, interval, dias_historico, fim_ts_ms=No
     fixo, tornando o período reproduzível (não desloca com o tempo
     real entre execuções).
     """
-    intervalo_ms = {'W': 604800000, 'D': 86400000, '240': 14400000, '60': 3600000, '30': 1800000, '15': 900000, '5': 300000, '1': 60000}.get(interval, 900000)
+    intervalo_ms = {'M': 2592000000, 'W': 604800000, 'D': 86400000, '240': 14400000, '60': 3600000, '30': 1800000, '15': 900000, '5': 300000, '1': 60000}.get(interval, 900000)
     total_candles_necessarios = int((dias_historico * 86400000) / intervalo_ms) + 20
     todos = []
     end_ts = fim_ts_ms
@@ -933,6 +933,99 @@ def _kairos_liquidity_map_tf(candles, tf):
 # Valida pivôs 20/20, pools 2+ toques, overlap POI, sweeps e causalidade.
 # Não entra na decisão operacional, não envia Telegram e não grava DB.
 # ═══════════════════════════════════════════════════════════════════════
+
+KAIROS_REAL_LIQUIDITY_AUDIT_TFS = {
+    'MN': ('M', 3650),
+    'W1': ('W', 1825),
+    'D1': ('D', 730),
+    'H4': ('240', 120),
+    'H1': ('60', 45),
+    'M30': ('30', 25),
+    'M15': ('15', 12),
+    'M5': ('5', 5),
+    'M1': ('1', 2),
+}
+
+
+def _kairos_audit_lux50_structural_levels(candles, tf, now_ts, sample_limit=100):
+    """Audita a genealogia causal dos Swing High/Low Lux50 sem alterar produção."""
+    levels = _kairos_lux50_structural_levels(candles, tf, now_ts)
+    by_ts = {c['t']: i for i, c in enumerate(candles)}
+    checks = []
+    for lv in levels[-sample_limit:]:
+        oi = by_ts.get(lv.get('origin_ts'))
+        expected_ci = None if oi is None else oi + KAIROS_STRUCTURAL_SWING_SIZE
+        ci_ok = expected_ci is not None and expected_ci < len(candles)
+        expected_confirm = candles[expected_ci]['t'] if ci_ok else None
+        typ = lv.get('type')
+        expected_level = None
+        if oi is not None:
+            expected_level = candles[oi]['h'] if typ == 'SWING_HIGH' else candles[oi]['l']
+        first_capture = None
+        if ci_ok and expected_level is not None:
+            for cc in candles[expected_ci + 1:]:
+                crossed = (typ == 'SWING_HIGH' and cc['h'] > expected_level) or (typ == 'SWING_LOW' and cc['l'] < expected_level)
+                if crossed:
+                    first_capture = cc['t']
+                    break
+        checks.append({
+            'tf': tf, 'type': typ, 'level': lv.get('level'),
+            'origin_ts': lv.get('origin_ts'), 'confirmed_ts': lv.get('confirmed_ts'),
+            'captured_ts': lv.get('captured_ts'),
+            'origin_price_ok': expected_level == lv.get('level'),
+            'confirmation_delay_ok': ci_ok and expected_confirm == lv.get('confirmed_ts'),
+            'known_before_capture': lv.get('captured_ts') is None or (lv.get('confirmed_ts') is not None and lv.get('confirmed_ts') < lv.get('captured_ts')),
+            'first_capture_ok': first_capture == lv.get('captured_ts'),
+            'lookahead_ok': lv.get('confirmed_ts') is not None and lv.get('confirmed_ts') <= now_ts,
+        })
+    for x in checks:
+        x['pass'] = bool(x['origin_price_ok'] and x['confirmation_delay_ok'] and x['known_before_capture'] and x['first_capture_ok'] and x['lookahead_ok'])
+    return {
+        'tf': tf, 'candles': len(candles), 'swing_size': KAIROS_STRUCTURAL_SWING_SIZE,
+        'total': len(checks), 'pass': sum(1 for x in checks if x['pass']),
+        'fail': sum(1 for x in checks if not x['pass']),
+        'swing_high': sum(1 for x in checks if x['type'] == 'SWING_HIGH'),
+        'swing_low': sum(1 for x in checks if x['type'] == 'SWING_LOW'),
+        'all_math_pass': all(x['pass'] for x in checks),
+        'samples': checks[-20:],
+    }
+
+
+def auditar_liquidez_real_todos_tfs(pair='BTCUSD', sample_limit=100, fim_ts_ms=None):
+    """Auditoria on-demand MN→M1 dos Swing High/Low Lux50, sem tocar no motor de sinais."""
+    pair = str(pair or 'BTCUSD').upper()
+    if pair not in PARES_MONITORADOS_REPLAY:
+        raise ValueError('par fora da lista monitorada')
+    sample_limit = max(10, min(int(sample_limit or 100), 300))
+    now_ts = int(fim_ts_ms) if fim_ts_ms else int(time.time() * 1000)
+    resultado = {}
+    for tf, (interval, dias) in KAIROS_REAL_LIQUIDITY_AUDIT_TFS.items():
+        candles = _fetch_bybit_klines_historico(pair, interval, dias, fim_ts_ms=fim_ts_ms)
+        resultado[tf] = _kairos_audit_lux50_structural_levels(candles, tf, now_ts, sample_limit)
+    total = sum(r['total'] for r in resultado.values())
+    total_fail = sum(r['fail'] for r in resultado.values())
+    return {
+        'pair': pair, 'swing_math': 'LUX50', 'timeframes': list(KAIROS_REAL_LIQUIDITY_AUDIT_TFS.keys()),
+        'total_levels_checked': total, 'total_fail': total_fail,
+        'all_math_pass': total > 0 and total_fail == 0,
+        'resultado': resultado,
+        'nota': 'Prova origem→confirmacao→primeira captura→zero lookahead dos Swing High/Low Lux50. Somente auditoria; nao altera setup/entry/SL/TP.'
+    }
+
+
+@explicacao_bp.route('/kairos_v2/auditoria_liquidez_real', methods=['GET'])
+def auditoria_liquidez_real_endpoint():
+    try:
+        pair = request.args.get('pair', 'BTCUSD')
+        n = int(request.args.get('eventos', 100))
+        fim = request.args.get('fim_ts_ms')
+        fim = int(fim) if fim else None
+        return jsonify(auditar_liquidez_real_todos_tfs(pair=pair, sample_limit=n, fim_ts_ms=fim)), 200
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'erro': str(e)}), 500
+
 
 KAIROS_BTC_AUDIT_TFS = {
     'H4': ('240', 45),

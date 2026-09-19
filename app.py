@@ -328,26 +328,7 @@ def _run_btc_math_audit_once():
 
         print("[BTC_AUDIT] FIM", flush=True)
 
-        # TEMP 2026-09-19: prova causal Lux50 MN→M1. Remover após capturar os logs.
-        time.sleep(10)
-        print("[REAL_LIQ_AUDIT] INICIO BTCUSD MN->M1 eventos=100", flush=True)
-        rr = scalp_engine.auditar_liquidez_real_todos_tfs(pair='BTCUSD', sample_limit=100)
-        print(
-            f"[REAL_LIQ_AUDIT] RESUMO pair={rr.get('pair')} "
-            f"all_math_pass={rr.get('all_math_pass')} total={rr.get('total_levels_checked')} "
-            f"fail={rr.get('total_fail')}",
-            flush=True,
-        )
-        for tf, x in (rr.get('resultado') or {}).items():
-            print(
-                f"[REAL_LIQ_AUDIT] {tf} all_math_pass={x.get('all_math_pass')} "
-                f"pass={x.get('pass')}/{x.get('total')} fail={x.get('fail')} "
-                f"high={x.get('swing_high')} low={x.get('swing_low')}",
-                flush=True,
-            )
-            if x.get('fail'):
-                print(f"[REAL_LIQ_AUDIT_FAIL] {tf} samples={x.get('samples')}", flush=True)
-        print("[REAL_LIQ_AUDIT] FIM", flush=True)
+
     except Exception as e:
         import traceback
         print(f"[BTC_AUDIT] ERRO {type(e).__name__}: {e}", flush=True)

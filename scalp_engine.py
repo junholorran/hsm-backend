@@ -2449,7 +2449,7 @@ def replay_vortex_decision_layer_v2(pair, dias_historico=7, janelas_mfe_mae=JANE
         if experimental_obstacle_blocks is not None and r.get('failure_reason') == 'OBSTACULO_ESTRUTURAL_ANTES_2R':
             o=dict(r.get('tp1_obstacle') or {})
             experimental_obstacle_blocks.append({
-                'ts_corte':ts_corte,'entry':r.get('entry'),'sl':r.get('sl'),'direction':r.get('direction'),
+                'ts_corte':ts_corte,'entry_executable_ts':ts_corte,'entry':r.get('entry'),'sl':r.get('sl'),'direction':r.get('direction'),
                 'risk':abs(float(r['entry'])-float(r['sl'])) if r.get('entry') is not None and r.get('sl') is not None else None,
                 'obstacle':o,'obstacle_rr':r.get('rr'),'target':r.get('first_liquidity_target'),
                 'thesis':(r.get('first_capture_ts'),r.get('choch_timestamp'),r.get('direction')),
@@ -2571,15 +2571,16 @@ def replay_vortex_decision_layer_v2(pair, dias_historico=7, janelas_mfe_mae=JANE
     }
 
 
-def replay_poi_lifecycle_abc_sol(dias_historico=7, fim_ts_ms=None):
-    """Branch-only causal A/B/C replay for SOL. No DB/Telegram writes."""
+def replay_poi_lifecycle_abc_sol(dias_historico=7, fim_ts_ms=None, pair='SOLUSD'):
+    """Branch-only causal A/B/C benchmark replay. Pair-selectable; no DB/Telegram writes."""
+    pair=(pair or 'SOLUSD').upper()
     if fim_ts_ms is None:
         fim_ts_ms=int(time.time()*1000)
     out={}
     for policy in ('A_CURRENT','B_FREEZE','C_LIFECYCLE'):
         t0=time.time()
         print(f'[POI_ABC_PROGRESS] policy={policy} phase=REPLAY_START', flush=True)
-        r=replay_vortex_decision_layer_v2('SOLUSD',dias_historico=dias_historico,fim_ts_ms=fim_ts_ms,
+        r=replay_vortex_decision_layer_v2(pair,dias_historico=dias_historico,fim_ts_ms=fim_ts_ms,
                                           experimental_poi_policy=policy)
         print(f'[POI_ABC_PROGRESS] policy={policy} phase=REPLAY_DONE seconds={round(time.time()-t0,2)} signals={r.get("total_sinais_unicos") if isinstance(r,dict) else None}', flush=True)
         if 'erro' in r:
@@ -2720,15 +2721,16 @@ def replay_poi_lifecycle_abc_sol(dias_historico=7, fim_ts_ms=None):
                     micro_result='TP1R'; micro_resolution_ts=fc.get('t'); break
                 if hit_sl:
                     micro_result='SL'; micro_resolution_ts=fc.get('t'); break
-            if micro_resolution_ts is not None and b.get('ts_corte') is not None:
-                micro_minutes=round((int(micro_resolution_ts)-int(b.get('ts_corte')))/60000.0,1)
+            entry_executable_ts=b.get('entry_executable_ts') or b.get('ts_corte')
+            if micro_resolution_ts is not None and entry_executable_ts is not None:
+                micro_minutes=round((int(micro_resolution_ts)-int(entry_executable_ts))/60000.0,1)
 
             if len(shadow_rows)<50:
                 shadow_rows.append({**b,'shadow_tp3':round(tp3,6),'shadow_result':mapped,
                                     'shadow_resolution_ts':res.get('timestamp'),'shadow_r':res.get('r_obtido'),
                                     'structural_target_rr':target_rr,'counterfactual_class':gate_class,
                                     'micro_1r_target':round(tp1,6),'micro_1r_result':micro_result,
-                                    'micro_1r_resolution_ts':micro_resolution_ts,'micro_1r_minutes_from_cutoff':micro_minutes,
+                                    'micro_1r_resolution_ts':micro_resolution_ts,'micro_1r_minutes_from_entry':micro_minutes,
                                     'obstacle_interaction':interaction,'obstacle_touched':touched,
                                     'obstacle_crossed':crossed,'obstacle_first_touch_ts':first_touch_ts,
                                     'mfe_R':round(mfe_r,3),'mae_R':round(mae_r,3)})
@@ -2751,8 +2753,8 @@ def replay_poi_lifecycle_abc_sol(dias_historico=7, fim_ts_ms=None):
             micro_1r_counts[mr]=micro_1r_counts.get(mr,0)+1
             if cc=='GATE_EXCLUSIVE':
                 micro_1r_gate_exclusive_counts[mr]=micro_1r_gate_exclusive_counts.get(mr,0)+1
-                if mr=='TP1R' and row.get('micro_1r_minutes_from_cutoff') is not None:
-                    micro_tp_minutes.append(row.get('micro_1r_minutes_from_cutoff'))
+                if mr=='TP1R' and row.get('micro_1r_minutes_from_entry') is not None:
+                    micro_tp_minutes.append(row.get('micro_1r_minutes_from_entry'))
         out[policy]['obstacle_shadow_audit']={
             'blocked_cycles':len(blocks),'unique_candidates':len(unique_blocks),
             'outcomes_300_m5':shadow_counts,'obstacle_groups':obstacle_groups,
@@ -2761,17 +2763,17 @@ def replay_poi_lifecycle_abc_sol(dias_historico=7, fim_ts_ms=None):
             'independent_theses_by_class':{k:len(v) for k,v in thesis_sets.items()},
             'micro_1r_all_candidates':micro_1r_counts,
             'micro_1r_gate_exclusive':micro_1r_gate_exclusive_counts,
-            'micro_1r_gate_exclusive_tp_median_minutes':(
+            'micro_1r_gate_exclusive_tp_median_minutes_from_entry':(
                 sorted(micro_tp_minutes)[len(micro_tp_minutes)//2] if micro_tp_minutes else None
             ),
             'sample':shadow_rows,
-            'note':'SHADOW ONLY: producao/gates intactos. GATE_EXCLUSIVE exige alvo estrutural >=2R. Micro 1R e medido em paralelo e separado do scalp 2R/3R.'
+            'note':'SHADOW ONLY: producao/gates intactos. GATE_EXCLUSIVE exige alvo estrutural >=2R. Micro 1R e medido desde o primeiro estado executavel do candidato (entry_executable_ts) e separado do scalp 2R/3R.'
         }
         print(f'[POI_OBSTACLE_AUDIT] policy={policy} blocked_cycles={len(blocks)} unique={len(unique_blocks)} outcomes={shadow_counts} groups={obstacle_groups} sample={shadow_rows[:12]}', flush=True)
         print(f'[POI_ABC_LIFECYCLE] policy={policy} events={event_counts} theses={out[policy]["poi_lifecycle_audit"]["theses"]} sample={transition_examples[:12]}', flush=True)
         print(f'[POI_ABC_PROGRESS] policy={policy} phase=DONE seconds={round(time.time()-t0,2)} metrics={out[policy]}', flush=True)
     return {
-        'pair':'SOLUSD','dias_historico':dias_historico,'fim_ts_ms':fim_ts_ms,
+        'pair':pair,'dias_historico':dias_historico,'fim_ts_ms':fim_ts_ms,
         'policies':out,'production_impact':'NONE_BRANCH_ONLY',
         'causal_note':'Mesma janela e mesmo cutoff causal para A/B/C; unica variavel e lifecycle da POI.'
     }

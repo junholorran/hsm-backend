@@ -1975,8 +1975,54 @@ def _kairos_context_bias(candles_por_tf):
 
 
 
+def _kairos_experimental_zone_id(z):
+    if not z:
+        return None
+    return (z.get('tipo'), z.get('created_ts'), z.get('flip_ts'), z.get('bottom'), z.get('top'))
+
+def _kairos_experimental_eligible_entry_zones(exec_candles, sweep, structure, mapa):
+    """Experimental mirror of current eligibility rules; branch-only."""
+    if not structure:
+        return []
+    direction=sweep['direcao']; st=structure['t']; zones=[]
+    for z in _kairos_fvg_states(exec_candles):
+        effective_ts=z.get('flip_ts') or z.get('created_ts') or 0
+        if z.get('direcao') != direction: continue
+        if z.get('state') not in ('ATIVA','TOCADA','PARCIAL','IFVG'): continue
+        if not (sweep['sweep_ts'] <= effective_ts <= st): continue
+        if z.get('created_ts') is not None and z.get('created_ts') < sweep['sweep_ts']: continue
+        z2=dict(z); z2['liquidity_inside']=_kairos_zone_contains_liquidity(z2,mapa); zones.append(z2)
+    ob=_kairos_ob_from_break(exec_candles, structure.get('full_idx'), direction)
+    if ob:
+        ob['liquidity_inside']=_kairos_zone_contains_liquidity(ob,mapa); zones.append(ob)
+    return zones
+
+def _kairos_experimental_apply_poi_policy(current, exec_candles, sweep, structure, mapa, policy, state):
+    """Branch-only A/B/C lifecycle. Default evaluator never calls this unless policy is explicit."""
+    if not policy or policy == 'A_CURRENT':
+        return current
+    if state is None:
+        return current
+    thesis=(sweep.get('sweep_ts'), structure.get('t'), sweep.get('direcao'))
+    eligible=_kairos_experimental_eligible_entry_zones(exec_candles,sweep,structure,mapa)
+    by_id={_kairos_experimental_zone_id(z):z for z in eligible}
+    prev=state.get(thesis); prev_id=_kairos_experimental_zone_id(prev)
+    if prev is None:
+        if current: state[thesis]=dict(current)
+        return current
+    if prev_id in by_id:
+        return by_id[prev_id]
+    if policy == 'B_FREEZE':
+        return None
+    if policy == 'C_LIFECYCLE':
+        if current: state[thesis]=dict(current)
+        return current
+    raise ValueError('experimental_poi_policy invalida: '+str(policy))
+
+
 def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=None,
-                                      candles_por_tf=None, audit_pair=None):
+                                      candles_por_tf=None, audit_pair=None,
+                                      experimental_poi_policy=None, experimental_poi_state=None):
     """KAIROS Paper V2.2 — liquidez HTF estrutural, M15 executa, M5 refina.
 
     Cadeia autorizadora:
@@ -2050,6 +2096,8 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
     else: resultado['setup_type']='LOCAL'
 
     zone=_kairos_select_entry_zone(exec_candles,sweep,structure,mapa)
+    if experimental_poi_policy:
+        zone=_kairos_experimental_apply_poi_policy(zone,exec_candles,sweep,structure,mapa,experimental_poi_policy,experimental_poi_state)
     if not zone:
         resultado['failure_reason']='SEM_FVG_IFVG_OB_M15_CAUSAL'; return resultado
     # SHADOW ONLY: prova matemática/causal do POI escolhido. Não bloqueia nem altera sinal.
@@ -2249,7 +2297,7 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
 KAIROS_DECISION_LAYER_V2_VERSAO = 'KAIROS V2.2 — HTF LIQUIDITY→FIRST CAPTURE→REACTION→DISPLACEMENT→M15 MSS/CHoCH/BOS→CAUSAL FVG/IFVG/OB→RETEST→STRUCTURAL SL→TP1/TP2'
 
 
-def replay_vortex_decision_layer_v2(pair, dias_historico=7, janelas_mfe_mae=JANELAS_MFE_MAE_PADRAO, fim_ts_ms=None):
+def replay_vortex_decision_layer_v2(pair, dias_historico=7, janelas_mfe_mae=JANELAS_MFE_MAE_PADRAO, fim_ts_ms=None, experimental_poi_policy=None):
     """
     Replay causal completo do KAIROS V2.2 (HTF liquidity→FIRST CAPTURE→
     reaction/displacement→M15 MSS/CHoCH/BOS→causal FVG/IFVG/OB→retest→ENTRY→SL→TP1/TP2). Mesma metodologia já aprovada (fetch único por
@@ -2317,6 +2365,7 @@ def replay_vortex_decision_layer_v2(pair, dias_historico=7, janelas_mfe_mae=JANE
     }
     distribuicao_motivos = {}
     sinais_completos_brutos = []
+    experimental_poi_state = {} if experimental_poi_policy else None
 
     for i in range(MIN_M5_IDX, len(m5)):
         # Avaliamos o estado imediatamente APÓS o fecho deste M5.
@@ -2344,7 +2393,9 @@ def replay_vortex_decision_layer_v2(pair, dias_historico=7, janelas_mfe_mae=JANE
         try:
             r = avaliar_vortex_decision_layer_v2(
                 m15_ate_agora, m5_ate_agora, d1_ate_agora, candles_por_tf=tf_map,
-                audit_pair=pair
+                audit_pair=pair,
+                experimental_poi_policy=experimental_poi_policy,
+                experimental_poi_state=experimental_poi_state
             )
         except Exception as e:
             distribuicao_motivos[f'EXCECAO: {e}'] = distribuicao_motivos.get(f'EXCECAO: {e}', 0) + 1
@@ -2380,14 +2431,16 @@ def replay_vortex_decision_layer_v2(pair, dias_historico=7, janelas_mfe_mae=JANE
     sinais_unicos = []
     chaves_vistas = set()
     for s in sinais_completos_brutos:
-        chave = (s['choch_timestamp'], s['direction'], s['zone_type'])
+        chave = ((s['choch_timestamp'], s['direction'], s['zone_type'], s.get('zone_created_ts'), s.get('zone_bottom'), s.get('zone_top'))
+                 if experimental_poi_policy else (s['choch_timestamp'], s['direction'], s['zone_type']))
         if chave not in chaves_vistas:
             chaves_vistas.add(chave)
             sinais_unicos.append(s)
 
     contagem_repeticoes = {}
     for s in sinais_completos_brutos:
-        chave = (s['choch_timestamp'], s['direction'], s['zone_type'])
+        chave = ((s['choch_timestamp'], s['direction'], s['zone_type'], s.get('zone_created_ts'), s.get('zone_bottom'), s.get('zone_top'))
+                 if experimental_poi_policy else (s['choch_timestamp'], s['direction'], s['zone_type']))
         contagem_repeticoes[chave] = contagem_repeticoes.get(chave, 0) + 1
     repeticoes_por_sinal_unico = [
         {'choch_timestamp': s['choch_timestamp'], 'direction': s['direction'], 'zone_type': s['zone_type'],
@@ -2481,6 +2534,53 @@ def replay_vortex_decision_layer_v2(pair, dias_historico=7, janelas_mfe_mae=JANE
         'mfe_mae_causal': {'global': mfe_mae_global, 'LONG': mfe_mae_long, 'SHORT': mfe_mae_short},
         'sinais_unicos_completos': sinais_unicos,
         'm5_completo': m5,
+    }
+
+
+def replay_poi_lifecycle_abc_sol(dias_historico=7, fim_ts_ms=None):
+    """Branch-only causal A/B/C replay for SOL. No DB/Telegram writes."""
+    if fim_ts_ms is None:
+        fim_ts_ms=int(time.time()*1000)
+    out={}
+    for policy in ('A_CURRENT','B_FREEZE','C_LIFECYCLE'):
+        r=replay_vortex_decision_layer_v2('SOLUSD',dias_historico=dias_historico,fim_ts_ms=fim_ts_ms,
+                                          experimental_poi_policy=policy)
+        if 'erro' in r:
+            out[policy]=r; continue
+        m5=r.get('m5_completo') or []
+        events=[]; proxy=[]
+        for s in r.get('sinais_unicos_completos',[]):
+            entry_ts=s.get('timestamp')
+            future=[x for x in m5 if entry_ts is not None and x.get('t',0)>entry_ts]
+            res=_resolver_gestao_2r_3r_be(future,s['direction'],s['entry'],s['sl'],s['tp2'],300)
+            ev=res.get('resultado'); events.append(ev)
+            if ev=='TP': proxy.append(3.0)
+            elif ev=='SL': proxy.append(-1.0)
+            elif ev=='BE': proxy.append(0.0)
+        counts={k:events.count(k) for k in ('TP','SL','BE','AMBIGUO','NENHUM')}
+        resolved=counts['TP']+counts['SL']+counts['BE']
+        binary=counts['TP']+counts['SL']
+        equity=0.0; peak=0.0; maxdd=0.0; streak=0; maxstreak=0
+        for x in proxy:
+            equity+=x; peak=max(peak,equity); maxdd=max(maxdd,peak-equity)
+            if x<0: streak+=1; maxstreak=max(maxstreak,streak)
+            elif x>0: streak=0
+        gross_win=sum(x for x in proxy if x>0); gross_loss=-sum(x for x in proxy if x<0)
+        out[policy]={
+            'N':len(events),'TP':counts['TP'],'SL':counts['SL'],'BE':counts['BE'],
+            'AMBIGUO':counts['AMBIGUO'],'NENHUM':counts['NENHUM'],
+            'win_rate_binary_pct':round(100*counts['TP']/binary,2) if binary else None,
+            'expectancy_proxy_R':round(sum(proxy)/len(proxy),4) if proxy else None,
+            'profit_factor_proxy':round(gross_win/gross_loss,4) if gross_loss else (None if not gross_win else 'INF'),
+            'max_drawdown_proxy_R':round(maxdd,4),'max_sl_streak':maxstreak,
+            'nota_R':'PROXY conservador: TP=+3R, SL=-1R, BE=0R; parcial TP1 nao tem percentagem definida, portanto expectancy/PF monetarios exatos continuam indisponiveis.',
+            'total_sinais_unicos':r.get('total_sinais_unicos'),
+            'distribuicao_motivos':r.get('distribuicao_motivos_todos_ciclos'),
+        }
+    return {
+        'pair':'SOLUSD','dias_historico':dias_historico,'fim_ts_ms':fim_ts_ms,
+        'policies':out,'production_impact':'NONE_BRANCH_ONLY',
+        'causal_note':'Mesma janela e mesmo cutoff causal para A/B/C; unica variavel e lifecycle da POI.'
     }
 
 

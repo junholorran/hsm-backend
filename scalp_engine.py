@@ -2381,6 +2381,7 @@ def replay_vortex_decision_layer_v2(pair, dias_historico=7, janelas_mfe_mae=JANE
     }
     distribuicao_motivos = {}
     sinais_completos_brutos = []
+    experimental_obstacle_blocks = [] if experimental_poi_policy else None
     experimental_poi_state = {} if experimental_poi_policy else None
     experimental_poi_audit = [] if experimental_poi_policy else None
 
@@ -2445,6 +2446,15 @@ def replay_vortex_decision_layer_v2(pair, dias_historico=7, janelas_mfe_mae=JANE
             a.update({'ts_corte':ts_corte,'failure_reason':r.get('failure_reason'),'zone_type':r.get('zone_type'),
                       'zone_created_ts':r.get('zone_created_ts'),'zone_bottom':r.get('zone_bottom'),'zone_top':r.get('zone_top')})
             experimental_poi_audit.append(a)
+        if experimental_obstacle_blocks is not None and r.get('failure_reason') == 'OBSTACULO_ESTRUTURAL_ANTES_2R':
+            o=dict(r.get('tp1_obstacle') or {})
+            experimental_obstacle_blocks.append({
+                'ts_corte':ts_corte,'entry':r.get('entry'),'sl':r.get('sl'),'direction':r.get('direction'),
+                'risk':abs(float(r['entry'])-float(r['sl'])) if r.get('entry') is not None and r.get('sl') is not None else None,
+                'obstacle':o,'obstacle_rr':r.get('rr'),'target':r.get('first_liquidity_target'),
+                'thesis':(r.get('first_capture_ts'),r.get('choch_timestamp'),r.get('direction')),
+                'zone':(r.get('zone_type'),r.get('zone_created_ts'),r.get('zone_bottom'),r.get('zone_top')),
+            })
 
         if r['valid']:
             funil['sinais_validos_brutos'] += 1
@@ -2546,6 +2556,7 @@ def replay_vortex_decision_layer_v2(pair, dias_historico=7, janelas_mfe_mae=JANE
         'funil': funil,
         'distribuicao_motivos_todos_ciclos': distribuicao_motivos,
         'experimental_poi_audit': experimental_poi_audit,
+        'experimental_obstacle_blocks': experimental_obstacle_blocks,
         'total_sinais_unicos': len(sinais_unicos),
         'auditoria_dedup': auditoria_dedup,
         'sinais_long': len(sinais_long), 'sinais_short': len(sinais_short),

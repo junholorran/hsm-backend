@@ -2543,22 +2543,35 @@ def replay_poi_lifecycle_abc_sol(dias_historico=7, fim_ts_ms=None):
         fim_ts_ms=int(time.time()*1000)
     out={}
     for policy in ('A_CURRENT','B_FREEZE','C_LIFECYCLE'):
+        t0=time.time()
+        print(f'[POI_ABC_PROGRESS] policy={policy} phase=REPLAY_START', flush=True)
         r=replay_vortex_decision_layer_v2('SOLUSD',dias_historico=dias_historico,fim_ts_ms=fim_ts_ms,
                                           experimental_poi_policy=policy)
+        print(f'[POI_ABC_PROGRESS] policy={policy} phase=REPLAY_DONE seconds={round(time.time()-t0,2)} signals={r.get("total_sinais_unicos") if isinstance(r,dict) else None}', flush=True)
         if 'erro' in r:
-            out[policy]=r; continue
+            out[policy]=r
+            print(f'[POI_ABC_PROGRESS] policy={policy} phase=ERROR error={r.get("erro")}', flush=True)
+            continue
         m5=r.get('m5_completo') or []
+        # Same strict condition as before (candle.t > entry_ts), but find the
+        # first future candle by binary search instead of rescanning all M5
+        # candles for every signal. Trading math and the 300-candle resolver
+        # are unchanged.
+        m5_ts=[x.get('t',0) for x in m5]
+        import bisect
         events=[]; proxy=[]
-        for s in r.get('sinais_unicos_completos',[]):
+        sinais=r.get('sinais_unicos_completos',[])
+        print(f'[POI_ABC_PROGRESS] policy={policy} phase=RESOLVE_START signals={len(sinais)} m5={len(m5)}', flush=True)
+        for s in sinais:
             entry_ts=s.get('timestamp')
-            future=[x for x in m5 if entry_ts is not None and x.get('t',0)>entry_ts]
+            idx=bisect.bisect_right(m5_ts,entry_ts) if entry_ts is not None else len(m5)
+            future=m5[idx:idx+300]
             res=_resolver_gestao_2r_3r_be(future,s['direction'],s['entry'],s['sl'],s['tp2'],300)
             ev=res.get('resultado'); events.append(ev)
             if ev=='TP': proxy.append(3.0)
             elif ev=='SL': proxy.append(-1.0)
             elif ev=='BE': proxy.append(0.0)
         counts={k:events.count(k) for k in ('TP','SL','BE','AMBIGUO','NENHUM')}
-        resolved=counts['TP']+counts['SL']+counts['BE']
         binary=counts['TP']+counts['SL']
         equity=0.0; peak=0.0; maxdd=0.0; streak=0; maxstreak=0
         for x in proxy:
@@ -2577,6 +2590,7 @@ def replay_poi_lifecycle_abc_sol(dias_historico=7, fim_ts_ms=None):
             'total_sinais_unicos':r.get('total_sinais_unicos'),
             'distribuicao_motivos':r.get('distribuicao_motivos_todos_ciclos'),
         }
+        print(f'[POI_ABC_PROGRESS] policy={policy} phase=DONE seconds={round(time.time()-t0,2)} metrics={out[policy]}', flush=True)
     return {
         'pair':'SOLUSD','dias_historico':dias_historico,'fim_ts_ms':fim_ts_ms,
         'policies':out,'production_impact':'NONE_BRANCH_ONLY',

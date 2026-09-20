@@ -1850,16 +1850,28 @@ else:
 # EXPERIMENTAL BRANCH ONLY — POI lifecycle A/B/C replay. Read-only, no DB/Telegram.
 _KAIROS_ABC_CACHE = {'status':'IDLE','result':None,'error':None,'started_at':None,'finished_at':None}
 
-def _run_kairos_abc_background(dias, fim_ts_ms):
+def _run_kairos_abc_background(dias, fim_ts_ms, pair='SOLUSD'):
     global _KAIROS_ABC_CACHE
     try:
         _KAIROS_ABC_CACHE.update({'status':'RUNNING','result':None,'error':None,'started_at':int(time.time()*1000),'finished_at':None})
-        r=scalp_engine.replay_poi_lifecycle_abc_sol(dias_historico=dias,fim_ts_ms=fim_ts_ms)
+        r=scalp_engine.replay_poi_lifecycle_abc_sol(dias_historico=dias,fim_ts_ms=fim_ts_ms,pair=pair)
         _KAIROS_ABC_CACHE.update({'status':'DONE','result':r,'finished_at':int(time.time()*1000)})
         print('[POI_ABC_RESULT] '+str(r), flush=True)
     except Exception as e:
         _KAIROS_ABC_CACHE.update({'status':'ERROR','error':str(e),'finished_at':int(time.time()*1000)})
         print('[POI_ABC_ERROR] '+str(e), flush=True)
+
+@app.route('/experiment/poi_lifecycle_abc_btc', methods=['GET'])
+def experiment_poi_lifecycle_abc_btc():
+    dias=max(1,min(int(request.args.get('dias','7')),31))
+    fim_raw=request.args.get('fim_ts_ms')
+    fim_ts_ms=int(fim_raw) if fim_raw else None
+    if request.args.get('start') == '1':
+        if _KAIROS_ABC_CACHE.get('status') != 'RUNNING':
+            threading.Thread(target=_run_kairos_abc_background,args=(dias,fim_ts_ms,'BTCUSD'),daemon=True).start()
+        return jsonify({'status':_KAIROS_ABC_CACHE.get('status'),'started':True,'pair':'BTCUSD'}),202
+    return jsonify(_KAIROS_ABC_CACHE)
+
 
 @app.route('/experiment/poi_lifecycle_abc_sol', methods=['GET'])
 def experiment_poi_lifecycle_abc_sol():

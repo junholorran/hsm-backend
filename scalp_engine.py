@@ -2449,7 +2449,7 @@ def replay_vortex_decision_layer_v2(pair, dias_historico=7, janelas_mfe_mae=JANE
         if experimental_obstacle_blocks is not None and r.get('failure_reason') == 'OBSTACULO_ESTRUTURAL_ANTES_2R':
             o=dict(r.get('tp1_obstacle') or {})
             experimental_obstacle_blocks.append({
-                'ts_corte':ts_corte,'entry_executable_ts':ts_corte,'entry':r.get('entry'),'sl':r.get('sl'),'direction':r.get('direction'),
+                'ts_corte':ts_corte,'entry_executable_ts':r.get('timestamp'),'entry':r.get('entry'),'sl':r.get('sl'),'direction':r.get('direction'),
                 'risk':abs(float(r['entry'])-float(r['sl'])) if r.get('entry') is not None and r.get('sl') is not None else None,
                 'obstacle':o,'obstacle_rr':r.get('rr'),'target':r.get('first_liquidity_target'),
                 'thesis':(r.get('first_capture_ts'),r.get('choch_timestamp'),r.get('direction')),
@@ -2476,7 +2476,7 @@ def replay_vortex_decision_layer_v2(pair, dias_historico=7, janelas_mfe_mae=JANE
         contagem_repeticoes[chave] = contagem_repeticoes.get(chave, 0) + 1
     repeticoes_por_sinal_unico = [
         {'choch_timestamp': s['choch_timestamp'], 'direction': s['direction'], 'zone_type': s['zone_type'],
-         'repeticoes': contagem_repeticoes[(s['choch_timestamp'], s['direction'], s['zone_type'])]}
+         'repeticoes': contagem_repeticoes[((s['choch_timestamp'], s['direction'], s['zone_type'], s.get('zone_created_ts'), s.get('zone_bottom'), s.get('zone_top')) if experimental_poi_policy else (s['choch_timestamp'], s['direction'], s['zone_type']))]}
         for s in sinais_unicos
     ]
     lista_repeticoes = [r['repeticoes'] for r in repeticoes_por_sinal_unico]
@@ -2656,7 +2656,8 @@ def replay_poi_lifecycle_abc_sol(dias_historico=7, fim_ts_ms=None, pair='SOLUSD'
             if entry is None or sl is None or not risk: continue
             sign=1.0 if direction=='LONG' else -1.0
             tp3=float(entry)+sign*(3.0*float(risk))
-            idx=bisect.bisect_right(m5_ts,b.get('ts_corte') or 0)
+            entry_exec_ts=b.get('entry_executable_ts') or b.get('ts_corte') or 0
+            idx=bisect.bisect_right(m5_ts,entry_exec_ts)
             future=m5[idx:idx+300]
             res=_resolver_gestao_2r_3r_be(future,direction,float(entry),float(sl),tp3,300)
             ev=res.get('resultado')
@@ -2666,15 +2667,20 @@ def replay_poi_lifecycle_abc_sol(dias_historico=7, fim_ts_ms=None, pair='SOLUSD'
             g=f"{o.get('tf')}:{o.get('tipo')}"
             obstacle_groups[g]=obstacle_groups.get(g,0)+1
 
-            # Autopsia causal do obstaculo: tocou, rejeitou, atravessou,
-            # MFE/MAE em R. Somente leitura do futuro; nao altera gates.
+            # Limita a autopsia ao instante em que a gestao 2R/3R realmente resolve.
+            # Evita atribuir ao trade atravessamentos ocorridos depois de TP/SL/BE.
+            n_res=res.get('candles_ate_resolucao')
+            interaction_future=future[:n_res] if n_res else future
+            resolution_ts=(interaction_future[-1].get('t') if n_res and interaction_future else None)
+
+            # Autopsia causal do obstaculo: tocou/atravessou e MFE/MAE em R.
             obstacle_level=o.get('nivel')
             obstacle_top=o.get('top')
             obstacle_bottom=o.get('bottom')
             touched=False; crossed=False; rejected=False; first_touch_ts=None
             mfe_r=0.0; mae_r=0.0
             post_touch_extreme=None
-            for fc in future:
+            for fc in interaction_future:
                 hi=float(fc.get('h',fc.get('c',entry))); lo=float(fc.get('l',fc.get('c',entry)))
                 if direction=='LONG':
                     mfe_r=max(mfe_r,(hi-float(entry))/float(risk))
@@ -2721,13 +2727,13 @@ def replay_poi_lifecycle_abc_sol(dias_historico=7, fim_ts_ms=None, pair='SOLUSD'
                     micro_result='TP1R'; micro_resolution_ts=fc.get('t'); break
                 if hit_sl:
                     micro_result='SL'; micro_resolution_ts=fc.get('t'); break
-            entry_executable_ts=b.get('entry_executable_ts') or b.get('ts_corte')
+            entry_executable_ts=entry_exec_ts
             if micro_resolution_ts is not None and entry_executable_ts is not None:
                 micro_minutes=round((int(micro_resolution_ts)-int(entry_executable_ts))/60000.0,1)
 
             if len(shadow_rows)<50:
                 shadow_rows.append({**b,'shadow_tp3':round(tp3,6),'shadow_result':mapped,
-                                    'shadow_resolution_ts':res.get('timestamp'),'shadow_r':res.get('r_obtido'),
+                                    'shadow_resolution_ts':resolution_ts,'shadow_r':res.get('r_obtido'),
                                     'structural_target_rr':target_rr,'counterfactual_class':gate_class,
                                     'micro_1r_target':round(tp1,6),'micro_1r_result':micro_result,
                                     'micro_1r_resolution_ts':micro_resolution_ts,'micro_1r_minutes_from_entry':micro_minutes,
@@ -2755,19 +2761,39 @@ def replay_poi_lifecycle_abc_sol(dias_historico=7, fim_ts_ms=None, pair='SOLUSD'
                 micro_1r_gate_exclusive_counts[mr]=micro_1r_gate_exclusive_counts.get(mr,0)+1
                 if mr=='TP1R' and row.get('micro_1r_minutes_from_entry') is not None:
                     micro_tp_minutes.append(row.get('micro_1r_minutes_from_entry'))
+        # Unidade estatistica primaria = TESE, nao variante/candidato. Escolhe apenas
+        # o primeiro candidato cronologicamente executavel de cada tese para impedir
+        # selecao ex-post da melhor variante.
+        primary_by_thesis={}
+        for row in sorted(shadow_rows,key=lambda x: (x.get('entry_executable_ts') or 0)):
+            tk=str(row.get('thesis'))
+            if tk not in primary_by_thesis:
+                primary_by_thesis[tk]=row
+        primary_rows=list(primary_by_thesis.values())
+        primary_gate=[x for x in primary_rows if x.get('counterfactual_class')=='GATE_EXCLUSIVE']
+        primary_gate_shadow={}; primary_gate_micro={}
+        for row in primary_gate:
+            sr=row.get('shadow_result'); mr=row.get('micro_1r_result')
+            primary_gate_shadow[sr]=primary_gate_shadow.get(sr,0)+1
+            primary_gate_micro[mr]=primary_gate_micro.get(mr,0)+1
+
         out[policy]['obstacle_shadow_audit']={
             'blocked_cycles':len(blocks),'unique_candidates':len(unique_blocks),
             'outcomes_300_m5':shadow_counts,'obstacle_groups':obstacle_groups,
             'interaction_counts':interaction_counts,'interaction_outcomes':interaction_outcomes,
             'counterfactual_counts':counterfactual_counts,'counterfactual_outcomes':counterfactual_outcomes,
             'independent_theses_by_class':{k:len(v) for k,v in thesis_sets.items()},
+            'primary_independent_theses_total':len(primary_rows),
+            'primary_gate_exclusive_theses':len(primary_gate),
+            'primary_gate_exclusive_shadow_2r3r':primary_gate_shadow,
+            'primary_gate_exclusive_micro_1r':primary_gate_micro,
             'micro_1r_all_candidates':micro_1r_counts,
             'micro_1r_gate_exclusive':micro_1r_gate_exclusive_counts,
             'micro_1r_gate_exclusive_tp_median_minutes_from_entry':(
                 sorted(micro_tp_minutes)[len(micro_tp_minutes)//2] if micro_tp_minutes else None
             ),
             'sample':shadow_rows,
-            'note':'SHADOW ONLY: producao/gates intactos. GATE_EXCLUSIVE exige alvo estrutural >=2R. Micro 1R e medido desde o primeiro estado executavel do candidato (entry_executable_ts) e separado do scalp 2R/3R.'
+            'note':'SHADOW ONLY: producao/gates intactos. Entry executavel = timestamp real do reteste devolvido pelo motor. Interacao do obstaculo termina na resolucao 2R/3R. Metricas PRIMARY usam somente o primeiro candidato executavel de cada tese, evitando selecao ex-post.'
         }
         print(f'[POI_OBSTACLE_AUDIT] policy={policy} blocked_cycles={len(blocks)} unique={len(unique_blocks)} outcomes={shadow_counts} groups={obstacle_groups} sample={shadow_rows[:12]}', flush=True)
         print(f'[POI_ABC_LIFECYCLE] policy={policy} events={event_counts} theses={out[policy]["poi_lifecycle_audit"]["theses"]} sample={transition_examples[:12]}', flush=True)

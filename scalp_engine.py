@@ -2382,6 +2382,7 @@ def replay_vortex_decision_layer_v2(pair, dias_historico=7, janelas_mfe_mae=JANE
     distribuicao_motivos = {}
     sinais_completos_brutos = []
     experimental_poi_state = {} if experimental_poi_policy else None
+    experimental_poi_audit = [] if experimental_poi_policy else None
 
     for i in range(MIN_M5_IDX, len(m5)):
         # Avaliamos o estado imediatamente APÓS o fecho deste M5.
@@ -2439,6 +2440,11 @@ def replay_vortex_decision_layer_v2(pair, dias_historico=7, janelas_mfe_mae=JANE
 
         motivo_chave = 'SINAL_VALIDO' if r['valid'] else (r['failure_reason'] or 'MOTIVO_DESCONHECIDO')
         distribuicao_motivos[motivo_chave] = distribuicao_motivos.get(motivo_chave, 0) + 1
+        if experimental_poi_audit is not None and r.get('experimental_poi_lifecycle'):
+            a=dict(r['experimental_poi_lifecycle'])
+            a.update({'ts_corte':ts_corte,'failure_reason':r.get('failure_reason'),'zone_type':r.get('zone_type'),
+                      'zone_created_ts':r.get('zone_created_ts'),'zone_bottom':r.get('zone_bottom'),'zone_top':r.get('zone_top')})
+            experimental_poi_audit.append(a)
 
         if r['valid']:
             funil['sinais_validos_brutos'] += 1
@@ -2539,6 +2545,7 @@ def replay_vortex_decision_layer_v2(pair, dias_historico=7, janelas_mfe_mae=JANE
         'validacao_dados': {'MN': val_mn, 'W1': val_w1, 'D1': val_d1, 'H4': val_h4, 'H1': val_h1, 'M30': val_m30, 'M15': val_m15, 'M5': val_m5, 'M1': val_m1},
         'funil': funil,
         'distribuicao_motivos_todos_ciclos': distribuicao_motivos,
+        'experimental_poi_audit': experimental_poi_audit,
         'total_sinais_unicos': len(sinais_unicos),
         'auditoria_dedup': auditoria_dedup,
         'sinais_long': len(sinais_long), 'sinais_short': len(sinais_short),
@@ -2606,6 +2613,20 @@ def replay_poi_lifecycle_abc_sol(dias_historico=7, fim_ts_ms=None):
             'total_sinais_unicos':r.get('total_sinais_unicos'),
             'distribuicao_motivos':r.get('distribuicao_motivos_todos_ciclos'),
         }
+        audit=r.get('experimental_poi_audit') or []
+        event_counts={}
+        transition_examples=[]
+        for a in audit:
+            ev=a.get('event')
+            event_counts[ev]=event_counts.get(ev,0)+1
+            if ev in ('INIT','KEEP','REPLACE','EXPIRED_FREEZE','EXPIRED_NO_REPLACEMENT') and len(transition_examples)<40:
+                transition_examples.append(a)
+        out[policy]['poi_lifecycle_audit']={
+            'events':event_counts,
+            'theses':len({str(a.get('thesis_id')) for a in audit}),
+            'transitions_sample':transition_examples,
+        }
+        print(f'[POI_ABC_LIFECYCLE] policy={policy} events={event_counts} theses={out[policy]["poi_lifecycle_audit"]["theses"]} sample={transition_examples[:12]}', flush=True)
         print(f'[POI_ABC_PROGRESS] policy={policy} phase=DONE seconds={round(time.time()-t0,2)} metrics={out[policy]}', flush=True)
     return {
         'pair':'SOLUSD','dias_historico':dias_historico,'fim_ts_ms':fim_ts_ms,

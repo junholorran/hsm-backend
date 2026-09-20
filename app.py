@@ -1839,7 +1839,12 @@ def build_news_block(limit=4):
         return ""
 
 
-threading.Thread(target=paper_tick_scheduler_loop, daemon=True).start()
+# Experimental Railway service must stay replay-only: no live 13-pair scheduler.
+# Production/main behavior is unchanged because this guard exists only on the experiment branch.
+if os.environ.get('RAILWAY_SERVICE_NAME') != 'kairos-poi-abc-sol':
+    threading.Thread(target=paper_tick_scheduler_loop, daemon=True).start()
+else:
+    print('[POI_ABC] experimental service: live paper scheduler DISABLED', flush=True)
 
 
 # EXPERIMENTAL BRANCH ONLY — POI lifecycle A/B/C replay. Read-only, no DB/Telegram.

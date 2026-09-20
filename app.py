@@ -1840,3 +1840,16 @@ def build_news_block(limit=4):
 
 
 threading.Thread(target=paper_tick_scheduler_loop, daemon=True).start()
+
+
+# EXPERIMENTAL BRANCH ONLY — POI lifecycle A/B/C replay. Read-only, no DB/Telegram.
+@app.route('/experiment/poi_lifecycle_abc_sol', methods=['GET'])
+def experiment_poi_lifecycle_abc_sol():
+    try:
+        dias=max(1,min(int(request.args.get('dias','7')),31))
+        fim_raw=request.args.get('fim_ts_ms')
+        fim_ts_ms=int(fim_raw) if fim_raw else None
+        return jsonify(scalp_engine.replay_poi_lifecycle_abc_sol(dias_historico=dias,fim_ts_ms=fim_ts_ms))
+    except Exception as e:
+        return jsonify({'erro':str(e)}),500
+

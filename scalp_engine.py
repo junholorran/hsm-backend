@@ -2637,6 +2637,43 @@ def replay_poi_lifecycle_abc_sol(dias_historico=7, fim_ts_ms=None):
             'theses':len({str(a.get('thesis_id')) for a in audit}),
             'transitions_sample':transition_examples,
         }
+        # Shadow autopsy of candidates rejected ONLY because an opposing
+        # structural obstacle was <2R. The live gate stays untouched.
+        blocks=r.get('experimental_obstacle_blocks') or []
+        unique_blocks=[]; seen_blocks=set()
+        for b in blocks:
+            key=(b.get('thesis'),b.get('zone'),b.get('entry'),b.get('sl'),
+                 (b.get('obstacle') or {}).get('tf'),(b.get('obstacle') or {}).get('tipo'),
+                 (b.get('obstacle') or {}).get('nivel'))
+            if key in seen_blocks: continue
+            seen_blocks.add(key); unique_blocks.append(b)
+        shadow_counts={'TP3':0,'SL':0,'BE':0,'AMBIGUO':0,'NENHUM':0}
+        shadow_rows=[]
+        obstacle_groups={}
+        for b in unique_blocks:
+            entry=b.get('entry'); sl=b.get('sl'); risk=b.get('risk'); direction=b.get('direction')
+            if entry is None or sl is None or not risk: continue
+            sign=1.0 if direction=='LONG' else -1.0
+            tp3=float(entry)+sign*(3.0*float(risk))
+            idx=bisect.bisect_right(m5_ts,b.get('ts_corte') or 0)
+            future=m5[idx:idx+300]
+            res=_resolver_gestao_2r_3r_be(future,direction,float(entry),float(sl),tp3,300)
+            ev=res.get('resultado')
+            mapped='TP3' if ev=='TP' else ev
+            if mapped in shadow_counts: shadow_counts[mapped]+=1
+            o=b.get('obstacle') or {}
+            g=f"{o.get('tf')}:{o.get('tipo')}"
+            obstacle_groups[g]=obstacle_groups.get(g,0)+1
+            if len(shadow_rows)<50:
+                shadow_rows.append({**b,'shadow_tp3':round(tp3,6),'shadow_result':mapped,
+                                    'shadow_resolution_ts':res.get('timestamp'),'shadow_r':res.get('r_obtido')})
+        out[policy]['obstacle_shadow_audit']={
+            'blocked_cycles':len(blocks),'unique_candidates':len(unique_blocks),
+            'outcomes_300_m5':shadow_counts,'obstacle_groups':obstacle_groups,
+            'sample':shadow_rows,
+            'note':'SHADOW ONLY: gate OBSTACULO_ESTRUTURAL_ANTES_2R permaneceu ativo; mede o que teria ocorrido sem remover a trava.'
+        }
+        print(f'[POI_OBSTACLE_AUDIT] policy={policy} blocked_cycles={len(blocks)} unique={len(unique_blocks)} outcomes={shadow_counts} groups={obstacle_groups} sample={shadow_rows[:12]}', flush=True)
         print(f'[POI_ABC_LIFECYCLE] policy={policy} events={event_counts} theses={out[policy]["poi_lifecycle_audit"]["theses"]} sample={transition_examples[:12]}', flush=True)
         print(f'[POI_ABC_PROGRESS] policy={policy} phase=DONE seconds={round(time.time()-t0,2)} metrics={out[policy]}', flush=True)
     return {

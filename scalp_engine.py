@@ -2664,12 +2664,59 @@ def replay_poi_lifecycle_abc_sol(dias_historico=7, fim_ts_ms=None):
             o=b.get('obstacle') or {}
             g=f"{o.get('tf')}:{o.get('tipo')}"
             obstacle_groups[g]=obstacle_groups.get(g,0)+1
+
+            # Autopsia causal do obstaculo: tocou, rejeitou, atravessou,
+            # MFE/MAE em R. Somente leitura do futuro; nao altera gates.
+            obstacle_level=o.get('nivel')
+            obstacle_top=o.get('top')
+            obstacle_bottom=o.get('bottom')
+            touched=False; crossed=False; rejected=False; first_touch_ts=None
+            mfe_r=0.0; mae_r=0.0
+            post_touch_extreme=None
+            for fc in future:
+                hi=float(fc.get('h',fc.get('c',entry))); lo=float(fc.get('l',fc.get('c',entry)))
+                if direction=='LONG':
+                    mfe_r=max(mfe_r,(hi-float(entry))/float(risk))
+                    mae_r=max(mae_r,(float(entry)-lo)/float(risk))
+                    hit = obstacle_bottom is not None and hi >= float(obstacle_bottom)
+                    full_cross = obstacle_top is not None and hi > float(obstacle_top)
+                    if hit and not touched:
+                        touched=True; first_touch_ts=fc.get('t'); post_touch_extreme=hi
+                    if touched:
+                        post_touch_extreme=max(post_touch_extreme or hi,hi)
+                    crossed = crossed or full_cross
+                else:
+                    mfe_r=max(mfe_r,(float(entry)-lo)/float(risk))
+                    mae_r=max(mae_r,(hi-float(entry))/float(risk))
+                    hit = obstacle_top is not None and lo <= float(obstacle_top)
+                    full_cross = obstacle_bottom is not None and lo < float(obstacle_bottom)
+                    if hit and not touched:
+                        touched=True; first_touch_ts=fc.get('t'); post_touch_extreme=lo
+                    if touched:
+                        post_touch_extreme=min(post_touch_extreme if post_touch_extreme is not None else lo,lo)
+                    crossed = crossed or full_cross
+            # Rejection = tocou o POI contrario mas nao atravessou toda a zona.
+            rejected = bool(touched and not crossed)
+            interaction='NAO_TOCADO'
+            if touched: interaction='ATRAVESSADO' if crossed else 'REJEITADO'
             if len(shadow_rows)<50:
                 shadow_rows.append({**b,'shadow_tp3':round(tp3,6),'shadow_result':mapped,
-                                    'shadow_resolution_ts':res.get('timestamp'),'shadow_r':res.get('r_obtido')})
+                                    'shadow_resolution_ts':res.get('timestamp'),'shadow_r':res.get('r_obtido'),
+                                    'obstacle_interaction':interaction,'obstacle_touched':touched,
+                                    'obstacle_crossed':crossed,'obstacle_rejected':rejected,
+                                    'obstacle_first_touch_ts':first_touch_ts,
+                                    'mfe_R':round(mfe_r,3),'mae_R':round(mae_r,3)})
+        interaction_counts={}
+        interaction_outcomes={}
+        for row in shadow_rows:
+            k=row.get('obstacle_interaction','NAO_TOCADO')
+            interaction_counts[k]=interaction_counts.get(k,0)+1
+            ko=f"{k}:{row.get('shadow_result')}"
+            interaction_outcomes[ko]=interaction_outcomes.get(ko,0)+1
         out[policy]['obstacle_shadow_audit']={
             'blocked_cycles':len(blocks),'unique_candidates':len(unique_blocks),
             'outcomes_300_m5':shadow_counts,'obstacle_groups':obstacle_groups,
+            'interaction_counts':interaction_counts,'interaction_outcomes':interaction_outcomes,
             'sample':shadow_rows,
             'note':'SHADOW ONLY: gate OBSTACULO_ESTRUTURAL_ANTES_2R permaneceu ativo; mede o que teria ocorrido sem remover a trava.'
         }

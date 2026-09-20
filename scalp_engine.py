@@ -2695,30 +2695,77 @@ def replay_poi_lifecycle_abc_sol(dias_historico=7, fim_ts_ms=None):
                     if touched:
                         post_touch_extreme=min(post_touch_extreme if post_touch_extreme is not None else lo,lo)
                     crossed = crossed or full_cross
-            # Rejection = tocou o POI contrario mas nao atravessou toda a zona.
-            rejected = bool(touched and not crossed)
+            # A classificacao atual mede somente toque/atravessamento da zona;
+            # nao chama "rejeicao" sem uma excursao objetiva para longe do POI.
             interaction='NAO_TOCADO'
-            if touched: interaction='ATRAVESSADO' if crossed else 'REJEITADO'
+            if touched: interaction='ATRAVESSADO' if crossed else 'TOCOU_SEM_ATRAVESSAR'
+
+            # Se a liquidez estrutural seguinte nem oferece 2R, o obstaculo nao
+            # e o unico gate que mataria o trade. Se oferece >=2R, este candidato
+            # e gate-exclusive e serve para auditar a trava de obstaculo.
+            target_rr=(b.get('target') or {}).get('rr')
+            gate_class='GATE_EXCLUSIVE' if target_rr is not None and float(target_rr)>=2.0 else 'DOWNSTREAM_REJECT_ANYWAY'
+
+            # Shadow paralelo do micro-scalp: mede 1R sem mudar a regra oficial.
+            # Primeiro candle futuro que toca +1R ou SL decide; mesmo candle = ambiguo.
+            tp1=float(entry)+sign*float(risk)
+            micro_result='NENHUM'; micro_resolution_ts=None; micro_minutes=None
+            for fc in future:
+                hi=float(fc.get('h',fc.get('c',entry))); lo=float(fc.get('l',fc.get('c',entry)))
+                hit_tp = hi>=tp1 if direction=='LONG' else lo<=tp1
+                hit_sl = lo<=float(sl) if direction=='LONG' else hi>=float(sl)
+                if hit_tp and hit_sl:
+                    micro_result='AMBIGUO'; micro_resolution_ts=fc.get('t'); break
+                if hit_tp:
+                    micro_result='TP1R'; micro_resolution_ts=fc.get('t'); break
+                if hit_sl:
+                    micro_result='SL'; micro_resolution_ts=fc.get('t'); break
+            if micro_resolution_ts is not None and b.get('ts_corte') is not None:
+                micro_minutes=round((int(micro_resolution_ts)-int(b.get('ts_corte')))/60000.0,1)
+
             if len(shadow_rows)<50:
                 shadow_rows.append({**b,'shadow_tp3':round(tp3,6),'shadow_result':mapped,
                                     'shadow_resolution_ts':res.get('timestamp'),'shadow_r':res.get('r_obtido'),
+                                    'structural_target_rr':target_rr,'counterfactual_class':gate_class,
+                                    'micro_1r_target':round(tp1,6),'micro_1r_result':micro_result,
+                                    'micro_1r_resolution_ts':micro_resolution_ts,'micro_1r_minutes_from_cutoff':micro_minutes,
                                     'obstacle_interaction':interaction,'obstacle_touched':touched,
-                                    'obstacle_crossed':crossed,'obstacle_rejected':rejected,
-                                    'obstacle_first_touch_ts':first_touch_ts,
+                                    'obstacle_crossed':crossed,'obstacle_first_touch_ts':first_touch_ts,
                                     'mfe_R':round(mfe_r,3),'mae_R':round(mae_r,3)})
-        interaction_counts={}
-        interaction_outcomes={}
+        interaction_counts={}; interaction_outcomes={}
+        counterfactual_counts={}; counterfactual_outcomes={}
+        micro_1r_counts={}; micro_1r_gate_exclusive_counts={}
+        thesis_sets={'GATE_EXCLUSIVE':set(),'DOWNSTREAM_REJECT_ANYWAY':set()}
+        micro_tp_minutes=[]
         for row in shadow_rows:
             k=row.get('obstacle_interaction','NAO_TOCADO')
             interaction_counts[k]=interaction_counts.get(k,0)+1
             ko=f"{k}:{row.get('shadow_result')}"
             interaction_outcomes[ko]=interaction_outcomes.get(ko,0)+1
+            cc=row.get('counterfactual_class')
+            counterfactual_counts[cc]=counterfactual_counts.get(cc,0)+1
+            co=f"{cc}:{row.get('shadow_result')}"
+            counterfactual_outcomes[co]=counterfactual_outcomes.get(co,0)+1
+            if cc in thesis_sets: thesis_sets[cc].add(str(row.get('thesis')))
+            mr=row.get('micro_1r_result')
+            micro_1r_counts[mr]=micro_1r_counts.get(mr,0)+1
+            if cc=='GATE_EXCLUSIVE':
+                micro_1r_gate_exclusive_counts[mr]=micro_1r_gate_exclusive_counts.get(mr,0)+1
+                if mr=='TP1R' and row.get('micro_1r_minutes_from_cutoff') is not None:
+                    micro_tp_minutes.append(row.get('micro_1r_minutes_from_cutoff'))
         out[policy]['obstacle_shadow_audit']={
             'blocked_cycles':len(blocks),'unique_candidates':len(unique_blocks),
             'outcomes_300_m5':shadow_counts,'obstacle_groups':obstacle_groups,
             'interaction_counts':interaction_counts,'interaction_outcomes':interaction_outcomes,
+            'counterfactual_counts':counterfactual_counts,'counterfactual_outcomes':counterfactual_outcomes,
+            'independent_theses_by_class':{k:len(v) for k,v in thesis_sets.items()},
+            'micro_1r_all_candidates':micro_1r_counts,
+            'micro_1r_gate_exclusive':micro_1r_gate_exclusive_counts,
+            'micro_1r_gate_exclusive_tp_median_minutes':(
+                sorted(micro_tp_minutes)[len(micro_tp_minutes)//2] if micro_tp_minutes else None
+            ),
             'sample':shadow_rows,
-            'note':'SHADOW ONLY: gate OBSTACULO_ESTRUTURAL_ANTES_2R permaneceu ativo; mede o que teria ocorrido sem remover a trava.'
+            'note':'SHADOW ONLY: producao/gates intactos. GATE_EXCLUSIVE exige alvo estrutural >=2R. Micro 1R e medido em paralelo e separado do scalp 2R/3R.'
         }
         print(f'[POI_OBSTACLE_AUDIT] policy={policy} blocked_cycles={len(blocks)} unique={len(unique_blocks)} outcomes={shadow_counts} groups={obstacle_groups} sample={shadow_rows[:12]}', flush=True)
         print(f'[POI_ABC_LIFECYCLE] policy={policy} events={event_counts} theses={out[policy]["poi_lifecycle_audit"]["theses"]} sample={transition_examples[:12]}', flush=True)

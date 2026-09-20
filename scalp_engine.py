@@ -1997,25 +1997,39 @@ def _kairos_experimental_eligible_entry_zones(exec_candles, sweep, structure, ma
         ob['liquidity_inside']=_kairos_zone_contains_liquidity(ob,mapa); zones.append(ob)
     return zones
 
-def _kairos_experimental_apply_poi_policy(current, exec_candles, sweep, structure, mapa, policy, state):
+def _kairos_experimental_apply_poi_policy(current, exec_candles, sweep, structure, mapa, policy, state, audit=None):
     """Branch-only A/B/C lifecycle. Default evaluator never calls this unless policy is explicit."""
+    thesis=(sweep.get('sweep_ts'), structure.get('t'), sweep.get('direcao'))
+    current_id=_kairos_experimental_zone_id(current)
     if not policy or policy == 'A_CURRENT':
+        if audit is not None:
+            audit.update({'thesis_id':thesis,'event':'CURRENT','current_id':current_id,'selected_id':current_id,'previous_id':None})
         return current
     if state is None:
+        if audit is not None:
+            audit.update({'thesis_id':thesis,'event':'NO_STATE','current_id':current_id,'selected_id':current_id,'previous_id':None})
         return current
-    thesis=(sweep.get('sweep_ts'), structure.get('t'), sweep.get('direcao'))
     eligible=_kairos_experimental_eligible_entry_zones(exec_candles,sweep,structure,mapa)
     by_id={_kairos_experimental_zone_id(z):z for z in eligible}
     prev=state.get(thesis); prev_id=_kairos_experimental_zone_id(prev)
     if prev is None:
         if current: state[thesis]=dict(current)
+        if audit is not None:
+            audit.update({'thesis_id':thesis,'event':'INIT','current_id':current_id,'selected_id':current_id,'previous_id':None,'eligible_count':len(eligible)})
         return current
     if prev_id in by_id:
-        return by_id[prev_id]
+        selected=by_id[prev_id]
+        if audit is not None:
+            audit.update({'thesis_id':thesis,'event':'KEEP','current_id':current_id,'selected_id':prev_id,'previous_id':prev_id,'eligible_count':len(eligible)})
+        return selected
     if policy == 'B_FREEZE':
+        if audit is not None:
+            audit.update({'thesis_id':thesis,'event':'EXPIRED_FREEZE','current_id':current_id,'selected_id':None,'previous_id':prev_id,'eligible_count':len(eligible)})
         return None
     if policy == 'C_LIFECYCLE':
         if current: state[thesis]=dict(current)
+        if audit is not None:
+            audit.update({'thesis_id':thesis,'event':'REPLACE' if current else 'EXPIRED_NO_REPLACEMENT','current_id':current_id,'selected_id':current_id,'previous_id':prev_id,'eligible_count':len(eligible)})
         return current
     raise ValueError('experimental_poi_policy invalida: '+str(policy))
 
@@ -2097,7 +2111,9 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
 
     zone=_kairos_select_entry_zone(exec_candles,sweep,structure,mapa)
     if experimental_poi_policy:
-        zone=_kairos_experimental_apply_poi_policy(zone,exec_candles,sweep,structure,mapa,experimental_poi_policy,experimental_poi_state)
+        lifecycle_audit={}
+        zone=_kairos_experimental_apply_poi_policy(zone,exec_candles,sweep,structure,mapa,experimental_poi_policy,experimental_poi_state,lifecycle_audit)
+        resultado['experimental_poi_lifecycle']=lifecycle_audit
     if not zone:
         resultado['failure_reason']='SEM_FVG_IFVG_OB_M15_CAUSAL'; return resultado
     # SHADOW ONLY: prova matemática/causal do POI escolhido. Não bloqueia nem altera sinal.

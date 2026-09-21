@@ -1873,6 +1873,45 @@ def experiment_poi_lifecycle_abc_btc():
     return jsonify(_KAIROS_ABC_CACHE)
 
 
+# FASE SEGUINTE — C_LIFECYCLE congelado nos 13 pares.
+# Experimental/read-only: scheduler live continua desligado neste servico.
+_KAIROS_C13_CACHE = {'status':'IDLE','result':None,'error':None,'started_at':None,'finished_at':None,'current_pair':None}
+
+def _run_kairos_c13_background(dias, fim_ts_ms):
+    global _KAIROS_C13_CACHE
+    pairs=list(scalp_engine.PARES_MONITORADOS_REPLAY)
+    try:
+        _KAIROS_C13_CACHE.update({'status':'RUNNING','result':{},'error':None,'started_at':int(time.time()*1000),'finished_at':None,'current_pair':None})
+        for idx,pair in enumerate(pairs,1):
+            _KAIROS_C13_CACHE['current_pair']=pair
+            print(f'[POI_C13_PROGRESS] pair={pair} index={idx}/{len(pairs)} phase=START', flush=True)
+            r=scalp_engine.replay_poi_lifecycle_abc_sol(
+                dias_historico=dias,
+                fim_ts_ms=fim_ts_ms,
+                pair=pair,
+                policies=('C_LIFECYCLE',),
+            )
+            _KAIROS_C13_CACHE['result'][pair]=r
+            print(f'[POI_C13_PROGRESS] pair={pair} index={idx}/{len(pairs)} phase=DONE', flush=True)
+        _KAIROS_C13_CACHE.update({'status':'DONE','finished_at':int(time.time()*1000),'current_pair':None})
+        print('[POI_C13_RESULT] '+str(_KAIROS_C13_CACHE['result']), flush=True)
+    except Exception as e:
+        _KAIROS_C13_CACHE.update({'status':'ERROR','error':str(e),'finished_at':int(time.time()*1000)})
+        print('[POI_C13_ERROR] '+str(e), flush=True)
+
+@app.route('/experiment/poi_lifecycle_c_13pairs', methods=['GET'])
+def experiment_poi_lifecycle_c_13pairs():
+    dias=max(1,min(int(request.args.get('dias','30')),31))
+    fim_raw=request.args.get('fim_ts_ms')
+    fim_ts_ms=int(fim_raw) if fim_raw else None
+    if request.args.get('start') == '1':
+        if _KAIROS_C13_CACHE.get('status') != 'RUNNING' and _KAIROS_ABC_CACHE.get('status') != 'RUNNING':
+            threading.Thread(target=_run_kairos_c13_background,args=(dias,fim_ts_ms),daemon=True).start()
+            return jsonify({'status':'STARTING','started':True,'policy':'C_LIFECYCLE','pairs':scalp_engine.PARES_MONITORADOS_REPLAY,'dias':dias}),202
+        return jsonify({'status':_KAIROS_C13_CACHE.get('status'),'started':False,'reason':'REPLAY_ALREADY_RUNNING'}),409
+    return jsonify(_KAIROS_C13_CACHE)
+
+
 @app.route('/experiment/poi_lifecycle_abc_sol', methods=['GET'])
 def experiment_poi_lifecycle_abc_sol():
     dias=max(1,min(int(request.args.get('dias','7')),31))

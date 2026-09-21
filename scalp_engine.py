@@ -2571,13 +2571,17 @@ def replay_vortex_decision_layer_v2(pair, dias_historico=7, janelas_mfe_mae=JANE
     }
 
 
-def replay_poi_lifecycle_abc_sol(dias_historico=7, fim_ts_ms=None, pair='SOLUSD'):
+def replay_poi_lifecycle_abc_sol(dias_historico=7, fim_ts_ms=None, pair='SOLUSD', policies=None):
     """Branch-only causal A/B/C benchmark replay. Pair-selectable; no DB/Telegram writes."""
     pair=(pair or 'SOLUSD').upper()
     if fim_ts_ms is None:
         fim_ts_ms=int(time.time()*1000)
     out={}
-    for policy in ('A_CURRENT','B_FREEZE','C_LIFECYCLE'):
+    policies = tuple(policies or ('A_CURRENT','B_FREEZE','C_LIFECYCLE'))
+    allowed = {'A_CURRENT','B_FREEZE','C_LIFECYCLE'}
+    if not policies or any(p not in allowed for p in policies):
+        raise ValueError(f'policies invalidas: {policies}')
+    for policy in policies:
         t0=time.time()
         print(f'[POI_ABC_PROGRESS] policy={policy} phase=REPLAY_START', flush=True)
         r=replay_vortex_decision_layer_v2(pair,dias_historico=dias_historico,fim_ts_ms=fim_ts_ms,

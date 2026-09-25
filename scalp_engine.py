@@ -2128,13 +2128,22 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
     resultado['first_capture_ts']=sweep['first_capture_ts']; resultado['sweep_confirm_ts']=sweep.get('confirm_ts')
     resultado['sweep_level']=round(sweep['nivel'],6); resultado['sweep_extreme']=round(sweep['extremo'],6)
 
-    # M15 lê intenção/estrutura APÓS a captura neutra e só então escolhe LONG/SHORT.
+    # A liquidez HTF autoriza a procura do gatilho. M15 continua preferencial;
+    # para SCALP, se M15 ainda não confirmou, M5 pode confirmar a MESMA narrativa
+    # causal depois do first capture. M5 nunca cria tese sozinho.
     exec_tf='M15'; exec_candles=candles_por_tf.get('M15') or []
     intent=_kairos_direction_after_first_capture(exec_candles,sweep,swing_size=5)
+    resultado['intent_m15_found']=bool(intent)
     if not intent:
-        resultado['failure_reason']='SEM_INTENCAO_CHOCH_MSS_M15_APOS_FIRST_CAPTURE'; return resultado
+        m5_intent_candles=candles_por_tf.get('M5') or []
+        intent=_kairos_direction_after_first_capture(m5_intent_candles,sweep,swing_size=5)
+        if intent:
+            exec_tf='M5'; exec_candles=m5_intent_candles
+            resultado['intent_fallback']='M5_AFTER_HTF_FIRST_CAPTURE'
+    if not intent:
+        resultado['failure_reason']='SEM_INTENCAO_CHOCH_MSS_M15_M5_APOS_FIRST_CAPTURE'; return resultado
     direction=intent['direction']; sweep['direcao']=intent['direcao']; structure=intent['structure']
-    resultado['direction']=direction; resultado['execution_tf']='M15'; resultado['choch_confirmed']=True
+    resultado['direction']=direction; resultado['execution_tf']=exec_tf; resultado['choch_confirmed']=True
     resultado['choch_timestamp']=structure['t']; resultado['choch_level']=round(structure['nivel'],6)
     z=intent.get('momentum_z'); resultado['momentum_z']=round(z,3) if z is not None else None
 
@@ -2150,16 +2159,16 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
         zone=_kairos_experimental_apply_poi_policy(zone,exec_candles,sweep,structure,mapa,experimental_poi_policy,experimental_poi_state,lifecycle_audit)
         resultado['experimental_poi_lifecycle']=lifecycle_audit
     if not zone:
-        resultado['failure_reason']='SEM_FVG_IFVG_OB_M15_CAUSAL'; return resultado
+        resultado['failure_reason']=f'SEM_FVG_IFVG_OB_{exec_tf}_CAUSAL'; return resultado
     # SHADOW ONLY: prova matemática/causal do POI escolhido. Não bloqueia nem altera sinal.
     try:
-        poi_shadow=_kairos_shadow_validate_poi(zone, exec_candles, sweep=sweep, structure=structure, tf='M15')
+        poi_shadow=_kairos_shadow_validate_poi(zone, exec_candles, sweep=sweep, structure=structure, tf=exec_tf)
         resultado['poi_shadow_audit']=poi_shadow
         _kairos_shadow_log_poi(audit_pair, zone, poi_shadow)
     except Exception as _poi_shadow_exc:
         resultado['poi_shadow_audit']={'shadow_only':True,'pass':False,'reason':f'AUDIT_EXCEPTION:{_poi_shadow_exc}'}
     resultado['zone_type']=zone['tipo']; resultado['zone_top']=round(zone['top'],6); resultado['zone_bottom']=round(zone['bottom'],6)
-    resultado['zone_source']=f"{zone['tipo']}_M15_APOS_SWEEP"; resultado['liquidity_inside_zone']=zone.get('liquidity_inside',[])
+    resultado['zone_source']=f"{zone['tipo']}_{exec_tf}_APOS_SWEEP"; resultado['liquidity_inside_zone']=zone.get('liquidity_inside',[])
     # Auditoria causal da zona: não altera seleção/entrada; apenas expõe os candles exatos.
     resultado['zone_created_ts']=zone.get('created_ts')
     resultado['zone_origin_ts']=zone.get('origin_ts')
@@ -2171,10 +2180,11 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
     zone_ts=zone.get('flip_ts') or zone.get('created_ts') or zone.get('t') or structure['t']
     after_ts=max(structure['t'],zone_ts)
 
-    # M5 refinement é opcional e nunca inventa setup sem a zona M15.
+    # Se a confirmação veio no M15, M5 pode refinar. Se a confirmação já veio
+    # no M5, a própria zona M5 é a zona executável e não há segundo refinamento.
     m5=candles_por_tf.get('M5') or []
-    refined=_kairos_m5_refine_zone(m5,zone,sweep['sweep_ts'],structure['t'],sweep['direcao'])
-    retest=None; active_zone=zone; entry_tf='M15'
+    refined=_kairos_m5_refine_zone(m5,zone,sweep['sweep_ts'],structure['t'],sweep['direcao']) if exec_tf=='M15' else None
+    retest=None; active_zone=zone; entry_tf=exec_tf
     if refined:
         rz_ts=refined.get('flip_ts') or refined.get('created_ts') or refined.get('t') or structure['t']
         r5=_kairos_retest_zone(m5,refined,max(structure['t'],rz_ts))
@@ -2255,10 +2265,10 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
         base=(min(c['l'] for c in seg) if direction=='LONG' else max(c['h'] for c in seg)) if seg else None
         slc=aplicar_buffer_stop_atr(base,sweep['direcao'],[c for c in exec_candles if c['t']<=retest['t']]) if base is not None else None
         right=(slc < retest['c']) if direction=='LONG' else (slc > retest['c'])
-        sl_info={'sl':slc,'sl_base':base,'sl_tf':'M15','sl_classe':'CONTINUATION_STRUCTURE','sl_sweep_ts':sweep['sweep_ts'],'sl_sweep_level':sweep['nivel'],'sl_sweep_extreme':base} if slc is not None and right else None
+        sl_info={'sl':slc,'sl_base':base,'sl_tf':exec_tf,'sl_classe':'CONTINUATION_STRUCTURE','sl_sweep_ts':sweep['sweep_ts'],'sl_sweep_level':sweep['nivel'],'sl_sweep_extreme':base} if slc is not None and right else None
         sl_audit={'motivo':'OK_CONTINUATION_STRUCTURE' if sl_info else 'SEM_ANCORA_CONTINUATION_VALIDA','candidatos':[]}
     else:
-        sl_info,sl_audit=_kairos_select_structural_sl(mapa,'M15',exec_candles,sweep,structure,retest,direction)
+        sl_info,sl_audit=_kairos_select_structural_sl(mapa,exec_tf,exec_candles,sweep,structure,retest,direction)
     resultado['sl_audit']=sl_audit
     if not sl_info:
         resultado['failure_reason']='SEM_ANCORA_SL_CAUSAL_VALIDA'; return resultado

@@ -1707,14 +1707,16 @@ def _kairos_zone_contains_liquidity(zone, mapa, max_items=10):
     return hits[:max_items]
 
 def _kairos_select_structural_sl(mapa, exec_tf, exec_candles, context_sweep, structure, retest, direction):
-    """Seleciona uma âncora de SL causal e ainda válida no momento da entrada.
+    """Seleciona uma âncora de SL causal e válida no momento da entrada.
 
-    Regras:
-    - prioriza sweep do TF de execução, na mesma direção da tese;
-    - o sweep local tem de acontecer depois do sweep narrativo e antes/até à quebra estrutural;
-    - uma âncora cujo SL buffered já tenha sido negociado antes da entrada é descartada;
-    - se nenhum sweep local servir, tenta o sweep narrativo HTF;
-    - nunca força stop do lado errado só para fabricar RR.
+    Hierarquia:
+    1) extremo protegido da perna causal sweep->MSS/CHoCH;
+    2) sweep local do TF de execução dentro da mesma janela causal;
+    3) extremo do sweep narrativo HTF.
+
+    O ATR é somente buffer depois da âncora estrutural. Nenhum candle posterior
+    ao reteste participa da escolha. Uma âncora já violada antes da entrada é
+    rejeitada.
     """
     if not exec_candles or not context_sweep or not structure or not retest:
         return None, {'motivo': 'DADOS_SL_INSUFICIENTES', 'candidatos': []}
@@ -1725,6 +1727,19 @@ def _kairos_select_structural_sl(mapa, exec_tf, exec_candles, context_sweep, str
     retest_ts = retest['t']
     context_ts = context_sweep['sweep_ts']
 
+    # Extremo protegido da perna que realmente produziu a quebra estrutural.
+    # Só usa candles conhecidos entre first capture e confirmação do MSS/CHoCH.
+    causal_leg = [c for c in exec_candles if context_ts <= c.get('t', -1) <= struct_ts]
+    protected = None
+    if causal_leg:
+        pc = min(causal_leg, key=lambda c: c['l']) if direction == 'LONG' else max(causal_leg, key=lambda c: c['h'])
+        protected = {
+            'direcao': thesis_dir,
+            'sweep_ts': pc['t'],
+            'nivel': pc['l'] if direction == 'LONG' else pc['h'],
+            'extremo': pc['l'] if direction == 'LONG' else pc['h'],
+        }
+
     local_sweeps = (mapa.get(exec_tf) or {}).get('sweeps', [])
     locais = [
         x for x in local_sweeps
@@ -1733,19 +1748,30 @@ def _kairos_select_structural_sl(mapa, exec_tf, exec_candles, context_sweep, str
     ]
     locais.sort(key=lambda x: x.get('sweep_ts', 0), reverse=True)
 
-    candidatos = [(exec_tf, x, 'EXECUCAO') for x in locais]
-    # Sweep narrativo sempre fica como fallback estrutural, sem duplicar o mesmo evento.
+    candidatos = []
+    if protected is not None:
+        candidatos.append((exec_tf, protected, 'PROTECTED_CAUSAL_LEG'))
+    candidatos.extend((exec_tf, x, 'EXECUCAO_SWEEP') for x in locais)
+
+    # Sweep narrativo continua fallback estrutural, sem duplicar o mesmo evento.
     if not any(x.get('sweep_ts') == context_sweep.get('sweep_ts') and tf == context_sweep.get('tf')
                for tf, x, _ in candidatos):
-        candidatos.append((context_sweep.get('tf'), context_sweep, 'NARRATIVA'))
+        candidatos.append((context_sweep.get('tf'), context_sweep, 'NARRATIVA_SWEEP'))
 
     audit=[]
+    seen=set()
     for tf_anchor, sw, classe in candidatos:
         base = sw.get('extremo')
+        base_ts = sw.get('sweep_ts')
+        key=(tf_anchor, base_ts, base, classe)
+        if key in seen:
+            continue
+        seen.add(key)
+
         candles_ate_entry = [c for c in exec_candles if c['t'] <= retest_ts]
         sl = aplicar_buffer_stop_atr(base, thesis_dir, candles_ate_entry)
         rec = {
-            'tf': tf_anchor, 'classe': classe, 'sweep_ts': sw.get('sweep_ts'),
+            'tf': tf_anchor, 'classe': classe, 'anchor_ts': base_ts,
             'sweep_level': sw.get('nivel'), 'sweep_extreme': base, 'sl_buffered': sl,
         }
         if sl is None:
@@ -1755,24 +1781,26 @@ def _kairos_select_structural_sl(mapa, exec_tf, exec_candles, context_sweep, str
         if not right:
             rec['status']='LADO_ERRADO'; audit.append(rec); continue
 
-        # A âncora não pode já ter sido violada ANTES da decisão de entrada.
-        posteriores = [c for c in exec_candles if sw.get('sweep_ts', 0) < c['t'] < retest_ts]
+        # Nada de look-ahead: valida somente entre a própria âncora e o reteste.
+        posteriores = [c for c in exec_candles if (base_ts or 0) < c['t'] < retest_ts]
         if direction == 'LONG':
             violacao = next((c for c in posteriores if c['l'] <= sl), None)
         else:
             violacao = next((c for c in posteriores if c['h'] >= sl), None)
         if violacao:
-            rec['status']='INVALIDADA_ANTES_ENTRY'; rec['invalidated_ts']=violacao['t']; audit.append(rec); continue
+            rec['status']='INVALIDADA_ANTES_ENTRY'
+            rec['invalidated_ts']=violacao['t']
+            audit.append(rec)
+            continue
 
         rec['status']='VALIDA'; audit.append(rec)
         return {
             'sl': sl, 'sl_base': base, 'sl_tf': tf_anchor, 'sl_classe': classe,
-            'sl_sweep_ts': sw.get('sweep_ts'), 'sl_sweep_level': sw.get('nivel'),
+            'sl_sweep_ts': base_ts, 'sl_sweep_level': sw.get('nivel'),
             'sl_sweep_extreme': base,
         }, {'motivo': 'OK', 'candidatos': audit}
 
     return None, {'motivo': 'SEM_ANCORA_SL_CAUSAL_VALIDA', 'candidatos': audit}
-
 
 def _kairos_select_entry_zone(exec_candles, sweep, structure, mapa):
     """Zona causal sem score: IFVG/FVG/OB ligados ao evento, por ordem temporal."""
@@ -2230,9 +2258,12 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
     sl=sl_info['sl']; risk=abs(entry-sl)
     if risk<=0:
         resultado['failure_reason']='RISCO_ZERO_SL'; return resultado
-    resultado['sl']=round(sl,6); resultado['sl_regra']=(f"continuation_structure_M15_atr" if intent.get('mode')=='CONTINUATION' else f"first_capture_{sweep['liquidity_tf']}_extremo_atr")
-    resultado['sl_anchor_tf']=sweep['liquidity_tf']; resultado['sl_anchor_class']='STRUCTURAL_FIRST_CAPTURE'
-    resultado['sl_anchor_sweep_ts']=sweep['sweep_ts']; resultado['sl_anchor_extreme']=round(sweep['extremo'],6)
+    resultado['sl']=round(sl,6)
+    resultado['sl_regra']=f"{sl_info.get('sl_classe','STRUCTURAL')}_atr_buffer"
+    resultado['sl_anchor_tf']=sl_info.get('sl_tf')
+    resultado['sl_anchor_class']=sl_info.get('sl_classe')
+    resultado['sl_anchor_sweep_ts']=sl_info.get('sl_sweep_ts')
+    resultado['sl_anchor_extreme']=round(sl_info['sl_sweep_extreme'],6) if sl_info.get('sl_sweep_extreme') is not None else None
 
     # TP = primeira liquidez estrutural ATIVA do lado do trade. POI contrário antes dela pode virar TP conservador.
     # Congela mapa/targets no timestamp da entrada: nenhum candle posterior ao

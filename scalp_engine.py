@@ -1031,6 +1031,84 @@ def auditar_liquidez_real_todos_tfs(pair='BTCUSD', sample_limit=100, fim_ts_ms=N
     }
 
 
+
+def _kairos_audit_structure_sl_parity_tf(candles, tf, swing_size=5, sample_limit=100):
+    """Audita BOS/CHoCH -> broken swing -> protected swing -> SL sem alterar trading."""
+    events=compute_lux_structure_events(candles, swing_size=swing_size)
+    swings=_extrair_swings_lux_algo(candles, swing_size=swing_size)
+    swing_keys={(s.get('t'), str(s.get('tipo')).upper(), float(s.get('valor'))) for s in swings}
+    by_ts={x.get('t'):x for x in candles}
+    rows=[]; fails=0
+    for e in events[-max(1,int(sample_limit)):]:
+        direction='LONG' if e.get('direcao')=='alta' else 'SHORT'
+        expected_protected='LOW' if direction=='LONG' else 'HIGH'
+        broken_type='HIGH' if direction=='LONG' else 'LOW'
+        broken_ts=e.get('broken_swing_origin_ts')
+        protected_ts=e.get('protected_swing_origin_ts')
+        broken=float(e.get('nivel')) if e.get('nivel') is not None else None
+        protected=float(e.get('protected_swing_level')) if e.get('protected_swing_level') is not None else None
+        break_candle=by_ts.get(e.get('t'))
+        broken_candle=by_ts.get(broken_ts)
+        protected_candle=by_ts.get(protected_ts)
+
+        broken_price_ok=bool(broken_candle and broken is not None and abs(float(broken_candle['h' if broken_type=='HIGH' else 'l'])-broken)<=1e-9)
+        protected_price_ok=bool(protected_candle and protected is not None and abs(float(protected_candle['l' if expected_protected=='LOW' else 'h'])-protected)<=1e-9)
+        broken_is_lux=bool(broken is not None and (broken_ts,broken_type,broken) in swing_keys)
+        protected_is_lux=bool(protected is not None and (protected_ts,expected_protected,protected) in swing_keys)
+        close_break_ok=bool(break_candle and broken is not None and (break_candle['c']>broken if direction=='LONG' else break_candle['c']<broken))
+        causal_ok=bool(broken_ts is not None and protected_ts is not None and e.get('t') is not None and broken_ts<e['t'] and protected_ts<e['t'])
+        type_ok=e.get('protected_swing_type')==expected_protected
+
+        # O protected swing tem de ser o ultimo swing Lux oposto conhecido antes da quebra.
+        prior_opposite=[s for s in swings if s.get('t') is not None and s['t']<e.get('t',0) and str(s.get('tipo')).upper()==expected_protected]
+        latest=max(prior_opposite,key=lambda s:s['t']) if prior_opposite else None
+        latest_ok=bool(latest and protected_ts==latest.get('t') and protected is not None and abs(protected-float(latest.get('valor')))<=1e-9)
+
+        ok=all((broken_price_ok,protected_price_ok,broken_is_lux,protected_is_lux,close_break_ok,causal_ok,type_ok,latest_ok))
+        if not ok: fails+=1
+        rows.append({
+            'pass':ok,'tf':tf,'event_type':e.get('tipo'),'direction':direction,
+            'break_ts':e.get('t'),'break_close':break_candle.get('c') if break_candle else None,
+            'broken_type':broken_type,'broken_level':broken,'broken_origin_ts':broken_ts,
+            'protected_type':e.get('protected_swing_type'),'protected_level':protected,'protected_origin_ts':protected_ts,
+            'checks':{'broken_price_ok':broken_price_ok,'protected_price_ok':protected_price_ok,
+                      'broken_is_lux':broken_is_lux,'protected_is_lux':protected_is_lux,
+                      'close_break_ok':close_break_ok,'causal_ok':causal_ok,'type_ok':type_ok,
+                      'latest_opposite_swing_ok':latest_ok}
+        })
+    return {'tf':tf,'swing_size':swing_size,'events_checked':len(rows),'fail':fails,
+            'all_pass':bool(rows) and fails==0,'events':rows}
+
+
+def auditar_structure_sl_btc(sample_limit=100, fim_ts_ms=None):
+    """Prova auditavel do elo estrutura Lux -> protected swing usado pelo SL em M15/M5."""
+    result={}
+    specs={'M15':('15',8),'M5':('5',4)}
+    for tf,(interval,dias) in specs.items():
+        candles=_fetch_bybit_klines_historico('BTCUSD',interval,dias,fim_ts_ms=fim_ts_ms)
+        result[tf]=_kairos_audit_structure_sl_parity_tf(candles,tf,swing_size=5,sample_limit=sample_limit)
+    total=sum(x['events_checked'] for x in result.values())
+    fail=sum(x['fail'] for x in result.values())
+    out={'pair':'BTCUSD','audit':'LUX_BREAK_PROTECTED_SWING_SL_PARITY','total_events_checked':total,
+         'total_fail':fail,'all_pass':total>0 and fail==0,'resultado':result,
+         'nota':'Auditoria somente leitura. Confere origem do swing quebrado, close da quebra, swing protegido oposto, causalidade e se era o ultimo swing Lux oposto conhecido no instante do BOS/CHoCH.'}
+    print('[STRUCTURE_SL_PARITY] '+json.dumps({'pair':'BTCUSD','total':total,'fail':fail,'all_pass':out['all_pass']}),flush=True)
+    return out
+
+
+@explicacao_bp.route('/kairos_v2/auditoria_structure_sl_btc', methods=['GET'])
+def auditoria_structure_sl_btc_endpoint():
+    try:
+        n=max(1,min(int(request.args.get('eventos','100')),300))
+        fim=request.args.get('fim_ts_ms')
+        fim=int(fim) if fim else None
+        return jsonify(auditar_structure_sl_btc(sample_limit=n,fim_ts_ms=fim)),200
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'erro':str(e)}),500
+
+
 @explicacao_bp.route('/kairos_v2/auditoria_liquidez_real', methods=['GET'])
 def auditoria_liquidez_real_endpoint():
     try:

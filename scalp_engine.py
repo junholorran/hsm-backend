@@ -1736,14 +1736,23 @@ def _kairos_select_structural_sl(mapa, exec_tf, exec_candles, context_sweep, str
         return None, {'motivo':'STRUCTURE_TS_FORA_EXEC_TF','candidatos':[]}
 
     # Somente candles conhecidos até a confirmação da quebra: zero look-ahead.
+    # Usa a MESMA matemática Lux/internal já existente no motor; não chama helper
+    # inexistente nem cria um segundo algoritmo de pivôs.
     pre=exec_candles[:struct_idx+1]
-    pivots=_kairos_pivots(pre,left=5,right=5)
-    wanted='LOW' if direction=='LONG' else 'HIGH'
-    candidates=[p for p in pivots if p.get('tipo')==wanted and p.get('t',-1)<struct_ts]
-    if direction=='LONG':
-        candidates=[p for p in candidates if p.get('nivel') is not None and float(p['nivel'])<entry]
-    else:
-        candidates=[p for p in candidates if p.get('nivel') is not None and float(p['nivel'])>entry]
+    events=compute_lux_structure_events(pre,swing_size=5)
+    wanted_dir='baixa' if direction=='LONG' else 'alta'
+    candidates=[]
+    for ev in events:
+        if ev.get('direcao')!=wanted_dir or ev.get('t',-1)>=struct_ts:
+            continue
+        idx=ev.get('index')
+        # O nível quebrado pelo evento é o swing protegido/oposto relevante.
+        level=ev.get('nivel')
+        if level is None:
+            continue
+        p={'tipo':'LOW' if direction=='LONG' else 'HIGH','t':ev.get('t'),'nivel':float(level),'event':ev.get('tipo')}
+        if (direction=='LONG' and p['nivel']<entry) or (direction=='SHORT' and p['nivel']>entry):
+            candidates.append(p)
     candidates.sort(key=lambda p:p.get('t',0),reverse=True)
 
     audit=[]

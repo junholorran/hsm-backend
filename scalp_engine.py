@@ -1047,12 +1047,30 @@ def auditar_liquidez_real_todos_tfs(pair='BTCUSD', sample_limit=100, fim_ts_ms=N
 
 
 def _kairos_audit_structure_sl_parity_tf(candles, tf, swing_size=5, sample_limit=100):
-    """Audita BOS/CHoCH -> broken swing -> protected swing -> SL sem alterar trading."""
+    """Audita BOS/CHoCH -> broken swing -> protected swing de forma causal.
+
+    Importante: um pivot Lux só é "conhecido" quando a mudança de leg o
+    CONFIRMA. O timestamp de origem sozinho não basta. Eventos sem swing
+    oposto confirmado são inelegíveis para SL e não contam como erro de
+    paridade — o motor deve simplesmente não abrir trade neles.
+    """
     events=compute_lux_structure_events(candles, swing_size=swing_size)
     swings=_extrair_swings_lux_algo(candles, swing_size=swing_size)
-    swing_keys={(s.get('t'), str(s.get('tipo')).upper(), float(s.get('valor'))) for s in swings}
     by_ts={x.get('t'):x for x in candles}
-    rows=[]; fails=0
+    idx_by_ts={x.get('t'):i for i,x in enumerate(candles)}
+
+    # A própria matemática Lux confirma o pivot swing_size candles depois
+    # da origem (na mudança de leg). Guardamos isso explicitamente para a
+    # auditoria nunca usar um pivot futuro só porque a origem já existia.
+    confirmed_swings=[]
+    for s in swings:
+        oi=idx_by_ts.get(s.get('t'))
+        ci=(oi+swing_size) if oi is not None else None
+        confirm_ts=candles[ci]['t'] if ci is not None and ci < len(candles) else None
+        confirmed_swings.append({**s,'confirm_ts':confirm_ts})
+    swing_keys={(s.get('t'),str(s.get('tipo')).upper(),float(s.get('valor'))) for s in confirmed_swings}
+
+    rows=[]; fails=0; eligible=0; skipped_no_anchor=0
     for e in events[-max(1,int(sample_limit)):]:
         direction='LONG' if e.get('direcao')=='alta' else 'SHORT'
         expected_protected='LOW' if direction=='LONG' else 'HIGH'
@@ -1061,38 +1079,60 @@ def _kairos_audit_structure_sl_parity_tf(candles, tf, swing_size=5, sample_limit
         protected_ts=e.get('protected_swing_origin_ts')
         broken=float(e.get('nivel')) if e.get('nivel') is not None else None
         protected=float(e.get('protected_swing_level')) if e.get('protected_swing_level') is not None else None
-        break_candle=by_ts.get(e.get('t'))
+        break_ts=e.get('t')
+        break_candle=by_ts.get(break_ts)
         broken_candle=by_ts.get(broken_ts)
         protected_candle=by_ts.get(protected_ts)
 
+        # Só swings já CONFIRMADOS até o candle da quebra podem participar.
+        known=[s for s in confirmed_swings if s.get('confirm_ts') is not None and break_ts is not None and s['confirm_ts']<=break_ts]
+        known_opposite=[s for s in known if str(s.get('tipo')).upper()==expected_protected]
+        latest=max(known_opposite,key=lambda s:(s['confirm_ts'],s['t'])) if known_opposite else None
+
         broken_price_ok=bool(broken_candle and broken is not None and abs(float(broken_candle['h' if broken_type=='HIGH' else 'l'])-broken)<=1e-9)
-        protected_price_ok=bool(protected_candle and protected is not None and abs(float(protected_candle['l' if expected_protected=='LOW' else 'h'])-protected)<=1e-9)
         broken_is_lux=bool(broken is not None and (broken_ts,broken_type,broken) in swing_keys)
-        protected_is_lux=bool(protected is not None and (protected_ts,expected_protected,protected) in swing_keys)
         close_break_ok=bool(break_candle and broken is not None and (break_candle['c']>broken if direction=='LONG' else break_candle['c']<broken))
-        causal_ok=bool(broken_ts is not None and protected_ts is not None and e.get('t') is not None and broken_ts<e['t'] and protected_ts<e['t'])
         type_ok=e.get('protected_swing_type')==expected_protected
 
-        # O protected swing tem de ser o ultimo swing Lux oposto conhecido antes da quebra.
-        prior_opposite=[s for s in swings if s.get('t') is not None and s['t']<e.get('t',0) and str(s.get('tipo')).upper()==expected_protected]
-        latest=max(prior_opposite,key=lambda s:s['t']) if prior_opposite else None
-        latest_ok=bool(latest and protected_ts==latest.get('t') and protected is not None and abs(protected-float(latest.get('valor')))<=1e-9)
+        # Sem swing oposto causalmente confirmado = sem âncora de SL = sem trade.
+        # Isso é comportamento correto, não falha matemática.
+        no_anchor = latest is None
+        if no_anchor:
+            skipped_no_anchor += 1
+            rows.append({
+                'pass':True,'eligible_for_sl':False,'reason':'SEM_SWING_OPOSTO_CONFIRMADO',
+                'tf':tf,'event_type':e.get('tipo'),'direction':direction,
+                'break_ts':break_ts,'broken_level':broken,'broken_origin_ts':broken_ts
+            })
+            continue
+
+        eligible += 1
+        protected_price_ok=bool(protected_candle and protected is not None and abs(float(protected_candle['l' if expected_protected=='LOW' else 'h'])-protected)<=1e-9)
+        protected_is_lux=bool(protected is not None and (protected_ts,expected_protected,protected) in swing_keys)
+        latest_ok=bool(protected_ts==latest.get('t') and protected is not None and abs(protected-float(latest.get('valor')))<=1e-9)
+        protected_confirm_ts=latest.get('confirm_ts') if latest_ok else None
+        causal_ok=bool(
+            broken_ts is not None and protected_ts is not None and break_ts is not None
+            and broken_ts<break_ts and protected_ts<break_ts
+            and protected_confirm_ts is not None and protected_confirm_ts<=break_ts
+        )
 
         ok=all((broken_price_ok,protected_price_ok,broken_is_lux,protected_is_lux,close_break_ok,causal_ok,type_ok,latest_ok))
         if not ok: fails+=1
         rows.append({
-            'pass':ok,'tf':tf,'event_type':e.get('tipo'),'direction':direction,
-            'break_ts':e.get('t'),'break_close':break_candle.get('c') if break_candle else None,
+            'pass':ok,'eligible_for_sl':True,'tf':tf,'event_type':e.get('tipo'),'direction':direction,
+            'break_ts':break_ts,'break_close':break_candle.get('c') if break_candle else None,
             'broken_type':broken_type,'broken_level':broken,'broken_origin_ts':broken_ts,
-            'protected_type':e.get('protected_swing_type'),'protected_level':protected,'protected_origin_ts':protected_ts,
+            'protected_type':e.get('protected_swing_type'),'protected_level':protected,
+            'protected_origin_ts':protected_ts,'protected_confirm_ts':protected_confirm_ts,
             'checks':{'broken_price_ok':broken_price_ok,'protected_price_ok':protected_price_ok,
                       'broken_is_lux':broken_is_lux,'protected_is_lux':protected_is_lux,
                       'close_break_ok':close_break_ok,'causal_ok':causal_ok,'type_ok':type_ok,
                       'latest_opposite_swing_ok':latest_ok}
         })
-    return {'tf':tf,'swing_size':swing_size,'events_checked':len(rows),'fail':fails,
-            'all_pass':bool(rows) and fails==0,'events':rows}
-
+    return {'tf':tf,'swing_size':swing_size,'events_checked':len(rows),
+            'eligible_for_sl':eligible,'skipped_no_anchor':skipped_no_anchor,
+            'fail':fails,'all_pass':eligible>0 and fails==0,'events':rows}
 
 def auditar_structure_sl_btc(sample_limit=100, fim_ts_ms=None):
     """Prova auditavel do elo estrutura Lux -> protected swing usado pelo SL em M15/M5."""

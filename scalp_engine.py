@@ -2319,10 +2319,20 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
         if invalidated is not None and invalidated <= entry_ts:
             continue
         touch=o.get('first_touch_ts')
+        raw_state=o.get('state')
         o['entry_state']='FRESH_ACTIVE' if touch is None or touch >= entry_ts else 'MITIGATED_ACTIVE'
+        # Gate de risco: zona já tocada/parcialmente mitigada não recebe o mesmo
+        # poder de veto de uma POI fresh. Ela continua no mapa/telemetria, mas só
+        # FRESH/ATIVA ou IFVG efetivamente flipada podem bloquear o trade.
+        o['blocks_entry'] = bool(
+            o['entry_state']=='FRESH_ACTIVE'
+            or raw_state=='IFVG'
+        )
         active_obstacles.append(o)
     resultado['target_obstacles_at_entry']=active_obstacles
-    first_obstacle = active_obstacles[0] if active_obstacles else None
+    blocking_obstacles=[o for o in active_obstacles if o.get('blocks_entry')]
+    resultado['blocking_obstacles_at_entry']=blocking_obstacles
+    first_obstacle = blocking_obstacles[0] if blocking_obstacles else None
     if first_obstacle:
         obstacle_level = float(first_obstacle['nivel'])
         obstacle_rr = abs(obstacle_level - entry) / risk

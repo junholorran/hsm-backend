@@ -2572,7 +2572,7 @@ def replay_vortex_decision_layer_v2(pair, dias_historico=7, janelas_mfe_mae=JANE
             a.update({'ts_corte':ts_corte,'failure_reason':r.get('failure_reason'),'zone_type':r.get('zone_type'),
                       'zone_created_ts':r.get('zone_created_ts'),'zone_bottom':r.get('zone_bottom'),'zone_top':r.get('zone_top')})
             experimental_poi_audit.append(a)
-        if experimental_obstacle_blocks is not None and r.get('failure_reason') == 'OBSTACULO_ESTRUTURAL_ANTES_2R':
+        if experimental_obstacle_blocks is not None and r.get('failure_reason') in ('OBSTACULO_ESTRUTURAL_ANTES_2R','OBSTACULO_ESTRUTURAL_ANTES_1R'):
             o=dict(r.get('tp1_obstacle') or {})
             experimental_obstacle_blocks.append({
                 'ts_corte':ts_corte,'entry_executable_ts':r.get('timestamp'),'entry':r.get('entry'),'sl':r.get('sl'),'direction':r.get('direction'),
@@ -2580,6 +2580,13 @@ def replay_vortex_decision_layer_v2(pair, dias_historico=7, janelas_mfe_mae=JANE
                 'obstacle':o,'obstacle_rr':r.get('rr'),'target':r.get('first_liquidity_target'),
                 'thesis':(r.get('first_capture_ts'),r.get('choch_timestamp'),r.get('direction')),
                 'zone':(r.get('zone_type'),r.get('zone_created_ts'),r.get('zone_bottom'),r.get('zone_top')),
+                'obstacle_state_at_entry': o.get('entry_state'),
+                'obstacle_raw_state': o.get('state'),
+                'obstacle_created_ts': o.get('created_ts'),
+                'obstacle_first_touch_ts': o.get('first_touch_ts'),
+                'obstacle_mitigated_ts': o.get('mitigated_ts'),
+                'obstacle_invalidated_ts': o.get('invalidated_ts'),
+                'obstacle_blocks_entry': o.get('blocks_entry'),
             })
 
         if r['valid']:

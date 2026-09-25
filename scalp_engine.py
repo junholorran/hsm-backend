@@ -85,6 +85,16 @@ def compute_lux_structure_events(candles, swing_size=50):
     bias = 'neutro'
     eventos = []
 
+    # O estado de break e o estado do SL têm papéis diferentes:
+    # - swing_*_level = nível estrutural ainda elegível para BOS/CHoCH;
+    # - latest_* = último pivot Lux confirmado, mesmo que esse pivot já tenha
+    #   sido quebrado antes. É este segundo estado que a execução precisa para
+    #   saber qual era o swing oposto mais recente NO INSTANTE da quebra.
+    latest_high_level = None
+    latest_low_level = None
+    latest_high_origin_ts = None
+    latest_low_origin_ts = None
+
     for i in range(swing_size + 1, n):
         if legs[i] != legs[i - 1]:
             idx_pivot = i - swing_size
@@ -94,10 +104,14 @@ def compute_lux_structure_events(candles, swing_size=50):
                 swing_low_level = candles[idx_pivot]['l']
                 swing_low_origin_ts = candles[idx_pivot]['t']
                 swing_low_crossed = False
+                latest_low_level = swing_low_level
+                latest_low_origin_ts = swing_low_origin_ts
             else:
                 swing_high_level = candles[idx_pivot]['h']
                 swing_high_origin_ts = candles[idx_pivot]['t']
                 swing_high_crossed = False
+                latest_high_level = swing_high_level
+                latest_high_origin_ts = swing_high_origin_ts
 
         c = candles[i]
         if swing_high_level is not None and not swing_high_crossed and c['c'] > swing_high_level:
@@ -106,8 +120,8 @@ def compute_lux_structure_events(candles, swing_size=50):
                 'tipo': tipo, 'direcao': 'alta', 'nivel': swing_high_level,
                 'broken_swing_origin_ts': swing_high_origin_ts,
                 'protected_swing_type': 'LOW',
-                'protected_swing_level': swing_low_level,
-                'protected_swing_origin_ts': swing_low_origin_ts,
+                'protected_swing_level': latest_low_level,
+                'protected_swing_origin_ts': latest_low_origin_ts,
                 't': c['t'], 'index': i
             })
             bias = 'alta'
@@ -118,8 +132,8 @@ def compute_lux_structure_events(candles, swing_size=50):
                 'tipo': tipo, 'direcao': 'baixa', 'nivel': swing_low_level,
                 'broken_swing_origin_ts': swing_low_origin_ts,
                 'protected_swing_type': 'HIGH',
-                'protected_swing_level': swing_high_level,
-                'protected_swing_origin_ts': swing_high_origin_ts,
+                'protected_swing_level': latest_high_level,
+                'protected_swing_origin_ts': latest_high_origin_ts,
                 't': c['t'], 'index': i
             })
             bias = 'baixa'

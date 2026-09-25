@@ -2332,8 +2332,17 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
         proximal = float(o.get('bottom')) if direction=='LONG' else float(o.get('top'))
         ahead_of_entry = (proximal > entry) if direction=='LONG' else (proximal < entry)
         o['ahead_of_entry'] = ahead_of_entry
+        # Hierarquia MTF: W1/D1/H4 definem contexto/narrativa; não são
+        # paredes binárias para um scalp interno M15/M5. H1/M15 podem vetar a
+        # execução quando uma POI oposta fresh/IFVG está realmente à frente.
+        # POIs HTF continuam preservadas em target_obstacles_at_entry para
+        # contexto, reação, alvo e auditoria.
+        execution_block_tf = o.get('tf') in ('H1','M15')
+        o['role_at_entry'] = 'EXECUTION_OBSTACLE' if execution_block_tf else 'HTF_CONTEXT'
         o['blocks_entry'] = bool(
-            ahead_of_entry and (
+            execution_block_tf
+            and ahead_of_entry
+            and (
                 o['entry_state']=='FRESH_ACTIVE'
                 or raw_state=='IFVG'
             )

@@ -1888,6 +1888,14 @@ def _run_kairos_a_btc_background(dias, fim_ts_ms):
         _KAIROS_A_BTC_CACHE.update({'status':'ERROR','error':str(e),'finished_at':int(time.time()*1000)})
         print('[POI_A_BTC_ERROR] '+str(e), flush=True)
 
+@app.route('/experiment/poi_lifecycle_a_btc_1d/start', methods=['GET'])
+def experiment_poi_lifecycle_a_btc_1d_start():
+    """Atalho sem query string para iniciar o replay BTC A_CURRENT de 1 dia."""
+    if _KAIROS_A_BTC_CACHE.get('status') != 'RUNNING' and _KAIROS_A13_CACHE.get('status') != 'RUNNING' and _KAIROS_ABC_CACHE.get('status') != 'RUNNING':
+        threading.Thread(target=_run_kairos_a_btc_background,args=(1,None),daemon=True).start()
+        return jsonify({'status':'STARTING','started':True,'pair':'BTCUSD','policy':'A_CURRENT','dias':1}),202
+    return jsonify({'status':_KAIROS_A_BTC_CACHE.get('status'),'started':False,'reason':'REPLAY_ALREADY_RUNNING'}),409
+
 @app.route('/experiment/poi_lifecycle_a_btc', methods=['GET'])
 def experiment_poi_lifecycle_a_btc():
     dias=max(1,min(int(request.args.get('dias','7')),31))

@@ -78,6 +78,8 @@ def compute_lux_structure_events(candles, swing_size=50):
 
     swing_high_level = None
     swing_low_level = None
+    swing_high_origin_ts = None
+    swing_low_origin_ts = None
     swing_high_crossed = False
     swing_low_crossed = False
     bias = 'neutro'
@@ -90,20 +92,36 @@ def compute_lux_structure_events(candles, swing_size=50):
                 continue
             if legs[i] == 1:
                 swing_low_level = candles[idx_pivot]['l']
+                swing_low_origin_ts = candles[idx_pivot]['t']
                 swing_low_crossed = False
             else:
                 swing_high_level = candles[idx_pivot]['h']
+                swing_high_origin_ts = candles[idx_pivot]['t']
                 swing_high_crossed = False
 
         c = candles[i]
         if swing_high_level is not None and not swing_high_crossed and c['c'] > swing_high_level:
             tipo = 'CHoCH' if bias == 'baixa' else 'BOS'
-            eventos.append({'tipo': tipo, 'direcao': 'alta', 'nivel': swing_high_level, 't': c['t'], 'index': i})
+            eventos.append({
+                'tipo': tipo, 'direcao': 'alta', 'nivel': swing_high_level,
+                'broken_swing_origin_ts': swing_high_origin_ts,
+                'protected_swing_type': 'LOW',
+                'protected_swing_level': swing_low_level,
+                'protected_swing_origin_ts': swing_low_origin_ts,
+                't': c['t'], 'index': i
+            })
             bias = 'alta'
             swing_high_crossed = True
         if swing_low_level is not None and not swing_low_crossed and c['c'] < swing_low_level:
             tipo = 'CHoCH' if bias == 'alta' else 'BOS'
-            eventos.append({'tipo': tipo, 'direcao': 'baixa', 'nivel': swing_low_level, 't': c['t'], 'index': i})
+            eventos.append({
+                'tipo': tipo, 'direcao': 'baixa', 'nivel': swing_low_level,
+                'broken_swing_origin_ts': swing_low_origin_ts,
+                'protected_swing_type': 'HIGH',
+                'protected_swing_level': swing_high_level,
+                'protected_swing_origin_ts': swing_high_origin_ts,
+                't': c['t'], 'index': i
+            })
             bias = 'baixa'
             swing_low_crossed = True
 
@@ -1720,64 +1738,64 @@ def _kairos_zone_contains_liquidity(zone, mapa, max_items=10):
     return hits[:max_items]
 
 def _kairos_select_structural_sl(mapa, exec_tf, exec_candles, context_sweep, structure, retest, direction):
-    """SL de execução: sempre no menor TF que confirmou a quebra.
+    """SL 1:1 com a mesma matemática Lux/internal que gerou o BOS/CHoCH.
 
-    HTF fornece contexto/narrativa. Depois do MSS/CHoCH/BOS no TF executor,
-    o risco pertence à estrutura local desse TF: último pivô protegido
-    confirmado antes da quebra. Nunca herda o extremo do sweep HTF como
-    fallback para um scalp.
+    O próprio evento estrutural carrega o swing protegido que existia no
+    instante da quebra. Não reconstruímos pivôs depois, não usamos HTF como
+    fallback e não criamos uma segunda matemática para o stop.
     """
     if not exec_candles or not structure or not retest:
         return None, {'motivo':'DADOS_SL_INSUFICIENTES','candidatos':[]}
 
-    entry=float(retest['c']); struct_ts=structure['t']; retest_ts=retest['t']
-    struct_idx=next((i for i,c in enumerate(exec_candles) if c.get('t')==struct_ts),None)
-    if struct_idx is None:
-        return None, {'motivo':'STRUCTURE_TS_FORA_EXEC_TF','candidatos':[]}
+    entry=float(retest['c'])
+    retest_ts=retest['t']
+    expected_type='LOW' if direction=='LONG' else 'HIGH'
+    base=structure.get('protected_swing_level')
+    base_ts=structure.get('protected_swing_origin_ts')
+    actual_type=structure.get('protected_swing_type')
 
-    # Somente candles conhecidos até a confirmação da quebra: zero look-ahead.
-    # Usa a MESMA matemática Lux/internal já existente no motor; não chama helper
-    # inexistente nem cria um segundo algoritmo de pivôs.
-    pre=exec_candles[:struct_idx+1]
-    events=compute_lux_structure_events(pre,swing_size=5)
-    wanted_dir='baixa' if direction=='LONG' else 'alta'
-    candidates=[]
-    for ev in events:
-        if ev.get('direcao')!=wanted_dir or ev.get('t',-1)>=struct_ts:
-            continue
-        idx=ev.get('index')
-        # O nível quebrado pelo evento é o swing protegido/oposto relevante.
-        level=ev.get('nivel')
-        if level is None:
-            continue
-        p={'tipo':'LOW' if direction=='LONG' else 'HIGH','t':ev.get('t'),'nivel':float(level),'event':ev.get('tipo')}
-        if (direction=='LONG' and p['nivel']<entry) or (direction=='SHORT' and p['nivel']>entry):
-            candidates.append(p)
-    candidates.sort(key=lambda p:p.get('t',0),reverse=True)
+    audit=[{
+        'tf':exec_tf,
+        'classe':'LUX_PROTECTED_SWING_FROM_BREAK',
+        'structure_ts':structure.get('t'),
+        'structure_type':structure.get('tipo'),
+        'broken_level':structure.get('nivel'),
+        'protected_type':actual_type,
+        'anchor_ts':base_ts,
+        'sweep_level':base,
+        'sweep_extreme':base,
+    }]
 
-    audit=[]
-    for p in candidates:
-        base=float(p['nivel']); base_ts=p.get('t')
-        sl=aplicar_buffer_stop_atr(base,'alta' if direction=='LONG' else 'baixa',
-                                   [c for c in exec_candles if c['t']<=retest_ts])
-        rec={'tf':exec_tf,'classe':'EXECUTION_PROTECTED_SWING','anchor_ts':base_ts,
-             'sweep_level':base,'sweep_extreme':base,'sl_buffered':sl}
-        if sl is None:
-            rec['status']='SEM_SL'; audit.append(rec); continue
-        right=(sl<entry) if direction=='LONG' else (sl>entry)
-        if not right:
-            rec['status']='LADO_ERRADO'; audit.append(rec); continue
-        posteriores=[c for c in exec_candles if base_ts<c['t']<retest_ts]
-        violation=next((c for c in posteriores if (c['l']<=sl if direction=='LONG' else c['h']>=sl)),None)
-        if violation:
-            rec['status']='INVALIDADA_ANTES_ENTRY'; rec['invalidated_ts']=violation['t']; audit.append(rec); continue
-        rec['status']='VALIDA'; audit.append(rec)
-        return {'sl':sl,'sl_base':base,'sl_tf':exec_tf,'sl_classe':'EXECUTION_PROTECTED_SWING',
-                'sl_sweep_ts':base_ts,'sl_sweep_level':base,'sl_sweep_extreme':base}, {'motivo':'OK_EXECUTION_TF','candidatos':audit}
+    if base is None or base_ts is None or actual_type != expected_type:
+        audit[0]['status']='SEM_PROTECTED_SWING_NO_EVENTO'
+        return None, {'motivo':'SEM_SWING_PROTEGIDO_EXEC_TF','candidatos':audit}
 
-    # Fail closed: sem estrutura local protegida no TF executor = sem trade.
-    # Não alarga o stop até H1/H4/D1/W1 para fazer o setup caber.
-    return None, {'motivo':'SEM_SWING_PROTEGIDO_EXEC_TF','candidatos':audit}
+    base=float(base)
+    if (direction=='LONG' and base>=entry) or (direction=='SHORT' and base<=entry):
+        audit[0]['status']='LADO_ERRADO'
+        return None, {'motivo':'SWING_PROTEGIDO_LADO_ERRADO','candidatos':audit}
+
+    known=[x for x in exec_candles if x['t']<=retest_ts]
+    sl=aplicar_buffer_stop_atr(base,'alta' if direction=='LONG' else 'baixa',known)
+    audit[0]['sl_buffered']=sl
+    if sl is None:
+        audit[0]['status']='SEM_SL'
+        return None, {'motivo':'SEM_SL_BUFFER','candidatos':audit}
+
+    # Se o swing protegido já foi violado antes da entrada, a tese local morreu.
+    posteriores=[x for x in exec_candles if base_ts < x['t'] < retest_ts]
+    violation=next((x for x in posteriores if (x['l']<=sl if direction=='LONG' else x['h']>=sl)),None)
+    if violation:
+        audit[0]['status']='INVALIDADA_ANTES_ENTRY'
+        audit[0]['invalidated_ts']=violation['t']
+        return None, {'motivo':'SWING_PROTEGIDO_INVALIDADO_ANTES_ENTRY','candidatos':audit}
+
+    audit[0]['status']='VALIDA'
+    return {
+        'sl':sl,'sl_base':base,'sl_tf':exec_tf,
+        'sl_classe':'LUX_PROTECTED_SWING_FROM_BREAK',
+        'sl_sweep_ts':base_ts,'sl_sweep_level':base,'sl_sweep_extreme':base
+    }, {'motivo':'OK_LUX_SAME_EVENT','candidatos':audit}
 
 def _kairos_select_entry_zone(exec_candles, sweep, structure, mapa):
     """Zona causal sem score: IFVG/FVG/OB ligados ao evento, por ordem temporal."""

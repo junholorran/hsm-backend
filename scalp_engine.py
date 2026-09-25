@@ -2296,7 +2296,37 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
         obstacle_rr = abs(obstacle_level - entry) / risk
         resultado['tp1_obstacle'] = dict(first_obstacle)
         if obstacle_rr < 2.0:
-            resultado['failure_reason']='OBSTACULO_ESTRUTURAL_ANTES_2R'
+            # Plano principal 2R/3R bloqueado. Não transformamos CHoCH/MSS em
+            # entrada automática: a cadeia causal completa já foi validada acima.
+            # SCALP 1R só existe quando há espaço estrutural real >=1R.
+            resultado['swing_blocked_by_obstacle']=True
+            resultado['swing_obstacle_rr']=round(obstacle_rr,2)
+            if obstacle_rr >= 1.0:
+                tp_scalp_1r = entry + sign * risk
+                resultado['tp1']=round(tp_scalp_1r,6)
+                resultado['tp1_rr']=1.0
+                resultado['tp1_origem']='SCALP_CAUSAL_1R'
+                resultado['tp2']=None
+                resultado['tp2_rr']=None
+                resultado['tp2_origem']=None
+                resultado['tp']=resultado['tp1']
+                resultado['rr']=1.0
+                resultado['tp_origem']='SCALP_CAUSAL_1R'
+                resultado['be_trigger']=None
+                resultado['be_price']=None
+                resultado['trade_mode']='SCALP_CAUSAL_1R'
+                resultado['structural_target_context']=round(float(target['nivel']),6)
+                resultado['structural_target_context_origin']=f"LIQUIDEZ_ESTRUTURAL_{target['tf']}_{target['tipo']}"
+                resultado['signal']=True
+                resultado['valid']=True
+                resultado['reason']=(
+                    f"LIQ={sweep['liquidity_tf']}:{sweep['liquidity_type']}@{sweep['nivel']} -> FIRST_CAPTURE_M15@{sweep['sweep_ts']} -> "
+                    f"{sweep.get('post_capture_state')} -> INTENT={intent['mode']}:{direction} -> {structure['tipo']}_M15 -> DISPLACEMENT(z={resultado['momentum_z']}) -> "
+                    f"{resultado['zone_source']} -> RETEST_{entry_tf} -> SL={sl_info.get('sl_classe')} -> SCALP_CAUSAL_1R -> "
+                    f"SETUP={resultado['setup_type']}"
+                )
+                return resultado
+            resultado['failure_reason']='OBSTACULO_ESTRUTURAL_ANTES_1R'
             resultado['rr']=round(obstacle_rr,2)
             return resultado
 
@@ -2305,7 +2335,30 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
     structural_rr = abs(float(target['nivel']) - entry) / risk
     if structural_rr < 2.0:
         resultado['rr']=round(structural_rr,2)
-        resultado['failure_reason']='LIQUIDEZ_ESTRUTURAL_ANTES_2R'
+        if structural_rr >= 1.0:
+            tp_scalp_1r = entry + sign * risk
+            resultado['tp1']=round(tp_scalp_1r,6)
+            resultado['tp1_rr']=1.0
+            resultado['tp1_origem']='SCALP_CAUSAL_1R'
+            resultado['tp2']=None
+            resultado['tp2_rr']=None
+            resultado['tp2_origem']=None
+            resultado['tp']=resultado['tp1']
+            resultado['rr']=1.0
+            resultado['tp_origem']='SCALP_CAUSAL_1R'
+            resultado['be_trigger']=None
+            resultado['be_price']=None
+            resultado['trade_mode']='SCALP_CAUSAL_1R'
+            resultado['signal']=True
+            resultado['valid']=True
+            resultado['reason']=(
+                f"LIQ={sweep['liquidity_tf']}:{sweep['liquidity_type']}@{sweep['nivel']} -> FIRST_CAPTURE_M15@{sweep['sweep_ts']} -> "
+                f"{sweep.get('post_capture_state')} -> INTENT={intent['mode']}:{direction} -> {structure['tipo']}_M15 -> DISPLACEMENT(z={resultado['momentum_z']}) -> "
+                f"{resultado['zone_source']} -> RETEST_{entry_tf} -> SL={sl_info.get('sl_classe')} -> SCALP_CAUSAL_1R -> "
+                f"SETUP={resultado['setup_type']}"
+            )
+            return resultado
+        resultado['failure_reason']='LIQUIDEZ_ESTRUTURAL_ANTES_1R'
         return resultado
 
     resultado['tp1']=round(tp1_2r,6)
@@ -2326,7 +2379,7 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
     resultado['reason']=(
         f"LIQ={sweep['liquidity_tf']}:{sweep['liquidity_type']}@{sweep['nivel']} -> FIRST_CAPTURE_M15@{sweep['sweep_ts']} -> "
         f"{sweep.get('post_capture_state')} -> INTENT={intent['mode']}:{direction} -> {structure['tipo']}_M15 -> DISPLACEMENT(z={resultado['momentum_z']}) -> "
-        f"{resultado['zone_source']} -> RETEST_{entry_tf} -> SL_FIRST_CAPTURE -> {resultado['tp_origem']} RR={resultado['rr']} -> "
+        f"{resultado['zone_source']} -> RETEST_{entry_tf} -> SL={sl_info.get('sl_classe')} -> {resultado['tp_origem']} RR={resultado['rr']} -> "
         f"SETUP={resultado['setup_type']}"
     )
     return resultado

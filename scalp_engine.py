@@ -1740,18 +1740,36 @@ def _kairos_select_structural_sl(mapa, exec_tf, exec_candles, context_sweep, str
     retest_ts = retest['t']
     context_ts = context_sweep['sweep_ts']
 
-    # Extremo protegido da perna que realmente produziu a quebra estrutural.
-    # Só usa candles conhecidos entre first capture e confirmação do MSS/CHoCH.
-    causal_leg = [c for c in exec_candles if context_ts <= c.get('t', -1) <= struct_ts]
+    # Invalidação da EXECUÇÃO, não automaticamente o extremo de toda a perna HTF.
+    # Para scalp, o stop deve ficar atrás do último swing/pivô protegido que
+    # EXISTIA antes do MSS/CHoCH e pertence à perna de intenção. A captura HTF
+    # continua sendo a narrativa; só vira fallback de SL se não houver âncora
+    # estrutural local causal.
+    struct_idx = next((i for i,c in enumerate(exec_candles) if c.get('t') == struct_ts), None)
     protected = None
-    if causal_leg:
-        pc = min(causal_leg, key=lambda c: c['l']) if direction == 'LONG' else max(causal_leg, key=lambda c: c['h'])
-        protected = {
-            'direcao': thesis_dir,
-            'sweep_ts': pc['t'],
-            'nivel': pc['l'] if direction == 'LONG' else pc['h'],
-            'extremo': pc['l'] if direction == 'LONG' else pc['h'],
-        }
+    if struct_idx is not None:
+        pre = exec_candles[:struct_idx+1]
+        pivots = _kairos_pivots(pre, left=5, right=5)
+        if direction == 'LONG':
+            local = [p for p in pivots if p.get('tipo') == 'LOW' and context_ts <= p.get('t',-1) < struct_ts and p.get('nivel') < entry]
+        else:
+            local = [p for p in pivots if p.get('tipo') == 'HIGH' and context_ts <= p.get('t',-1) < struct_ts and p.get('nivel') > entry]
+        if local:
+            p=max(local,key=lambda x:x.get('t',0))
+            protected={'direcao':thesis_dir,'sweep_ts':p.get('t'),'nivel':p.get('nivel'),'extremo':p.get('nivel')}
+
+    # Fallback: extremo da perna causal inteira. Mantém fail-safe quando não
+    # existe pivô local confirmado sem inventar um stop por RR.
+    if protected is None:
+        causal_leg = [c for c in exec_candles if context_ts <= c.get('t', -1) <= struct_ts]
+        if causal_leg:
+            pc = min(causal_leg, key=lambda c: c['l']) if direction == 'LONG' else max(causal_leg, key=lambda c: c['h'])
+            protected = {
+                'direcao': thesis_dir,
+                'sweep_ts': pc['t'],
+                'nivel': pc['l'] if direction == 'LONG' else pc['h'],
+                'extremo': pc['l'] if direction == 'LONG' else pc['h'],
+            }
 
     local_sweeps = (mapa.get(exec_tf) or {}).get('sweeps', [])
     locais = [

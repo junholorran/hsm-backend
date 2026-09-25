@@ -1873,6 +1873,34 @@ def experiment_poi_lifecycle_abc_btc():
     return jsonify(_KAIROS_ABC_CACHE)
 
 
+# BTC-only A_CURRENT — auditoria curta sem disparar os 13 pares.
+_KAIROS_A_BTC_CACHE = {'status':'IDLE','result':None,'error':None,'started_at':None,'finished_at':None}
+
+def _run_kairos_a_btc_background(dias, fim_ts_ms):
+    global _KAIROS_A_BTC_CACHE
+    try:
+        _KAIROS_A_BTC_CACHE.update({'status':'RUNNING','result':None,'error':None,'started_at':int(time.time()*1000),'finished_at':None})
+        print(f'[POI_A_BTC_PROGRESS] pair=BTCUSD dias={dias} phase=START', flush=True)
+        r=scalp_engine.replay_poi_lifecycle_abc_sol(dias_historico=dias,fim_ts_ms=fim_ts_ms,pair='BTCUSD',policies=('A_CURRENT',))
+        _KAIROS_A_BTC_CACHE.update({'status':'DONE','result':r,'finished_at':int(time.time()*1000)})
+        print(f'[POI_A_BTC_PROGRESS] pair=BTCUSD dias={dias} phase=DONE', flush=True)
+    except Exception as e:
+        _KAIROS_A_BTC_CACHE.update({'status':'ERROR','error':str(e),'finished_at':int(time.time()*1000)})
+        print('[POI_A_BTC_ERROR] '+str(e), flush=True)
+
+@app.route('/experiment/poi_lifecycle_a_btc', methods=['GET'])
+def experiment_poi_lifecycle_a_btc():
+    dias=max(1,min(int(request.args.get('dias','7')),31))
+    fim_raw=request.args.get('fim_ts_ms')
+    fim_ts_ms=int(fim_raw) if fim_raw else None
+    if request.args.get('start') == '1':
+        if _KAIROS_A_BTC_CACHE.get('status') != 'RUNNING' and _KAIROS_A13_CACHE.get('status') != 'RUNNING' and _KAIROS_ABC_CACHE.get('status') != 'RUNNING':
+            threading.Thread(target=_run_kairos_a_btc_background,args=(dias,fim_ts_ms),daemon=True).start()
+            return jsonify({'status':'STARTING','started':True,'pair':'BTCUSD','policy':'A_CURRENT','dias':dias}),202
+        return jsonify({'status':_KAIROS_A_BTC_CACHE.get('status'),'started':False,'reason':'REPLAY_ALREADY_RUNNING'}),409
+    return jsonify(_KAIROS_A_BTC_CACHE)
+
+
 # FASE SEGUINTE — A_CURRENT congelado nos 13 pares.
 # Experimental/read-only: scheduler live continua desligado neste servico.
 _KAIROS_A13_CACHE = {'status':'IDLE','result':None,'error':None,'started_at':None,'finished_at':None,'current_pair':None}

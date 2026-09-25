@@ -2324,9 +2324,19 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
         # Gate de risco: zona já tocada/parcialmente mitigada não recebe o mesmo
         # poder de veto de uma POI fresh. Ela continua no mapa/telemetria, mas só
         # FRESH/ATIVA ou IFVG efetivamente flipada podem bloquear o trade.
+        # Um POI contrário só é hard-block se estiver À FRENTE da entrada.
+        # Se a entrada já abriu além da borda proximal da zona, o preço já está
+        # negociando através/para dentro do POI; nesse caso ele vira contexto/TP
+        # conservador, não veto automático. Isso evita o falso bloqueio observado
+        # no BTC SHORT: entry 85379.3 acima da FVG D1 bullish cujo top era 85066.3.
+        proximal = float(o.get('bottom')) if direction=='LONG' else float(o.get('top'))
+        ahead_of_entry = (proximal > entry) if direction=='LONG' else (proximal < entry)
+        o['ahead_of_entry'] = ahead_of_entry
         o['blocks_entry'] = bool(
-            o['entry_state']=='FRESH_ACTIVE'
-            or raw_state=='IFVG'
+            ahead_of_entry and (
+                o['entry_state']=='FRESH_ACTIVE'
+                or raw_state=='IFVG'
+            )
         )
         active_obstacles.append(o)
     resultado['target_obstacles_at_entry']=active_obstacles

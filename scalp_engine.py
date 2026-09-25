@@ -1680,8 +1680,15 @@ def _kairos_opposing_zone_obstacles(mapa, entry, direction, target_level=None, l
                 if level<=entry or (target_level is not None and level>=target_level): continue
             else:
                 if level>=entry or (target_level is not None and level<=target_level): continue
+            # O obstáculo precisa existir causalmente no momento da entrada.
+            created_ts = z.get('flip_ts') or z.get('break_ts') or z.get('created_ts') or z.get('t')
+            if created_ts is not None and z.get('tipo','').startswith('FVG_'):
+                created_ts = z.get('created_ts')
             obs.append({'tf':tf,'tipo':z.get('tipo','POI_OPPOSTA'),'nivel':level,'top':top,'bottom':bottom,
-                        'peso':KAIROS_TF_PESO.get(tf,1),'dist':abs(level-entry),'classe':'OBSTACULO_POI'})
+                        'peso':KAIROS_TF_PESO.get(tf,1),'dist':abs(level-entry),'classe':'OBSTACULO_POI',
+                        'state':z.get('state'),'created_ts':created_ts,
+                        'first_touch_ts':z.get('first_touch_ts'),'mitigated_ts':z.get('mitigated_ts'),
+                        'invalidated_ts':z.get('invalidated_ts')})
     obs.sort(key=lambda x:(x['dist'],-x['peso']))
     dedup=[]
     for o in obs:
@@ -2290,7 +2297,22 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
     tp1_2r = entry + sign * (2.0 * risk)
     tp2_3r = entry + sign * (3.0 * risk)
 
-    first_obstacle = obstacles[0] if obstacles else None
+    # Estado do obstáculo no instante da entrada: o mapa já foi truncado em
+    # entry_ts. Não basta a zona existir; distinguimos fresh vs previamente
+    # tocada/mitigada para auditoria e exigimos que ela ainda esteja válida.
+    active_obstacles=[]
+    for o in obstacles:
+        created=o.get('created_ts')
+        invalidated=o.get('invalidated_ts')
+        if created is not None and created > entry_ts:
+            continue
+        if invalidated is not None and invalidated <= entry_ts:
+            continue
+        touch=o.get('first_touch_ts')
+        o['entry_state']='FRESH_ACTIVE' if touch is None or touch >= entry_ts else 'MITIGATED_ACTIVE'
+        active_obstacles.append(o)
+    resultado['target_obstacles_at_entry']=active_obstacles
+    first_obstacle = active_obstacles[0] if active_obstacles else None
     if first_obstacle:
         obstacle_level = float(first_obstacle['nivel'])
         obstacle_rr = abs(obstacle_level - entry) / risk

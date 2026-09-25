@@ -1720,118 +1720,55 @@ def _kairos_zone_contains_liquidity(zone, mapa, max_items=10):
     return hits[:max_items]
 
 def _kairos_select_structural_sl(mapa, exec_tf, exec_candles, context_sweep, structure, retest, direction):
-    """Seleciona uma âncora de SL causal e válida no momento da entrada.
+    """SL de execução: sempre no menor TF que confirmou a quebra.
 
-    Hierarquia:
-    1) extremo protegido da perna causal sweep->MSS/CHoCH;
-    2) sweep local do TF de execução dentro da mesma janela causal;
-    3) extremo do sweep narrativo HTF.
-
-    O ATR é somente buffer depois da âncora estrutural. Nenhum candle posterior
-    ao reteste participa da escolha. Uma âncora já violada antes da entrada é
-    rejeitada.
+    HTF fornece contexto/narrativa. Depois do MSS/CHoCH/BOS no TF executor,
+    o risco pertence à estrutura local desse TF: último pivô protegido
+    confirmado antes da quebra. Nunca herda o extremo do sweep HTF como
+    fallback para um scalp.
     """
-    if not exec_candles or not context_sweep or not structure or not retest:
-        return None, {'motivo': 'DADOS_SL_INSUFICIENTES', 'candidatos': []}
+    if not exec_candles or not structure or not retest:
+        return None, {'motivo':'DADOS_SL_INSUFICIENTES','candidatos':[]}
 
-    entry = retest['c']
-    thesis_dir = context_sweep['direcao']
-    struct_ts = structure['t']
-    retest_ts = retest['t']
-    context_ts = context_sweep['sweep_ts']
+    entry=float(retest['c']); struct_ts=structure['t']; retest_ts=retest['t']
+    struct_idx=next((i for i,c in enumerate(exec_candles) if c.get('t')==struct_ts),None)
+    if struct_idx is None:
+        return None, {'motivo':'STRUCTURE_TS_FORA_EXEC_TF','candidatos':[]}
 
-    # Invalidação da EXECUÇÃO, não automaticamente o extremo de toda a perna HTF.
-    # Para scalp, o stop deve ficar atrás do último swing/pivô protegido que
-    # EXISTIA antes do MSS/CHoCH e pertence à perna de intenção. A captura HTF
-    # continua sendo a narrativa; só vira fallback de SL se não houver âncora
-    # estrutural local causal.
-    struct_idx = next((i for i,c in enumerate(exec_candles) if c.get('t') == struct_ts), None)
-    protected = None
-    if struct_idx is not None:
-        pre = exec_candles[:struct_idx+1]
-        pivots = _kairos_pivots(pre, left=5, right=5)
-        if direction == 'LONG':
-            local = [p for p in pivots if p.get('tipo') == 'LOW' and context_ts <= p.get('t',-1) < struct_ts and p.get('nivel') < entry]
-        else:
-            local = [p for p in pivots if p.get('tipo') == 'HIGH' and context_ts <= p.get('t',-1) < struct_ts and p.get('nivel') > entry]
-        if local:
-            p=max(local,key=lambda x:x.get('t',0))
-            protected={'direcao':thesis_dir,'sweep_ts':p.get('t'),'nivel':p.get('nivel'),'extremo':p.get('nivel')}
-
-    # Fallback: extremo da perna causal inteira. Mantém fail-safe quando não
-    # existe pivô local confirmado sem inventar um stop por RR.
-    if protected is None:
-        causal_leg = [c for c in exec_candles if context_ts <= c.get('t', -1) <= struct_ts]
-        if causal_leg:
-            pc = min(causal_leg, key=lambda c: c['l']) if direction == 'LONG' else max(causal_leg, key=lambda c: c['h'])
-            protected = {
-                'direcao': thesis_dir,
-                'sweep_ts': pc['t'],
-                'nivel': pc['l'] if direction == 'LONG' else pc['h'],
-                'extremo': pc['l'] if direction == 'LONG' else pc['h'],
-            }
-
-    local_sweeps = (mapa.get(exec_tf) or {}).get('sweeps', [])
-    locais = [
-        x for x in local_sweeps
-        if x.get('direcao') == thesis_dir
-        and context_ts <= x.get('sweep_ts', -1) <= struct_ts
-    ]
-    locais.sort(key=lambda x: x.get('sweep_ts', 0), reverse=True)
-
-    candidatos = []
-    if protected is not None:
-        candidatos.append((exec_tf, protected, 'PROTECTED_CAUSAL_LEG'))
-    candidatos.extend((exec_tf, x, 'EXECUCAO_SWEEP') for x in locais)
-
-    # Sweep narrativo continua fallback estrutural, sem duplicar o mesmo evento.
-    if not any(x.get('sweep_ts') == context_sweep.get('sweep_ts') and tf == context_sweep.get('tf')
-               for tf, x, _ in candidatos):
-        candidatos.append((context_sweep.get('tf'), context_sweep, 'NARRATIVA_SWEEP'))
+    # Somente candles conhecidos até a confirmação da quebra: zero look-ahead.
+    pre=exec_candles[:struct_idx+1]
+    pivots=_kairos_pivots(pre,left=5,right=5)
+    wanted='LOW' if direction=='LONG' else 'HIGH'
+    candidates=[p for p in pivots if p.get('tipo')==wanted and p.get('t',-1)<struct_ts]
+    if direction=='LONG':
+        candidates=[p for p in candidates if p.get('nivel') is not None and float(p['nivel'])<entry]
+    else:
+        candidates=[p for p in candidates if p.get('nivel') is not None and float(p['nivel'])>entry]
+    candidates.sort(key=lambda p:p.get('t',0),reverse=True)
 
     audit=[]
-    seen=set()
-    for tf_anchor, sw, classe in candidatos:
-        base = sw.get('extremo')
-        base_ts = sw.get('sweep_ts')
-        key=(tf_anchor, base_ts, base, classe)
-        if key in seen:
-            continue
-        seen.add(key)
-
-        candles_ate_entry = [c for c in exec_candles if c['t'] <= retest_ts]
-        sl = aplicar_buffer_stop_atr(base, thesis_dir, candles_ate_entry)
-        rec = {
-            'tf': tf_anchor, 'classe': classe, 'anchor_ts': base_ts,
-            'sweep_level': sw.get('nivel'), 'sweep_extreme': base, 'sl_buffered': sl,
-        }
+    for p in candidates:
+        base=float(p['nivel']); base_ts=p.get('t')
+        sl=aplicar_buffer_stop_atr(base,'alta' if direction=='LONG' else 'baixa',
+                                   [c for c in exec_candles if c['t']<=retest_ts])
+        rec={'tf':exec_tf,'classe':'EXECUTION_PROTECTED_SWING','anchor_ts':base_ts,
+             'sweep_level':base,'sweep_extreme':base,'sl_buffered':sl}
         if sl is None:
             rec['status']='SEM_SL'; audit.append(rec); continue
-
-        right = (sl < entry) if direction == 'LONG' else (sl > entry)
+        right=(sl<entry) if direction=='LONG' else (sl>entry)
         if not right:
             rec['status']='LADO_ERRADO'; audit.append(rec); continue
-
-        # Nada de look-ahead: valida somente entre a própria âncora e o reteste.
-        posteriores = [c for c in exec_candles if (base_ts or 0) < c['t'] < retest_ts]
-        if direction == 'LONG':
-            violacao = next((c for c in posteriores if c['l'] <= sl), None)
-        else:
-            violacao = next((c for c in posteriores if c['h'] >= sl), None)
-        if violacao:
-            rec['status']='INVALIDADA_ANTES_ENTRY'
-            rec['invalidated_ts']=violacao['t']
-            audit.append(rec)
-            continue
-
+        posteriores=[c for c in exec_candles if base_ts<c['t']<retest_ts]
+        violation=next((c for c in posteriores if (c['l']<=sl if direction=='LONG' else c['h']>=sl)),None)
+        if violation:
+            rec['status']='INVALIDADA_ANTES_ENTRY'; rec['invalidated_ts']=violation['t']; audit.append(rec); continue
         rec['status']='VALIDA'; audit.append(rec)
-        return {
-            'sl': sl, 'sl_base': base, 'sl_tf': tf_anchor, 'sl_classe': classe,
-            'sl_sweep_ts': base_ts, 'sl_sweep_level': sw.get('nivel'),
-            'sl_sweep_extreme': base,
-        }, {'motivo': 'OK', 'candidatos': audit}
+        return {'sl':sl,'sl_base':base,'sl_tf':exec_tf,'sl_classe':'EXECUTION_PROTECTED_SWING',
+                'sl_sweep_ts':base_ts,'sl_sweep_level':base,'sl_sweep_extreme':base}, {'motivo':'OK_EXECUTION_TF','candidatos':audit}
 
-    return None, {'motivo': 'SEM_ANCORA_SL_CAUSAL_VALIDA', 'candidatos': audit}
+    # Fail closed: sem estrutura local protegida no TF executor = sem trade.
+    # Não alarga o stop até H1/H4/D1/W1 para fazer o setup caber.
+    return None, {'motivo':'SEM_SWING_PROTEGIDO_EXEC_TF','candidatos':audit}
 
 def _kairos_select_entry_zone(exec_candles, sweep, structure, mapa):
     """Zona causal sem score: IFVG/FVG/OB ligados ao evento, por ordem temporal."""
@@ -2283,16 +2220,10 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
         resultado['failure_reason']='AGUARDANDO_RETESTE_ZONA'; return resultado
     entry=retest['c']; resultado['entry']=round(entry,6); resultado['timestamp']=retest['t']
 
-    # SL atrás do sweep estrutural que autorizou a tese; M5 não move o stop para o lado errado.
-    if intent.get('mode')=='CONTINUATION':
-        seg=[c for c in exec_candles if sweep['sweep_ts'] <= c['t'] <= structure['t']]
-        base=(min(c['l'] for c in seg) if direction=='LONG' else max(c['h'] for c in seg)) if seg else None
-        slc=aplicar_buffer_stop_atr(base,sweep['direcao'],[c for c in exec_candles if c['t']<=retest['t']]) if base is not None else None
-        right=(slc < retest['c']) if direction=='LONG' else (slc > retest['c'])
-        sl_info={'sl':slc,'sl_base':base,'sl_tf':exec_tf,'sl_classe':'CONTINUATION_STRUCTURE','sl_sweep_ts':sweep['sweep_ts'],'sl_sweep_level':sweep['nivel'],'sl_sweep_extreme':base} if slc is not None and right else None
-        sl_audit={'motivo':'OK_CONTINUATION_STRUCTURE' if sl_info else 'SEM_ANCORA_CONTINUATION_VALIDA','candidatos':[]}
-    else:
-        sl_info,sl_audit=_kairos_select_structural_sl(mapa,exec_tf,exec_candles,sweep,structure,retest,direction)
+    # O HTF autoriza a narrativa; o risco pertence SEMPRE ao menor TF que
+    # confirmou a quebra estrutural (M15 preferencial, M5 quando foi o fallback).
+    # Reversal e continuation obedecem à mesma regra de invalidação local.
+    sl_info,sl_audit=_kairos_select_structural_sl(mapa,exec_tf,exec_candles,sweep,structure,retest,direction)
     resultado['sl_audit']=sl_audit
     if not sl_info:
         resultado['failure_reason']='SEM_ANCORA_SL_CAUSAL_VALIDA'; return resultado

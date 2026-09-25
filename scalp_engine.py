@@ -1479,11 +1479,17 @@ def _kairos_select_structural_first_capture_sweep(candles_por_tf, now_ts):
     valid=[x for x in candidates if x.get('status')=='VALID_FIRST_CAPTURE_NEUTRAL' and 0 <= x['age_ms'] <= max_age.get(x['liquidity_tf'],5*3600000)]
     if not valid:
         return None, {'levels':levels,'candidates':candidates}
-    # A captura é válida no TF que realmente a produziu: W1, D1, H4 ou H1.
-    # Se houver mais de uma captura ainda válida, preservamos a hierarquia HTF;
-    # recência desempata apenas dentro do mesmo TF/classe estrutural.
-    valid.sort(key=lambda x:(KAIROS_PRIMARY_LIQUIDITY_PRIORITY.get(x['liquidity_tf'],0),x['sweep_ts']), reverse=True)
-    return valid[0], {'levels':levels,'setup_levels':setup_levels,'candidates':candidates}
+    # Um capture HTF não congela o intraday inteiro. Depois que uma captura
+    # posterior H1/H4/D1/W1 já está causalmente confirmada, ela representa um
+    # novo evento de liquidez e pode abrir uma nova tese dentro do mesmo range.
+    # A hierarquia HTF continua sendo contexto; para a TESE OPERACIONAL escolhemos
+    # o evento válido mais recente. O peso do TF desempata capturas simultâneas.
+    valid.sort(key=lambda x:(x['sweep_ts'],KAIROS_PRIMARY_LIQUIDITY_PRIORITY.get(x['liquidity_tf'],0)), reverse=True)
+    selected=valid[0]
+    return selected, {'levels':levels,'setup_levels':setup_levels,'candidates':candidates,
+                      'valid_capture_count':len(valid),
+                      'selection_rule':'LATEST_VALID_CAPTURE_THEN_HTF_PRIORITY',
+                      'selected_capture':{k:selected.get(k) for k in ('liquidity_tf','liquidity_type','nivel','sweep_ts','confirm_ts','post_capture_state')}}
 
 
 def _kairos_direction_after_first_capture(candles, capture, swing_size=5):

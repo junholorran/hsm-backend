@@ -1943,6 +1943,7 @@ def _run_kairos_pdh_pdl_btc_background(dias, fim_ts_ms):
         print(f'[PDH_PDL_BTC_PROGRESS] dias={dias} phase=START', flush=True)
         r=scalp_engine.replay_vortex_decision_layer_v2('BTCUSD',dias_historico=dias,fim_ts_ms=fim_ts_ms,experimental_poi_policy='A_CURRENT',liquidity_policy='PDH_PDL_ONLY')
         _KAIROS_PDH_PDL_CACHE.update({'status':'DONE','result':r,'finished_at':int(time.time()*1000)})
+        print(f'[PDH_PDL_BTC_RESULT] {r}', flush=True)
         print(f'[PDH_PDL_BTC_PROGRESS] dias={dias} phase=DONE', flush=True)
     except Exception as e:
         _KAIROS_PDH_PDL_CACHE.update({'status':'ERROR','error':str(e),'finished_at':int(time.time()*1000)})

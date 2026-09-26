@@ -2504,9 +2504,13 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
         interaction_ts = None
         if raw_state == 'IFVG' and execution_block_tf and ahead_of_entry:
             zone_bottom=float(o.get('bottom')); zone_top=float(o.get('top'))
-            known_exec=[cc for cc in exec_candles if cc.get('t') is not None and cc['t'] <= entry_ts]
+            # Julga a zona no timeframe DELA, nunca no TF de execucao.
+            # Ex.: IFVG H1 => somente candles H1 fechados ate a entrada.
+            obstacle_tf=o.get('tf')
+            obstacle_candles=(target_tf_map.get(obstacle_tf) or [])
+            known_obstacle=[cc for cc in obstacle_candles if cc.get('t') is not None and cc['t'] <= entry_ts]
             interaction_state='UNRESOLVED'
-            for cc in known_exec:
+            for cc in known_obstacle:
                 if direction=='LONG':
                     touched=float(cc['h']) >= zone_bottom
                     accepted=float(cc['c']) > zone_top

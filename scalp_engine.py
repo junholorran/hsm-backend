@@ -684,7 +684,7 @@ def _kairos_fvg_states(candles, lookback=250):
 
 def auditar_fvg_ifvg_h1_btc(dias=7, fim_ts_ms=None, lo=85000.0, hi=87000.0):
     """Auditoria read-only: prova geometria 3-candles e lifecycle FVG/IFVG H1."""
-    raw=_fetch_bybit_klines_historico('BTCUSD','60',dias,fim_ts_ms)
+    raw=_fetch_bybit_klines_historico('BTCUSDT','60',dias,fim_ts_ms)
     candles,_=_validar_e_limpar_candles(raw,'H1')
     states=_kairos_fvg_states(candles,lookback=max(250,len(candles)))
     out=[]
@@ -710,7 +710,7 @@ def auditar_fvg_ifvg_h1_btc(dias=7, fim_ts_ms=None, lo=85000.0, hi=87000.0):
             'source_a':a,'source_mid':m,'source_c':cc,'flip_candle':flip or None,
             'geometry_3c_ok':geometry_ok,'flip_close_ok':flip_ok,
         })
-    return {'pair':'BTCUSD','tf':'H1','range':[lo,hi],'candles':len(candles),'zones':out}
+    return {'pair':'BTCUSD','market_symbol':'BTCUSDT','tf':'H1','range':[lo,hi],'candles':len(candles),'zones':out}
 
 def _kairos_momentum_z(candles, period=50):
     if len(candles) < period + 1:

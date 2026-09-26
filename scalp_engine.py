@@ -634,7 +634,7 @@ def _kairos_fvg_states(candles, lookback=250):
         novo=None
         if atual['l'] > a['h']:
             novo={'id':f"FVG_{meio['t']}_B",'tipo':'FVG_bullish','direcao':'alta','top':atual['l'],'bottom':a['h'],
-                  'created_ts':atual['t'],'origin_ts':meio['t'],'state':'ATIVA','flip_ts':None,
+                  'created_ts':atual['t'],'origin_ts':meio['t'],'state':'ATIVA','flip_ts':None,'mother_fvg_id':None,
                   'first_touch_ts':None,'mitigated_ts':None,'invalidated_ts':None,
                   'source_a':dict(a),'source_mid':dict(meio),'source_c':dict(atual),'flip_candle':None}
         elif atual['h'] < a['l']:
@@ -653,7 +653,7 @@ def _kairos_fvg_states(candles, lookback=250):
             # extremidade invalidadora confirma inversão e cria IFVG.
             if z['tipo'] == 'FVG_bullish':
                 if atual['c'] < z['bottom']:
-                    z['state']='IFVG'; z['tipo']='IFVG_bearish'; z['direcao']='baixa'; z['flip_ts']=atual['t']; z['flip_candle']=dict(atual)
+                    z['state']='IFVG'; z['tipo']='IFVG_bearish'; z['direcao']='baixa'; z['mother_fvg_id']=z['id']; z['flip_ts']=atual['t']; z['flip_candle']=dict(atual)
                 elif atual['l'] <= z['bottom']:
                     z['state']='PARCIAL'; z['first_touch_ts']=z['first_touch_ts'] or atual['t']
                     z['mitigated_ts']=z['mitigated_ts'] or atual['t']
@@ -662,7 +662,7 @@ def _kairos_fvg_states(candles, lookback=250):
                     z['first_touch_ts']=z['first_touch_ts'] or atual['t']
             elif z['tipo'] == 'FVG_bearish':
                 if atual['c'] > z['top']:
-                    z['state']='IFVG'; z['tipo']='IFVG_bullish'; z['direcao']='alta'; z['flip_ts']=atual['t']; z['flip_candle']=dict(atual)
+                    z['state']='IFVG'; z['tipo']='IFVG_bullish'; z['direcao']='alta'; z['mother_fvg_id']=z['id']; z['flip_ts']=atual['t']; z['flip_candle']=dict(atual)
                 elif atual['h'] >= z['top']:
                     z['state']='PARCIAL'; z['first_touch_ts']=z['first_touch_ts'] or atual['t']
                     z['mitigated_ts']=z['mitigated_ts'] or atual['t']
@@ -703,7 +703,7 @@ def auditar_fvg_ifvg_h1_btc(dias=7, fim_ts_ms=None, lo=85000.0, hi=87000.0):
         if z.get('flip_ts') is not None:
             flip_ok = (flip.get('c') < z.get('bottom')) if mother_type=='FVG_bullish' else (flip.get('c') > z.get('top'))
         out.append({
-            'id':z.get('id'),'mother_type':mother_type,'current_type':z.get('tipo'),
+            'id':z.get('id'),'mother_fvg_id':z.get('mother_fvg_id'),'mother_type':mother_type,'current_type':z.get('tipo'),
             'state':z.get('state'),'bottom':z.get('bottom'),'top':z.get('top'),
             'created_ts':z.get('created_ts'),'flip_ts':z.get('flip_ts'),
             'first_touch_ts':z.get('first_touch_ts'),'invalidated_ts':z.get('invalidated_ts'),

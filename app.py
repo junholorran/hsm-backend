@@ -1909,6 +1909,16 @@ def experiment_poi_lifecycle_a_btc():
     return jsonify(_KAIROS_A_BTC_CACHE)
 
 
+
+@app.route('/kairos_v2/auditoria_fvg_h1_btc', methods=['GET'])
+def kairos_v2_auditoria_fvg_h1_btc():
+    dias=max(1,min(int(request.args.get('dias','7')),31))
+    fim_raw=request.args.get('fim_ts_ms')
+    fim_ts_ms=int(fim_raw) if fim_raw else None
+    lo=float(request.args.get('lo','85000'))
+    hi=float(request.args.get('hi','87000'))
+    return jsonify(scalp_engine.auditar_fvg_ifvg_h1_btc(dias=dias,fim_ts_ms=fim_ts_ms,lo=lo,hi=hi))
+
 # FASE SEGUINTE — A_CURRENT congelado nos 13 pares.
 # Experimental/read-only: scheduler live continua desligado neste servico.
 _KAIROS_A13_CACHE = {'status':'IDLE','result':None,'error':None,'started_at':None,'finished_at':None,'current_pair':None}

@@ -1947,9 +1947,14 @@ def _run_kairos_pdh_pdl_btc_background(dias, fim_ts_ms):
         try:
             end_ts=(r.get('janela_fixa') or {}).get('data_fim_ts_ms')
             start_ts=(r.get('janela_fixa') or {}).get('data_inicio_ts_ms')
-            full=scalp_engine.obter_candles_multitf('BTCUSD')
+            symbol='BTCUSDT'
+            d1_raw=scalp_engine._fetch_bybit_klines_historico(symbol,'D',261,fim_ts_ms=end_ts)
+            m15_raw=scalp_engine._fetch_bybit_klines_historico(symbol,'15',10,fim_ts_ms=end_ts)
+            d1,_=scalp_engine._validar_e_limpar_candles(d1_raw,'D')
+            m15_all,_=scalp_engine._validar_e_limpar_candles(m15_raw,'15')
+            full={'D1':d1,'M15':m15_all}
             refs=scalp_engine._kairos_previous_period_refs(full,end_ts)
-            m15=[c for c in (full.get('M15') or []) if start_ts <= c.get('t',0) <= end_ts]
+            m15=[c for c in m15_all if start_ts <= c.get('t',0) <= end_ts]
             diag={'PDH':refs.get('PDH'),'PDL':refs.get('PDL'),'crosses':{}}
             for typ in ('PDH','PDL'):
                 rec=refs.get(typ); lv=rec.get('level') if rec else None

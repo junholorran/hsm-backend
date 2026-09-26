@@ -1904,8 +1904,6 @@ def _kairos_btc_live_scanner_loop():
 
 if os.environ.get('RAILWAY_SERVICE_NAME') == 'kairos-poi-abc-sol':
     threading.Thread(target=_kairos_btc_live_scanner_loop, daemon=True).start()
-    if os.environ.get('KAIROS_RUN_PDH_PDL_1D_ONCE') == '1':
-        threading.Thread(target=_run_kairos_pdh_pdl_btc_background,args=(1,None),daemon=True).start()
     print('[KAIROS_BTC_LIVE] scanner ENABLED BTCUSD A_CURRENT interval=5m demo/manual', flush=True)
 
 
@@ -1958,6 +1956,11 @@ def experiment_pdh_pdl_btc_1d():
             return jsonify({'status':'STARTING','started':True,'pair':'BTCUSD','liquidity_policy':'PDH_PDL_ONLY','dias':1}),202
         return jsonify({'status':'RUNNING','started':False}),409
     return jsonify(_KAIROS_PDH_PDL_CACHE)
+
+
+if os.environ.get('RAILWAY_SERVICE_NAME') == 'kairos-poi-abc-sol' and os.environ.get('KAIROS_RUN_PDH_PDL_1D_ONCE') == '1':
+    threading.Thread(target=_run_kairos_pdh_pdl_btc_background,args=(1,None),daemon=True).start()
+    print('[PDH_PDL_BTC] one-shot replay ARMED', flush=True)
 
 
 # BTC-only A_CURRENT — auditoria curta sem disparar os 13 pares.

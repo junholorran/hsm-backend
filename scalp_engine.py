@@ -681,6 +681,37 @@ def _kairos_fvg_states(candles, lookback=250):
                     z['first_touch_ts']=z['first_touch_ts'] or atual['t']
     return states
 
+
+def auditar_fvg_ifvg_h1_btc(dias=7, fim_ts_ms=None, lo=85000.0, hi=87000.0):
+    """Auditoria read-only: prova geometria 3-candles e lifecycle FVG/IFVG H1."""
+    raw=_fetch_bybit_klines_historico('BTCUSD','60',dias,fim_ts_ms)
+    candles,_=_validar_e_limpar_candles(raw,'H1')
+    states=_kairos_fvg_states(candles,lookback=max(250,len(candles)))
+    out=[]
+    for z in states:
+        if z.get('top',0) < lo or z.get('bottom',0) > hi:
+            continue
+        a=z.get('source_a') or {}; m=z.get('source_mid') or {}; cc=z.get('source_c') or {}
+        flip=z.get('flip_candle') or {}
+        geometry_ok = (
+            (z.get('direcao')=='alta' and cc.get('l') is not None and a.get('h') is not None and cc['l']>a['h'])
+            or (z.get('direcao')=='baixa' and cc.get('h') is not None and a.get('l') is not None and cc['h']<a['l'])
+            or z.get('tipo','').startswith('IFVG_')
+        )
+        mother_type = 'FVG_bullish' if z.get('id','').endswith('_B') else 'FVG_bearish'
+        flip_ok=None
+        if z.get('flip_ts') is not None:
+            flip_ok = (flip.get('c') < z.get('bottom')) if mother_type=='FVG_bullish' else (flip.get('c') > z.get('top'))
+        out.append({
+            'id':z.get('id'),'mother_type':mother_type,'current_type':z.get('tipo'),
+            'state':z.get('state'),'bottom':z.get('bottom'),'top':z.get('top'),
+            'created_ts':z.get('created_ts'),'flip_ts':z.get('flip_ts'),
+            'first_touch_ts':z.get('first_touch_ts'),'invalidated_ts':z.get('invalidated_ts'),
+            'source_a':a,'source_mid':m,'source_c':cc,'flip_candle':flip or None,
+            'geometry_3c_ok':geometry_ok,'flip_close_ok':flip_ok,
+        })
+    return {'pair':'BTCUSD','tf':'H1','range':[lo,hi],'candles':len(candles),'zones':out}
+
 def _kairos_momentum_z(candles, period=50):
     if len(candles) < period + 1:
         return None

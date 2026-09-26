@@ -1933,6 +1933,31 @@ def experiment_poi_lifecycle_abc_btc():
     return jsonify(_KAIROS_ABC_CACHE)
 
 
+# BTC-only PDH/PDL liquidity policy — experimental replay, no Telegram.
+_KAIROS_PDH_PDL_CACHE = {'status':'IDLE','result':None,'error':None,'started_at':None,'finished_at':None}
+
+def _run_kairos_pdh_pdl_btc_background(dias, fim_ts_ms):
+    global _KAIROS_PDH_PDL_CACHE
+    try:
+        _KAIROS_PDH_PDL_CACHE.update({'status':'RUNNING','result':None,'error':None,'started_at':int(time.time()*1000),'finished_at':None})
+        print(f'[PDH_PDL_BTC_PROGRESS] dias={dias} phase=START', flush=True)
+        r=scalp_engine.replay_vortex_decision_layer_v2('BTCUSD',dias_historico=dias,fim_ts_ms=fim_ts_ms,experimental_poi_policy='A_CURRENT',liquidity_policy='PDH_PDL_ONLY')
+        _KAIROS_PDH_PDL_CACHE.update({'status':'DONE','result':r,'finished_at':int(time.time()*1000)})
+        print(f'[PDH_PDL_BTC_PROGRESS] dias={dias} phase=DONE', flush=True)
+    except Exception as e:
+        _KAIROS_PDH_PDL_CACHE.update({'status':'ERROR','error':str(e),'finished_at':int(time.time()*1000)})
+        print('[PDH_PDL_BTC_ERROR] '+str(e), flush=True)
+
+@app.route('/experiment/pdh_pdl_btc_1d', methods=['GET'])
+def experiment_pdh_pdl_btc_1d():
+    if request.args.get('start') == '1':
+        if _KAIROS_PDH_PDL_CACHE.get('status') != 'RUNNING':
+            threading.Thread(target=_run_kairos_pdh_pdl_btc_background,args=(1,None),daemon=True).start()
+            return jsonify({'status':'STARTING','started':True,'pair':'BTCUSD','liquidity_policy':'PDH_PDL_ONLY','dias':1}),202
+        return jsonify({'status':'RUNNING','started':False}),409
+    return jsonify(_KAIROS_PDH_PDL_CACHE)
+
+
 # BTC-only A_CURRENT — auditoria curta sem disparar os 13 pares.
 _KAIROS_A_BTC_CACHE = {'status':'IDLE','result':None,'error':None,'started_at':None,'finished_at':None}
 

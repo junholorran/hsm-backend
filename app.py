@@ -1847,6 +1847,66 @@ else:
     print('[POI_ABC] experimental service: live paper scheduler DISABLED', flush=True)
 
 
+# EXPERIMENTAL BTC A_CURRENT LIVE SCANNER — demo/manual execution only.
+# Uses the same closed-candle causal replay/decision layer; never emits historical
+# signals on startup. Only a newly executable signal after the scanner watermark
+# can alert, once per structural signature.
+_KAIROS_BTC_LIVE_LAST_TS = int(time.time() * 1000)
+_KAIROS_BTC_LIVE_SEEN = set()
+_KAIROS_BTC_LIVE_INTERVAL_SECONDS = 5 * 60
+
+def _kairos_btc_live_scanner_loop():
+    global _KAIROS_BTC_LIVE_LAST_TS
+    while True:
+        cycle_started_ms = int(time.time() * 1000)
+        try:
+            r = scalp_engine.replay_vortex_decision_layer_v2(
+                'BTCUSD', dias_historico=1, fim_ts_ms=cycle_started_ms,
+                experimental_poi_policy='A_CURRENT',
+            )
+            sinais = r.get('sinais_unicos_completos', []) if isinstance(r, dict) else []
+            novos = []
+            for s in sinais:
+                ts = s.get('timestamp')
+                sig = (s.get('choch_timestamp'), s.get('direction'), s.get('zone_type'),
+                       s.get('zone_created_ts'), s.get('zone_bottom'), s.get('zone_top'))
+                if ts is None or ts <= _KAIROS_BTC_LIVE_LAST_TS or ts > cycle_started_ms or sig in _KAIROS_BTC_LIVE_SEEN:
+                    continue
+                novos.append((ts, sig, s))
+            novos.sort(key=lambda x: x[0])
+            for ts, sig, s in novos:
+                direction = s.get('direction')
+                entry = s.get('entry')
+                sl = s.get('sl')
+                tp1 = s.get('tp1')
+                tp2 = s.get('tp2')
+                zone = s.get('zone_type')
+                choch = s.get('choch_timestamp')
+                msg = (
+                    "⚡ <b>KAIROS BTC — SINAL CAUSAL NOVO</b>\n\n"
+                    f"{'📈' if direction == 'LONG' else '📉'} <b>{direction}</b> | BTCUSD\n"
+                    f"🎯 <b>Entry:</b> {entry}\n"
+                    f"🛑 <b>SL estrutural:</b> {sl}\n"
+                    f"✅ <b>TP1:</b> {tp1}\n"
+                    f"🏁 <b>TP2:</b> {tp2}\n"
+                    f"🧩 <b>POI:</b> {zone}\n"
+                    f"🔗 <b>MSS/CHoCH:</b> {choch}\n"
+                    "🧪 Demo/manual — A_CURRENT, candles fechados, sem score."
+                )
+                send_telegram(msg)
+                _KAIROS_BTC_LIVE_SEEN.add(sig)
+                print(f"[KAIROS_BTC_LIVE] ALERT ts={ts} sig={sig} entry={entry} sl={sl}", flush=True)
+            _KAIROS_BTC_LIVE_LAST_TS = cycle_started_ms
+            print(f"[KAIROS_BTC_LIVE] scan done signals={len(sinais)} new={len(novos)} watermark={_KAIROS_BTC_LIVE_LAST_TS}", flush=True)
+        except Exception as e:
+            print(f"[KAIROS_BTC_LIVE] scan error: {e}", flush=True)
+        time.sleep(_KAIROS_BTC_LIVE_INTERVAL_SECONDS)
+
+if os.environ.get('RAILWAY_SERVICE_NAME') == 'kairos-poi-abc-sol':
+    threading.Thread(target=_kairos_btc_live_scanner_loop, daemon=True).start()
+    print('[KAIROS_BTC_LIVE] scanner ENABLED BTCUSD A_CURRENT interval=5m demo/manual', flush=True)
+
+
 # EXPERIMENTAL BRANCH ONLY — POI lifecycle A/B/C replay. Read-only, no DB/Telegram.
 _KAIROS_ABC_CACHE = {'status':'IDLE','result':None,'error':None,'started_at':None,'finished_at':None}
 

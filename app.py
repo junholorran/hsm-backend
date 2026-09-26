@@ -1962,6 +1962,31 @@ def _run_kairos_pdh_pdl_btc_background(dias, fim_ts_ms):
             print(f'[PDH_PDL_BTC_CROSS_AUDIT] {diag}', flush=True)
         except Exception as audit_e:
             print(f'[PDH_PDL_BTC_CROSS_AUDIT_ERROR] {audit_e}', flush=True)
+        # Auditoria causal por ciclo: usa o PDH/PDL que estava ativo naquele instante,
+        # evitando aplicar a referência do fim da janela ao dia inteiro.
+        try:
+            end_ts=(r.get('janela_fixa') or {}).get('data_fim_ts_ms')
+            start_ts=(r.get('janela_fixa') or {}).get('data_inicio_ts_ms')
+            symbol='BTCUSDT'
+            d1_raw=scalp_engine._fetch_bybit_klines_historico(symbol,'D',261,fim_ts_ms=end_ts)
+            m15_raw=scalp_engine._fetch_bybit_klines_historico(symbol,'15',10,fim_ts_ms=end_ts)
+            d1,_=scalp_engine._validar_e_limpar_candles(d1_raw,'D')
+            m15,_=scalp_engine._validar_e_limpar_candles(m15_raw,'15')
+            events=[]; seen=set()
+            for c in m15:
+                ts=c.get('t',0)
+                if ts < start_ts or ts > end_ts: continue
+                refs=scalp_engine._kairos_previous_period_refs({'D1':d1,'M15':m15},ts+15*60*1000)
+                for typ in ('PDH','PDL'):
+                    rec=refs.get(typ); lv=rec.get('level') if rec else None
+                    if lv is None: continue
+                    crossed=(c.get('h')>lv) if typ=='PDH' else (c.get('l')<lv)
+                    key=(typ,rec.get('period_open_ts'))
+                    if crossed and key not in seen:
+                        seen.add(key); events.append({'type':typ,'level':lv,'period_open_ts':rec.get('period_open_ts'),'confirmed_ts':rec.get('confirmed_ts'),'sweep_candle':c})
+            print(f'[PDH_PDL_BTC_CAUSAL_CROSS_AUDIT] {events}', flush=True)
+        except Exception as audit_e:
+            print(f'[PDH_PDL_BTC_CAUSAL_CROSS_AUDIT_ERROR] {audit_e}', flush=True)
         print(f'[PDH_PDL_BTC_RESULT] {r}', flush=True)
         print(f'[PDH_PDL_BTC_PROGRESS] dias={dias} phase=DONE', flush=True)
     except Exception as e:

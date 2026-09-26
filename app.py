@@ -2004,8 +2004,8 @@ def experiment_pdh_pdl_btc_1d():
 
 
 if os.environ.get('RAILWAY_SERVICE_NAME') == 'kairos-poi-abc-sol' and os.environ.get('KAIROS_RUN_PDH_PDL_1D_ONCE') == '1':
-    threading.Thread(target=_run_kairos_pdh_pdl_btc_background,args=(1,None),daemon=True).start()
-    print('[PDH_PDL_BTC] one-shot replay ARMED', flush=True)
+    threading.Thread(target=_run_kairos_pdh_pdl_btc_background,args=(3,1790208000000),daemon=True).start()
+    print('[PDH_PDL_BTC] historical sweep replay ARMED end=2026-09-24T00:00:00Z dias=3', flush=True)
 
 
 # BTC-only A_CURRENT — auditoria curta sem disparar os 13 pares.

@@ -1590,7 +1590,7 @@ def _kairos_structural_registry(candles_por_tf, now_ts):
     return out
 
 
-def _kairos_select_structural_first_capture_sweep(candles_por_tf, now_ts):
+def _kairos_select_structural_first_capture_sweep(candles_por_tf, now_ts, liquidity_policy=None):
     """Primeira captura estrutural NEUTRA.
 
     A liquidez localiza o evento; NÃO escolhe LONG/SHORT. A primeira captura
@@ -1600,7 +1600,7 @@ def _kairos_select_structural_first_capture_sweep(candles_por_tf, now_ts):
     levels=_kairos_structural_registry(candles_por_tf, now_ts)
     # M15 permanece no registry/auditoria, mas não pode ser a liquidez
     # primária que autoriza um setup. MN fica como mapa macro/contexto.
-    setup_levels=[x for x in levels if x.get('tf') in KAIROS_PRIMARY_SETUP_LIQUIDITY_TFS]
+    setup_levels=([x for x in levels if x.get('type') in ('PDH','PDL')] if liquidity_policy=='PDH_PDL_ONLY' else [x for x in levels if x.get('tf') in KAIROS_PRIMARY_SETUP_LIQUIDITY_TFS])
     m15=[c for c in (candles_por_tf.get('M15') or []) if c.get('t') is not None and c['t'] <= now_ts]
     if len(m15) < 3:
         return None, {'levels':levels,'candidates':[]}
@@ -2222,7 +2222,7 @@ def _kairos_experimental_apply_poi_policy(current, exec_candles, sweep, structur
 
 def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=None,
                                       candles_por_tf=None, audit_pair=None,
-                                      experimental_poi_policy=None, experimental_poi_state=None):
+                                      experimental_poi_policy=None, experimental_poi_state=None, liquidity_policy=None):
     """KAIROS Paper V2.2 — liquidez HTF estrutural, M15 executa, M5 refina.
 
     Cadeia autorizadora:
@@ -2269,7 +2269,7 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
         'zones':len(d.get('zones',[])),'order_blocks':len(d.get('order_blocks',[])),'volume':d.get('volume')
     } for tf,d in mapa.items()}
 
-    sweep,sweep_audit=_kairos_select_structural_first_capture_sweep(candles_por_tf,now_ts)
+    sweep,sweep_audit=_kairos_select_structural_first_capture_sweep(candles_por_tf,now_ts,liquidity_policy=liquidity_policy)
     resultado['structural_sweep_audit']=sweep_audit
     if not sweep:
         resultado['failure_reason']='SEM_SWEEP_ESTRUTURAL_FIRST_CAPTURE_VALIDO'; return resultado
@@ -2642,7 +2642,7 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
 KAIROS_DECISION_LAYER_V2_VERSAO = 'KAIROS V2.2 — HTF LIQUIDITY→FIRST CAPTURE→REACTION→DISPLACEMENT→M15 MSS/CHoCH/BOS→CAUSAL FVG/IFVG/OB→RETEST→STRUCTURAL SL→TP1/TP2'
 
 
-def replay_vortex_decision_layer_v2(pair, dias_historico=7, janelas_mfe_mae=JANELAS_MFE_MAE_PADRAO, fim_ts_ms=None, experimental_poi_policy=None):
+def replay_vortex_decision_layer_v2(pair, dias_historico=7, janelas_mfe_mae=JANELAS_MFE_MAE_PADRAO, fim_ts_ms=None, experimental_poi_policy=None, liquidity_policy=None):
     """
     Replay causal completo do KAIROS V2.2 (HTF liquidity→FIRST CAPTURE→
     reaction/displacement→M15 MSS/CHoCH/BOS→causal FVG/IFVG/OB→retest→ENTRY→SL→TP1/TP2). Mesma metodologia já aprovada (fetch único por
@@ -2742,7 +2742,8 @@ def replay_vortex_decision_layer_v2(pair, dias_historico=7, janelas_mfe_mae=JANE
                 m15_ate_agora, m5_ate_agora, d1_ate_agora, candles_por_tf=tf_map,
                 audit_pair=pair,
                 experimental_poi_policy=experimental_poi_policy,
-                experimental_poi_state=experimental_poi_state
+                experimental_poi_state=experimental_poi_state,
+                liquidity_policy=liquidity_policy
             )
         except Exception as e:
             distribuicao_motivos[f'EXCECAO: {e}'] = distribuicao_motivos.get(f'EXCECAO: {e}', 0) + 1

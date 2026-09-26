@@ -2934,7 +2934,7 @@ def replay_poi_lifecycle_abc_sol(dias_historico=7, fim_ts_ms=None, pair='SOLUSD'
         # are unchanged.
         m5_ts=[x.get('t',0) for x in m5]
         import bisect
-        events=[]; proxy=[]
+        events=[]; proxy=[]; resolved_signal_autopsy=[]
         sinais=r.get('sinais_unicos_completos',[])
         print(f'[POI_ABC_PROGRESS] policy={policy} phase=RESOLVE_START signals={len(sinais)} m5={len(m5)}', flush=True)
         for s in sinais:
@@ -2943,6 +2943,8 @@ def replay_poi_lifecycle_abc_sol(dias_historico=7, fim_ts_ms=None, pair='SOLUSD'
             future=m5[idx:idx+300]
             res=_resolver_gestao_2r_3r_be(future,s['direction'],s['entry'],s['sl'],s['tp2'],300)
             ev=res.get('resultado'); events.append(ev)
+            n_res=res.get('candles_ate_resolucao')
+            resolved_signal_autopsy.append({'signal':s,'resolution':res,'resolution_candle_m5':(future[n_res-1] if n_res and n_res <= len(future) else None),'future_m5_until_resolution':(future[:n_res] if n_res else [])})
             if ev=='TP': proxy.append(3.0)
             elif ev=='SL': proxy.append(-1.0)
             elif ev=='BE': proxy.append(0.0)
@@ -2964,6 +2966,7 @@ def replay_poi_lifecycle_abc_sol(dias_historico=7, fim_ts_ms=None, pair='SOLUSD'
             'nota_R':'PROXY conservador: TP=+3R, SL=-1R, BE=0R; parcial TP1 nao tem percentagem definida, portanto expectancy/PF monetarios exatos continuam indisponiveis.',
             'total_sinais_unicos':r.get('total_sinais_unicos'),
             'distribuicao_motivos':r.get('distribuicao_motivos_todos_ciclos'),
+            'resolved_signal_autopsy':resolved_signal_autopsy,
         }
         audit=r.get('experimental_poi_audit') or []
         event_counts={}

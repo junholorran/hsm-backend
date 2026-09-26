@@ -1943,6 +1943,20 @@ def _run_kairos_pdh_pdl_btc_background(dias, fim_ts_ms):
         print(f'[PDH_PDL_BTC_PROGRESS] dias={dias} phase=START', flush=True)
         r=scalp_engine.replay_vortex_decision_layer_v2('BTCUSD',dias_historico=dias,fim_ts_ms=fim_ts_ms,experimental_poi_policy='A_CURRENT',liquidity_policy='PDH_PDL_ONLY')
         _KAIROS_PDH_PDL_CACHE.update({'status':'DONE','result':r,'finished_at':int(time.time()*1000)})
+        # Diagnóstico objetivo: referências PDH/PDL e cruzamentos M15 da janela fixa.
+        try:
+            end_ts=(r.get('janela_fixa') or {}).get('data_fim_ts_ms')
+            start_ts=(r.get('janela_fixa') or {}).get('data_inicio_ts_ms')
+            full=scalp_engine.obter_candles_multitf('BTCUSD')
+            refs=scalp_engine._kairos_previous_period_refs(full,end_ts)
+            m15=[c for c in (full.get('M15') or []) if start_ts <= c.get('t',0) <= end_ts]
+            diag={'PDH':refs.get('PDH'),'PDL':refs.get('PDL'),'crosses':{}}
+            for typ in ('PDH','PDL'):
+                rec=refs.get(typ); lv=rec.get('level') if rec else None
+                diag['crosses'][typ]=[] if lv is None else [c for c in m15 if (c.get('h')>lv if typ=='PDH' else c.get('l')<lv)][:20]
+            print(f'[PDH_PDL_BTC_CROSS_AUDIT] {diag}', flush=True)
+        except Exception as audit_e:
+            print(f'[PDH_PDL_BTC_CROSS_AUDIT_ERROR] {audit_e}', flush=True)
         print(f'[PDH_PDL_BTC_RESULT] {r}', flush=True)
         print(f'[PDH_PDL_BTC_PROGRESS] dias={dias} phase=DONE', flush=True)
     except Exception as e:

@@ -2492,10 +2492,40 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
         # (flip estrutural real), que representa mudanca de estado da propria zona.
         o['intention_direction_at_entry'] = direction
         o['causal_intention_confirmed'] = True
+
+        # IFVG nao e parede automatica. No timestamp da entrada, classifica a
+        # relacao REAL do preco com a zona usando apenas candles ja fechados.
+        # - ACCEPTED_THROUGH: fechou para alem da borda distal na direcao do trade.
+        # - REJECTED_AGAINST: tocou a zona e fechou de volta contra o trade.
+        # - UNRESOLVED: ainda nao ha prova suficiente; preserva o bloqueio.
+        # Isto mantem a IFVG como risco estrutural sem deixar a polaridade decidir
+        # a direcao depois de sweep -> intencao -> MSS/CHoCH ja confirmados.
+        interaction_state = 'NOT_APPLICABLE'
+        interaction_ts = None
+        if raw_state == 'IFVG' and execution_block_tf and ahead_of_entry:
+            zone_bottom=float(o.get('bottom')); zone_top=float(o.get('top'))
+            known_exec=[cc for cc in exec_candles if cc.get('t') is not None and cc['t'] <= entry_ts]
+            interaction_state='UNRESOLVED'
+            for cc in known_exec:
+                if direction=='LONG':
+                    touched=float(cc['h']) >= zone_bottom
+                    accepted=float(cc['c']) > zone_top
+                    rejected=touched and float(cc['c']) < zone_bottom
+                else:
+                    touched=float(cc['l']) <= zone_top
+                    accepted=float(cc['c']) < zone_bottom
+                    rejected=touched and float(cc['c']) > zone_top
+                if accepted:
+                    interaction_state='ACCEPTED_THROUGH'; interaction_ts=cc['t']
+                elif rejected:
+                    interaction_state='REJECTED_AGAINST'; interaction_ts=cc['t']
+        o['interaction_state_at_entry']=interaction_state
+        o['interaction_state_ts']=interaction_ts
         o['blocks_entry'] = bool(
             execution_block_tf
             and ahead_of_entry
             and raw_state=='IFVG'
+            and interaction_state != 'ACCEPTED_THROUGH'
         )
         active_obstacles.append(o)
     resultado['target_obstacles_at_entry']=active_obstacles

@@ -2453,13 +2453,18 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
         # contexto, reação, alvo e auditoria.
         execution_block_tf = o.get('tf') in ('H1','M15')
         o['role_at_entry'] = 'EXECUTION_OBSTACLE' if execution_block_tf else 'HTF_CONTEXT'
+        # POI/FVG contrario nao decide direcao sozinho. Neste ponto a cadeia
+        # causal ja provou sweep -> reaction/intention -> MSS/CHoCH -> displacement
+        # -> POI causal -> reteste. Portanto uma zona H1/M15 contraria e fresh
+        # continua como RISCO/CONTEXTO, mas nao veta cegamente uma intencao ja
+        # confirmada. Hard-block fica reservado a IFVG contrario confirmado
+        # (flip estrutural real), que representa mudanca de estado da propria zona.
+        o['intention_direction_at_entry'] = direction
+        o['causal_intention_confirmed'] = True
         o['blocks_entry'] = bool(
             execution_block_tf
             and ahead_of_entry
-            and (
-                o['entry_state']=='FRESH_ACTIVE'
-                or raw_state=='IFVG'
-            )
+            and raw_state=='IFVG'
         )
         active_obstacles.append(o)
     resultado['target_obstacles_at_entry']=active_obstacles

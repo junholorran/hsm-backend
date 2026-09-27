@@ -2131,41 +2131,48 @@ def experiment_poi_lifecycle_a_near():
 
 @app.route('/experiment/audit_near_choch_5020', methods=['GET'])
 def experiment_audit_near_choch_5020():
-    """Read-only: prova a genealogia do CHoCH M15 do ultimo replay NEAR A_CURRENT."""
-    cache=globals().get('_KAIROS_A_NEAR_CACHE') or {}
-    rr=cache.get('result') or {}
-    pol=((rr.get('policies') or {}).get('A_CURRENT') or {})
-    autos=pol.get('resolved_signal_autopsy') or []
-    if not autos:
-        return jsonify({'ok':False,'reason':'SEM_AUTOPSIA_NEAR_NO_CACHE'}),404
-    sig=(autos[0] or {}).get('signal') or {}
-    event_ts=sig.get('choch_timestamp')
-    level=sig.get('choch_level')
-    if event_ts is None:
-        return jsonify({'ok':False,'reason':'SEM_CHOCH_TS'}),404
-    # Busca somente candles fechados ate o candle do evento; endpoint diagnostico, sem escrita/Telegram.
+    """Read-only e autocontida: reconstrói NEAR 1d A_CURRENT e prova genealogia do CHoCH M15."""
     try:
-        cs=scalp_engine.fetch_bybit_klines('NEARUSD','15',limit=1000,end_ms=int(event_ts)+900000)
-    except TypeError:
-        cs=scalp_engine.fetch_bybit_klines('NEARUSD','15',1000,int(event_ts)+900000)
-    cs=[x for x in (cs or []) if x.get('t') is not None and x['t'] <= event_ts]
-    ev5=scalp_engine.compute_lux_structure_events(cs,swing_size=5)
-    ev50=scalp_engine.compute_lux_structure_events(cs,swing_size=50)
-    match5=[e for e in ev5 if e.get('t')==event_ts and abs(float(e.get('nivel',0))-float(level))<1e-9]
-    same50=[e for e in ev50 if e.get('t')==event_ts]
-    return jsonify({
-        'ok':True,'pair':'NEARUSD','read_only':True,
-        'signal_direction':sig.get('direction'),'context_bias':sig.get('context_bias'),
-        'htf_location':sig.get('htf_location'),
-        'reported_event':{'ts':event_ts,'level':level,'type':sig.get('m15_confirmation_type')},
-        'lux_internal_5_match':match5,
-        'lux_swing_50_events_same_candle':same50,
-        'classification':('INTERNAL_ONLY' if match5 and not same50 else ('ALSO_SWING50' if match5 and same50 else 'NO_MATCH')),
-        'event_candle':next((x for x in cs if x.get('t')==event_ts),None),
-        'prior_internal_events':ev5[-8:],
-        'prior_swing50_events':ev50[-8:],
-    })
+        rr=scalp_engine.replay_poi_lifecycle_abc_sol(
+            dias_historico=1, fim_ts_ms=None, pair='NEARUSD',
+            policies=('A_CURRENT',),
+        )
+        pol=((rr or {}).get('policies') or {}).get('A_CURRENT') or {}
+        autos=pol.get('resolved_signal_autopsy') or []
+        if not autos:
+            return jsonify({'ok':False,'reason':'SEM_AUTOPSIA_NEAR_NO_REPLAY','replay_summary':{
+                'N':pol.get('N'),'total_sinais_unicos':pol.get('total_sinais_unicos'),
+                'distribuicao_motivos':pol.get('distribuicao_motivos')}}),404
+        sig=(autos[0] or {}).get('signal') or {}
+        event_ts=sig.get('choch_timestamp')
+        level=sig.get('choch_level')
+        if event_ts is None or level is None:
+            return jsonify({'ok':False,'reason':'SEM_CHOCH_TS_OU_LEVEL'}),404
 
+        try:
+            cs=scalp_engine.fetch_bybit_klines('NEARUSD','15',limit=1000,end_ms=int(event_ts)+900000)
+        except TypeError:
+            cs=scalp_engine.fetch_bybit_klines('NEARUSD','15',1000,int(event_ts)+900000)
+        cs=[x for x in (cs or []) if x.get('t') is not None and x['t'] <= event_ts]
+        ev5=scalp_engine.compute_lux_structure_events(cs,swing_size=5)
+        ev50=scalp_engine.compute_lux_structure_events(cs,swing_size=50)
+        match5=[e for e in ev5 if e.get('t')==event_ts and abs(float(e.get('nivel',0))-float(level))<1e-9]
+        same50=[e for e in ev50 if e.get('t')==event_ts]
+        return jsonify({
+            'ok':True,'pair':'NEARUSD','read_only':True,'self_contained_replay':True,
+            'signal_direction':sig.get('direction'),'context_bias':sig.get('context_bias'),
+            'htf_location':sig.get('htf_location'),
+            'reported_event':{'ts':event_ts,'level':level,'type':sig.get('m15_confirmation_type')},
+            'lux_internal_5_match':match5,
+            'lux_swing_50_events_same_candle':same50,
+            'classification':('INTERNAL_ONLY' if match5 and not same50 else ('ALSO_SWING50' if match5 and same50 else 'NO_MATCH')),
+            'event_candle':next((x for x in cs if x.get('t')==event_ts),None),
+            'prior_internal_events':ev5[-8:],
+            'prior_swing50_events':ev50[-8:],
+            'replay_summary':{'N':pol.get('N'),'total_sinais_unicos':pol.get('total_sinais_unicos')},
+        })
+    except Exception as e:
+        return jsonify({'ok':False,'reason':'AUDIT_EXCEPTION','error':str(e)}),500
 
 @app.route('/experiment/audit_btc_execution_chain', methods=['GET'])
 def experiment_audit_btc_execution_chain():

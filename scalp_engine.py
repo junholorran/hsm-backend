@@ -2477,25 +2477,25 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
     sweep,sweep_audit=_kairos_select_structural_first_capture_sweep(candles_por_tf,now_ts,liquidity_policy=liquidity_policy)
     resultado['structural_sweep_audit']=sweep_audit
 
-    # HTF autoriza LOCALIZAÇÃO; nunca impõe direção. Sweep é um caminho válido,
-    # mas deixou de ser requisito universal: toque causal em POI HTF também pode
-    # levar à confirmação M15.
+    # HARD BLOCK CAUSAL: POI HTF (FVG/IFVG/OB) é localização/contexto, NÃO liquidez.
+    # Sem captura estrutural real + reação resolvida, não existe autorização de trade.
+    # Isto fecha apenas o antigo atalho HTF_POI_TOUCH; o pipeline validado após sweep
+    # (M15 -> POI causal -> M5 -> reteste -> Entry/SL/target) permanece intacto.
     exec_tf='M15'; exec_candles=candles_por_tf.get('M15') or []
     location=None
-    if sweep:
-        resultado['authorization_path']='STRUCTURAL_LIQUIDITY_CAPTURE'
-        resultado['sweep_tf']=sweep['liquidity_tf']; resultado['liquidity_tf']=sweep['liquidity_tf']
-        resultado['liquidity_type']=sweep['liquidity_type']; resultado['capture_tf']='M15'
-        resultado['first_capture_ts']=sweep['first_capture_ts']; resultado['sweep_confirm_ts']=sweep.get('confirm_ts')
-        resultado['sweep_level']=round(sweep['nivel'],6); resultado['sweep_extreme']=round(sweep['extremo'],6)
-        intent=_kairos_direction_after_first_capture(exec_candles,sweep,swing_size=5)
-    else:
+    if not sweep:
         location=_kairos_select_htf_poi_location(mapa,exec_candles,now_ts)
-        if not location:
-            resultado['failure_reason']='SEM_LOCALIZACAO_HTF_CAUSAL'; return resultado
-        resultado['authorization_path']='HTF_POI_TOUCH'
         resultado['htf_location']=location
-        intent=_kairos_direction_after_htf_location(exec_candles,location,swing_size=5)
+        resultado['authorization_path']='BLOCKED_NO_STRUCTURAL_LIQUIDITY_CAPTURE'
+        resultado['failure_reason']='SEM_SWEEP_FIRST_CAPTURE'
+        return resultado
+
+    resultado['authorization_path']='STRUCTURAL_LIQUIDITY_CAPTURE'
+    resultado['sweep_tf']=sweep['liquidity_tf']; resultado['liquidity_tf']=sweep['liquidity_tf']
+    resultado['liquidity_type']=sweep['liquidity_type']; resultado['capture_tf']='M15'
+    resultado['first_capture_ts']=sweep['first_capture_ts']; resultado['sweep_confirm_ts']=sweep.get('confirm_ts')
+    resultado['sweep_level']=round(sweep['nivel'],6); resultado['sweep_extreme']=round(sweep['extremo'],6)
+    intent=_kairos_direction_after_first_capture(exec_candles,sweep,swing_size=5)
 
     resultado['intent_m15_found']=bool(intent)
     if not intent:

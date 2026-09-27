@@ -2412,7 +2412,7 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
         _cs=candles_por_tf.get(_tf) or []
         _size=50
         if len(_cs) >= _size + 5:
-            resultado['dealing_ranges'][_tf]=_kairos_lux_dealing_range(_cs,swing_size=_size)
+            resultado['dealing_ranges'][_tf]=_kairos_lux_dealing_range(_cs,swing_size=_size,tf=_tf)
     resultado['mtf_summary']={tf:{
         'pivots':len(d.get('pivots',[])),'eq':len(d.get('equal_liquidity',[])),
         'liq_ativas':sum(1 for x in d.get('liquidity_pools',[]) if x.get('state')=='ATIVA'),

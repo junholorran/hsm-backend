@@ -1844,6 +1844,57 @@ def _kairos_m5_refine_zone(m5_candles, m15_zone, sweep_ts, structure_ts, directi
         }
     return None
 
+def _kairos_last_causal_m5_sweep(m5_candles, direction, leg_start_ts, confirm_ts):
+    """Último sweep M5 causal antes da confirmação M15, sem lookahead.
+
+    Liquidez local = pivot Lux interno size=5 já CONFIRMADO antes do candle do sweep.
+    LONG: wick abaixo do LOW confirmado e fecho de volta acima do nível.
+    SHORT: wick acima do HIGH confirmado e fecho de volta abaixo do nível.
+    O sweep tem de pertencer à perna causal M15 e existir antes do fecho confirmador.
+    """
+    if not m5_candles or direction not in ('LONG','SHORT'):
+        return None, {'motivo':'SEM_DADOS_M5','candidatos':[]}
+    dur=INTERVALO_MS_POR_LABEL['5']
+    swings=_extrair_swings_lux_algo(m5_candles, swing_size=5)
+    wanted='low' if direction=='LONG' else 'high'
+    candidates=[]
+    for c in m5_candles:
+        ts=c.get('t')
+        if ts is None or ts < (leg_start_ts or 0) or ts >= confirm_ts:
+            continue
+        # Um pivot Lux size=5 só é conhecido 5 candles depois da origem.
+        known=[x for x in swings if x.get('tipo')==wanted and
+               x.get('t') is not None and x['t'] + 5*dur <= ts]
+        if not known:
+            continue
+        # Só níveis ainda à frente do wick/fecho podem ter sido varridos neste candle.
+        swept=[]
+        for liq in known:
+            lv=float(liq['valor'])
+            if direction=='LONG':
+                ok=c.get('l') is not None and c.get('c') is not None and c['l'] < lv and c['c'] > lv
+            else:
+                ok=c.get('h') is not None and c.get('c') is not None and c['h'] > lv and c['c'] < lv
+            if ok:
+                swept.append(liq)
+        if not swept:
+            continue
+        # Nível mais próximo do preço é a liquidez efetivamente atravessada por último.
+        liq=(max(swept,key=lambda x:float(x['valor'])) if direction=='LONG'
+             else min(swept,key=lambda x:float(x['valor'])))
+        candidates.append({
+            'tf':'M5','liquidity_type':'LUX_INTERNAL_SWING_'+wanted.upper(),
+            'liquidity_level':float(liq['valor']),'liquidity_origin_ts':liq['t'],
+            'liquidity_confirmed_ts':liq['t']+5*dur,
+            'sweep_ts':ts,'sweep_extreme':float(c['l'] if direction=='LONG' else c['h']),
+            'sweep_candle':dict(c),'reclaimed_on_sweep_close':True
+        })
+    if not candidates:
+        return None, {'motivo':'SEM_SWEEP_M5_CAUSAL_CONFIRMADO','candidatos':[]}
+    selected=max(candidates,key=lambda x:x['sweep_ts'])
+    return selected, {'motivo':'OK_LAST_CAUSAL_M5_SWEEP','candidatos':candidates,'selected':selected}
+
+
 def _kairos_structural_targets(candles_por_tf, now_ts, entry, direction, limit=12):
     """Próxima liquidez estrutural ATIVA do lado do trade, sem score."""
     levels=_kairos_structural_registry(candles_por_tf, now_ts)
@@ -2596,60 +2647,38 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
         resultado['causal_break_level_m15']=active_zone.get('causal_break_level_m15')
         resultado['m5_refinement_origin_candle']=active_zone.get('origin_candle')
 
-    # M15 confirma a tese; M5 apenas refina. O stop M5 fica atrás do
-    # protected swing interno já conhecido no fecho confirmador do M15.
-    # A borda geométrica da FVG/OB, sozinha, não é uma invalidação estrutural.
+    # M15 confirma a tese; M5 apenas refina. O SL fica atrás do ÚLTIMO
+    # sweep local causal real: um pivot Lux M5 já confirmado foi varrido por wick
+    # e reclamado no fecho, dentro da perna que antecede a confirmação M15.
     if entry_tf=='M5':
-        m5_known=[c for c in m5 if c.get('t',0) < structure_confirm_ts]
-        m5_events=compute_lux_internal_structure(m5_known,swing_size=5)
-        expected_type='LOW' if direction=='LONG' else 'HIGH'
-        candidates=[]
-        for ev in m5_events:
-            if ev.get('direcao') != ('alta' if direction=='LONG' else 'baixa'):
-                continue
-            if ev.get('protected_swing_type') != expected_type:
-                continue
-            base=ev.get('protected_swing_level'); base_ts=ev.get('protected_swing_origin_ts')
-            if base is None or base_ts is None:
-                continue
-            if base_ts < (structure.get('leg_start_ts') or 0):
-                continue
-            if (direction=='LONG' and float(base)>=entry) or (direction=='SHORT' and float(base)<=entry):
-                continue
-            candidates.append((ev,float(base),base_ts))
-        if candidates:
-            pev,extreme,extreme_ts=candidates[-1]
+        local_sweep,sl_audit=_kairos_last_causal_m5_sweep(
+            m5,direction,structure.get('leg_start_ts'),structure_confirm_ts)
+        if local_sweep:
+            extreme=float(local_sweep['sweep_extreme']); extreme_ts=local_sweep['sweep_ts']
             known_to_entry=[c for c in m5 if c.get('t',0)<=retest['t']]
             sl=aplicar_buffer_stop_atr(extreme,'alta' if direction=='LONG' else 'baixa',known_to_entry)
             violation=next((c for c in m5 if extreme_ts < c.get('t',0) < retest['t'] and
                             ((c.get('l') is not None and c['l']<=sl) if direction=='LONG'
                              else (c.get('h') is not None and c['h']>=sl))),None)
             if violation is None:
-                sl_info={'sl':sl,'sl_tf':'M5','sl_classe':'M5_LUX_PROTECTED_SWING',
+                sl_info={'sl':sl,'sl_tf':'M5','sl_classe':'M5_LAST_CAUSAL_SWEEP',
                          'sl_sweep_ts':extreme_ts,'sl_sweep_extreme':extreme}
-                sl_audit={'motivo':'OK_M5_LUX_PROTECTED_SWING','candidatos':[{
-                    'tf':'M5','classe':'M5_LUX_PROTECTED_SWING','protected_type':expected_type,
-                    'anchor_ts':extreme_ts,'sweep_extreme':extreme,'sl_buffered':sl,
-                    'source_structure_ts':pev.get('t'),'source_structure_type':pev.get('tipo'),
-                    'source_broken_level':pev.get('nivel'),
-                    # TELEMETRIA SOMENTE: prova matemática exata do buffer do SL.
-                    'anchor_candle':next((dict(c) for c in m5 if c.get('t')==extreme_ts),None),
-                    'source_structure_event':dict(pev),
+                sl_audit.update({
+                    'classe':'M5_LAST_CAUSAL_SWEEP','liquidity_level':local_sweep['liquidity_level'],
+                    'liquidity_origin_ts':local_sweep['liquidity_origin_ts'],
+                    'liquidity_confirmed_ts':local_sweep['liquidity_confirmed_ts'],
+                    'sweep_ts':extreme_ts,'sweep_extreme':extreme,
                     'atr_period':14,'atr_buffer_mult':ATR_BUFFER_MULT,
                     'atr_value':((extreme-sl)/ATR_BUFFER_MULT if direction=='LONG' and ATR_BUFFER_MULT else
                                  (sl-extreme)/ATR_BUFFER_MULT if direction=='SHORT' and ATR_BUFFER_MULT else None),
-                    'buffer_abs':abs(float(sl)-float(extreme)),
-                    'known_to_entry_last_ts':known_to_entry[-1].get('t') if known_to_entry else None,
-                    'status':'VALIDA'}]}
+                    'buffer_abs':abs(float(sl)-float(extreme)),'sl_buffered':sl,
+                    'known_to_entry_last_ts':known_to_entry[-1].get('t') if known_to_entry else None})
             else:
                 sl_info=None
-                sl_audit={'motivo':'M5_PROTECTED_SWING_INVALIDADO_ANTES_ENTRY','candidatos':[{
-                    'tf':'M5','classe':'M5_LUX_PROTECTED_SWING','protected_type':expected_type,
-                    'anchor_ts':extreme_ts,'sweep_extreme':extreme,'sl_buffered':sl,
-                    'invalidated_ts':violation.get('t'),'status':'INVALIDADA_ANTES_ENTRY'}]}
+                sl_audit.update({'motivo':'LAST_CAUSAL_M5_SWEEP_INVALIDADO_ANTES_ENTRY',
+                                 'invalidated_ts':violation.get('t'),'sl_buffered':sl})
         else:
             sl_info=None
-            sl_audit={'motivo':'SEM_M5_PROTECTED_SWING_CAUSAL','candidatos':[]}
     else:
         sl_info,sl_audit=_kairos_select_structural_sl(mapa,'M15',exec_candles,sweep,structure,retest,direction)
     resultado['sl_audit']=sl_audit

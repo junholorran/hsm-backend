@@ -1757,22 +1757,37 @@ def _kairos_select_htf_poi_location(mapa, m15_candles, now_ts):
     return max(candidates,key=lambda x:(x['touch_ts'],KAIROS_TF_PESO.get(x['tf'],1)))
 
 def _kairos_direction_after_first_capture(candles, capture, swing_size=5):
-    """Reação resolvida + primeira quebra Lux M15 na direção causal esperada."""
+    """Hierarquia M15: estrutura maior autoriza; interna apenas confirma/tima.
+
+    Após captura estrutural real + reação resolvida, a direção causal esperada
+    precisa primeiro aparecer na estrutura M15 maior (Lux swing 50). Só DEPOIS
+    aceitamos um evento interno Lux (default swing 5) na mesma direção.
+    """
     if not candles or not capture:
         return None
     side=capture.get('liquidity_side'); state=capture.get('post_capture_state')
     if side not in ('HIGH','LOW') or state not in ('REJECTION_RECLAIM','ACCEPTANCE_CONTINUATION'):
         return None
     expected=('baixa' if side=='HIGH' else 'alta') if state=='REJECTION_RECLAIM' else ('alta' if side=='HIGH' else 'baixa')
-    events=compute_lux_internal_structure(candles,swing_size=swing_size)
-    for e in events:
-        if e.get('t',0) <= capture['sweep_ts'] or e.get('direcao') != expected or e.get('tipo') not in ('CHoCH','BOS'):
+
+    major_events=compute_lux_structure_events(candles,swing_size=50)
+    major=next((e for e in major_events
+                if e.get('t',0) > capture['sweep_ts']
+                and e.get('direcao')==expected
+                and e.get('tipo') in ('CHoCH','BOS')),None)
+    if not major:
+        return None
+
+    internal_events=compute_lux_internal_structure(candles,swing_size=swing_size)
+    for e in internal_events:
+        if e.get('t',0) < major.get('t',0) or e.get('direcao') != expected or e.get('tipo') not in ('CHoCH','BOS'):
             continue
         full_idx=next((j for j,c in enumerate(candles) if c['t']==e['t']),None)
         if full_idx is None:
             continue
         return {'direction':'LONG' if expected=='alta' else 'SHORT','direcao':expected,
                 'mode':'REVERSAL' if state=='REJECTION_RECLAIM' else 'CONTINUATION',
+                'major_structure':major,
                 'structure':{**e,'full_idx':full_idx},'momentum_z':None}
     return None
 

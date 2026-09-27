@@ -122,6 +122,8 @@ def compute_lux_structure_events(candles, swing_size=50):
                 'protected_swing_type': 'LOW',
                 'protected_swing_level': latest_low_level,
                 'protected_swing_origin_ts': latest_low_origin_ts,
+                'leg_start_ts': latest_low_origin_ts,
+                'leg_end_ts': c['t'],
                 't': c['t'], 'index': i
             })
             bias = 'alta'
@@ -134,6 +136,8 @@ def compute_lux_structure_events(candles, swing_size=50):
                 'protected_swing_type': 'HIGH',
                 'protected_swing_level': latest_high_level,
                 'protected_swing_origin_ts': latest_high_origin_ts,
+                'leg_start_ts': latest_high_origin_ts,
+                'leg_end_ts': c['t'],
                 't': c['t'], 'index': i
             })
             bias = 'baixa'

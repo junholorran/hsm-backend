@@ -2555,7 +2555,7 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
                             resultado['prealert_tp_origem'] = resultado['prealert_tp2_origem']
 
         resultado['failure_reason']='AGUARDANDO_RETESTE_ZONA'; return resultado
-    entry=retest['c']; resultado['entry']=round(entry,6); resultado['timestamp']=retest['t']
+    entry=(float(active_zone['top']) if direction=='LONG' else float(active_zone['bottom'])) if entry_tf=='M5' else retest['c']; resultado['entry']=round(entry,6); resultado['timestamp']=retest['t']
     resultado['entry_tf']=entry_tf
     resultado['m15_break_candle_open_ts']=structure.get('t')
     resultado['m15_confirmation_ts']=structure_confirm_ts

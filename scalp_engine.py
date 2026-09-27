@@ -2378,10 +2378,10 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
     zone_ts=zone.get('flip_ts') or zone.get('created_ts') or zone.get('t') or structure['t']
     after_ts=max(structure['t'],zone_ts)
 
-    # Se a confirmação veio no M15, M5 pode refinar. Se a confirmação já veio
-    # no M5, a própria zona M5 é a zona executável e não há segundo refinamento.
+    # M15 confirmou a intenção; M5 só refina a execução da MESMA tese.
+    # Nunca volta a decidir direção nem cria tese independente.
     m5=candles_por_tf.get('M5') or []
-    refined=_kairos_m5_refine_zone(m5,zone,sweep['sweep_ts'],structure['t'],sweep['direcao']) if exec_tf=='M15' else None
+    refined=_kairos_m5_refine_zone(m5,zone,sweep['sweep_ts'],structure['t'],sweep['direcao'])
     retest=None; active_zone=zone; entry_tf=exec_tf
     if refined:
         rz_ts=refined.get('flip_ts') or refined.get('created_ts') or refined.get('t') or structure['t']
@@ -2456,11 +2456,34 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
 
         resultado['failure_reason']='AGUARDANDO_RETESTE_ZONA'; return resultado
     entry=retest['c']; resultado['entry']=round(entry,6); resultado['timestamp']=retest['t']
+    resultado['entry_tf']=entry_tf
+    resultado['m15_confirmation_ts']=structure.get('t')
+    resultado['m15_confirmation_type']=structure.get('tipo')
+    resultado['m15_confirmation_level']=round(structure['nivel'],6) if structure.get('nivel') is not None else None
+    resultado['m5_refinement_used']=bool(entry_tf=='M5')
+    if entry_tf=='M5':
+        resultado['m5_refinement_created_ts']=active_zone.get('created_ts') or active_zone.get('t')
+        resultado['m5_refinement_type']=active_zone.get('tipo')
+        resultado['m5_refinement_source_a']=active_zone.get('source_a')
+        resultado['m5_refinement_source_mid']=active_zone.get('source_mid')
+        resultado['m5_refinement_source_c']=active_zone.get('source_c')
 
-    # O HTF autoriza a narrativa; o risco pertence SEMPRE ao menor TF que
-    # confirmou a quebra estrutural (M15 preferencial, M5 quando foi o fallback).
-    # Reversal e continuation obedecem à mesma regra de invalidação local.
-    sl_info,sl_audit=_kairos_select_structural_sl(mapa,exec_tf,exec_candles,sweep,structure,retest,direction)
+    # Risco: se M5 refinou de verdade, usamos a invalidação LOCAL M5 da zona causal;
+    # caso contrário mantemos o protected swing do evento M15. Nunca apertamos SL
+    # artificialmente só para fabricar RR.
+    if entry_tf=='M5':
+        m5_events=compute_lux_internal_structure([c for c in m5 if c['t']<=retest['t']],swing_size=5)
+        m5_struct=next((e for e in reversed(m5_events)
+                        if e.get('t',0)<=retest['t'] and e.get('direcao')==sweep['direcao']
+                        and e.get('tipo') in ('CHoCH','BOS')),None)
+        if m5_struct:
+            m5_struct=dict(m5_struct)
+            m5_struct['full_idx']=next((i for i,c in enumerate(m5) if c['t']==m5_struct['t']),None)
+            sl_info,sl_audit=_kairos_select_structural_sl(mapa,'M5',m5,m5_struct,m5_struct,retest,direction)
+        else:
+            sl_info,sl_audit=None,{'motivo':'SEM_BREAK_M5_CAUSAL_PARA_SL','candidatos':[]}
+    else:
+        sl_info,sl_audit=_kairos_select_structural_sl(mapa,'M15',exec_candles,sweep,structure,retest,direction)
     resultado['sl_audit']=sl_audit
     if not sl_info:
         resultado['failure_reason']='SEM_ANCORA_SL_CAUSAL_VALIDA'; return resultado

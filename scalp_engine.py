@@ -1879,15 +1879,21 @@ def _kairos_last_causal_m5_sweep(m5_candles, direction, leg_start_ts, confirm_ts
                 swept.append(liq)
         if not swept:
             continue
-        # Nível mais próximo do preço é a liquidez efetivamente atravessada por último.
+        # Cada pool de liquidez só pode ser consumido UMA vez. O primeiro
+        # sweep/reclaim válido encerra aquele nível; candles seguintes não podem
+        # reciclar a mesma liquidez como novos sweeps.
         liq=(max(swept,key=lambda x:float(x['valor'])) if direction=='LONG'
              else min(swept,key=lambda x:float(x['valor'])))
+        key=(wanted,liq['t'],round(float(liq['valor']),10))
+        if any(x.get('_liquidity_key')==key for x in candidates):
+            continue
         candidates.append({
             'tf':'M5','liquidity_type':'LUX_INTERNAL_SWING_'+wanted.upper(),
             'liquidity_level':float(liq['valor']),'liquidity_origin_ts':liq['t'],
             'liquidity_confirmed_ts':liq['t']+5*dur,
             'sweep_ts':ts,'sweep_extreme':float(c['l'] if direction=='LONG' else c['h']),
-            'sweep_candle':dict(c),'reclaimed_on_sweep_close':True
+            'sweep_candle':dict(c),'reclaimed_on_sweep_close':True,
+            '_liquidity_key':key
         })
     if not candidates:
         return None, {'motivo':'SEM_SWEEP_M5_CAUSAL_CONFIRMADO','candidatos':[]}
@@ -2654,29 +2660,45 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
         local_sweep,sl_audit=_kairos_last_causal_m5_sweep(
             m5,direction,structure.get('leg_start_ts'),structure_confirm_ts)
         if local_sweep:
-            extreme=float(local_sweep['sweep_extreme']); extreme_ts=local_sweep['sweep_ts']
-            known_to_entry=[c for c in m5 if c.get('t',0)<=retest['t']]
-            sl=aplicar_buffer_stop_atr(extreme,'alta' if direction=='LONG' else 'baixa',known_to_entry)
-            violation=next((c for c in m5 if extreme_ts < c.get('t',0) < retest['t'] and
-                            ((c.get('l') is not None and c['l']<=sl) if direction=='LONG'
-                             else (c.get('h') is not None and c['h']>=sl))),None)
-            if violation is None:
-                sl_info={'sl':sl,'sl_tf':'M5','sl_classe':'M5_LAST_CAUSAL_SWEEP',
-                         'sl_sweep_ts':extreme_ts,'sl_sweep_extreme':extreme}
-                sl_audit.update({
-                    'classe':'M5_LAST_CAUSAL_SWEEP','liquidity_level':local_sweep['liquidity_level'],
-                    'liquidity_origin_ts':local_sweep['liquidity_origin_ts'],
-                    'liquidity_confirmed_ts':local_sweep['liquidity_confirmed_ts'],
-                    'sweep_ts':extreme_ts,'sweep_extreme':extreme,
-                    'atr_period':14,'atr_buffer_mult':ATR_BUFFER_MULT,
-                    'atr_value':((extreme-sl)/ATR_BUFFER_MULT if direction=='LONG' and ATR_BUFFER_MULT else
-                                 (sl-extreme)/ATR_BUFFER_MULT if direction=='SHORT' and ATR_BUFFER_MULT else None),
-                    'buffer_abs':abs(float(sl)-float(extreme)),'sl_buffered':sl,
-                    'known_to_entry_last_ts':known_to_entry[-1].get('t') if known_to_entry else None})
+            # O sweep tem de invalidar a tese se for perdido SEM depender do
+            # buffer para atravessar a Entry. LONG exige extremo < Entry;
+            # SHORT exige extremo > Entry.
+            valid_side=((float(local_sweep['sweep_extreme']) < entry) if direction=='LONG'
+                        else (float(local_sweep['sweep_extreme']) > entry))
+            if not valid_side:
+                valid_candidates=[x for x in sl_audit.get('candidatos',[]) if
+                                  ((float(x['sweep_extreme']) < entry) if direction=='LONG'
+                                   else (float(x['sweep_extreme']) > entry))]
+                local_sweep=max(valid_candidates,key=lambda x:x['sweep_ts']) if valid_candidates else None
+                if local_sweep is None:
+                    sl_info=None
+                    sl_audit['motivo']='SEM_SWEEP_M5_NO_LADO_ESTRUTURAL_DA_ENTRY'
+            if local_sweep is not None:
+                extreme=float(local_sweep['sweep_extreme']); extreme_ts=local_sweep['sweep_ts']
+                known_to_entry=[c for c in m5 if c.get('t',0)<=retest['t']]
             else:
-                sl_info=None
-                sl_audit.update({'motivo':'LAST_CAUSAL_M5_SWEEP_INVALIDADO_ANTES_ENTRY',
-                                 'invalidated_ts':violation.get('t'),'sl_buffered':sl})
+                extreme=extreme_ts=known_to_entry=None
+                sl=aplicar_buffer_stop_atr(extreme,'alta' if direction=='LONG' else 'baixa',known_to_entry)
+                violation=next((c for c in m5 if extreme_ts < c.get('t',0) < retest['t'] and
+                                ((c.get('l') is not None and c['l']<=sl) if direction=='LONG'
+                                 else (c.get('h') is not None and c['h']>=sl))),None)
+                if violation is None:
+                    sl_info={'sl':sl,'sl_tf':'M5','sl_classe':'M5_LAST_CAUSAL_SWEEP',
+                             'sl_sweep_ts':extreme_ts,'sl_sweep_extreme':extreme}
+                    sl_audit.update({
+                        'classe':'M5_LAST_CAUSAL_SWEEP','liquidity_level':local_sweep['liquidity_level'],
+                        'liquidity_origin_ts':local_sweep['liquidity_origin_ts'],
+                        'liquidity_confirmed_ts':local_sweep['liquidity_confirmed_ts'],
+                        'sweep_ts':extreme_ts,'sweep_extreme':extreme,
+                        'atr_period':14,'atr_buffer_mult':ATR_BUFFER_MULT,
+                        'atr_value':((extreme-sl)/ATR_BUFFER_MULT if direction=='LONG' and ATR_BUFFER_MULT else
+                                     (sl-extreme)/ATR_BUFFER_MULT if direction=='SHORT' and ATR_BUFFER_MULT else None),
+                        'buffer_abs':abs(float(sl)-float(extreme)),'sl_buffered':sl,
+                        'known_to_entry_last_ts':known_to_entry[-1].get('t') if known_to_entry else None})
+                else:
+                    sl_info=None
+                    sl_audit.update({'motivo':'LAST_CAUSAL_M5_SWEEP_INVALIDADO_ANTES_ENTRY',
+                                     'invalidated_ts':violation.get('t'),'sl_buffered':sl})
         else:
             sl_info=None
     else:

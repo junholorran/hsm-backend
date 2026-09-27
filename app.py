@@ -2193,6 +2193,73 @@ def experiment_audit_near_choch_5020():
     """Resultado/status instantaneo; nunca executa replay dentro da requisicao."""
     return jsonify(_KAIROS_NEAR_CHOCH_AUDIT)
 
+_KAIROS_STRUCTURE_HIERARCHY_AUDIT = {'status':'IDLE','result':None,'error':None}
+_KAIROS_STRUCTURE_HIERARCHY_PAIRS = ('BTCUSD','ETHUSD','SOLUSD','XRPUSD','LINKUSD','ADAUSD','AVAXUSD','BNBUSD','AAVEUSD','NEARUSD','PENDLEUSD','INJUSD','ONDOUSD')
+
+def _kairos_hierarchy_case(pair, sig):
+    event_ts=sig.get('choch_timestamp')
+    if event_ts is None:
+        return {'pair':pair,'classification':'SEM_EVENT_TS'}
+    cs=scalp_engine._fetch_bybit_klines_historico(pair,'15',10,fim_ts_ms=int(event_ts)+900000)
+    cs=[x for x in (cs or []) if x.get('t') is not None and x['t'] <= event_ts]
+    ev5=scalp_engine.compute_lux_structure_events(cs,swing_size=5)
+    ev50=scalp_engine.compute_lux_structure_events(cs,swing_size=50)
+    i5=next((e for e in reversed(ev5) if e.get('t')==event_ts),None)
+    major_before=next((e for e in reversed(ev50) if e.get('t',0) <= event_ts),None)
+    major_same=next((e for e in reversed(ev50) if e.get('t')==event_ts),None)
+    sig_dir='alta' if sig.get('direction')=='LONG' else ('baixa' if sig.get('direction')=='SHORT' else None)
+    major_dir=(major_before or {}).get('direcao')
+    if major_same and major_same.get('direcao')==sig_dir:
+        cls='REVERSAO_MAIOR_CONFIRMADA'
+    elif major_dir==sig_dir:
+        cls='ALINHADO_COM_ESTRUTURA_MAIOR'
+    elif i5 and i5.get('direcao')==sig_dir:
+        cls='INTERNAL_SEM_AUTORIZACAO_MAIOR'
+    else:
+        cls='SEM_GENEALOGIA_INTERNA_EXATA'
+    return {'pair':pair,'classification':cls,'signal_direction':sig.get('direction'),
+            'authorization_path':sig.get('authorization_path'),'event_ts':event_ts,
+            'reported_level':sig.get('choch_level'),'context_bias':sig.get('context_bias'),
+            'htf_location':sig.get('htf_location'),'internal5_event':i5,
+            'major50_state_at_event':major_before,'major50_same_candle':major_same}
+
+def _run_structure_hierarchy_audit():
+    _KAIROS_STRUCTURE_HIERARCHY_AUDIT.update({'status':'RUNNING','result':None,'error':None,'started_at':int(time.time()*1000)})
+    try:
+        cases=[]; errors=[]
+        for pair in _KAIROS_STRUCTURE_HIERARCHY_PAIRS:
+            try:
+                rr=scalp_engine.replay_poi_lifecycle_abc_sol(dias_historico=1,fim_ts_ms=None,pair=pair,policies=('A_CURRENT',))
+                pol=((rr or {}).get('policies') or {}).get('A_CURRENT') or {}
+                autos=pol.get('resolved_signal_autopsy') or []
+                for a in autos:
+                    sig=(a or {}).get('signal') or {}
+                    if sig.get('authorization_path')=='HTF_POI_TOUCH':
+                        cases.append(_kairos_hierarchy_case(pair,sig))
+            except Exception as e:
+                errors.append({'pair':pair,'error':str(e)})
+        counts={}
+        for x in cases: counts[x['classification']]=counts.get(x['classification'],0)+1
+        result={'ok':True,'read_only':True,'pairs_requested':len(_KAIROS_STRUCTURE_HIERARCHY_PAIRS),
+                'cases':cases,'classification_counts':counts,'errors':errors,
+                'note':'Audit only: no gate, direction, entry, SL or TP changed.'}
+        _KAIROS_STRUCTURE_HIERARCHY_AUDIT.update({'status':'DONE','result':result,'finished_at':int(time.time()*1000)})
+        print('[STRUCTURE_HIERARCHY_AUDIT] DONE cases='+str(len(cases))+' counts='+str(counts)+' errors='+str(len(errors)),flush=True)
+    except Exception as e:
+        _KAIROS_STRUCTURE_HIERARCHY_AUDIT.update({'status':'ERROR','error':str(e),'finished_at':int(time.time()*1000)})
+        print('[STRUCTURE_HIERARCHY_AUDIT] ERROR '+str(e),flush=True)
+
+@app.route('/experiment/audit_structure_hierarchy/start',methods=['GET'])
+def experiment_audit_structure_hierarchy_start():
+    if _KAIROS_STRUCTURE_HIERARCHY_AUDIT.get('status')=='RUNNING':
+        return jsonify({'status':'RUNNING','started':False,'reason':'AUDIT_ALREADY_RUNNING'}),202
+    threading.Thread(target=_run_structure_hierarchy_audit,daemon=True).start()
+    return jsonify({'status':'STARTING','started':True,'audit':'HTF_M15_50_INTERNAL5','pairs':len(_KAIROS_STRUCTURE_HIERARCHY_PAIRS)}),202
+
+@app.route('/experiment/audit_structure_hierarchy',methods=['GET'])
+def experiment_audit_structure_hierarchy_result():
+    return jsonify(_KAIROS_STRUCTURE_HIERARCHY_AUDIT)
+
 @app.route('/experiment/audit_btc_execution_chain', methods=['GET'])
 def experiment_audit_btc_execution_chain():
     """READ-ONLY: extrai do ultimo replay BTC a genealogia da entrada sem alterar gates."""

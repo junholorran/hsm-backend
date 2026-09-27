@@ -1681,7 +1681,7 @@ def _kairos_select_structural_first_capture_sweep(candles_por_tf, now_ts, liquid
         age=now_ts-c['t']; rec['age_ms']=age
         rec['status']='VALID_FIRST_CAPTURE_NEUTRAL' if state!='UNRESOLVED_REACTION' else 'AWAITING_REACTION'
         candidates.append(rec)
-    valid=[x for x in candidates if x.get('status')=='VALID_FIRST_CAPTURE_NEUTRAL' and capture_is_fresh_for_m15(x,now_ts,max_m15_bars=12)]
+    valid=[x for x in candidates if x.get('status')=='VALID_FIRST_CAPTURE_NEUTRAL']
     if not valid:
         return None, {'levels':levels,'candidates':candidates}
     # Um capture HTF não congela o intraday inteiro. Depois que uma captura

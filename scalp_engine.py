@@ -1696,6 +1696,61 @@ def _kairos_select_structural_first_capture_sweep(candles_por_tf, now_ts, liquid
                       'selected_capture':{k:selected.get(k) for k in ('liquidity_tf','liquidity_type','nivel','sweep_ts','confirm_ts','post_capture_state')}}
 
 
+def _kairos_direction_after_htf_location(candles, location, swing_size=5):
+    """M15 decide a direção depois de tocar um POI HTF; o POI não impõe LONG/SHORT."""
+    if not candles or not location:
+        return None
+    touch_ts=location.get('touch_ts')
+    if touch_ts is None:
+        return None
+    events=compute_lux_internal_structure(candles,swing_size=swing_size)
+    for e in events:
+        if e.get('t',0) <= touch_ts or e.get('tipo') not in ('CHoCH','BOS'):
+            continue
+        full_idx=next((j for j,c in enumerate(candles) if c['t']==e['t']),None)
+        if full_idx is None:
+            continue
+        causal=candles[:full_idx+1]
+        z=_kairos_momentum_z(causal)
+        atrs=compute_atr(causal,14); atr=next((v for v in reversed(atrs) if v is not None),None)
+        bc=candles[full_idx]; body=abs(bc['c']-bc['o'])
+        d=e.get('direcao')
+        signed_ok=(z is not None and ((d=='alta' and z>0.5) or (d=='baixa' and z<-0.5)))
+        body_ok=bool(atr and body>=0.5*atr and ((d=='alta' and bc['c']>bc['o']) or (d=='baixa' and bc['c']<bc['o'])))
+        if signed_ok or body_ok:
+            return {'direction':'LONG' if d=='alta' else 'SHORT','direcao':d,'mode':'HTF_POI_REACTION',
+                    'structure':{**e,'full_idx':full_idx},'momentum_z':z}
+    return None
+
+
+def _kairos_select_htf_poi_location(mapa, m15_candles, now_ts):
+    """Última interação causal M15 com FVG/IFVG/OB HTF já existente."""
+    if not m15_candles:
+        return None
+    candidates=[]
+    for tf in ('W1','D1','H4','H1'):
+        data=mapa.get(tf) or {}
+        zones=list(data.get('zones',[]))+list(data.get('order_blocks',[]))
+        for z in zones:
+            if z.get('state') not in ('ATIVA','TOCADA','PARCIAL','IFVG'):
+                continue
+            top=z.get('top'); bottom=z.get('bottom')
+            if top is None or bottom is None:
+                continue
+            born=z.get('flip_ts') or z.get('break_ts') or z.get('created_ts') or z.get('t')
+            if born is None:
+                continue
+            touch=next((c for c in reversed(m15_candles)
+                        if born <= c['t'] <= now_ts and c['h'] >= bottom and c['l'] <= top),None)
+            if touch:
+                candidates.append({'tf':tf,'tipo':z.get('tipo','HTF_POI'),'top':top,'bottom':bottom,
+                                   'origin_ts':born,'touch_ts':touch['t'],'touch_price':touch['c'],
+                                   'poi_direction':z.get('direcao'),'source':'HTF_POI_TOUCH'})
+    if not candidates:
+        return None
+    return max(candidates,key=lambda x:(x['touch_ts'],KAIROS_TF_PESO.get(x['tf'],1)))
+
+
 def _kairos_direction_after_first_capture(candles, capture, swing_size=5):
     """Deriva direção da REAÇÃO + intenção + MSS/CHoCH, nunca do lado da liquidez."""
     if not candles or not capture: return None

@@ -2397,22 +2397,40 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
 
     sweep,sweep_audit=_kairos_select_structural_first_capture_sweep(candles_por_tf,now_ts,liquidity_policy=liquidity_policy)
     resultado['structural_sweep_audit']=sweep_audit
-    if not sweep:
-        resultado['failure_reason']='SEM_SWEEP_ESTRUTURAL_FIRST_CAPTURE_VALIDO'; return resultado
 
-    resultado['sweep_tf']=sweep['liquidity_tf']; resultado['liquidity_tf']=sweep['liquidity_tf']
-    resultado['liquidity_type']=sweep['liquidity_type']; resultado['capture_tf']='M15'
-    resultado['first_capture_ts']=sweep['first_capture_ts']; resultado['sweep_confirm_ts']=sweep.get('confirm_ts')
-    resultado['sweep_level']=round(sweep['nivel'],6); resultado['sweep_extreme']=round(sweep['extremo'],6)
-
-    # Arquitetura fechada: HTF = mapa/estrutura; M15 = confirmação obrigatória;
-    # M5 = refinamento/entrada. M5 nunca substitui a confirmação M15.
+    # HTF autoriza LOCALIZAÇÃO; nunca impõe direção. Sweep é um caminho válido,
+    # mas deixou de ser requisito universal: toque causal em POI HTF também pode
+    # levar à confirmação M15.
     exec_tf='M15'; exec_candles=candles_por_tf.get('M15') or []
-    intent=_kairos_direction_after_first_capture(exec_candles,sweep,swing_size=5)
+    location=None
+    if sweep:
+        resultado['authorization_path']='STRUCTURAL_LIQUIDITY_CAPTURE'
+        resultado['sweep_tf']=sweep['liquidity_tf']; resultado['liquidity_tf']=sweep['liquidity_tf']
+        resultado['liquidity_type']=sweep['liquidity_type']; resultado['capture_tf']='M15'
+        resultado['first_capture_ts']=sweep['first_capture_ts']; resultado['sweep_confirm_ts']=sweep.get('confirm_ts')
+        resultado['sweep_level']=round(sweep['nivel'],6); resultado['sweep_extreme']=round(sweep['extremo'],6)
+        intent=_kairos_direction_after_first_capture(exec_candles,sweep,swing_size=5)
+    else:
+        location=_kairos_select_htf_poi_location(mapa,exec_candles,now_ts)
+        if not location:
+            resultado['failure_reason']='SEM_LOCALIZACAO_HTF_CAUSAL'; return resultado
+        resultado['authorization_path']='HTF_POI_TOUCH'
+        resultado['htf_location']=location
+        intent=_kairos_direction_after_htf_location(exec_candles,location,swing_size=5)
+
     resultado['intent_m15_found']=bool(intent)
     if not intent:
-        resultado['failure_reason']='SEM_INTENCAO_CHOCH_MSS_M15_APOS_FIRST_CAPTURE'; return resultado
-    direction=intent['direction']; sweep['direcao']=intent['direcao']; structure=intent['structure']
+        resultado['failure_reason']='SEM_INTENCAO_CHOCH_MSS_M15_APOS_LOCALIZACAO_HTF'; return resultado
+    direction=intent['direction']; structure=intent['structure']
+    if sweep is None:
+        # Adaptador de contexto para funções legadas abaixo. Não representa sweep.
+        # A direção veio exclusivamente da quebra M15 posterior ao toque HTF.
+        sweep={'direcao':intent['direcao'],'sweep_ts':location['touch_ts'],
+               'extremo':location['touch_price'],'nivel':location['touch_price'],
+               'liquidity_tf':location['tf'],'liquidity_type':location['tipo'],
+               'first_capture_ts':location['touch_ts'],'confirm_ts':location['touch_ts']}
+    else:
+        sweep['direcao']=intent['direcao']
     resultado['direction']=direction; resultado['execution_tf']=exec_tf; resultado['choch_confirmed']=True
     resultado['choch_timestamp']=structure['t']; resultado['choch_level']=round(structure['nivel'],6)
     z=intent.get('momentum_z'); resultado['momentum_z']=round(z,3) if z is not None else None
@@ -2453,7 +2471,7 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
     # M15 confirmou a intenção; M5 só refina a execução da MESMA tese.
     # Nunca volta a decidir direção nem cria tese independente.
     m5=candles_por_tf.get('M5') or []
-    refined=_kairos_m5_refine_zone(m5,zone,sweep['sweep_ts'],structure['t'],sweep['direcao'])
+    refined=_kairos_m5_refine_zone(m5,zone,structure.get('leg_start_ts') or sweep['sweep_ts'],structure['t'],sweep['direcao'])
     retest=None; active_zone=zone; entry_tf=exec_tf
     if refined:
         rz_ts=refined.get('flip_ts') or refined.get('created_ts') or refined.get('t') or structure['t']

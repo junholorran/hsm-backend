@@ -2581,40 +2581,51 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
         resultado['m5_refinement_source_mid']=active_zone.get('source_mid')
         resultado['m5_refinement_source_c']=active_zone.get('source_c')
 
-    # O CHoCH/BOS M15 já confirmou a tese. Se houve refinamento M5, o M5
-    # serve SOMENTE para entry + invalidação local da POI refinada; não exigimos
-    # uma segunda quebra estrutural no M5.
+    # M15 confirma a tese; M5 apenas refina. O stop M5 fica atrás do
+    # protected swing interno já conhecido no fecho confirmador do M15.
+    # A borda geométrica da FVG/OB, sozinha, não é uma invalidação estrutural.
     if entry_tf=='M5':
-        atr_series_m5=compute_atr([c for c in m5 if c.get('t',0)<=retest['t']],14)
-        atr_m5=next((v for v in reversed(atr_series_m5) if v is not None),0.0)
-        buffer_m5=ATR_BUFFER_MULT*atr_m5
-        if direction=='LONG':
-            extreme=active_zone.get('bottom')
-            sl=(float(extreme)-buffer_m5) if extreme is not None else None
-            protected_type='LOW'
+        m5_known=[c for c in m5 if c.get('t',0) < structure_confirm_ts]
+        m5_events=compute_lux_internal_structure(m5_known,swing_size=5)
+        expected_type='LOW' if direction=='LONG' else 'HIGH'
+        candidates=[]
+        for ev in m5_events:
+            if ev.get('direcao') != ('alta' if direction=='LONG' else 'baixa'):
+                continue
+            if ev.get('protected_swing_type') != expected_type:
+                continue
+            base=ev.get('protected_swing_level'); base_ts=ev.get('protected_swing_origin_ts')
+            if base is None or base_ts is None:
+                continue
+            if base_ts < (structure.get('leg_start_ts') or 0):
+                continue
+            if (direction=='LONG' and float(base)>=entry) or (direction=='SHORT' and float(base)<=entry):
+                continue
+            candidates.append((ev,float(base),base_ts))
+        if candidates:
+            pev,extreme,extreme_ts=candidates[-1]
+            known_to_entry=[c for c in m5 if c.get('t',0)<=retest['t']]
+            sl=aplicar_buffer_stop_atr(extreme,'alta' if direction=='LONG' else 'baixa',known_to_entry)
+            violation=next((c for c in m5 if extreme_ts < c.get('t',0) < retest['t'] and
+                            ((c.get('l') is not None and c['l']<=sl) if direction=='LONG'
+                             else (c.get('h') is not None and c['h']>=sl))),None)
+            if violation is None:
+                sl_info={'sl':sl,'sl_tf':'M5','sl_classe':'M5_LUX_PROTECTED_SWING',
+                         'sl_sweep_ts':extreme_ts,'sl_sweep_extreme':extreme}
+                sl_audit={'motivo':'OK_M5_LUX_PROTECTED_SWING','candidatos':[{
+                    'tf':'M5','classe':'M5_LUX_PROTECTED_SWING','protected_type':expected_type,
+                    'anchor_ts':extreme_ts,'sweep_extreme':extreme,'sl_buffered':sl,
+                    'source_structure_ts':pev.get('t'),'source_structure_type':pev.get('tipo'),
+                    'source_broken_level':pev.get('nivel'),'status':'VALIDA'}]}
+            else:
+                sl_info=None
+                sl_audit={'motivo':'M5_PROTECTED_SWING_INVALIDADO_ANTES_ENTRY','candidatos':[{
+                    'tf':'M5','classe':'M5_LUX_PROTECTED_SWING','protected_type':expected_type,
+                    'anchor_ts':extreme_ts,'sweep_extreme':extreme,'sl_buffered':sl,
+                    'invalidated_ts':violation.get('t'),'status':'INVALIDADA_ANTES_ENTRY'}]}
         else:
-            extreme=active_zone.get('top')
-            sl=(float(extreme)+buffer_m5) if extreme is not None else None
-            protected_type='HIGH'
-        if sl is not None:
-            sl_info={
-                'sl':sl,
-                'sl_tf':'M5',
-                'sl_classe':'M5_REFINED_POI_INVALIDATION',
-                'sl_sweep_ts':active_zone.get('origin_ts') or active_zone.get('created_ts') or active_zone.get('t'),
-                'sl_sweep_extreme':extreme,
-            }
-            sl_audit={'motivo':'OK_M5_REFINED_POI_INVALIDATION','candidatos':[{
-                'tf':'M5','classe':'M5_REFINED_POI_INVALIDATION',
-                'protected_type':protected_type,
-                'anchor_ts':sl_info['sl_sweep_ts'],
-                'sweep_extreme':extreme,'sl_buffered':sl,
-                'zone_type':active_zone.get('tipo'),
-                'refinement_basis':active_zone.get('refinement_basis'),
-                'status':'VALIDA'
-            }]}
-        else:
-            sl_info,sl_audit=None,{'motivo':'SEM_EXTREMO_POI_M5_PARA_SL','candidatos':[]}
+            sl_info=None
+            sl_audit={'motivo':'SEM_M5_PROTECTED_SWING_CAUSAL','candidatos':[]}
     else:
         sl_info,sl_audit=_kairos_select_structural_sl(mapa,'M15',exec_candles,sweep,structure,retest,direction)
     resultado['sl_audit']=sl_audit

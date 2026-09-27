@@ -2116,7 +2116,16 @@ def experiment_audit_btc_execution_chain():
       'execution':{'entry':sig.get('entry'),'sl':sig.get('sl'),'sl_regra':sig.get('sl_regra'),
                    'sl_anchor_tf':sig.get('sl_anchor_tf'),'sl_anchor_class':sig.get('sl_anchor_class'),
                    'sl_anchor_ts':sig.get('sl_anchor_sweep_ts'),'sl_anchor_extreme':sig.get('sl_anchor_extreme'),
-                   'sl_audit':sig.get('sl_audit'),'tp1':sig.get('tp1'),'tp2':sig.get('tp2')},
+                   'sl_audit':sig.get('sl_audit'),'tp1':sig.get('tp1'),'tp2':sig.get('tp2'),
+                   'tp1_rr':sig.get('tp1_rr'),'tp2_rr':sig.get('tp2_rr'),
+                   'tp1_origem':sig.get('tp1_origem'),'tp2_origem':sig.get('tp2_origem'),
+                   'tp_origem':sig.get('tp_origem'),'trade_mode':sig.get('trade_mode'),
+                   'risk_abs':(abs(float(sig.get('entry'))-float(sig.get('sl'))) if sig.get('entry') is not None and sig.get('sl') is not None else None),
+                   'first_liquidity_target':sig.get('first_liquidity_target'),
+                   'structural_target_context':sig.get('structural_target_context'),
+                   'structural_target_context_origin':sig.get('structural_target_context_origin'),
+                   'target_obstacles_at_entry':sig.get('target_obstacles_at_entry'),
+                   'blocking_obstacles_at_entry':sig.get('blocking_obstacles_at_entry')},
       'dealing_ranges':sig.get('dealing_ranges')})
 
 @app.route('/experiment/audit_btc_w1_pivot', methods=['GET'])

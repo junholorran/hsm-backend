@@ -3299,6 +3299,7 @@ def replay_poi_lifecycle_abc_sol(dias_historico=7, fim_ts_ms=None, pair='SOLUSD'
             'total_sinais_unicos':r.get('total_sinais_unicos'),
             'distribuicao_motivos':r.get('distribuicao_motivos_todos_ciclos'),
             'resolved_signal_autopsy':resolved_signal_autopsy,
+            'sl_failure_autopsy':(r.get('experimental_sl_failures') or [])[:30],
         }
         audit=r.get('experimental_poi_audit') or []
         event_counts={}

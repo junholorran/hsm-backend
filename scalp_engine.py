@@ -1812,9 +1812,19 @@ def _kairos_m5_refine_zone(m5_candles, m15_zone, sweep_ts, structure_ts, directi
     # Para OB, usamos o último candle M5 oposto dentro da perna causal
     # imediatamente anterior à confirmação M15, desde que sobreponha o POI M15.
     leg=[(i,c) for i,c in enumerate(m5_candles)
-         if sweep_ts <= c.get('t',0) <= structure_ts]
+         if sweep_ts <= c.get('t',0) < structure_ts]
+    break_m5=None
+    if structure_level is not None:
+        for _idx,_c in leg:
+            _close=_c.get('c')
+            if _close is not None and ((_close > structure_level) if direction=='alta' else (_close < structure_level)):
+                break_m5=(_idx,_c)
+                break
+    if break_m5 is None:
+        return None
+    break_idx,break_candle=break_m5
     wanted_opposite = (lambda c: c.get('c',0) < c.get('o',0)) if direction=='alta' else (lambda c: c.get('c',0) > c.get('o',0))
-    for idx,c in reversed(leg):
+    for idx,c in reversed([(i,x) for i,x in leg if i < break_idx]):
         if not wanted_opposite(c):
             continue
         top=c.get('h'); bottom=c.get('l')

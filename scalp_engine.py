@@ -1,4 +1,5 @@
 # scalp_engine.py — KAIROS Paper V2.2 causal engine
+from kairos_structural_math import current_lux_dealing_range, capture_is_fresh_for_m15
 
 import sqlite3
 import hashlib
@@ -1680,7 +1681,7 @@ def _kairos_select_structural_first_capture_sweep(candles_por_tf, now_ts, liquid
         age=now_ts-c['t']; rec['age_ms']=age
         rec['status']='VALID_FIRST_CAPTURE_NEUTRAL' if state!='UNRESOLVED_REACTION' else 'AWAITING_REACTION'
         candidates.append(rec)
-    valid=[x for x in candidates if x.get('status')=='VALID_FIRST_CAPTURE_NEUTRAL' and 0 <= x['age_ms'] <= max_age.get(x['liquidity_tf'],5*3600000)]
+    valid=[x for x in candidates if x.get('status')=='VALID_FIRST_CAPTURE_NEUTRAL' and capture_is_fresh_for_m15(x,now_ts,max_m15_bars=12)]
     if not valid:
         return None, {'levels':levels,'candidates':candidates}
     # Um capture HTF não congela o intraday inteiro. Depois que uma captura
@@ -2243,19 +2244,8 @@ def _kairos_lux_dealing_range(candles, swing_size=50):
     swings=_extrair_swings_lux_algo(candles, swing_size=swing_size)
     if not swings:
         return None
-    last_high=next((x for x in reversed(swings) if x.get('tipo')=='high'),None)
-    last_low=next((x for x in reversed(swings) if x.get('tipo')=='low'),None)
-    if not last_high or not last_low:
-        return None
-    hi=float(last_high['valor']); lo=float(last_low['valor'])
-    if hi <= lo:
-        return None
-    eq=(hi+lo)/2.0
     close=float(candles[-1]['c']) if candles else None
-    location='EQUILIBRIUM' if close == eq else ('PREMIUM' if close > eq else 'DISCOUNT')
-    return {'high':hi,'low':lo,'equilibrium':eq,'location':location,
-            'high_origin_ts':last_high.get('t'),'low_origin_ts':last_low.get('t'),
-            'swing_size':swing_size,'source':'LUX_CONFIRMED_SWINGS'}
+    return current_lux_dealing_range(swings,close,swing_size=swing_size)
 
 
 def _kairos_context_bias(candles_por_tf):

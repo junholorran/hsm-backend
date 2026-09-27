@@ -3850,6 +3850,11 @@ def _formatar_mensagem_novo_sinal_paper_v2(pair, sinal, cohort=None):
     ts_str = datetime.fromtimestamp(sinal['choch_timestamp'] / 1000, tz=timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
     cohort = cohort or sinal.get('cohort') or _paper_v2_classificar_cohort(sinal.get('timestamp') or sinal.get('candle_confirmacao_ts'))
     titulo = "🟢 <b>FORWARD — NOVO SINAL</b>" if cohort == 'FORWARD' else "🔵 <b>REPLAY/HISTÓRICO — SINAL</b>"
+    be_trigger = sinal.get('be_trigger') or sinal.get('tp1') or 'N/A'
+    obstacle = sinal.get('tp1_obstacle') or {}
+    obstacle_txt = 'N/A'
+    if obstacle:
+        obstacle_txt = f"{obstacle.get('tf')} {obstacle.get('tipo')} @ {obstacle.get('nivel')} (~{sinal.get('swing_obstacle_rr') or obstacle.get('rr')}R)"
     return (
         f"{titulo}\n"
         f"Par: {pair}\n"
@@ -3857,12 +3862,15 @@ def _formatar_mensagem_novo_sinal_paper_v2(pair, sinal, cohort=None):
         f"Timestamp: {ts_str}\n"
         f"Entry: {sinal['entry']}\n"
         f"SL: {sinal['sl']}\n"
-        f"TP1 2R / parcial + BE: {sinal.get('tp1') or 'N/A'}\n"
-        f"TP2 final 3R: {sinal['tp']}\n"
-        f"R:R final: {sinal['rr']}\n"
-        f"Origem TP2: {sinal['tp_origem']}\n"
+        f"+1R / MOVER SL PARA BE: {be_trigger}\n"
+        f"BE: {sinal.get('be_price') or sinal['entry']}\n"
+        f"Obstáculo no caminho: {obstacle_txt}\n"
+        f"Alvo estrutural: {sinal['tp']}\n"
+        f"R:R até alvo estrutural: {sinal['rr']}\n"
+        f"Origem alvo: {sinal['tp_origem']}\n"
+        f"Modo: {sinal.get('trade_mode') or 'N/A'}\n"
         f"Estado: PENDING\n"
-        f"⚠️ 100% experimental — paper trading, zero dinheiro real."
+        f"⚠️ FORWARD experimental — execução manual em demo; zero ordem automática."
     )
 
 

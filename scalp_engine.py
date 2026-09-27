@@ -2258,7 +2258,7 @@ def _kairos_retest_zone(candles, zone, after_ts):
     return None
 
 
-def _kairos_lux_dealing_range(candles, swing_size=50):
+def _kairos_lux_dealing_range(candles, swing_size=50, tf=None):
     """Range estrutural auditável derivado dos pivôs Lux confirmados; EQ=50%.
 
     Não é gatilho. Serve apenas para localização premium/discount. Usa somente

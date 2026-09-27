@@ -2142,10 +2142,9 @@ def _build_near_choch_audit(rr):
     event_ts=sig.get('choch_timestamp'); level=sig.get('choch_level')
     if event_ts is None or level is None:
         return {'ok':False,'reason':'SEM_CHOCH_TS_OU_LEVEL'}
-    try:
-        cs=scalp_engine.fetch_bybit_klines('NEARUSD','15',limit=1000,end_ms=int(event_ts)+900000)
-    except TypeError:
-        cs=scalp_engine.fetch_bybit_klines('NEARUSD','15',1000,int(event_ts)+900000)
+    # Usa exatamente o mesmo fetch historico do replay; nada de API paralela/inventada.
+    cs=scalp_engine._fetch_bybit_klines_historico(
+        'NEARUSD','15',10,fim_ts_ms=int(event_ts)+900000)
     cs=[x for x in (cs or []) if x.get('t') is not None and x['t'] <= event_ts]
     ev5=scalp_engine.compute_lux_structure_events(cs,swing_size=5)
     ev50=scalp_engine.compute_lux_structure_events(cs,swing_size=50)

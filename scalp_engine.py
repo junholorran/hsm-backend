@@ -2468,7 +2468,7 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
     resultado['zone_source_c']=zone.get('source_c')
     resultado['zone_flip_candle']=zone.get('flip_candle')
     zone_ts=zone.get('flip_ts') or zone.get('created_ts') or zone.get('t') or structure['t']
-    structure_confirm_ts=_kairos_candle_close_ts(structure['t'], exec_tf) or structure['t']
+    structure_confirm_ts=_kairos_candle_close_ts(structure['t'], 'M15') or structure['t']
     after_ts=max(structure_confirm_ts,zone_ts)
 
     # M15 confirmou a intenção; M5 só refina a execução da MESMA tese.

@@ -2091,6 +2091,24 @@ def experiment_poi_lifecycle_a_btc():
 
 
 
+@app.route('/experiment/audit_btc_w1_pivot', methods=['GET'])
+def experiment_audit_btc_w1_pivot():
+    """Somente leitura: prova o OHLC bruto Bybit do pivot W1 usado pelo Lux50."""
+    origin_ts=int(request.args.get('origin_ts','1668988800000'))
+    candles=scalp_engine._fetch_bybit_klines_historico('BTCUSDT','W',1825)
+    candles=sorted(candles,key=lambda c:c['t'])
+    idx=next((i for i,c in enumerate(candles) if c['t']==origin_ts),None)
+    if idx is None:
+        return jsonify({'ok':False,'origin_ts':origin_ts,'reason':'CANDLE_W1_NAO_ENCONTRADO'}),404
+    c=candles[idx]
+    left=candles[max(0,idx-2):idx]
+    right=candles[idx+1:idx+3]
+    swings=scalp_engine._extrair_swings_lux_algo(candles,swing_size=50)
+    pivot=next((x for x in swings if x.get('t')==origin_ts and x.get('tipo')=='low'),None)
+    return jsonify({'ok':True,'source':'BYBIT_V5_LINEAR_BTCUSDT_W_RAW','origin_ts':origin_ts,
+                    'raw_candle':c,'neighbors_before':left,'neighbors_after':right,
+                    'lux50_is_swing_low':pivot is not None,'lux50_pivot':pivot})
+
 @app.route('/kairos_v2/auditoria_fvg_h1_btc', methods=['GET'])
 def kairos_v2_auditoria_fvg_h1_btc():
     dias=max(1,min(int(request.args.get('dias','7')),31))

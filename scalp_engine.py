@@ -1777,14 +1777,16 @@ def _kairos_direction_after_first_capture(candles, capture, swing_size=5):
     return None
 
 def _kairos_m5_refine_zone(m5_candles, m15_zone, sweep_ts, structure_ts, direction):
-    """Refina M15 com POI M5 da MESMA perna causal sweep→MSS.
+    """M5 refina a tese já confirmada no M15; não cria uma segunda tese estrutural.
 
-    O FVG pode nascer durante o displacement, antes do candle que confirma
-    MSS/CHoCH: SWEEP_TS <= FVG_CREATED_TS <= STRUCTURE_TS. A entrada/reteste,
-    porém, continua proibida antes da confirmação estrutural.
+    Procura POI M5 causal da perna M15 e contido/overlap no POI M15.
+    FVG/IFVG usa a própria matemática/lifecycle existente. OB M5 é derivado
+    do displacement que culmina na confirmação M15, sem exigir novo BOS M5.
+    O reteste continua obrigatório e só pode ocorrer após structure_ts.
     """
     if not m5_candles or not m15_zone:
         return None
+
     zones=[]
     for z in _kairos_fvg_states(m5_candles):
         created=z.get('created_ts')
@@ -1799,20 +1801,37 @@ def _kairos_m5_refine_zone(m5_candles, m15_zone, sweep_ts, structure_ts, directi
             continue
         if z['top'] < m15_zone['bottom'] or z['bottom'] > m15_zone['top']:
             continue
-        q=dict(z); q['source_tf']='M5'; zones.append(q)
+        q=dict(z)
+        q['source_tf']='M5'
+        q['refinement_basis']='M15_CONFIRMED_LEG_FVG'
+        zones.append(q)
     if zones:
         return max(zones,key=lambda z:z.get('flip_ts') or z.get('created_ts') or 0)
-    # OB M5 só pode refinar se existir a partir de uma quebra estrutural M5 pós-M15-structure.
-    events=compute_lux_internal_structure(m5_candles,swing_size=5)
-    wanted=direction
-    ev=next((e for e in reversed(events) if e.get('t',0)>=structure_ts and e.get('direcao')==wanted and e.get('tipo') in ('CHoCH','BOS')),None)
-    if ev:
-        idx=next((i for i,c in enumerate(m5_candles) if c['t']==ev['t']),None)
-        ob=_kairos_ob_from_break(m5_candles,idx,wanted) if idx is not None else None
-        if ob and not (ob['top'] < m15_zone['bottom'] or ob['bottom'] > m15_zone['top']):
-            ob=dict(ob); ob['source_tf']='M5'; return ob
-    return None
 
+    # Sem segunda quebra M5: o M15 já confirmou a intenção.
+    # Para OB, usamos o último candle M5 oposto dentro da perna causal
+    # imediatamente anterior à confirmação M15, desde que sobreponha o POI M15.
+    leg=[(i,c) for i,c in enumerate(m5_candles)
+         if sweep_ts <= c.get('t',0) <= structure_ts]
+    wanted_opposite = (lambda c: c.get('c',0) < c.get('o',0)) if direction=='alta' else (lambda c: c.get('c',0) > c.get('o',0))
+    for idx,c in reversed(leg):
+        if not wanted_opposite(c):
+            continue
+        top=c.get('h'); bottom=c.get('l')
+        if top is None or bottom is None:
+            continue
+        if top < m15_zone['bottom'] or bottom > m15_zone['top']:
+            continue
+        return {
+            'tipo':'OB_bullish' if direction=='alta' else 'OB_bearish',
+            'direcao':direction,
+            'top':top,'bottom':bottom,
+            'created_ts':c.get('t'),'origin_ts':c.get('t'),
+            'state':'ATIVA','source_tf':'M5',
+            'origin_candle':dict(c),
+            'refinement_basis':'M15_CONFIRMED_LEG_LAST_OPPOSITE_M5'
+        }
+    return None
 
 def _kairos_structural_targets(candles_por_tf, now_ts, entry, direction, limit=12):
     """Próxima liquidez estrutural ATIVA do lado do trade, sem score."""

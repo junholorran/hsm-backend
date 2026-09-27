@@ -2631,7 +2631,16 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
                     'tf':'M5','classe':'M5_LUX_PROTECTED_SWING','protected_type':expected_type,
                     'anchor_ts':extreme_ts,'sweep_extreme':extreme,'sl_buffered':sl,
                     'source_structure_ts':pev.get('t'),'source_structure_type':pev.get('tipo'),
-                    'source_broken_level':pev.get('nivel'),'status':'VALIDA'}]}
+                    'source_broken_level':pev.get('nivel'),
+                    # TELEMETRIA SOMENTE: prova matemática exata do buffer do SL.
+                    'anchor_candle':next((dict(c) for c in m5 if c.get('t')==extreme_ts),None),
+                    'source_structure_event':dict(pev),
+                    'atr_period':14,'atr_buffer_mult':ATR_BUFFER_MULT,
+                    'atr_value':((extreme-sl)/ATR_BUFFER_MULT if direction=='LONG' and ATR_BUFFER_MULT else
+                                 (sl-extreme)/ATR_BUFFER_MULT if direction=='SHORT' and ATR_BUFFER_MULT else None),
+                    'buffer_abs':abs(float(sl)-float(extreme)),
+                    'known_to_entry_last_ts':known_to_entry[-1].get('t') if known_to_entry else None,
+                    'status':'VALIDA'}]}
             else:
                 sl_info=None
                 sl_audit={'motivo':'M5_PROTECTED_SWING_INVALIDADO_ANTES_ENTRY','candidatos':[{

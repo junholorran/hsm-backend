@@ -2008,17 +2008,28 @@ def _run_kairos_pdh_pdl_btc_background(dias, fim_ts_ms):
             for sig in selected:
                 entry=sig.get('entry'); sl=sig.get('sl'); tp1=sig.get('tp1') or sig.get('tp'); tp2=sig.get('tp2')
                 ets=sig.get('timestamp'); direction=sig.get('direction')
-                outcome='PENDING'; outcome_ts=None; tp1_seen=False
-                for c in [x for x in m5_future if x.get('t',0) > (ets or 0)]:
+                outcome='PENDING'; outcome_ts=None; tp1_seen=False; tp1_ts=None
+                future=[x for x in m5_future if x.get('t',0) > (ets or 0)]
+                for idx,c in enumerate(future):
                     if direction=='LONG':
                         hit_sl=sl is not None and c.get('l') <= sl; hit_tp1=tp1 is not None and c.get('h') >= tp1; hit_tp2=tp2 is not None and c.get('h') >= tp2
                     else:
                         hit_sl=sl is not None and c.get('h') >= sl; hit_tp1=tp1 is not None and c.get('l') <= tp1; hit_tp2=tp2 is not None and c.get('l') <= tp2
-                    if hit_sl and (hit_tp1 or hit_tp2): outcome='AMBIGUO'; outcome_ts=c.get('t'); break
-                    if hit_tp2: outcome='TP2'; outcome_ts=c.get('t'); break
-                    if hit_tp1: tp1_seen=True; outcome='TP1'; outcome_ts=c.get('t'); break
-                    if hit_sl: outcome='SL'; outcome_ts=c.get('t'); break
-                trades.append({'thesis':(sig.get('first_capture_ts'),sig.get('choch_timestamp'),direction),'candidate_pois':len(theses[(sig.get('first_capture_ts'),sig.get('choch_timestamp'),direction)]),'entry_ts':ets,'direction':direction,'entry':entry,'sl':sl,'tp1':tp1,'tp2':tp2,'zone_type':sig.get('zone_type'),'zone':[sig.get('zone_bottom'),sig.get('zone_top')],'rr':sig.get('rr'),'outcome':outcome,'outcome_ts':outcome_ts})
+                    if not tp1_seen:
+                        if hit_sl and (hit_tp1 or hit_tp2): outcome='AMBIGUO_PRE_TP1'; outcome_ts=c.get('t'); break
+                        if hit_tp2: outcome='TP2'; outcome_ts=c.get('t'); break
+                        if hit_sl: outcome='SL'; outcome_ts=c.get('t'); break
+                        if hit_tp1:
+                            tp1_seen=True; tp1_ts=c.get('t'); outcome='TP1_OPEN_REMAINDER'
+                            # BE só fica ativo A PARTIR DO candle seguinte.
+                            continue
+                    else:
+                        if hit_tp2: outcome='TP2_AFTER_TP1'; outcome_ts=c.get('t'); break
+                        hit_be=(c.get('l') <= entry) if direction=='LONG' else (c.get('h') >= entry)
+                        if hit_be: outcome='BE_AFTER_TP1'; outcome_ts=c.get('t'); break
+                if tp1_seen and outcome=='TP1_OPEN_REMAINDER':
+                    outcome_ts=tp1_ts
+                trades.append({'thesis':(sig.get('first_capture_ts'),sig.get('choch_timestamp'),direction),'candidate_pois':len(theses[(sig.get('first_capture_ts'),sig.get('choch_timestamp'),direction)]),'entry_ts':ets,'direction':direction,'entry':entry,'sl':sl,'tp1':tp1,'tp2':tp2,'zone_type':sig.get('zone_type'),'zone':[sig.get('zone_bottom'),sig.get('zone_top')],'rr':sig.get('rr'),'tp1_ts':tp1_ts,'outcome':outcome,'outcome_ts':outcome_ts})
             print(f'[PDH_PDL_BTC_THESIS_TRADES] total={len(trades)} trades={trades}', flush=True)
         except Exception as trades_e:
             print(f'[PDH_PDL_BTC_THESIS_TRADES_ERROR] {trades_e}', flush=True)

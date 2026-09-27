@@ -2589,6 +2589,12 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
         resultado['m5_refinement_source_a']=active_zone.get('source_a')
         resultado['m5_refinement_source_mid']=active_zone.get('source_mid')
         resultado['m5_refinement_source_c']=active_zone.get('source_c')
+        # TELEMETRIA SOMENTE: expõe a genealogia já usada pelo refinamento.
+        # Não altera seleção, direção, entry, SL, TP ou qualquer gate.
+        resultado['refinement_basis']=active_zone.get('refinement_basis')
+        resultado['causal_break_m5']=active_zone.get('causal_break_m5')
+        resultado['causal_break_level_m15']=active_zone.get('causal_break_level_m15')
+        resultado['m5_refinement_origin_candle']=active_zone.get('origin_candle')
 
     # M15 confirma a tese; M5 apenas refina. O stop M5 fica atrás do
     # protected swing interno já conhecido no fecho confirmador do M15.

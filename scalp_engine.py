@@ -3025,6 +3025,7 @@ def replay_vortex_decision_layer_v2(pair, dias_historico=7, janelas_mfe_mae=JANE
     experimental_obstacle_blocks = [] if experimental_poi_policy else None
     experimental_poi_state = {} if experimental_poi_policy else None
     experimental_poi_audit = [] if experimental_poi_policy else None
+    experimental_sl_failures = [] if experimental_poi_policy else None
 
     for i in range(MIN_M5_IDX, len(m5)):
         # Avaliamos o estado imediatamente APÓS o fecho deste M5.
@@ -3088,6 +3089,15 @@ def replay_vortex_decision_layer_v2(pair, dias_historico=7, janelas_mfe_mae=JANE
             a.update({'ts_corte':ts_corte,'failure_reason':r.get('failure_reason'),'zone_type':r.get('zone_type'),
                       'zone_created_ts':r.get('zone_created_ts'),'zone_bottom':r.get('zone_bottom'),'zone_top':r.get('zone_top')})
             experimental_poi_audit.append(a)
+        if experimental_sl_failures is not None and r.get('failure_reason')=='SEM_ANCORA_SL_CAUSAL_VALIDA':
+            experimental_sl_failures.append({
+                'ts_corte':ts_corte,'direction':r.get('direction'),'entry':r.get('entry'),'entry_ts':r.get('timestamp'),
+                'entry_tf':r.get('entry_tf'),'zone_type':r.get('zone_type'),'zone_bottom':r.get('zone_bottom'),'zone_top':r.get('zone_top'),
+                'first_capture_ts':r.get('first_capture_ts'),'liquidity_tf':r.get('liquidity_tf'),'liquidity_type':r.get('liquidity_type'),
+                'sweep_level':r.get('sweep_level'),'sweep_extreme':r.get('sweep_extreme'),
+                'm15_confirmation_ts':r.get('m15_confirmation_ts'),'m15_confirmation_level':r.get('m15_confirmation_level'),
+                'refinement_basis':r.get('refinement_basis'),'sl_audit':r.get('sl_audit')
+            })
         if experimental_obstacle_blocks is not None and r.get('failure_reason') in ('OBSTACULO_ESTRUTURAL_ANTES_2R','OBSTACULO_ESTRUTURAL_ANTES_1R'):
             o=dict(r.get('tp1_obstacle') or {})
             experimental_obstacle_blocks.append({
@@ -3206,6 +3216,7 @@ def replay_vortex_decision_layer_v2(pair, dias_historico=7, janelas_mfe_mae=JANE
         'distribuicao_motivos_todos_ciclos': distribuicao_motivos,
         'experimental_poi_audit': experimental_poi_audit,
         'experimental_obstacle_blocks': experimental_obstacle_blocks,
+        'experimental_sl_failures': experimental_sl_failures,
         'total_sinais_unicos': len(sinais_unicos),
         'auditoria_dedup': auditoria_dedup,
         'sinais_long': len(sinais_long), 'sinais_short': len(sinais_short),

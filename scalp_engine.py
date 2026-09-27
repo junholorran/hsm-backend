@@ -1989,6 +1989,9 @@ def _kairos_select_entry_zone(exec_candles, sweep, structure, mapa):
         return None
     direction=sweep['direcao']
     st=structure['t']
+    leg_start=structure.get('leg_start_ts') or structure.get('protected_swing_origin_ts')
+    if leg_start is None:
+        return None
     zones=[]
     for z in _kairos_fvg_states(exec_candles):
         effective_ts=z.get('flip_ts') or z.get('created_ts') or 0
@@ -1998,13 +2001,19 @@ def _kairos_select_entry_zone(exec_candles, sweep, structure, mapa):
             continue
         # O POI de entrada tem de NASCER da perna estrutural e existir até o break.
         # A geometria pode começar no candle do sweep, mas nunca antes dele nem depois do MSS/BOS.
-        if not (sweep['sweep_ts'] <= effective_ts <= st):
+        if not (leg_start <= effective_ts <= st):
             continue
-        if z.get('created_ts') is not None and z.get('created_ts') < sweep['sweep_ts']:
+        if z.get('created_ts') is not None and z.get('created_ts') < leg_start:
             # IFVG também precisa de FVG-mãe criada dentro da perna causal; não aceitamos
             # inverter uma FVG antiga e chamá-la de POI produzido pelo displacement atual.
             continue
+        src=[z.get('source_a'),z.get('source_mid'),z.get('source_c')]
+        if not all(isinstance(x,dict) and x.get('t') is not None for x in src):
+            continue
+        if min(x['t'] for x in src) < leg_start or max(x['t'] for x in src) > st:
+            continue
         z2=dict(z); z2['liquidity_inside']=_kairos_zone_contains_liquidity(z2,mapa)
+        z2['leg_start_ts']=leg_start; z2['leg_end_ts']=st
         zones.append(z2)
 
     # PRIORIDADE FECHADA: FVG Lux produzido na perna que efetivamente termina
@@ -2022,7 +2031,11 @@ def _kairos_select_entry_zone(exec_candles, sweep, structure, mapa):
     # OB é derivado diretamente do break e só entra se não houver FVG/IFVG causal.
     ob=_kairos_ob_from_break(exec_candles, structure.get('full_idx'), direction)
     if ob:
+        origin_ts=ob.get('origin_ts') or ob.get('created_ts') or ob.get('t')
+        if origin_ts is None or not (leg_start <= origin_ts <= st):
+            return None
         ob['liquidity_inside']=_kairos_zone_contains_liquidity(ob,mapa)
+        ob['leg_start_ts']=leg_start; ob['leg_end_ts']=st
         return ob
     return None
 

@@ -3085,7 +3085,15 @@ def replay_poi_lifecycle_abc_sol(dias_historico=7, fim_ts_ms=None, pair='SOLUSD'
             entry_ts=s.get('timestamp')
             idx=bisect.bisect_right(m5_ts,entry_ts) if entry_ts is not None else len(m5)
             future=m5[idx:idx+300]
-            res=_resolver_gestao_2r_3r_be(future,s['direction'],s['entry'],s['sl'],s['tp2'],300)
+            if s.get('trade_mode') == 'SCALP_CAUSAL_1R':
+                # O sinal 1R não possui TP2 por definição. Resolver TP1 vs SL,
+                # sem alterar entry/SL/TP nem fabricar gestão 2R/3R.
+                _dir_legacy = 'alta' if s['direction'] == 'LONG' else 'baixa'
+                res=_resolver_tp_sl_futuro(future,_dir_legacy,s['entry'],s['sl'],s.get('tp1'),None,300)
+                if res.get('resultado') == 'TP1':
+                    res=dict(res); res['resultado']='TP'
+            else:
+                res=_resolver_gestao_2r_3r_be(future,s['direction'],s['entry'],s['sl'],s['tp2'],300)
             ev=res.get('resultado'); events.append(ev)
             n_res=res.get('candles_ate_resolucao')
             resolved_signal_autopsy.append({'signal':s,'resolution':res,'resolution_candle_m5':(future[n_res-1] if n_res and n_res <= len(future) else None),'future_m5_until_resolution':(future[:n_res] if n_res else [])})

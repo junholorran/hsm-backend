@@ -2091,6 +2091,34 @@ def experiment_poi_lifecycle_a_btc():
 
 
 
+@app.route('/experiment/audit_btc_execution_chain', methods=['GET'])
+def experiment_audit_btc_execution_chain():
+    """READ-ONLY: extrai do ultimo replay BTC a genealogia da entrada sem alterar gates."""
+    cache=_KAIROS_A_BTC_CACHE.get('result') or {}
+    policies=cache.get('policies') or cache
+    pol=(policies.get('A_CURRENT') if isinstance(policies,dict) else None) or cache
+    metrics=(pol.get('metrics') if isinstance(pol,dict) else None) or pol
+    rows=(metrics.get('resolved_signal_autopsy') if isinstance(metrics,dict) else None) or []
+    if not rows:
+        return jsonify({'ok':False,'reason':'SEM_SINAL_RESOLVIDO_NO_CACHE; rode /experiment/poi_lifecycle_a_btc_1d/start primeiro'}),404
+    sig=(rows[-1].get('signal') or {})
+    return jsonify({'ok':True,'read_only':True,'pair':sig.get('pair','BTCUSD'),
+      'authorization_path':sig.get('authorization_path'),
+      'htf_location':sig.get('htf_location'),
+      'm15':{'break_open_ts':sig.get('m15_break_candle_open_ts'),'confirm_ts':sig.get('m15_confirmation_ts'),
+             'type':sig.get('m15_confirmation_type'),'level':sig.get('m15_confirmation_level'),
+             'poi_shadow_audit':sig.get('poi_shadow_audit')},
+      'm5':{'candidate_found':sig.get('m5_refinement_candidate_found'),'type':sig.get('m5_refinement_candidate_type'),
+            'top':sig.get('m5_refinement_candidate_top'),'bottom':sig.get('m5_refinement_candidate_bottom'),
+            'created_ts':sig.get('m5_refinement_created_ts'),'retest_found':sig.get('m5_refinement_retest_found'),
+            'retest_after_ts':sig.get('m5_refinement_retest_after_ts'),'basis':sig.get('refinement_basis'),
+            'causal_break_m5':sig.get('causal_break_m5'),'causal_break_level_m15':sig.get('causal_break_level_m15')},
+      'execution':{'entry':sig.get('entry'),'sl':sig.get('sl'),'sl_regra':sig.get('sl_regra'),
+                   'sl_anchor_tf':sig.get('sl_anchor_tf'),'sl_anchor_class':sig.get('sl_anchor_class'),
+                   'sl_anchor_ts':sig.get('sl_anchor_sweep_ts'),'sl_anchor_extreme':sig.get('sl_anchor_extreme'),
+                   'sl_audit':sig.get('sl_audit'),'tp1':sig.get('tp1'),'tp2':sig.get('tp2')},
+      'dealing_ranges':sig.get('dealing_ranges')})
+
 @app.route('/experiment/audit_btc_w1_pivot', methods=['GET'])
 def experiment_audit_btc_w1_pivot():
     """Somente leitura: prova o OHLC bruto Bybit do pivot W1 usado pelo Lux50."""

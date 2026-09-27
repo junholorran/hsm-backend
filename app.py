@@ -2095,6 +2095,39 @@ def experiment_poi_lifecycle_a_btc():
 
 
 
+
+# NEARUSD A_CURRENT — auditoria curta isolada; nao altera scanner FORWARD nem estrategia.
+_KAIROS_A_NEAR_CACHE = {'status':'IDLE','result':None,'error':None,'started_at':None,'finished_at':None}
+
+def _run_kairos_a_near_background(dias, fim_ts_ms):
+    global _KAIROS_A_NEAR_CACHE
+    try:
+        _KAIROS_A_NEAR_CACHE.update({'status':'RUNNING','result':None,'error':None,'started_at':int(time.time()*1000),'finished_at':None})
+        print(f'[POI_A_NEAR_PROGRESS] pair=NEARUSD dias={dias} phase=START', flush=True)
+        r=scalp_engine.replay_poi_lifecycle_abc_sol(
+            dias_historico=dias, fim_ts_ms=fim_ts_ms, pair='NEARUSD',
+            policies=('A_CURRENT',),
+        )
+        _KAIROS_A_NEAR_CACHE.update({'status':'DONE','result':r,'finished_at':int(time.time()*1000)})
+        print(f'[POI_A_NEAR_PROGRESS] pair=NEARUSD dias={dias} phase=DONE', flush=True)
+    except Exception as e:
+        _KAIROS_A_NEAR_CACHE.update({'status':'ERROR','error':str(e),'finished_at':int(time.time()*1000)})
+        print('[POI_A_NEAR_ERROR] '+str(e), flush=True)
+
+@app.route('/experiment/poi_lifecycle_a_near_1d/start', methods=['GET'])
+def experiment_poi_lifecycle_a_near_1d_start():
+    """Inicia replay isolado NEARUSD A_CURRENT de 1 dia."""
+    if _KAIROS_A_NEAR_CACHE.get('status') != 'RUNNING':
+        threading.Thread(target=_run_kairos_a_near_background,args=(1,None),daemon=True).start()
+        return jsonify({'status':'STARTING','started':True,'pair':'NEARUSD','policy':'A_CURRENT','dias':1}),202
+    return jsonify({'status':_KAIROS_A_NEAR_CACHE.get('status'),'started':False,'reason':'REPLAY_ALREADY_RUNNING'}),409
+
+@app.route('/experiment/poi_lifecycle_a_near', methods=['GET'])
+def experiment_poi_lifecycle_a_near():
+    return jsonify(_KAIROS_A_NEAR_CACHE)
+
+
+
 @app.route('/experiment/audit_btc_execution_chain', methods=['GET'])
 def experiment_audit_btc_execution_chain():
     """READ-ONLY: extrai do ultimo replay BTC a genealogia da entrada sem alterar gates."""

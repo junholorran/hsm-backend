@@ -2895,19 +2895,25 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
         resultado['failure_reason']='LIQUIDEZ_ESTRUTURAL_ANTES_1R'
         return resultado
 
-    resultado['tp1']=round(tp1_2r,6)
-    resultado['tp1_rr']=2.0
-    resultado['tp1_origem']='GESTAO_FIXA_2R_PARCIAL_BE'
-    resultado['tp2']=round(tp2_3r,6)
-    resultado['tp2_rr']=3.0
-    resultado['tp2_origem']='GESTAO_FIXA_3R'
+    # Plano normal: a estrutura escolhe o alvo. RR apenas mede o espaço.
+    # Ao atingir +1R, o risco vai para BE; depois o trade segue até a primeira
+    # liquidez estrutural causal já conhecida no timestamp da entrada.
+    structural_target=float(target['nivel'])
+    structural_rr=abs(structural_target-entry)/risk
+    resultado['tp1']=round(entry + sign*risk,6)
+    resultado['tp1_rr']=1.0
+    resultado['tp1_origem']='BE_TRIGGER_1R'
+    resultado['tp2']=round(structural_target,6)
+    resultado['tp2_rr']=round(structural_rr,2)
+    resultado['tp2_origem']=f"LIQUIDEZ_ESTRUTURAL_{target['tf']}_{target['tipo']}"
     resultado['tp']=resultado['tp2']
-    resultado['rr']=3.0
+    resultado['rr']=round(structural_rr,2)
     resultado['tp_origem']=resultado['tp2_origem']
     resultado['be_trigger']=resultado['tp1']
     resultado['be_price']=round(entry,6)
-    resultado['structural_target_context']=round(float(target['nivel']),6)
-    resultado['structural_target_context_origin']=f"LIQUIDEZ_ESTRUTURAL_{target['tf']}_{target['tipo']}"
+    resultado['trade_mode']='STRUCTURAL_TARGET_BE_1R'
+    resultado['structural_target_context']=round(structural_target,6)
+    resultado['structural_target_context_origin']=resultado['tp2_origem']
 
     resultado['signal']=True; resultado['valid']=True
     resultado['reason']=(

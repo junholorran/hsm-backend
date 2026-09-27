@@ -2571,8 +2571,9 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
     # serve SOMENTE para entry + invalidação local da POI refinada; não exigimos
     # uma segunda quebra estrutural no M5.
     if entry_tf=='M5':
-        atr_m5=_atr(m5,14) or 0.0
-        buffer_m5=0.5*atr_m5
+        atr_series_m5=compute_atr([c for c in m5 if c.get('t',0)<=retest['t']],14)
+        atr_m5=next((v for v in reversed(atr_series_m5) if v is not None),0.0)
+        buffer_m5=ATR_BUFFER_MULT*atr_m5
         if direction=='LONG':
             extreme=active_zone.get('bottom')
             sl=(float(extreme)-buffer_m5) if extreme is not None else None

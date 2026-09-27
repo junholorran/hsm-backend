@@ -1698,7 +1698,7 @@ def _kairos_select_structural_first_capture_sweep(candles_por_tf, now_ts, liquid
 
 
 def _kairos_direction_after_htf_location(candles, location, swing_size=5):
-    """M15 decide a direção depois de tocar um POI HTF; o POI não impõe LONG/SHORT."""
+    """M15: primeira quebra Lux real posterior ao toque HTF. Sem filtro arbitrário."""
     if not candles or not location:
         return None
     touch_ts=location.get('touch_ts')
@@ -1711,18 +1711,12 @@ def _kairos_direction_after_htf_location(candles, location, swing_size=5):
         full_idx=next((j for j,c in enumerate(candles) if c['t']==e['t']),None)
         if full_idx is None:
             continue
-        causal=candles[:full_idx+1]
-        z=_kairos_momentum_z(causal)
-        atrs=compute_atr(causal,14); atr=next((v for v in reversed(atrs) if v is not None),None)
-        bc=candles[full_idx]; body=abs(bc['c']-bc['o'])
         d=e.get('direcao')
-        signed_ok=(z is not None and ((d=='alta' and z>0.5) or (d=='baixa' and z<-0.5)))
-        body_ok=bool(atr and body>=0.5*atr and ((d=='alta' and bc['c']>bc['o']) or (d=='baixa' and bc['c']<bc['o'])))
-        if signed_ok or body_ok:
-            return {'direction':'LONG' if d=='alta' else 'SHORT','direcao':d,'mode':'HTF_POI_REACTION',
-                    'structure':{**e,'full_idx':full_idx},'momentum_z':z}
+        if d not in ('alta','baixa'):
+            continue
+        return {'direction':'LONG' if d=='alta' else 'SHORT','direcao':d,'mode':'HTF_POI_REACTION',
+                'structure':{**e,'full_idx':full_idx},'momentum_z':None}
     return None
-
 
 def _kairos_select_htf_poi_location(mapa, m15_candles, now_ts):
     """Última interação causal M15 com FVG/IFVG/OB HTF já existente."""
@@ -1753,34 +1747,23 @@ def _kairos_select_htf_poi_location(mapa, m15_candles, now_ts):
 
 
 def _kairos_direction_after_first_capture(candles, capture, swing_size=5):
-    """Deriva direção da REAÇÃO + intenção + MSS/CHoCH, nunca do lado da liquidez."""
-    if not candles or not capture: return None
+    """Reação resolvida + primeira quebra Lux M15 na direção causal esperada."""
+    if not candles or not capture:
+        return None
     side=capture.get('liquidity_side'); state=capture.get('post_capture_state')
-    # Sem reação resolvida não existe direção. Nunca transformar estado desconhecido
-    # silenciosamente em continuação.
     if side not in ('HIGH','LOW') or state not in ('REJECTION_RECLAIM','ACCEPTANCE_CONTINUATION'):
         return None
-    # Quatro caminhos causais AMD/PO3 permitidos.
-    expected = ('baixa' if side=='HIGH' else 'alta') if state=='REJECTION_RECLAIM' else ('alta' if side=='HIGH' else 'baixa')
-    idx=next((i for i,c in enumerate(candles) if c['t']>=capture['sweep_ts']),None)
-    if idx is None: return None
-    sub=candles[max(0,idx-swing_size-2):]
-    events=compute_lux_internal_structure(sub,swing_size=swing_size)
+    expected=('baixa' if side=='HIGH' else 'alta') if state=='REJECTION_RECLAIM' else ('alta' if side=='HIGH' else 'baixa')
+    events=compute_lux_internal_structure(candles,swing_size=swing_size)
     for e in events:
         if e.get('t',0) <= capture['sweep_ts'] or e.get('direcao') != expected or e.get('tipo') not in ('CHoCH','BOS'):
             continue
         full_idx=next((j for j,c in enumerate(candles) if c['t']==e['t']),None)
-        if full_idx is None: continue
-        causal=candles[:full_idx+1]
-        z=_kairos_momentum_z(causal)
-        atrs=compute_atr(causal,14); atr=next((v for v in reversed(atrs) if v is not None),None)
-        bc=candles[full_idx]; body=abs(bc['c']-bc['o'])
-        signed_ok=(z is not None and ((expected=='alta' and z>0.5) or (expected=='baixa' and z<-0.5)))
-        body_ok=bool(atr and body>=0.5*atr and ((expected=='alta' and bc['c']>bc['o']) or (expected=='baixa' and bc['c']<bc['o'])))
-        if signed_ok or body_ok:
-            return {'direction':'LONG' if expected=='alta' else 'SHORT','direcao':expected,
-                    'mode':'REVERSAL' if state=='REJECTION_RECLAIM' else 'CONTINUATION',
-                    'structure':{**e,'full_idx':full_idx},'momentum_z':z}
+        if full_idx is None:
+            continue
+        return {'direction':'LONG' if expected=='alta' else 'SHORT','direcao':expected,
+                'mode':'REVERSAL' if state=='REJECTION_RECLAIM' else 'CONTINUATION',
+                'structure':{**e,'full_idx':full_idx},'momentum_z':None}
     return None
 
 def _kairos_m5_refine_zone(m5_candles, m15_zone, sweep_ts, structure_ts, direction):

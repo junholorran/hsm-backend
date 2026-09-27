@@ -2129,6 +2129,34 @@ def experiment_poi_lifecycle_a_near():
 
 
 
+@app.route('/experiment/audit_near_liquidity_window', methods=['GET'])
+def experiment_audit_near_liquidity_window():
+    """READ-ONLY: prova o que o registry de liquidez da NEAR enxerga na janela atual."""
+    now_ts=int(request.args.get('fim_ts_ms') or int(time.time()*1000))
+    specs={'MN':('M',3650),'W1':('W',1825),'D1':('D',730),'H4':('240',120),'H1':('60',45),'M15':('15',12),'M5':('5',5)}
+    candles={}
+    for tf,(interval,dias) in specs.items():
+        candles[tf]=scalp_engine._fetch_bybit_klines_historico('NEARUSD',interval,dias,fim_ts_ms=now_ts)
+    sweep,audit=scalp_engine._kairos_select_structural_first_capture_sweep(candles,now_ts)
+    levels=(audit or {}).get('levels') or []
+    setup=(audit or {}).get('setup_levels') or []
+    candidates=(audit or {}).get('candidates') or []
+    m15=candles.get('M15') or []
+    ev50=scalp_engine.compute_lux_structure_events(m15,swing_size=50)
+    ev5=scalp_engine.compute_lux_structure_events(m15,swing_size=5)
+    return jsonify({
+        'ok':True,'read_only':True,'pair':'NEARUSD','fim_ts_ms':now_ts,
+        'selected_sweep':sweep,
+        'counts':{'registry_levels':len(levels),'setup_levels':len(setup),'capture_candidates':len(candidates),
+                  'm15_major50_events':len(ev50),'m15_internal5_events':len(ev5)},
+        'setup_levels':setup[-40:],
+        'capture_candidates':candidates[-40:],
+        'm15_major50_events':ev50[-20:],
+        'm15_internal5_events':ev5[-30:],
+        'note':'Somente leitura. FVG/IFVG/OB nao contam como liquidez; mostra registry, first-capture e estrutura M15 sem alterar gates.'
+    })
+
+
 _KAIROS_NEAR_CHOCH_AUDIT = {'status':'IDLE','result':None,'error':None}
 
 def _build_near_choch_audit(rr):

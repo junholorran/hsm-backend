@@ -2129,6 +2129,48 @@ def experiment_poi_lifecycle_a_near():
 
 
 
+_KAIROS_NEAR_CHAIN_AUDIT={'status':'IDLE','result':None,'error':None}
+
+def _near_chain_job():
+    _KAIROS_NEAR_CHAIN_AUDIT.update({'status':'RUNNING','result':None,'error':None})
+    try:
+        now_ts=int(time.time()*1000)
+        specs={'MN':('M',3650),'W1':('W',1825),'D1':('D',730),'H4':('240',120),'H1':('60',45),'M15':('15',12),'M5':('5',5)}
+        candles={tf:scalp_engine._fetch_bybit_klines_historico('NEARUSD',iv,d,fim_ts_ms=now_ts) for tf,(iv,d) in specs.items()}
+        sweep,audit=scalp_engine._kairos_select_structural_first_capture_sweep(candles,now_ts)
+        m15=candles.get('M15') or []
+        majors=scalp_engine.compute_lux_structure_events(m15,swing_size=50)
+        internals=scalp_engine.compute_lux_internal_structure(m15,swing_size=5)
+        rows=[]
+        for cap in ((audit or {}).get('candidates') or []):
+            if cap.get('status')!='VALID_FIRST_CAPTURE_NEUTRAL': continue
+            ts=cap.get('sweep_ts') or 0
+            side=cap.get('liquidity_side'); state=cap.get('post_capture_state')
+            expected=('baixa' if side=='HIGH' else 'alta') if state=='REJECTION_RECLAIM' else ('alta' if side=='HIGH' else 'baixa')
+            major_before=next((e for e in reversed(majors) if e.get('t',0)<=ts),None)
+            major_after=next((e for e in majors if e.get('t',0)>ts and e.get('direcao')==expected),None)
+            internal_after=next((e for e in internals if e.get('t',0)>ts and e.get('direcao')==expected),None)
+            intent=scalp_engine._kairos_direction_after_first_capture(m15,cap,swing_size=5)
+            rows.append({'capture':cap,'expected_direction':expected,'major_state_before_capture':major_before,
+                         'first_major_expected_after_capture':major_after,'first_internal_expected_after_capture':internal_after,
+                         'current_intent_result':intent,
+                         'first_failure':'NO_MAJOR_EXPECTED_AFTER_CAPTURE' if not major_after else ('NO_INTERNAL_AFTER_MAJOR' if not intent else None)})
+        _KAIROS_NEAR_CHAIN_AUDIT.update({'status':'DONE','result':{'ok':True,'read_only':True,'selected_sweep':sweep,'candidates':rows}})
+    except Exception as e:
+        _KAIROS_NEAR_CHAIN_AUDIT.update({'status':'ERROR','error':str(e)})
+
+@app.route('/experiment/audit_near_chain/start',methods=['GET'])
+def experiment_audit_near_chain_start():
+    if _KAIROS_NEAR_CHAIN_AUDIT.get('status')=='RUNNING':
+        return jsonify({'status':'RUNNING','started':False}),202
+    threading.Thread(target=_near_chain_job,daemon=True).start()
+    return jsonify({'status':'STARTING','started':True,'pair':'NEARUSD','read_only':True}),202
+
+@app.route('/experiment/audit_near_chain',methods=['GET'])
+def experiment_audit_near_chain():
+    return jsonify(_KAIROS_NEAR_CHAIN_AUDIT)
+
+
 _KAIROS_NEAR_LIQ_AUDIT={'status':'IDLE','result':None,'error':None}
 
 def _near_liq_job(now_ts):

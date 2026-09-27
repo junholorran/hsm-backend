@@ -1776,7 +1776,7 @@ def _kairos_direction_after_first_capture(candles, capture, swing_size=5):
                 'structure':{**e,'full_idx':full_idx},'momentum_z':None}
     return None
 
-def _kairos_m5_refine_zone(m5_candles, m15_zone, sweep_ts, structure_ts, direction):
+def _kairos_m5_refine_zone(m5_candles, m15_zone, sweep_ts, structure_ts, direction, structure_level=None):
     """M5 refina a tese já confirmada no M15; não cria uma segunda tese estrutural.
 
     Procura POI M5 causal da perna M15 e contido/overlap no POI M15.
@@ -2474,7 +2474,7 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
     # M15 confirmou a intenção; M5 só refina a execução da MESMA tese.
     # Nunca volta a decidir direção nem cria tese independente.
     m5=candles_por_tf.get('M5') or []
-    refined=_kairos_m5_refine_zone(m5,zone,structure.get('leg_start_ts') or sweep['sweep_ts'],structure_confirm_ts,sweep['direcao'])
+    refined=_kairos_m5_refine_zone(m5,zone,structure.get('leg_start_ts') or sweep['sweep_ts'],structure_confirm_ts,sweep['direcao'],structure.get('nivel'))
     resultado['m5_refinement_candidate_found']=bool(refined)
     resultado['m5_refinement_candidate_type']=refined.get('tipo') if refined else None
     resultado['m5_refinement_candidate_top']=round(refined['top'],6) if refined and refined.get('top') is not None else None

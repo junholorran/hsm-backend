@@ -1839,7 +1839,8 @@ def _kairos_m5_refine_zone(m5_candles, m15_zone, sweep_ts, structure_ts, directi
             'created_ts':c.get('t'),'origin_ts':c.get('t'),
             'state':'ATIVA','source_tf':'M5',
             'origin_candle':dict(c),
-            'refinement_basis':'M15_CONFIRMED_LEG_LAST_OPPOSITE_M5'
+            'causal_break_m5':dict(break_candle),'causal_break_level_m15':structure_level,
+            'refinement_basis':'M15_BREAK_CAUSAL_LAST_OPPOSITE_M5'
         }
     return None
 

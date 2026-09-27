@@ -1719,7 +1719,7 @@ def _kairos_direction_after_htf_location(candles, location, swing_size=5):
     return None
 
 def _kairos_select_htf_poi_location(mapa, m15_candles, now_ts):
-    """Última interação causal M15 com FVG/IFVG/OB HTF já existente."""
+    """Última INTERAÇÃO causal com POI HTF: entrada fora->dentro, não último candle dentro."""
     if not m15_candles:
         return None
     candidates=[]
@@ -1735,16 +1735,26 @@ def _kairos_select_htf_poi_location(mapa, m15_candles, now_ts):
             born=z.get('flip_ts') or z.get('break_ts') or z.get('created_ts') or z.get('t')
             if born is None:
                 continue
-            touch=next((c for c in reversed(m15_candles)
-                        if born <= c['t'] <= now_ts and c['h'] >= bottom and c['l'] <= top),None)
-            if touch:
+
+            # Um toque é o INÍCIO de uma interação: candle entra na zona vindo de fora.
+            # Enquanto os candles seguintes permanecerem dentro/overlap, o touch_ts fica
+            # congelado no primeiro candle; assim um BOS/CHoCH posterior não é apagado.
+            last_entry=None
+            prev_inside=False
+            for c in m15_candles:
+                if c['t'] < born or c['t'] > now_ts:
+                    continue
+                inside=(c['h'] >= bottom and c['l'] <= top)
+                if inside and not prev_inside:
+                    last_entry=c
+                prev_inside=inside
+            if last_entry:
                 candidates.append({'tf':tf,'tipo':z.get('tipo','HTF_POI'),'top':top,'bottom':bottom,
-                                   'origin_ts':born,'touch_ts':touch['t'],'touch_price':touch['c'],
-                                   'poi_direction':z.get('direcao'),'source':'HTF_POI_TOUCH'})
+                                   'origin_ts':born,'touch_ts':last_entry['t'],'touch_price':last_entry['c'],
+                                   'poi_direction':z.get('direcao'),'source':'HTF_POI_INTERACTION_ENTRY'})
     if not candidates:
         return None
     return max(candidates,key=lambda x:(x['touch_ts'],KAIROS_TF_PESO.get(x['tf'],1)))
-
 
 def _kairos_direction_after_first_capture(candles, capture, swing_size=5):
     """Reação resolvida + primeira quebra Lux M15 na direção causal esperada."""

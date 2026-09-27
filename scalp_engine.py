@@ -2676,8 +2676,6 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
             if local_sweep is not None:
                 extreme=float(local_sweep['sweep_extreme']); extreme_ts=local_sweep['sweep_ts']
                 known_to_entry=[c for c in m5 if c.get('t',0)<=retest['t']]
-            else:
-                extreme=extreme_ts=known_to_entry=None
                 sl=aplicar_buffer_stop_atr(extreme,'alta' if direction=='LONG' else 'baixa',known_to_entry)
                 violation=next((c for c in m5 if extreme_ts < c.get('t',0) < retest['t'] and
                                 ((c.get('l') is not None and c['l']<=sl) if direction=='LONG'
@@ -2699,6 +2697,8 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
                     sl_info=None
                     sl_audit.update({'motivo':'LAST_CAUSAL_M5_SWEEP_INVALIDADO_ANTES_ENTRY',
                                      'invalidated_ts':violation.get('t'),'sl_buffered':sl})
+            else:
+                sl_info=None
         else:
             sl_info=None
     else:

@@ -1987,6 +1987,33 @@ def _run_kairos_pdh_pdl_btc_background(dias, fim_ts_ms):
             print(f'[PDH_PDL_BTC_CAUSAL_CROSS_AUDIT] {events}', flush=True)
         except Exception as audit_e:
             print(f'[PDH_PDL_BTC_CAUSAL_CROSS_AUDIT_ERROR] {audit_e}', flush=True)
+        # Resumo operacional: somente trades únicos, com desfecho causal posterior.
+        try:
+            uniq=r.get('sinais_unicos_completos') or []
+            m5=r.get('m5_completo') or []
+            trades=[]
+            for sig in uniq:
+                entry=sig.get('entry'); sl=sig.get('sl'); tp1=sig.get('tp1') or sig.get('tp'); tp2=sig.get('tp2')
+                ets=sig.get('timestamp'); direction=sig.get('direction')
+                future=[c for c in m5 if c.get('t',0) > (ets or 0)]
+                outcome='PENDING'; outcome_ts=None
+                for c in future:
+                    if direction=='LONG':
+                        hit_sl=sl is not None and c.get('l') <= sl
+                        hit_tp2=tp2 is not None and c.get('h') >= tp2
+                        hit_tp1=tp1 is not None and c.get('h') >= tp1
+                    else:
+                        hit_sl=sl is not None and c.get('h') >= sl
+                        hit_tp2=tp2 is not None and c.get('l') <= tp2
+                        hit_tp1=tp1 is not None and c.get('l') <= tp1
+                    if hit_sl and (hit_tp1 or hit_tp2): outcome='AMBIGUO'; outcome_ts=c.get('t'); break
+                    if hit_tp2: outcome='TP2'; outcome_ts=c.get('t'); break
+                    if hit_sl: outcome='SL'; outcome_ts=c.get('t'); break
+                    if hit_tp1: outcome='TP1'; outcome_ts=c.get('t'); break
+                trades.append({'entry_ts':ets,'direction':direction,'entry':entry,'sl':sl,'tp1':tp1,'tp2':tp2,'choch_ts':sig.get('choch_timestamp'),'first_capture_ts':sig.get('first_capture_ts'),'zone_type':sig.get('zone_type'),'zone':[sig.get('zone_bottom'),sig.get('zone_top')],'rr':sig.get('rr'),'outcome':outcome,'outcome_ts':outcome_ts})
+            print(f'[PDH_PDL_BTC_UNIQUE_TRADES] total={len(trades)} trades={trades}', flush=True)
+        except Exception as trades_e:
+            print(f'[PDH_PDL_BTC_UNIQUE_TRADES_ERROR] {trades_e}', flush=True)
         print(f'[PDH_PDL_BTC_RESULT] {r}', flush=True)
         print(f'[PDH_PDL_BTC_PROGRESS] dias={dias} phase=DONE', flush=True)
     except Exception as e:

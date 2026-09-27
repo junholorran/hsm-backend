@@ -1847,64 +1847,68 @@ else:
     print('[POI_ABC] experimental service: live paper scheduler DISABLED', flush=True)
 
 
-# EXPERIMENTAL BTC A_CURRENT LIVE SCANNER — demo/manual execution only.
-# Uses the same closed-candle causal replay/decision layer; never emits historical
-# signals on startup. Only a newly executable signal after the scanner watermark
-# can alert, once per structural signature.
-_KAIROS_BTC_LIVE_LAST_TS = int(time.time() * 1000)
-_KAIROS_BTC_LIVE_SEEN = set()
-_KAIROS_BTC_LIVE_INTERVAL_SECONDS = 5 * 60
+# EXPERIMENTAL 13-PAIR A_CURRENT LIVE SCANNER — demo/manual execution only.
+# Same closed-candle causal replay/decision layer used for BTC; no trading math changed.
+# Per-pair watermark + structural dedup prevent one pair from suppressing another.
+_KAIROS_LIVE_PAIRS = (
+    'BTCUSD', 'ETHUSD', 'SOLUSD', 'XRPUSD', 'LINKUSD', 'ADAUSD', 'AVAXUSD',
+    'BNBUSD', 'AAVEUSD', 'NEARUSD', 'PENDLEUSD', 'INJUSD', 'ONDOUSD',
+)
+_KAIROS_LIVE_LAST_TS = {pair: int(time.time() * 1000) for pair in _KAIROS_LIVE_PAIRS}
+_KAIROS_LIVE_SEEN = {pair: set() for pair in _KAIROS_LIVE_PAIRS}
+_KAIROS_LIVE_INTERVAL_SECONDS = 5 * 60
 
-def _kairos_btc_live_scanner_loop():
-    global _KAIROS_BTC_LIVE_LAST_TS
+def _kairos_live_scanner_loop():
     while True:
         cycle_started_ms = int(time.time() * 1000)
-        try:
-            r = scalp_engine.replay_vortex_decision_layer_v2(
-                'BTCUSD', dias_historico=1, fim_ts_ms=cycle_started_ms,
-                experimental_poi_policy='A_CURRENT',
-            )
-            sinais = r.get('sinais_unicos_completos', []) if isinstance(r, dict) else []
-            novos = []
-            for s in sinais:
-                ts = s.get('timestamp')
-                sig = (s.get('choch_timestamp'), s.get('direction'), s.get('zone_type'),
-                       s.get('zone_created_ts'), s.get('zone_bottom'), s.get('zone_top'))
-                if ts is None or ts <= _KAIROS_BTC_LIVE_LAST_TS or ts > cycle_started_ms or sig in _KAIROS_BTC_LIVE_SEEN:
-                    continue
-                novos.append((ts, sig, s))
-            novos.sort(key=lambda x: x[0])
-            for ts, sig, s in novos:
-                direction = s.get('direction')
-                entry = s.get('entry')
-                sl = s.get('sl')
-                tp1 = s.get('tp1')
-                tp2 = s.get('tp2')
-                zone = s.get('zone_type')
-                choch = s.get('choch_timestamp')
-                msg = (
-                    "⚡ <b>KAIROS BTC — SINAL CAUSAL NOVO</b>\n\n"
-                    f"{'📈' if direction == 'LONG' else '📉'} <b>{direction}</b> | BTCUSD\n"
-                    f"🎯 <b>Entry:</b> {entry}\n"
-                    f"🛑 <b>SL estrutural:</b> {sl}\n"
-                    f"✅ <b>TP1:</b> {tp1}\n"
-                    f"🏁 <b>TP2:</b> {tp2}\n"
-                    f"🧩 <b>POI:</b> {zone}\n"
-                    f"🔗 <b>MSS/CHoCH:</b> {choch}\n"
-                    "🧪 Demo/manual — A_CURRENT, candles fechados, sem score."
+        for pair in _KAIROS_LIVE_PAIRS:
+            try:
+                r = scalp_engine.replay_vortex_decision_layer_v2(
+                    pair, dias_historico=1, fim_ts_ms=cycle_started_ms,
+                    experimental_poi_policy='A_CURRENT',
                 )
-                send_telegram(msg)
-                _KAIROS_BTC_LIVE_SEEN.add(sig)
-                print(f"[KAIROS_BTC_LIVE] ALERT ts={ts} sig={sig} entry={entry} sl={sl}", flush=True)
-            _KAIROS_BTC_LIVE_LAST_TS = cycle_started_ms
-            print(f"[KAIROS_BTC_LIVE] scan done signals={len(sinais)} new={len(novos)} watermark={_KAIROS_BTC_LIVE_LAST_TS}", flush=True)
-        except Exception as e:
-            print(f"[KAIROS_BTC_LIVE] scan error: {e}", flush=True)
-        time.sleep(_KAIROS_BTC_LIVE_INTERVAL_SECONDS)
+                sinais = r.get('sinais_unicos_completos', []) if isinstance(r, dict) else []
+                novos = []
+                for s in sinais:
+                    ts = s.get('timestamp')
+                    sig = (s.get('choch_timestamp'), s.get('direction'), s.get('zone_type'),
+                           s.get('zone_created_ts'), s.get('zone_bottom'), s.get('zone_top'))
+                    if (ts is None or ts <= _KAIROS_LIVE_LAST_TS[pair] or
+                            ts > cycle_started_ms or sig in _KAIROS_LIVE_SEEN[pair]):
+                        continue
+                    novos.append((ts, sig, s))
+                novos.sort(key=lambda x: x[0])
+                for ts, sig, s in novos:
+                    direction = s.get('direction')
+                    entry = s.get('entry')
+                    sl = s.get('sl')
+                    tp1 = s.get('tp1')
+                    tp2 = s.get('tp2')
+                    zone = s.get('zone_type')
+                    choch = s.get('choch_timestamp')
+                    msg = (
+                        "⚡ <b>KAIROS — SINAL CAUSAL NOVO</b>\n\n"
+                        f"{'📈' if direction == 'LONG' else '📉'} <b>{direction}</b> | {pair}\n"
+                        f"🎯 <b>Entry:</b> {entry}\n"
+                        f"🛑 <b>SL estrutural:</b> {sl}\n"
+                        f"✅ <b>TP1:</b> {tp1}\n"
+                        f"🏁 <b>TP2:</b> {tp2}\n"
+                        f"🧩 <b>POI:</b> {zone}\n"
+                        f"🔗 <b>MSS/CHoCH:</b> {choch}\n"
+                        "🧪 Demo/manual — A_CURRENT, candles fechados, sem score."
+                    )
+                    send_telegram(msg)
+                    _KAIROS_LIVE_SEEN[pair].add(sig)
+                    print(f"[KAIROS_LIVE] ALERT pair={pair} ts={ts} sig={sig} entry={entry} sl={sl}", flush=True)
+                _KAIROS_LIVE_LAST_TS[pair] = cycle_started_ms
+                print(f"[KAIROS_LIVE] scan done pair={pair} signals={len(sinais)} new={len(novos)} watermark={_KAIROS_LIVE_LAST_TS[pair]}", flush=True)
+            except Exception as e:
+                print(f"[KAIROS_LIVE] scan error pair={pair}: {e}", flush=True)
+        time.sleep(_KAIROS_LIVE_INTERVAL_SECONDS)
 
 if os.environ.get('RAILWAY_SERVICE_NAME') == 'kairos-poi-abc-sol':
-    threading.Thread(target=_kairos_btc_live_scanner_loop, daemon=True).start()
-    print('[KAIROS_BTC_LIVE] scanner ENABLED BTCUSD A_CURRENT interval=5m demo/manual', flush=True)
+    threading.Thread(target=_kairos_live_scanner_loop, daemon=True).start()
+    print(f"[KAIROS_LIVE] scanner ENABLED pairs={len(_KAIROS_LIVE_PAIRS)} A_CURRENT interval=5m demo/manual", flush=True)
 
 
 # EXPERIMENTAL BRANCH ONLY — POI lifecycle A/B/C replay. Read-only, no DB/Telegram.

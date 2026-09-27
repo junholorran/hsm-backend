@@ -3097,7 +3097,7 @@ def replay_poi_lifecycle_abc_sol(dias_historico=7, fim_ts_ms=None, pair='SOLUSD'
             ev=res.get('resultado'); events.append(ev)
             n_res=res.get('candles_ate_resolucao')
             resolved_signal_autopsy.append({'signal':s,'resolution':res,'resolution_candle_m5':(future[n_res-1] if n_res and n_res <= len(future) else None),'future_m5_until_resolution':(future[:n_res] if n_res else [])})
-            if ev=='TP': proxy.append(3.0)
+            if ev=='TP': proxy.append(1.0 if s.get('trade_mode')=='SCALP_CAUSAL_1R' else 3.0)
             elif ev=='SL': proxy.append(-1.0)
             elif ev=='BE': proxy.append(0.0)
         counts={k:events.count(k) for k in ('TP','SL','BE','AMBIGUO','NENHUM')}

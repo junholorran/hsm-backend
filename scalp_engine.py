@@ -629,19 +629,38 @@ def _kairos_fvg_states(candles, lookback=250):
     if len(c) < 3:
         return []
     states=[]
+    # LuxAlgo SMC literal FVG filter (same-TF port of drawFairValueGaps):
+    # currentLow > high[2] / currentHigh < low[2], middle candle CLOSE beyond
+    # the old extreme, and middle-candle body delta beyond the cumulative auto threshold.
+    # Pine formula is intentionally preserved literally:
+    #   barDeltaPercent = (lastClose-lastOpen)/(lastOpen*100)
+    #   threshold = cumulative(abs(barDeltaPercent))/bar_index*2
+    cumulative_abs_delta=0.0
     for i in range(2, len(c)):
         a, meio, atual = c[i-2], c[i-1], c[i]
+        denom=(float(meio['o'])*100.0) if meio.get('o') not in (None,0) else None
+        bar_delta=((float(meio['c'])-float(meio['o']))/denom) if denom else 0.0
+        cumulative_abs_delta += abs(bar_delta)
+        threshold=(cumulative_abs_delta / float(i) * 2.0) if i > 0 else 0.0
+        bull_geom=atual['l'] > a['h']
+        bear_geom=atual['h'] < a['l']
+        bull_lux=bull_geom and meio['c'] > a['h'] and bar_delta > threshold
+        bear_lux=bear_geom and meio['c'] < a['l'] and (-bar_delta) > threshold
         novo=None
-        if atual['l'] > a['h']:
+        if bull_lux:
             novo={'id':f"FVG_{meio['t']}_B",'tipo':'FVG_bullish','direcao':'alta','top':atual['l'],'bottom':a['h'],
                   'created_ts':atual['t'],'origin_ts':meio['t'],'state':'ATIVA','flip_ts':None,'mother_fvg_id':None,
                   'first_touch_ts':None,'mitigated_ts':None,'invalidated_ts':None,
-                  'source_a':dict(a),'source_mid':dict(meio),'source_c':dict(atual),'flip_candle':None}
-        elif atual['h'] < a['l']:
+                  'source_a':dict(a),'source_mid':dict(meio),'source_c':dict(atual),'flip_candle':None,
+                  'lux_fvg':True,'lux_bar_delta_percent':bar_delta,'lux_threshold':threshold,
+                  'lux_middle_close_condition':True,'lux_geometry_condition':True}
+        elif bear_lux:
             novo={'id':f"FVG_{meio['t']}_S",'tipo':'FVG_bearish','direcao':'baixa','top':a['l'],'bottom':atual['h'],
-                  'created_ts':atual['t'],'origin_ts':meio['t'],'state':'ATIVA','flip_ts':None,
+                  'created_ts':atual['t'],'origin_ts':meio['t'],'state':'ATIVA','flip_ts':None,'mother_fvg_id':None,
                   'first_touch_ts':None,'mitigated_ts':None,'invalidated_ts':None,
-                  'source_a':dict(a),'source_mid':dict(meio),'source_c':dict(atual),'flip_candle':None}
+                  'source_a':dict(a),'source_mid':dict(meio),'source_c':dict(atual),'flip_candle':None,
+                  'lux_fvg':True,'lux_bar_delta_percent':bar_delta,'lux_threshold':threshold,
+                  'lux_middle_close_condition':True,'lux_geometry_condition':True}
         if novo:
             states.append(novo)
 
@@ -2138,6 +2157,30 @@ def _kairos_retest_zone(candles, zone, after_ts):
     return None
 
 
+def _kairos_lux_dealing_range(candles, swing_size=50):
+    """Range estrutural auditável derivado dos pivôs Lux confirmados; EQ=50%.
+
+    Não é gatilho. Serve apenas para localização premium/discount. Usa somente
+    pivôs que a matemática Lux já confirmou causalmente.
+    """
+    swings=_extrair_swings_lux_algo(candles, swing_size=swing_size)
+    if not swings:
+        return None
+    last_high=next((x for x in reversed(swings) if x.get('tipo')=='high'),None)
+    last_low=next((x for x in reversed(swings) if x.get('tipo')=='low'),None)
+    if not last_high or not last_low:
+        return None
+    hi=float(last_high['valor']); lo=float(last_low['valor'])
+    if hi <= lo:
+        return None
+    eq=(hi+lo)/2.0
+    close=float(candles[-1]['c']) if candles else None
+    location='EQUILIBRIUM' if close == eq else ('PREMIUM' if close > eq else 'DISCOUNT')
+    return {'high':hi,'low':lo,'equilibrium':eq,'location':location,
+            'high_origin_ts':last_high.get('t'),'low_origin_ts':last_low.get('t'),
+            'swing_size':swing_size,'source':'LUX_CONFIRMED_SWINGS'}
+
+
 def _kairos_context_bias(candles_por_tf):
     """Narrativa HTF hierárquica; contexto, NUNCA trava de direção.
 
@@ -2261,6 +2304,12 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
     mapa=_kairos_build_mtf_map(candles_por_tf)
     contexto=_kairos_context_bias(candles_por_tf)
     resultado['context_bias']=contexto; resultado['bias']=contexto.get('final')
+    resultado['dealing_ranges']={}
+    for _tf in ('W1','D1','H4','H1'):
+        _cs=candles_por_tf.get(_tf) or []
+        _size=50
+        if len(_cs) >= _size + 5:
+            resultado['dealing_ranges'][_tf]=_kairos_lux_dealing_range(_cs,swing_size=_size)
     resultado['mtf_summary']={tf:{
         'pivots':len(d.get('pivots',[])),'eq':len(d.get('equal_liquidity',[])),
         'liq_ativas':sum(1 for x in d.get('liquidity_pools',[]) if x.get('state')=='ATIVA'),
@@ -2279,20 +2328,13 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
     resultado['first_capture_ts']=sweep['first_capture_ts']; resultado['sweep_confirm_ts']=sweep.get('confirm_ts')
     resultado['sweep_level']=round(sweep['nivel'],6); resultado['sweep_extreme']=round(sweep['extremo'],6)
 
-    # A liquidez HTF autoriza a procura do gatilho. M15 continua preferencial;
-    # para SCALP, se M15 ainda não confirmou, M5 pode confirmar a MESMA narrativa
-    # causal depois do first capture. M5 nunca cria tese sozinho.
+    # Arquitetura fechada: HTF = mapa/estrutura; M15 = confirmação obrigatória;
+    # M5 = refinamento/entrada. M5 nunca substitui a confirmação M15.
     exec_tf='M15'; exec_candles=candles_por_tf.get('M15') or []
     intent=_kairos_direction_after_first_capture(exec_candles,sweep,swing_size=5)
     resultado['intent_m15_found']=bool(intent)
     if not intent:
-        m5_intent_candles=candles_por_tf.get('M5') or []
-        intent=_kairos_direction_after_first_capture(m5_intent_candles,sweep,swing_size=5)
-        if intent:
-            exec_tf='M5'; exec_candles=m5_intent_candles
-            resultado['intent_fallback']='M5_AFTER_HTF_FIRST_CAPTURE'
-    if not intent:
-        resultado['failure_reason']='SEM_INTENCAO_CHOCH_MSS_M15_M5_APOS_FIRST_CAPTURE'; return resultado
+        resultado['failure_reason']='SEM_INTENCAO_CHOCH_MSS_M15_APOS_FIRST_CAPTURE'; return resultado
     direction=intent['direction']; sweep['direcao']=intent['direcao']; structure=intent['structure']
     resultado['direction']=direction; resultado['execution_tf']=exec_tf; resultado['choch_confirmed']=True
     resultado['choch_timestamp']=structure['t']; resultado['choch_level']=round(structure['nivel'],6)

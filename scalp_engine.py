@@ -2567,20 +2567,39 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
         resultado['m5_refinement_source_mid']=active_zone.get('source_mid')
         resultado['m5_refinement_source_c']=active_zone.get('source_c')
 
-    # Risco: se M5 refinou de verdade, usamos a invalidação LOCAL M5 da zona causal;
-    # caso contrário mantemos o protected swing do evento M15. Nunca apertamos SL
-    # artificialmente só para fabricar RR.
+    # O CHoCH/BOS M15 já confirmou a tese. Se houve refinamento M5, o M5
+    # serve SOMENTE para entry + invalidação local da POI refinada; não exigimos
+    # uma segunda quebra estrutural no M5.
     if entry_tf=='M5':
-        m5_events=compute_lux_internal_structure([c for c in m5 if c['t']<=retest['t']],swing_size=5)
-        m5_struct=next((e for e in reversed(m5_events)
-                        if e.get('t',0)<=retest['t'] and e.get('direcao')==sweep['direcao']
-                        and e.get('tipo') in ('CHoCH','BOS')),None)
-        if m5_struct:
-            m5_struct=dict(m5_struct)
-            m5_struct['full_idx']=next((i for i,c in enumerate(m5) if c['t']==m5_struct['t']),None)
-            sl_info,sl_audit=_kairos_select_structural_sl(mapa,'M5',m5,m5_struct,m5_struct,retest,direction)
+        atr_m5=_atr(m5,14) or 0.0
+        buffer_m5=0.5*atr_m5
+        if direction=='LONG':
+            extreme=active_zone.get('bottom')
+            sl=(float(extreme)-buffer_m5) if extreme is not None else None
+            protected_type='LOW'
         else:
-            sl_info,sl_audit=None,{'motivo':'SEM_BREAK_M5_CAUSAL_PARA_SL','candidatos':[]}
+            extreme=active_zone.get('top')
+            sl=(float(extreme)+buffer_m5) if extreme is not None else None
+            protected_type='HIGH'
+        if sl is not None:
+            sl_info={
+                'sl':sl,
+                'sl_tf':'M5',
+                'sl_classe':'M5_REFINED_POI_INVALIDATION',
+                'sl_sweep_ts':active_zone.get('origin_ts') or active_zone.get('created_ts') or active_zone.get('t'),
+                'sl_sweep_extreme':extreme,
+            }
+            sl_audit={'motivo':'OK_M5_REFINED_POI_INVALIDATION','candidatos':[{
+                'tf':'M5','classe':'M5_REFINED_POI_INVALIDATION',
+                'protected_type':protected_type,
+                'anchor_ts':sl_info['sl_sweep_ts'],
+                'sweep_extreme':extreme,'sl_buffered':sl,
+                'zone_type':active_zone.get('tipo'),
+                'refinement_basis':active_zone.get('refinement_basis'),
+                'status':'VALIDA'
+            }]}
+        else:
+            sl_info,sl_audit=None,{'motivo':'SEM_EXTREMO_POI_M5_PARA_SL','candidatos':[]}
     else:
         sl_info,sl_audit=_kairos_select_structural_sl(mapa,'M15',exec_candles,sweep,structure,retest,direction)
     resultado['sl_audit']=sl_audit

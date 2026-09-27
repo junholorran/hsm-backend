@@ -2264,11 +2264,24 @@ def _kairos_lux_dealing_range(candles, swing_size=50, tf=None):
     Não é gatilho. Serve apenas para localização premium/discount. Usa somente
     pivôs que a matemática Lux já confirmou causalmente.
     """
-    swings=_extrair_swings_lux_algo(candles, swing_size=swing_size)
-    if not swings:
+    events=compute_lux_structure_events(candles,swing_size=swing_size)
+    if not events:
         return None
-    close=float(candles[-1]['c']) if candles else None
-    return current_lux_dealing_range(swings,close,swing_size=swing_size)
+    ev=events[-1]
+    broken=ev.get('nivel'); protected=ev.get('protected_swing_level')
+    if broken is None or protected is None or float(broken)==float(protected):
+        return None
+    hi=max(float(broken),float(protected)); lo=min(float(broken),float(protected))
+    eq=lo+(hi-lo)*0.5; px=float(candles[-1]['c'])
+    return {'tf':tf,'high':hi,'low':lo,'equilibrium':eq,
+            'location':'EQUILIBRIUM' if abs(px-eq)<1e-12 else ('PREMIUM' if px>eq else 'DISCOUNT'),
+            'direction':ev.get('direcao'),'structure_type':ev.get('tipo'),
+            'break_level':float(broken),'break_candle_open_ts':ev.get('t'),
+            'broken_swing_origin_ts':ev.get('broken_swing_origin_ts'),
+            'protected_swing_type':ev.get('protected_swing_type'),
+            'protected_swing_level':float(protected),
+            'protected_swing_origin_ts':ev.get('protected_swing_origin_ts'),
+            'swing_size':swing_size,'source':'TF_ISOLATED_LUX_ACTIVE_STRUCTURE'}
 
 
 def _kairos_context_bias(candles_por_tf):

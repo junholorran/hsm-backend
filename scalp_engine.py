@@ -2689,7 +2689,12 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
                     sl_info=None
                     sl_audit['motivo']='SEM_SWEEP_M5_NO_LADO_ESTRUTURAL_DA_ENTRY'
             if local_sweep is not None:
-                extreme=float(local_sweep['sweep_extreme']); extreme_ts=local_sweep['sweep_ts']
+                # IMPORTANT: local_sweep pode ter sido substituído acima pelo último
+                # candidato estrutural do lado correto da Entry. Reancora extremo e
+                # timestamp no candidato efetivamente escolhido antes de calcular SL
+                # e testar invalidação; nunca misturar genealogia de dois sweeps.
+                extreme=float(local_sweep['sweep_extreme'])
+                extreme_ts=local_sweep['sweep_ts']
                 known_to_entry=[c for c in m5 if c.get('t',0)<=retest['t']]
                 sl=aplicar_buffer_stop_atr(extreme,'alta' if direction=='LONG' else 'baixa',known_to_entry)
                 violation=next((c for c in m5 if extreme_ts < c.get('t',0) < retest['t'] and

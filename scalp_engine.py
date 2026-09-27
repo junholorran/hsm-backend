@@ -2003,22 +2003,19 @@ def _kairos_select_entry_zone(exec_candles, sweep, structure, mapa):
         z2=dict(z); z2['liquidity_inside']=_kairos_zone_contains_liquidity(z2,mapa)
         zones.append(z2)
 
-    # Prioridade operacional: zona causal que contém/intersecta pool de liquidez,
-    # depois IFVG e FVG causais. Não é score; é relação geométrica POI<->liquidez.
-    with_pool=[z for z in zones if z.get('liquidity_inside')]
-    if with_pool:
-        ifvg_pool=[z for z in with_pool if z['tipo'].startswith('IFVG')]
-        if ifvg_pool:
-            return max(ifvg_pool,key=lambda z:(z.get('flip_ts') or z.get('created_ts') or 0))
-        return max(with_pool,key=lambda z:(z.get('created_ts') or 0))
-    ifvg=[z for z in zones if z['tipo'].startswith('IFVG')]
-    fvg=[z for z in zones if z['tipo'].startswith('FVG')]
-    if ifvg:
-        return max(ifvg,key=lambda z:(z.get('flip_ts') or z.get('created_ts') or 0))
+    # PRIORIDADE FECHADA: FVG Lux produzido na perna que efetivamente termina
+    # no BOS/CHoCH. Entre FVGs válidos da mesma perna, o mais próximo temporalmente
+    # do break tem prioridade. Liquidez dentro da zona desempata, mas não transforma
+    # IFVG/OB em prioridade acima do FVG causal da quebra.
+    fvg=[z for z in zones if z['tipo'].startswith('FVG_') and z.get('lux_fvg') is True]
     if fvg:
-        return max(fvg,key=lambda z:(z.get('created_ts') or 0))
+        return max(fvg,key=lambda z:(1 if z.get('liquidity_inside') else 0,z.get('created_ts') or 0))
+    # IFVG continua elegível somente quando nasceu de FVG-mãe Lux da mesma perna.
+    ifvg=[z for z in zones if z['tipo'].startswith('IFVG_') and z.get('mother_fvg_id')]
+    if ifvg:
+        return max(ifvg,key=lambda z:(1 if z.get('liquidity_inside') else 0,z.get('flip_ts') or z.get('created_ts') or 0))
 
-    # OB é derivado diretamente do break e só entra se não houver imbalance causal.
+    # OB é derivado diretamente do break e só entra se não houver FVG/IFVG causal.
     ob=_kairos_ob_from_break(exec_candles, structure.get('full_idx'), direction)
     if ob:
         ob['liquidity_inside']=_kairos_zone_contains_liquidity(ob,mapa)
@@ -2052,9 +2049,17 @@ def _kairos_shadow_validate_poi(zone, candles, sweep=None, structure=None, tf='M
         causal_ok=True
         if sweep: causal_ok=causal_ok and zone.get('created_ts',0) >= sweep.get('sweep_ts',0)
         if structure: causal_ok=causal_ok and (zone.get('flip_ts') or zone.get('created_ts') or 0) <= structure.get('t',0)
+        lux_delta=zone.get('lux_bar_delta_percent'); lux_threshold=zone.get('lux_threshold')
+        lux_close_ok=bool((mother=='FVG_bullish' and b.get('c') is not None and a.get('h') is not None and b['c']>a['h']) or
+                          (mother=='FVG_bearish' and b.get('c') is not None and a.get('l') is not None and b['c']<a['l']))
+        lux_threshold_ok=bool(lux_delta is not None and lux_threshold is not None and
+                              ((mother=='FVG_bullish' and lux_delta>lux_threshold) or
+                               (mother=='FVG_bearish' and -lux_delta>lux_threshold)))
         out.update({'mother_type':mother,'ordered_abc':ordered,'geometry_ok':bool(mother),'bounds_ok':bounds_ok,
                     'created_ts_ok':created_ok,'causal_window_ok':causal_ok,'source_a':a,'source_mid':b,'source_c':c,
-                    'top':zone.get('top'),'bottom':zone.get('bottom'),'created_ts':zone.get('created_ts'),'flip_ts':zone.get('flip_ts')})
+                    'top':zone.get('top'),'bottom':zone.get('bottom'),'created_ts':zone.get('created_ts'),'flip_ts':zone.get('flip_ts'),
+                    'lux_fvg':zone.get('lux_fvg'),'lux_bar_delta_percent':lux_delta,'lux_threshold':lux_threshold,
+                    'lux_middle_close_ok':lux_close_ok,'lux_threshold_ok':lux_threshold_ok})
         if typ.startswith('IFVG_'):
             flip=zone.get('flip_candle'); fts=zone.get('flip_ts')
             flip_after=bool(isinstance(flip,dict) and fts==flip.get('t') and fts and fts>zone.get('created_ts',0))
@@ -2066,7 +2071,7 @@ def _kairos_shadow_validate_poi(zone, candles, sweep=None, structure=None, tf='M
             out['pass']=bool(ok); out['reason']='OK' if ok else 'IFVG_SEM_CADEIA_MAE_FLIP_CAUSAL_VALIDA'
             return out
         expected='FVG_bullish' if mother=='FVG_bullish' else ('FVG_bearish' if mother=='FVG_bearish' else None)
-        ok=ordered and bool(mother) and typ==expected and bounds_ok and created_ok and causal_ok
+        ok=ordered and bool(mother) and typ==expected and bounds_ok and created_ok and causal_ok and zone.get('lux_fvg') is True and lux_close_ok and lux_threshold_ok
         out['pass']=bool(ok); out['reason']='OK' if ok else 'FVG_GEOMETRIA_OU_CAUSALIDADE_INVALIDA'
         return out
     if typ.startswith('OB_'):

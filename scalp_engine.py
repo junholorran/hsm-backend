@@ -2455,10 +2455,17 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
     # Nunca volta a decidir direção nem cria tese independente.
     m5=candles_por_tf.get('M5') or []
     refined=_kairos_m5_refine_zone(m5,zone,structure.get('leg_start_ts') or sweep['sweep_ts'],structure['t'],sweep['direcao'])
+    resultado['m5_refinement_candidate_found']=bool(refined)
+    resultado['m5_refinement_candidate_type']=refined.get('tipo') if refined else None
+    resultado['m5_refinement_candidate_top']=round(refined['top'],6) if refined and refined.get('top') is not None else None
+    resultado['m5_refinement_candidate_bottom']=round(refined['bottom'],6) if refined and refined.get('bottom') is not None else None
+    resultado['m5_refinement_candidate_ts']=(refined.get('flip_ts') or refined.get('created_ts') or refined.get('t')) if refined else None
     retest=None; active_zone=zone; entry_tf=exec_tf
     if refined:
         rz_ts=refined.get('flip_ts') or refined.get('created_ts') or refined.get('t') or structure['t']
         r5=_kairos_retest_zone(m5,refined,max(structure['t'],rz_ts))
+        resultado['m5_refinement_retest_found']=bool(r5)
+        resultado['m5_refinement_retest_after_ts']=max(structure['t'],rz_ts)
         if r5:
             retest=r5; active_zone=refined; entry_tf='M5'; resultado['refinement_tf']='M5'
             resultado['zone_type']=refined.get('tipo',resultado['zone_type'])

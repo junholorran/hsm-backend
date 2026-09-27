@@ -1987,33 +1987,41 @@ def _run_kairos_pdh_pdl_btc_background(dias, fim_ts_ms):
             print(f'[PDH_PDL_BTC_CAUSAL_CROSS_AUDIT] {events}', flush=True)
         except Exception as audit_e:
             print(f'[PDH_PDL_BTC_CAUSAL_CROSS_AUDIT_ERROR] {audit_e}', flush=True)
-        # Resumo operacional: somente trades únicos, com desfecho causal posterior.
+        # Consolida POIs concorrentes da MESMA tese causal em um único trade.
+        # A decisão continua congelada no timestamp original; candles futuros servem só para resolver o desfecho.
         try:
             uniq=r.get('sinais_unicos_completos') or []
-            m5=r.get('m5_completo') or []
-            trades=[]
+            theses={}
             for sig in uniq:
+                k=(sig.get('first_capture_ts'),sig.get('choch_timestamp'),sig.get('direction'))
+                theses.setdefault(k,[]).append(sig)
+            # Política determinística: primeira entrada executável da tese; empate => menor risco absoluto.
+            selected=[]
+            for k,cands in theses.items():
+                cands=sorted(cands,key=lambda x:((x.get('timestamp') or 10**30),abs(float(x.get('entry'))-float(x.get('sl'))) if x.get('entry') is not None and x.get('sl') is not None else 10**30))
+                selected.append(cands[0])
+            # Busca candles APÓS o fim do replay, sem reavaliar sinais (somente outcome).
+            future_end=int(time.time()*1000)
+            m5_raw=scalp_engine._fetch_bybit_klines_historico('BTCUSDT','5',3000,fim_ts_ms=future_end)
+            m5_future,_=scalp_engine._validar_e_limpar_candles(m5_raw,'5')
+            trades=[]
+            for sig in selected:
                 entry=sig.get('entry'); sl=sig.get('sl'); tp1=sig.get('tp1') or sig.get('tp'); tp2=sig.get('tp2')
                 ets=sig.get('timestamp'); direction=sig.get('direction')
-                future=[c for c in m5 if c.get('t',0) > (ets or 0)]
-                outcome='PENDING'; outcome_ts=None
-                for c in future:
+                outcome='PENDING'; outcome_ts=None; tp1_seen=False
+                for c in [x for x in m5_future if x.get('t',0) > (ets or 0)]:
                     if direction=='LONG':
-                        hit_sl=sl is not None and c.get('l') <= sl
-                        hit_tp2=tp2 is not None and c.get('h') >= tp2
-                        hit_tp1=tp1 is not None and c.get('h') >= tp1
+                        hit_sl=sl is not None and c.get('l') <= sl; hit_tp1=tp1 is not None and c.get('h') >= tp1; hit_tp2=tp2 is not None and c.get('h') >= tp2
                     else:
-                        hit_sl=sl is not None and c.get('h') >= sl
-                        hit_tp2=tp2 is not None and c.get('l') <= tp2
-                        hit_tp1=tp1 is not None and c.get('l') <= tp1
+                        hit_sl=sl is not None and c.get('h') >= sl; hit_tp1=tp1 is not None and c.get('l') <= tp1; hit_tp2=tp2 is not None and c.get('l') <= tp2
                     if hit_sl and (hit_tp1 or hit_tp2): outcome='AMBIGUO'; outcome_ts=c.get('t'); break
                     if hit_tp2: outcome='TP2'; outcome_ts=c.get('t'); break
+                    if hit_tp1: tp1_seen=True; outcome='TP1'; outcome_ts=c.get('t'); break
                     if hit_sl: outcome='SL'; outcome_ts=c.get('t'); break
-                    if hit_tp1: outcome='TP1'; outcome_ts=c.get('t'); break
-                trades.append({'entry_ts':ets,'direction':direction,'entry':entry,'sl':sl,'tp1':tp1,'tp2':tp2,'choch_ts':sig.get('choch_timestamp'),'first_capture_ts':sig.get('first_capture_ts'),'zone_type':sig.get('zone_type'),'zone':[sig.get('zone_bottom'),sig.get('zone_top')],'rr':sig.get('rr'),'outcome':outcome,'outcome_ts':outcome_ts})
-            print(f'[PDH_PDL_BTC_UNIQUE_TRADES] total={len(trades)} trades={trades}', flush=True)
+                trades.append({'thesis':(sig.get('first_capture_ts'),sig.get('choch_timestamp'),direction),'candidate_pois':len(theses[(sig.get('first_capture_ts'),sig.get('choch_timestamp'),direction)]),'entry_ts':ets,'direction':direction,'entry':entry,'sl':sl,'tp1':tp1,'tp2':tp2,'zone_type':sig.get('zone_type'),'zone':[sig.get('zone_bottom'),sig.get('zone_top')],'rr':sig.get('rr'),'outcome':outcome,'outcome_ts':outcome_ts})
+            print(f'[PDH_PDL_BTC_THESIS_TRADES] total={len(trades)} trades={trades}', flush=True)
         except Exception as trades_e:
-            print(f'[PDH_PDL_BTC_UNIQUE_TRADES_ERROR] {trades_e}', flush=True)
+            print(f'[PDH_PDL_BTC_THESIS_TRADES_ERROR] {trades_e}', flush=True)
         print(f'[PDH_PDL_BTC_RESULT] {r}', flush=True)
         print(f'[PDH_PDL_BTC_PROGRESS] dias={dias} phase=DONE', flush=True)
     except Exception as e:

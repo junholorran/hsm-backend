@@ -2468,7 +2468,8 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
     resultado['zone_source_c']=zone.get('source_c')
     resultado['zone_flip_candle']=zone.get('flip_candle')
     zone_ts=zone.get('flip_ts') or zone.get('created_ts') or zone.get('t') or structure['t']
-    after_ts=max(structure['t'],zone_ts)
+    structure_confirm_ts=_kairos_candle_close_ts(structure['t'], exec_tf) or structure['t']
+    after_ts=max(structure_confirm_ts,zone_ts)
 
     # M15 confirmou a intenção; M5 só refina a execução da MESMA tese.
     # Nunca volta a decidir direção nem cria tese independente.
@@ -2482,9 +2483,9 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
     retest=None; active_zone=zone; entry_tf=exec_tf
     if refined:
         rz_ts=refined.get('flip_ts') or refined.get('created_ts') or refined.get('t') or structure['t']
-        r5=_kairos_retest_zone(m5,refined,max(structure['t'],rz_ts))
+        r5=_kairos_retest_zone(m5,refined,max(structure_confirm_ts,rz_ts))
         resultado['m5_refinement_retest_found']=bool(r5)
-        resultado['m5_refinement_retest_after_ts']=max(structure['t'],rz_ts)
+        resultado['m5_refinement_retest_after_ts']=max(structure_confirm_ts,rz_ts)
         if r5:
             retest=r5; active_zone=refined; entry_tf='M5'; resultado['refinement_tf']='M5'
             resultado['zone_type']=refined.get('tipo',resultado['zone_type'])
@@ -2556,7 +2557,9 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
         resultado['failure_reason']='AGUARDANDO_RETESTE_ZONA'; return resultado
     entry=retest['c']; resultado['entry']=round(entry,6); resultado['timestamp']=retest['t']
     resultado['entry_tf']=entry_tf
-    resultado['m15_confirmation_ts']=structure.get('t')
+    resultado['m15_break_candle_open_ts']=structure.get('t')
+    resultado['m15_confirmation_ts']=structure_confirm_ts
+    resultado['m15_confirmation_close_ts']=structure_confirm_ts
     resultado['m15_confirmation_type']=structure.get('tipo')
     resultado['m15_confirmation_level']=round(structure['nivel'],6) if structure.get('nivel') is not None else None
     resultado['m5_refinement_used']=bool(entry_tf=='M5')

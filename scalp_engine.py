@@ -1910,10 +1910,11 @@ def _kairos_structural_targets(candles_por_tf, now_ts, entry, direction, limit=1
         # primeiro para H1/H4/D1/W1 quando houver liquidez ativa nessa direção.
         q['primary_target']=x.get('tf') in KAIROS_PRIMARY_SETUP_LIQUIDITY_TFS
         out.append(q)
-    primary=[x for x in out if x.get('primary_target')]
-    selected=primary if primary else out
-    selected.sort(key=lambda x:(x['dist'],-KAIROS_TF_PESO.get(x.get('tf'),1)))
-    return selected[:limit]
+    # Alvo = liquidez ATIVA mais próxima e relevante na direção do trade.
+    # Não força H1/H4/D1/W1 quando M15/EQH/EQL/swing válido estiver antes.
+    # Hierarquia HTF continua como contexto; distância causal decide o primeiro alvo.
+    out.sort(key=lambda x:(x['dist'],-KAIROS_TF_PESO.get(x.get('tf'),1)))
+    return out[:limit]
 
 def _kairos_build_structural_liquidity_telemetry(candles_por_tf, now_ts, signal_result=None):
     """Snapshot paralelo/auditável. Não participa da autorização do trade."""
@@ -2725,7 +2726,7 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
     resultado['sl_anchor_sweep_ts']=sl_info.get('sl_sweep_ts')
     resultado['sl_anchor_extreme']=round(sl_info['sl_sweep_extreme'],6) if sl_info.get('sl_sweep_extreme') is not None else None
 
-    # TP = primeira liquidez estrutural ATIVA do lado do trade. POI contrário antes dela pode virar TP conservador.
+    # TP = primeira liquidez ATIVA, válida e mais próxima do lado do trade. POI contrário permanece contexto/risco.
     # Congela mapa/targets no timestamp da entrada: nenhum candle posterior ao
     # reteste pode criar, consumir ou mover a liquidez usada como TP.
     entry_ts=retest['t']
@@ -2741,14 +2742,8 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
     obstacles=_kairos_opposing_zone_obstacles(_kairos_build_mtf_map(target_tf_map),entry,direction,target_level=target['nivel'],limit=8,allowed_tfs=obstacle_tfs)
     for o in obstacles: o['rr']=round(o['dist']/risk,2) if risk else None
     resultado['target_obstacles']=obstacles
-    # Gestão operacional fixa e auditável:
-    # TP1 = 2R (parcial + mover SL para BE); TP2 = 3R.
-    # A liquidez estrutural continua mapeada como contexto/obstáculo, mas não
-    # transforma um swing remoto em TP de 10R/30R. Se houver obstáculo estrutural
-    # relevante ANTES de 2R, rejeitamos o setup em vez de fabricar RR.
+    # Gestão: +1R é somente gatilho de BE; alvo vem da liquidez selecionada acima.
     sign = 1.0 if direction == 'LONG' else -1.0
-    tp1_2r = entry + sign * (2.0 * risk)
-    tp2_3r = entry + sign * (3.0 * risk)
 
     # Estado do obstáculo no instante da entrada: o mapa já foi truncado em
     # entry_ts. Não basta a zona existir; distinguimos fresh vs previamente

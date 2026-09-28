@@ -2551,6 +2551,57 @@ def experiment_previous_day_liquidity():
     except Exception as e:
         return Response('Erro ao consultar Kairos',status=500,mimetype='text/plain; charset=utf-8')
 
+@app.route('/experiment/audit_btc_pdl_chain', methods=['GET'])
+def experiment_audit_btc_pdl_chain():
+    """Read-only: congela o BTC no primeiro breach do PDL e prova HTF -> liquidez -> M15 sem lookahead."""
+    try:
+        wall_now=int(time.time()*1000)
+        d1=sorted(scalp_engine._fetch_bybit_klines_historico('BTCUSD','D',3,wall_now),key=lambda x:x.get('t',0))
+        closed=[c for c in d1 if int(c.get('t',0))+86400000 <= wall_now]
+        if not closed:
+            return jsonify({'ok':False,'error':'SEM_D1_FECHADO'}),404
+        prev=closed[-1]; pdl=float(prev['l']); valid_from=int(prev['t'])+86400000
+        m15_live=sorted(scalp_engine._fetch_bybit_klines_historico('BTCUSD','15',2,wall_now),key=lambda x:x.get('t',0))
+        first=next((c for c in m15_live if int(c.get('t',0))>=valid_from and int(c.get('t',0))+900000<=wall_now and float(c['l'])<pdl),None)
+        if not first:
+            return jsonify({'ok':True,'pair':'BTCUSD','PDL':pdl,'state':'ACTIVE','read_only':True})
+        capture_open=int(first['t']); capture_close=capture_open+900000
+        specs={'W1':('W',1825),'D1':('D',730),'H4':('240',120),'H1':('60',45),'M15':('15',12)}
+        candles={}
+        for tf,(iv,dias) in specs.items():
+            raw=sorted(scalp_engine._fetch_bybit_klines_historico('BTCUSD',iv,dias,capture_close),key=lambda x:x.get('t',0))
+            dur={'W1':604800000,'D1':86400000,'H4':14400000,'H1':3600000,'M15':900000}[tf]
+            candles[tf]=[c for c in raw if int(c.get('t',0))+dur <= capture_close]
+        mapa=scalp_engine._kairos_build_mtf_map(candles)
+        def htf_pois(tf):
+            d=mapa.get(tf) or {}; out=[]
+            for z in list(d.get('zones',[]))+list(d.get('order_blocks',[])):
+                born=z.get('flip_ts') or z.get('break_ts') or z.get('created_ts') or z.get('t')
+                if born is None or born>capture_close: continue
+                if z.get('state') not in ('ATIVA','TOCADA','PARCIAL','IFVG'): continue
+                out.append({'tf':tf,'type':z.get('tipo'),'direction':z.get('direcao'),
+                            'bottom':z.get('bottom'),'top':z.get('top'),'state':z.get('state'),
+                            'born_ts':born,'contains_pdl':z.get('bottom') is not None and z.get('top') is not None and float(z['bottom'])<=pdl<=float(z['top']),
+                            'capture_candle_overlap':z.get('bottom') is not None and z.get('top') is not None and float(first['h'])>=float(z['bottom']) and float(first['l'])<=float(z['top'])})
+            return out
+        close=float(first['c'])
+        reaction='ACCEPTANCE_CONTINUATION' if close<pdl else 'REJECTION_RECLAIM'
+        expected='baixa' if reaction=='ACCEPTANCE_CONTINUATION' else 'alta'
+        m15=candles['M15']
+        majors=scalp_engine.compute_lux_structure_events(m15,swing_size=50)
+        internals=scalp_engine.compute_lux_internal_structure(m15,swing_size=5)
+        major_before=next((e for e in reversed(majors) if e.get('t',0)<=capture_open),None)
+        internal_before=next((e for e in reversed(internals) if e.get('t',0)<=capture_open),None)
+        return jsonify({'ok':True,'read_only':True,'pair':'BTCUSD','audit_cutoff_ts':capture_close,
+                        'no_lookahead':True,'previous_closed_d1':prev,'PDL':pdl,
+                        'capture':{'open_ts':capture_open,'close_ts':capture_close,'candle':first,
+                                   'reaction':reaction,'candidate_intention':expected},
+                        'HTF_map_before_or_at_capture':{'H4':htf_pois('H4'),'H1':htf_pois('H1')},
+                        'M15_state_known_at_capture':{'major_swing50':major_before,'internal_swing5':internal_before},
+                        'next_step':'FOLLOW_FORWARD_FROM_CAPTURE_ONLY; no post-capture structure used in this snapshot'})
+    except Exception as e:
+        return jsonify({'ok':False,'error':str(e)}),500
+
 @app.route('/experiment/audit_btc_pdh_pdl_capture', methods=['GET'])
 def experiment_audit_btc_pdh_pdl_capture():
     """Read-only: prova PDH/PDL do ultimo D1 fechado e primeiro toque/captura M15 posterior."""

@@ -2551,6 +2551,43 @@ def experiment_previous_day_liquidity():
     except Exception as e:
         return Response('Erro ao consultar Kairos',status=500,mimetype='text/plain; charset=utf-8')
 
+@app.route('/experiment/audit_btc_pdh_pdl_capture', methods=['GET'])
+def experiment_audit_btc_pdh_pdl_capture():
+    """Read-only: prova PDH/PDL do ultimo D1 fechado e primeiro toque/captura M15 posterior."""
+    try:
+        now_ts=int(time.time()*1000)
+        d1=sorted(scalp_engine._fetch_bybit_klines_historico('BTCUSD','D',3,now_ts),key=lambda x:x.get('t',0))
+        day_ms=86400000
+        closed=[c for c in d1 if int(c.get('t',0))+day_ms <= now_ts]
+        if not closed:
+            return jsonify({'ok':False,'error':'SEM_D1_FECHADO'}),404
+        prev=closed[-1]
+        pdh=float(prev['h']); pdl=float(prev['l'])
+        valid_from=int(prev['t'])+day_ms
+        m15=sorted(scalp_engine._fetch_bybit_klines_historico('BTCUSD','15',2,now_ts),key=lambda x:x.get('t',0))
+        rows=[c for c in m15 if int(c.get('t',0))>=valid_from and int(c.get('t',0))+900000<=now_ts]
+        def audit_level(level,side):
+            touched=[]
+            for c in rows:
+                h=float(c['h']); l=float(c['l']); close=float(c['c'])
+                breach=(h>level) if side=='HIGH' else (l<level)
+                touch=(h>=level) if side=='HIGH' else (l<=level)
+                reclaim=(close<level) if side=='HIGH' else (close>level)
+                acceptance=(close>level) if side=='HIGH' else (close<level)
+                if touch:
+                    touched.append({'t':c['t'],'o':c['o'],'h':c['h'],'l':c['l'],'c':c['c'],
+                                    'breach':breach,'reclaim_close':breach and reclaim,
+                                    'acceptance_close':breach and acceptance})
+            first_touch=touched[0] if touched else None
+            first_breach=next((x for x in touched if x['breach']),None)
+            return {'level':level,'side':side,'first_touch':first_touch,'first_breach':first_breach,
+                    'state':'ACTIVE' if not first_breach else ('CAPTURED_REJECTION_RECLAIM' if first_breach['reclaim_close'] else ('CAPTURED_ACCEPTANCE' if first_breach['acceptance_close'] else 'CAPTURED_UNRESOLVED'))}
+        return jsonify({'ok':True,'read_only':True,'pair':'BTCUSD','source':'BYBIT_CLOSED_CANDLES',
+                        'previous_closed_d1':prev,'valid_from_ts':valid_from,
+                        'PDH':audit_level(pdh,'HIGH'),'PDL':audit_level(pdl,'LOW')})
+    except Exception as e:
+        return jsonify({'ok':False,'error':str(e)}),500
+
 @app.route('/experiment/audit_near_pdl_20260927', methods=['GET'])
 def experiment_audit_near_pdl_20260927():
     start_utc=1790474400000

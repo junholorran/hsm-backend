@@ -2544,9 +2544,9 @@ def experiment_previous_day_liquidity():
         if not closed:
             return Response('Sem D1 fechado',status=404,mimetype='text/plain; charset=utf-8')
         prev=closed[-1]
-        body=(f"{pair}\\n"
-              f"Máxima de ontem: {prev.get('h')}\\n"
-              f"Mínima de ontem: {prev.get('l')}\\n")
+        body=(f"{pair}\n"
+              f"Máxima de ontem: {prev.get('h')}\n"
+              f"Mínima de ontem: {prev.get('l')}\n")
         return Response(body,mimetype='text/plain; charset=utf-8')
     except Exception as e:
         return Response('Erro ao consultar Kairos',status=500,mimetype='text/plain; charset=utf-8')

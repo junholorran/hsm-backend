@@ -2694,17 +2694,17 @@ def _run_btc_pdl_full_execution_audit():
         if not internal: raise RuntimeError('SEM_INTERNAL_BEARISH_APOS_MAJOR')
         internal_close=internal['t']+900000
         mapa=scalp_engine._kairos_build_mtf_map(candles)
-        m15zones=[z for z in ((mapa.get('M15') or {}).get('zones') or []) if z.get('direcao')=='baixa' and (z.get('created_ts') or z.get('t') or 0)>=major.get('leg_start_ts',cutoff) and (z.get('created_ts') or z.get('t') or 0)<=internal_close]
+        m15zones=[z for z in ((mapa.get('M15') or {}).get('zones') or []) if z.get('direcao')=='baixa' and (z.get('created_ts') or z.get('t') or 0)>=cutoff and (z.get('created_ts') or z.get('t') or 0)<=internal_close and not (z.get('invalidated_ts') is not None and z.get('invalidated_ts')<=internal_close)]
         m15zones.sort(key=lambda z:(z.get('created_ts') or z.get('t') or 0))
         zone=m15zones[0] if m15zones else None
-        m5zones=[z for z in ((mapa.get('M5') or {}).get('zones') or []) if z.get('direcao')=='baixa' and (z.get('created_ts') or z.get('t') or 0)>=major_close]
+        m5zones=[z for z in ((mapa.get('M5') or {}).get('zones') or []) if z.get('direcao')=='baixa' and (z.get('created_ts') or z.get('t') or 0)>=internal_close and not (z.get('invalidated_ts') is not None and z.get('invalidated_ts')<=internal_close)]
         m5zones.sort(key=lambda z:(z.get('created_ts') or z.get('t') or 0))
         refinement=m5zones[0] if m5zones else None
         retest=None
         if refinement:
             born=refinement.get('created_ts') or refinement.get('t') or 0
             bot=float(refinement['bottom']); top=float(refinement['top'])
-            retest=next((x for x in m5 if x.get('t',0)>max(internal_close,born) and float(x['h'])>=bot and float(x['l'])<=top),None)
+            retest=next((x for x in m5 if x.get('t',0)>max(internal_close,born) and float(x['h'])>=bot and float(x['l'])<=top and not (refinement.get('invalidated_ts') is not None and refinement.get('invalidated_ts')<=x.get('t',0))),None)
         entry=(float(refinement['bottom']) if refinement and retest else None)
         sl_info=None; sl_audit=None; targets=[]
         if entry is not None:

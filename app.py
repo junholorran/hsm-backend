@@ -2529,52 +2529,27 @@ def experiment_audit_near_liquidity_impulse_20260927():
 
 @app.route('/experiment/previous_day_liquidity', methods=['GET'])
 def experiment_previous_day_liquidity():
-    """Read-only: PDH/PDL do ultimo D1 fechado para UM par por consulta."""
+    """Read-only e leve: ultimo D1 FECHADO de UM par; mostra somente PDH/PDL."""
     pair=str(request.args.get('pair','BTCUSD')).upper().strip()
     allowed=set(scalp_engine.PARES_MONITORADOS_REPLAY)
     if pair not in allowed:
-        return jsonify({'ok':False,'error':'PAIR_NOT_ALLOWED','pair':pair,
-                        'allowed_pairs':sorted(allowed)}),400
+        return Response('Par inválido',status=400,mimetype='text/plain; charset=utf-8')
     try:
         now_ts=int(time.time()*1000)
-        # Busca minima: D1 para refs; M15 apenas para o estado ACTIVE/CAPTURED do PDH/PDL.
-        d1=sorted(scalp_engine._fetch_bybit_klines_historico(pair,'D',5,fim_ts_ms=now_ts),
+        # Somente D1. Nada de M15, registry, replay ou scanner.
+        d1=sorted(scalp_engine._fetch_bybit_klines_historico(pair,'D',3,fim_ts_ms=now_ts),
                   key=lambda x:x.get('t',0))
-        m15=sorted(scalp_engine._fetch_bybit_klines_historico(pair,'15',200,fim_ts_ms=now_ts),
-                   key=lambda x:x.get('t',0))
-        candles={'D1':d1,'M15':m15}
-        refs=scalp_engine._kairos_previous_period_refs(candles,now_ts)
-        registry=scalp_engine._kairos_structural_registry(candles,now_ts)
-        def state_for(kind):
-            rows=[x for x in (registry or []) if str(x.get('tf'))=='D1' and str(x.get('type',x.get('tipo',''))).upper()==kind]
-            if not rows:
-                return None
-            x=rows[-1]
-            return {'state':x.get('state'),'captured_ts':x.get('captured_ts')}
-        pdh=refs.get('PDH'); pdl=refs.get('PDL')
-        if not pdh or not pdl:
-            return jsonify({'ok':False,'pair':pair,'error':'NO_CLOSED_D1_REFERENCE'}),404
-        prev=next((c for c in reversed(d1)
-                   if c.get('t')==pdh.get('period_open_ts')),None)
-        payload={
-            'ok':True,'read_only':True,'source':'KAIROS_BYBIT',
-            'pair':pair,'now_ts':now_ts,
-            'previous_closed_d1':prev,
-            'PDH':{'level':pdh.get('level'),'period_open_ts':pdh.get('period_open_ts'),
-                   'confirmed_ts':pdh.get('confirmed_ts'),**(state_for('PDH') or {})},
-            'PDL':{'level':pdl.get('level'),'period_open_ts':pdl.get('period_open_ts'),
-                   'confirmed_ts':pdl.get('confirmed_ts'),**(state_for('PDL') or {})}
-        }
-        if str(request.args.get('format','')).lower()=='json':
-            return jsonify(payload)
-        # Vista humana minimalista; a matematica/fonte permanece exatamente a mesma.
-        from flask import Response
+        day_ms=86400000
+        closed=[c for c in d1 if int(c.get('t',0))+day_ms <= now_ts]
+        if not closed:
+            return Response('Sem D1 fechado',status=404,mimetype='text/plain; charset=utf-8')
+        prev=closed[-1]
         body=(f"{pair}\\n"
-              f"Máxima de ontem: {pdh.get('level')}\\n"
-              f"Mínima de ontem: {pdl.get('level')}\\n")
+              f"Máxima de ontem: {prev.get('h')}\\n"
+              f"Mínima de ontem: {prev.get('l')}\\n")
         return Response(body,mimetype='text/plain; charset=utf-8')
     except Exception as e:
-        return jsonify({'ok':False,'pair':pair,'error':str(e)}),500
+        return Response('Erro ao consultar Kairos',status=500,mimetype='text/plain; charset=utf-8')
 
 @app.route('/experiment/audit_near_pdl_20260927', methods=['GET'])
 def experiment_audit_near_pdl_20260927():

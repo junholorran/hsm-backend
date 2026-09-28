@@ -2670,6 +2670,81 @@ def _run_btc_pdl_execution_audit():
     except Exception as e:
         _KAIROS_BTC_PDL_EXEC_AUDIT.update({'status':'ERROR','result':None,'error':str(e)})
 
+
+_KAIROS_BTC_PDL_FULL_EXEC_AUDIT={'status':'IDLE','result':None,'error':None}
+
+def _run_btc_pdl_full_execution_audit():
+    _KAIROS_BTC_PDL_FULL_EXEC_AUDIT.update({'status':'RUNNING','result':None,'error':None})
+    try:
+        cutoff=1790558100000
+        wall_now=int(time.time()*1000)
+        specs={'W1':('W',1825,604800000),'D1':('D',730,86400000),'H4':('240',120,14400000),
+               'H1':('60',45,3600000),'M15':('15',5,900000),'M5':('5',5,300000)}
+        candles={}
+        for tf,(iv,dias,dur) in specs.items():
+            raw=sorted(scalp_engine._fetch_bybit_klines_historico('BTCUSD',iv,dias,wall_now),key=lambda x:x.get('t',0))
+            candles[tf]=[x for x in raw if int(x.get('t',0))+dur<=wall_now]
+        m15=candles['M15']; m5=candles['M5']
+        majors=[e for e in scalp_engine.compute_lux_structure_events(m15,swing_size=50) if e.get('t',0)+900000>cutoff and e.get('direcao')=='baixa']
+        major=majors[0] if majors else None
+        if not major: raise RuntimeError('SEM_MAJOR_BEARISH_APOS_PDL')
+        major_close=major['t']+900000
+        internals=[e for e in scalp_engine.compute_lux_internal_structure(m15,swing_size=5) if e.get('t',0)+900000>=major_close and e.get('direcao')=='baixa']
+        internal=internals[0] if internals else None
+        if not internal: raise RuntimeError('SEM_INTERNAL_BEARISH_APOS_MAJOR')
+        internal_close=internal['t']+900000
+        mapa=scalp_engine._kairos_build_mtf_map(candles)
+        m15zones=[z for z in (mapa.get('M15') or []) if z.get('direcao')=='baixa' and (z.get('created_ts') or z.get('t') or 0)>=major.get('leg_start_ts',cutoff) and (z.get('created_ts') or z.get('t') or 0)<=internal_close]
+        m15zones.sort(key=lambda z:(z.get('created_ts') or z.get('t') or 0))
+        zone=m15zones[0] if m15zones else None
+        m5zones=[z for z in (mapa.get('M5') or []) if z.get('direcao')=='baixa' and (z.get('created_ts') or z.get('t') or 0)>=major_close]
+        m5zones.sort(key=lambda z:(z.get('created_ts') or z.get('t') or 0))
+        refinement=m5zones[0] if m5zones else None
+        retest=None
+        if refinement:
+            born=refinement.get('created_ts') or refinement.get('t') or 0
+            bot=float(refinement['bottom']); top=float(refinement['top'])
+            retest=next((x for x in m5 if x.get('t',0)>max(internal_close,born) and float(x['h'])>=bot and float(x['l'])<=top),None)
+        entry=(float(refinement['bottom']) if refinement and retest else None)
+        sl_info=None; sl_audit=None; targets=[]
+        if entry is not None:
+            local,sl_audit=scalp_engine._kairos_last_causal_m5_sweep(m5,'SHORT',major.get('leg_start_ts'),internal_close)
+            if local and float(local['sweep_extreme'])>entry:
+                known=[x for x in m5 if x.get('t',0)<=retest['t']]
+                sl=scalp_engine.aplicar_buffer_stop_atr(float(local['sweep_extreme']),'baixa',known)
+                invalid=next((x for x in m5 if local['sweep_ts']<x.get('t',0)<retest['t'] and float(x['h'])>=sl),None)
+                if not invalid:
+                    sl_info={'sl':sl,'sweep_ts':local['sweep_ts'],'sweep_extreme':local['sweep_extreme']}
+                    tfmap={tf:[x for x in cs if x.get('t',0)<=retest['t']] for tf,cs in candles.items()}
+                    targets=scalp_engine._kairos_structural_targets(tfmap,retest['t'],entry,'SHORT',limit=8)
+        risk=(float(sl_info['sl'])-entry) if sl_info else None
+        result={'ok':True,'read_only':True,'pair':'BTCUSD','fixed_thesis':'D1_PDL_84062.9','capture_close_ts':cutoff,
+                'major_m15':major,'major_confirm_close_ts':major_close,'internal_m15':internal,'internal_confirm_close_ts':internal_close,
+                'm15_causal_poi':zone,
+                'm5_refinement':refinement,
+                'm5_retest':retest,
+                'execution':{'direction':'SHORT','entry':entry,'sl':sl_info,'risk':risk,
+                             'be_trigger_1r':(entry-risk if risk else None),
+                             'nearest_relevant_liquidity':(targets[0] if targets else None),
+                             'next_liquidity_targets':targets},
+                'first_failure':None if (zone and refinement and retest and sl_info and targets) else
+                    ('SEM_POI_M15_CAUSAL' if not zone else 'SEM_REFINAMENTO_M5' if not refinement else 'SEM_RETESTE_M5' if not retest else 'SEM_SL_CAUSAL' if not sl_info else 'SEM_LIQUIDEZ_ALVO'),
+                'no_lookahead_selection':True}
+        _KAIROS_BTC_PDL_FULL_EXEC_AUDIT.update({'status':'DONE','result':result,'error':None})
+    except Exception as e:
+        _KAIROS_BTC_PDL_FULL_EXEC_AUDIT.update({'status':'ERROR','result':None,'error':str(e)})
+
+@app.route('/experiment/audit_btc_pdl_full_execution/start',methods=['GET'])
+def experiment_audit_btc_pdl_full_execution_start():
+    if _KAIROS_BTC_PDL_FULL_EXEC_AUDIT.get('status')=='RUNNING':
+        return jsonify({'status':'RUNNING','started':False}),202
+    threading.Thread(target=_run_btc_pdl_full_execution_audit,daemon=True).start()
+    return jsonify({'status':'STARTING','started':True,'pair':'BTCUSD','read_only':True}),202
+
+@app.route('/experiment/audit_btc_pdl_full_execution',methods=['GET'])
+def experiment_audit_btc_pdl_full_execution():
+    return jsonify(_KAIROS_BTC_PDL_FULL_EXEC_AUDIT)
+
 @app.route('/experiment/audit_btc_pdl_execution/start',methods=['GET'])
 def experiment_audit_btc_pdl_execution_start():
     if _KAIROS_BTC_PDL_EXEC_AUDIT.get('status')=='RUNNING':

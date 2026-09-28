@@ -2492,17 +2492,9 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
 
     resultado['intent_m15_found']=bool(intent)
     if not intent:
-        resultado['failure_reason']='SEM_INTENCAO_CHOCH_MSS_M15_APOS_LOCALIZACAO_HTF'; return resultado
+        resultado['failure_reason']='SEM_INTENCAO_M15_APOS_CAPTURA_ESTRUTURAL'; return resultado
     direction=intent['direction']; structure=intent['structure']
-    if sweep is None:
-        # Adaptador de contexto para funções legadas abaixo. Não representa sweep.
-        # A direção veio exclusivamente da quebra M15 posterior ao toque HTF.
-        sweep={'direcao':intent['direcao'],'sweep_ts':location['touch_ts'],
-               'extremo':location['touch_price'],'nivel':location['touch_price'],
-               'liquidity_tf':location['tf'],'liquidity_type':location['tipo'],
-               'first_capture_ts':location['touch_ts'],'confirm_ts':location['touch_ts']}
-    else:
-        sweep['direcao']=intent['direcao']
+    sweep['direcao']=intent['direcao']
     resultado['direction']=direction; resultado['execution_tf']=exec_tf; resultado['choch_confirmed']=True
     resultado['choch_timestamp']=structure['t']; resultado['choch_level']=round(structure['nivel'],6)
     z=intent.get('momentum_z'); resultado['momentum_z']=round(z,3) if z is not None else None
@@ -2600,29 +2592,16 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
                             target_level=pre_target['nivel'], limit=8,
                             allowed_tfs=('M15','H1','H4','D1','W1')
                         )
-                        # Pré-alerta usa a mesma gestão operacional do sinal:
-                        # 2R parcial + BE, 3R final. Liquidez/POIs continuam como
-                        # validação de espaço; não viram alvo remoto arbitrário.
+                        # Pré-alerta espelha a gestão causal atual:
+                        # +1R é gatilho de BE; o alvo continua sendo liquidez estrutural.
                         pre_sign = 1.0 if direction == 'LONG' else -1.0
-                        pre_blocked = False
-                        if pre_obstacles:
-                            pre_o = pre_obstacles[0]
-                            pre_o_rr = abs(float(pre_o['nivel']) - pre_limit) / pre_risk
-                            if pre_o_rr < 2.0:
-                                pre_blocked = True
                         pre_struct_rr = abs(float(pre_target['nivel']) - pre_limit) / pre_risk
-                        if pre_struct_rr < 2.0:
-                            pre_blocked = True
-                        if not pre_blocked:
-                            resultado['prealert_tp1'] = round(pre_limit + pre_sign * 2.0 * pre_risk, 6)
-                            resultado['prealert_tp1_rr'] = 2.0
-                            resultado['prealert_tp1_origem'] = 'GESTAO_FIXA_2R_PARCIAL_BE'
-                            resultado['prealert_tp2'] = round(pre_limit + pre_sign * 3.0 * pre_risk, 6)
-                            resultado['prealert_tp2_rr'] = 3.0
-                            resultado['prealert_tp2_origem'] = 'GESTAO_FIXA_3R'
-                            resultado['prealert_tp'] = resultado['prealert_tp2']
-                            resultado['prealert_rr'] = 3.0
-                            resultado['prealert_tp_origem'] = resultado['prealert_tp2_origem']
+                        resultado['prealert_be_trigger_1r'] = round(pre_limit + pre_sign * pre_risk, 6)
+                        resultado['prealert_be_price'] = round(pre_limit, 6)
+                        resultado['prealert_target'] = round(float(pre_target['nivel']), 6)
+                        resultado['prealert_target_rr'] = round(pre_struct_rr, 3)
+                        resultado['prealert_target_origem'] = pre_target.get('type') or pre_target.get('tipo') or 'STRUCTURAL_LIQUIDITY'
+                        resultado['prealert_obstacles'] = pre_obstacles or []
 
         resultado['failure_reason']='AGUARDANDO_RETESTE_ZONA'; return resultado
     entry=(float(active_zone['top']) if direction=='LONG' else float(active_zone['bottom'])) if entry_tf=='M5' else retest['c']; resultado['entry']=round(entry,6); resultado['timestamp']=retest['t']

@@ -2523,6 +2523,18 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
     resultado['sweep_level']=round(sweep['nivel'],6); resultado['sweep_extreme']=round(sweep['extremo'],6)
     intent=_kairos_direction_after_first_capture(exec_candles,sweep,swing_size=5)
 
+    # A cadeia M15 é uma só: a estrutura MAIOR autoriza a intenção e o interno
+    # apenas confirma/tima. O POI causal pertence à perna da quebra MAIOR;
+    # usar a perna do interno aqui corta fora o displacement que criou o POI.
+    if intent and intent.get('major_structure'):
+        major=intent['major_structure']
+        internal=intent['structure']
+        structure={**major,
+                   'full_idx':next((j for j,cc in enumerate(exec_candles) if cc.get('t')==major.get('t')),None),
+                   'internal_confirmation':internal,
+                   'internal_confirmation_ts':internal.get('t')}
+        intent['structure']=structure
+
     resultado['intent_m15_found']=bool(intent)
     if not intent:
         resultado['failure_reason']='SEM_INTENCAO_M15_APOS_CAPTURA_ESTRUTURAL'; return resultado

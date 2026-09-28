@@ -2630,6 +2630,64 @@ def experiment_audit_btc_pdl_chain_start():
 def experiment_audit_btc_pdl_chain():
     return jsonify(_KAIROS_BTC_PDL_CHAIN_AUDIT)
 
+_KAIROS_BTC_PDL_EXEC_AUDIT={'status':'IDLE','result':None,'error':None}
+
+def _run_btc_pdl_execution_audit():
+    _KAIROS_BTC_PDL_EXEC_AUDIT.update({'status':'RUNNING','result':None,'error':None})
+    try:
+        base=_KAIROS_BTC_PDL_CHAIN_AUDIT.get('result') or {}
+        fw=base.get('forward_after_capture') or {}
+        major=fw.get('major_swing50'); internal=fw.get('internal_swing5')
+        if not major or not internal:
+            raise RuntimeError('CADEIA_M15_AINDA_NAO_CONFIRMADA')
+        # Reusa o motor REAL A_CURRENT; apenas audita sinais cuja genealogia nasce depois da captura validada.
+        rr=scalp_engine.replay_poi_lifecycle_abc_sol(dias_historico=1,fim_ts_ms=None,pair='BTCUSD',policies=('A_CURRENT',))
+        pol=((rr or {}).get('policies') or {}).get('A_CURRENT') or {}
+        autos=pol.get('resolved_signal_autopsy') or []
+        capture_close=int((base.get('capture') or {}).get('close_ts') or 0)
+        major_close=int(fw.get('major_confirm_close_ts') or 0)
+        internal_close=int(fw.get('internal_confirm_close_ts') or 0)
+        rows=[]
+        for a in autos:
+            sig=(a or {}).get('signal') or {}
+            confirm=int(sig.get('m15_confirmation_ts') or 0)
+            if confirm < major_close: continue
+            rows.append({
+              'result':a.get('result') or a.get('resultado'),
+              'authorization_path':sig.get('authorization_path'),
+              'first_capture_ts':sig.get('first_capture_ts'),'sweep_confirm_ts':sig.get('sweep_confirm_ts'),
+              'm15':{'type':sig.get('m15_confirmation_type'),'level':sig.get('m15_confirmation_level'),'confirm_ts':confirm,
+                     'poi_shadow_audit':sig.get('poi_shadow_audit')},
+              'm5':{'candidate_found':sig.get('m5_refinement_candidate_found'),'type':sig.get('m5_refinement_candidate_type'),
+                    'bottom':sig.get('m5_refinement_candidate_bottom'),'top':sig.get('m5_refinement_candidate_top'),
+                    'created_ts':sig.get('m5_refinement_created_ts'),'retest_found':sig.get('m5_refinement_retest_found'),
+                    'retest_after_ts':sig.get('m5_refinement_retest_after_ts'),'basis':sig.get('refinement_basis')},
+              'execution':{'entry':sig.get('entry'),'sl':sig.get('sl'),'sl_regra':sig.get('sl_regra'),
+                           'sl_anchor_ts':sig.get('sl_anchor_sweep_ts'),'sl_anchor_extreme':sig.get('sl_anchor_extreme'),
+                           'sl_audit':sig.get('sl_audit'),'be_trigger_1r':sig.get('tp1'),'structural_target':sig.get('tp2'),
+                           'structural_target_origin':sig.get('tp2_origem'),'obstacles':sig.get('target_obstacles_at_entry'),
+                           'blocking_obstacles':sig.get('blocking_obstacles_at_entry')},
+              'raw_reason':sig.get('reason')})
+        result={'ok':True,'read_only':True,'pair':'BTCUSD','capture_close_ts':capture_close,
+                'major_confirm_close_ts':major_close,'internal_confirm_close_ts':internal_close,
+                'matching_signals':rows,'count':len(rows),
+                'first_failure':None if rows else 'SEM_SINAL_EXECUTAVEL_A_CURRENT_APOS_CONFIRMACAO_M15',
+                'note':'Replay/audit only; strategy logic unchanged.'}
+        _KAIROS_BTC_PDL_EXEC_AUDIT.update({'status':'DONE','result':result,'error':None})
+    except Exception as e:
+        _KAIROS_BTC_PDL_EXEC_AUDIT.update({'status':'ERROR','result':None,'error':str(e)})
+
+@app.route('/experiment/audit_btc_pdl_execution/start',methods=['GET'])
+def experiment_audit_btc_pdl_execution_start():
+    if _KAIROS_BTC_PDL_EXEC_AUDIT.get('status')=='RUNNING':
+        return jsonify({'status':'RUNNING','started':False}),202
+    threading.Thread(target=_run_btc_pdl_execution_audit,daemon=True).start()
+    return jsonify({'status':'STARTING','started':True,'pair':'BTCUSD','read_only':True}),202
+
+@app.route('/experiment/audit_btc_pdl_execution',methods=['GET'])
+def experiment_audit_btc_pdl_execution():
+    return jsonify(_KAIROS_BTC_PDL_EXEC_AUDIT)
+
 @app.route('/experiment/audit_btc_pdh_pdl_capture', methods=['GET'])
 def experiment_audit_btc_pdh_pdl_capture():
     """Read-only: prova PDH/PDL do ultimo D1 fechado e primeiro toque/captura M15 posterior."""

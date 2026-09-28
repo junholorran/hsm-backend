@@ -2556,7 +2556,7 @@ def experiment_previous_day_liquidity():
             return jsonify({'ok':False,'pair':pair,'error':'NO_CLOSED_D1_REFERENCE'}),404
         prev=next((c for c in reversed(d1)
                    if c.get('t')==pdh.get('period_open_ts')),None)
-        return jsonify({
+        payload={
             'ok':True,'read_only':True,'source':'KAIROS_BYBIT',
             'pair':pair,'now_ts':now_ts,
             'previous_closed_d1':prev,
@@ -2564,7 +2564,15 @@ def experiment_previous_day_liquidity():
                    'confirmed_ts':pdh.get('confirmed_ts'),**(state_for('PDH') or {})},
             'PDL':{'level':pdl.get('level'),'period_open_ts':pdl.get('period_open_ts'),
                    'confirmed_ts':pdl.get('confirmed_ts'),**(state_for('PDL') or {})}
-        })
+        }
+        if str(request.args.get('format','')).lower()=='json':
+            return jsonify(payload)
+        # Vista humana minimalista; a matematica/fonte permanece exatamente a mesma.
+        from flask import Response
+        body=(f"{pair}\\n"
+              f"Máxima de ontem: {pdh.get('level')}\\n"
+              f"Mínima de ontem: {pdl.get('level')}\\n")
+        return Response(body,mimetype='text/plain; charset=utf-8')
     except Exception as e:
         return jsonify({'ok':False,'pair':pair,'error':str(e)}),500
 

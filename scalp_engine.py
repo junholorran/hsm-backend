@@ -1629,7 +1629,6 @@ def _kairos_select_structural_first_capture_sweep(candles_por_tf, now_ts, liquid
     if len(m15) < 3:
         return None, {'levels':levels,'candidates':[]}
     candidates=[]
-    max_age={'MN':45*86400000,'W1':14*86400000,'D1':5*86400000,'H4':48*3600000,'H1':18*3600000,'M15':5*3600000}
     for liq in setup_levels:
         level=liq.get('level'); confirm_ts=liq.get('confirmed_ts')
         if level is None or confirm_ts is None or confirm_ts > now_ts:
@@ -1696,27 +1695,6 @@ def _kairos_select_structural_first_capture_sweep(candles_por_tf, now_ts, liquid
                       'selection_rule':'LATEST_VALID_CAPTURE_THEN_HTF_PRIORITY',
                       'selected_capture':{k:selected.get(k) for k in ('liquidity_tf','liquidity_type','nivel','sweep_ts','confirm_ts','post_capture_state')}}
 
-
-def _kairos_direction_after_htf_location(candles, location, swing_size=5):
-    """M15: primeira quebra Lux real posterior ao toque HTF. Sem filtro arbitrário."""
-    if not candles or not location:
-        return None
-    touch_ts=location.get('touch_ts')
-    if touch_ts is None:
-        return None
-    events=compute_lux_internal_structure(candles,swing_size=swing_size)
-    for e in events:
-        if e.get('t',0) <= touch_ts or e.get('tipo') not in ('CHoCH','BOS'):
-            continue
-        full_idx=next((j for j,c in enumerate(candles) if c['t']==e['t']),None)
-        if full_idx is None:
-            continue
-        d=e.get('direcao')
-        if d not in ('alta','baixa'):
-            continue
-        return {'direction':'LONG' if d=='alta' else 'SHORT','direcao':d,'mode':'HTF_POI_REACTION',
-                'structure':{**e,'full_idx':full_idx},'momentum_z':None}
-    return None
 
 def _kairos_select_htf_poi_location(mapa, m15_candles, now_ts):
     """Última INTERAÇÃO causal com POI HTF: entrada fora->dentro, não último candle dentro."""

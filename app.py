@@ -2638,6 +2638,13 @@ def _run_btc_pdl_execution_audit():
         base=_KAIROS_BTC_PDL_CHAIN_AUDIT.get('result') or {}
         fw=base.get('forward_after_capture') or {}
         major=fw.get('major_swing50'); internal=fw.get('internal_swing5')
+        # Deploy reinicia memoria do processo. Se o cache sumiu, reconstrói a auditoria causal
+        # no próprio worker antes de auditar a execução; nunca depende de chamada anterior.
+        if not major or not internal:
+            _run_btc_pdl_chain_audit()
+            base=_KAIROS_BTC_PDL_CHAIN_AUDIT.get('result') or {}
+            fw=base.get('forward_after_capture') or {}
+            major=fw.get('major_swing50'); internal=fw.get('internal_swing5')
         if not major or not internal:
             raise RuntimeError('CADEIA_M15_AINDA_NAO_CONFIRMADA')
         # Reusa o motor REAL A_CURRENT; apenas audita sinais cuja genealogia nasce depois da captura validada.

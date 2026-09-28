@@ -2694,10 +2694,10 @@ def _run_btc_pdl_full_execution_audit():
         if not internal: raise RuntimeError('SEM_INTERNAL_BEARISH_APOS_MAJOR')
         internal_close=internal['t']+900000
         mapa=scalp_engine._kairos_build_mtf_map(candles)
-        m15zones=[z for z in (mapa.get('M15') or []) if z.get('direcao')=='baixa' and (z.get('created_ts') or z.get('t') or 0)>=major.get('leg_start_ts',cutoff) and (z.get('created_ts') or z.get('t') or 0)<=internal_close]
+        m15zones=[z for z in ((mapa.get('M15') or {}).get('zones') or []) if z.get('direcao')=='baixa' and (z.get('created_ts') or z.get('t') or 0)>=major.get('leg_start_ts',cutoff) and (z.get('created_ts') or z.get('t') or 0)<=internal_close]
         m15zones.sort(key=lambda z:(z.get('created_ts') or z.get('t') or 0))
         zone=m15zones[0] if m15zones else None
-        m5zones=[z for z in (mapa.get('M5') or []) if z.get('direcao')=='baixa' and (z.get('created_ts') or z.get('t') or 0)>=major_close]
+        m5zones=[z for z in ((mapa.get('M5') or {}).get('zones') or []) if z.get('direcao')=='baixa' and (z.get('created_ts') or z.get('t') or 0)>=major_close]
         m5zones.sort(key=lambda z:(z.get('created_ts') or z.get('t') or 0))
         refinement=m5zones[0] if m5zones else None
         retest=None

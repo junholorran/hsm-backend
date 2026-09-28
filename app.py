@@ -2635,51 +2635,37 @@ _KAIROS_BTC_PDL_EXEC_AUDIT={'status':'IDLE','result':None,'error':None}
 def _run_btc_pdl_execution_audit():
     _KAIROS_BTC_PDL_EXEC_AUDIT.update({'status':'RUNNING','result':None,'error':None})
     try:
-        base=_KAIROS_BTC_PDL_CHAIN_AUDIT.get('result') or {}
-        fw=base.get('forward_after_capture') or {}
-        major=fw.get('major_swing50'); internal=fw.get('internal_swing5')
-        # Deploy reinicia memoria do processo. Se o cache sumiu, reconstrói a auditoria causal
-        # no próprio worker antes de auditar a execução; nunca depende de chamada anterior.
-        if not major or not internal:
-            _run_btc_pdl_chain_audit()
-            base=_KAIROS_BTC_PDL_CHAIN_AUDIT.get('result') or {}
-            fw=base.get('forward_after_capture') or {}
-            major=fw.get('major_swing50'); internal=fw.get('internal_swing5')
-        if not major or not internal:
-            raise RuntimeError('CADEIA_M15_AINDA_NAO_CONFIRMADA')
-        # Reusa o motor REAL A_CURRENT; apenas audita sinais cuja genealogia nasce depois da captura validada.
-        rr=scalp_engine.replay_poi_lifecycle_abc_sol(dias_historico=1,fim_ts_ms=None,pair='BTCUSD',policies=('A_CURRENT',))
-        pol=((rr or {}).get('policies') or {}).get('A_CURRENT') or {}
-        autos=pol.get('resolved_signal_autopsy') or []
-        capture_close=int((base.get('capture') or {}).get('close_ts') or 0)
-        major_close=int(fw.get('major_confirm_close_ts') or 0)
-        internal_close=int(fw.get('internal_confirm_close_ts') or 0)
-        rows=[]
-        for a in autos:
-            sig=(a or {}).get('signal') or {}
-            confirm=int(sig.get('m15_confirmation_ts') or 0)
-            if confirm < major_close: continue
-            rows.append({
-              'result':a.get('result') or a.get('resultado'),
-              'authorization_path':sig.get('authorization_path'),
-              'first_capture_ts':sig.get('first_capture_ts'),'sweep_confirm_ts':sig.get('sweep_confirm_ts'),
-              'm15':{'type':sig.get('m15_confirmation_type'),'level':sig.get('m15_confirmation_level'),'confirm_ts':confirm,
-                     'poi_shadow_audit':sig.get('poi_shadow_audit')},
-              'm5':{'candidate_found':sig.get('m5_refinement_candidate_found'),'type':sig.get('m5_refinement_candidate_type'),
-                    'bottom':sig.get('m5_refinement_candidate_bottom'),'top':sig.get('m5_refinement_candidate_top'),
-                    'created_ts':sig.get('m5_refinement_created_ts'),'retest_found':sig.get('m5_refinement_retest_found'),
-                    'retest_after_ts':sig.get('m5_refinement_retest_after_ts'),'basis':sig.get('refinement_basis')},
-              'execution':{'entry':sig.get('entry'),'sl':sig.get('sl'),'sl_regra':sig.get('sl_regra'),
-                           'sl_anchor_ts':sig.get('sl_anchor_sweep_ts'),'sl_anchor_extreme':sig.get('sl_anchor_extreme'),
-                           'sl_audit':sig.get('sl_audit'),'be_trigger_1r':sig.get('tp1'),'structural_target':sig.get('tp2'),
-                           'structural_target_origin':sig.get('tp2_origem'),'obstacles':sig.get('target_obstacles_at_entry'),
-                           'blocking_obstacles':sig.get('blocking_obstacles_at_entry')},
-              'raw_reason':sig.get('reason')})
-        result={'ok':True,'read_only':True,'pair':'BTCUSD','capture_close_ts':capture_close,
-                'major_confirm_close_ts':major_close,'internal_confirm_close_ts':internal_close,
-                'matching_signals':rows,'count':len(rows),
-                'first_failure':None if rows else 'SEM_SINAL_EXECUTAVEL_A_CURRENT_APOS_CONFIRMACAO_M15',
-                'note':'Replay/audit only; strategy logic unchanged.'}
+        now_ts=int(time.time()*1000)
+        specs={'W1':('W',1825,604800000),'D1':('D',730,86400000),'H4':('240',120,14400000),
+               'H1':('60',45,3600000),'M15':('15',3,900000),'M5':('5',3,300000)}
+        candles={}
+        for tf,(iv,dias,dur) in specs.items():
+            raw=sorted(scalp_engine._fetch_bybit_klines_historico('BTCUSD',iv,dias,now_ts),key=lambda x:x.get('t',0))
+            candles[tf]=[c for c in raw if int(c.get('t',0))+dur<=now_ts]
+        sig=scalp_engine.avaliar_vortex_decision_layer_v2(
+            candles['M15'],candles['M5'],candles['D1'],candles_por_tf=candles,
+            audit_pair='BTCUSD',liquidity_policy='A_CURRENT')
+        result={'ok':True,'read_only':True,'pair':'BTCUSD',
+                'signal':sig.get('signal'),'valid':sig.get('valid'),'failure_reason':sig.get('failure_reason'),
+                'authorization_path':sig.get('authorization_path'),
+                'capture':{'liquidity_tf':sig.get('liquidity_tf'),'liquidity_type':sig.get('liquidity_type'),
+                           'level':sig.get('sweep_level'),'first_capture_ts':sig.get('first_capture_ts'),'confirm_ts':sig.get('sweep_confirm_ts')},
+                'm15':{'type':sig.get('m15_confirmation_type') or ('CHoCH/BOS' if sig.get('choch_confirmed') else None),
+                       'level':sig.get('m15_confirmation_level') or sig.get('choch_level'),
+                       'open_ts':sig.get('m15_break_candle_open_ts') or sig.get('choch_timestamp'),
+                       'confirm_ts':sig.get('m15_confirmation_ts')},
+                'poi':{'type':sig.get('zone_type'),'bottom':sig.get('zone_bottom'),'top':sig.get('zone_top'),
+                       'created_ts':sig.get('zone_created_ts'),'shadow':sig.get('poi_shadow_audit')},
+                'm5':{'found':sig.get('m5_refinement_candidate_found'),'type':sig.get('m5_refinement_candidate_type'),
+                      'bottom':sig.get('m5_refinement_candidate_bottom'),'top':sig.get('m5_refinement_candidate_top'),
+                      'created_ts':sig.get('m5_refinement_candidate_ts'),'retest':sig.get('m5_refinement_retest_found'),
+                      'retest_after_ts':sig.get('m5_refinement_retest_after_ts')},
+                'execution':{'direction':sig.get('direction'),'entry':sig.get('entry'),'sl':sig.get('sl'),
+                             'sl_regra':sig.get('sl_regra'),'sl_audit':sig.get('sl_audit'),
+                             'be_trigger_1r':sig.get('tp1'),'structural_target':sig.get('tp2'),
+                             'target_origin':sig.get('tp2_origem'),'obstacles':sig.get('target_obstacles_at_entry'),
+                             'blocking_obstacles':sig.get('blocking_obstacles_at_entry')},
+                'note':'Single BTC current-state decision-layer audit; no replay and no strategy changes.'}
         _KAIROS_BTC_PDL_EXEC_AUDIT.update({'status':'DONE','result':result,'error':None})
     except Exception as e:
         _KAIROS_BTC_PDL_EXEC_AUDIT.update({'status':'ERROR','result':None,'error':str(e)})

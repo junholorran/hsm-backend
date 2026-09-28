@@ -2537,7 +2537,7 @@ def experiment_previous_day_liquidity():
     try:
         now_ts=int(time.time()*1000)
         # Somente D1. Nada de M15, registry, replay ou scanner.
-        d1=sorted(scalp_engine._fetch_bybit_klines_historico(pair,'D',3,fim_ts_ms=now_ts),
+        d1=sorted(scalp_engine._fetch_bybit_klines_historico(pair,'D',3,now_ts),
                   key=lambda x:x.get('t',0))
         day_ms=86400000
         closed=[c for c in d1 if int(c.get('t',0))+day_ms <= now_ts]

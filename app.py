@@ -2453,3 +2453,18 @@ def experiment_poi_lifecycle_abc_sol():
         return jsonify({'status':_KAIROS_ABC_CACHE.get('status'),'started':True}),202
     return jsonify(_KAIROS_ABC_CACHE)
 
+
+
+@app.route('/experiment/audit_near_pdl_20260927', methods=['GET'])
+def experiment_audit_near_pdl_20260927():
+    start_utc=1790474400000
+    end_utc=1790488800000
+    d1=sorted(scalp_engine._fetch_bybit_klines_historico('NEARUSD','D',10,fim_ts_ms=end_utc),key=lambda x:x['t'])
+    prev=[x for x in d1 if x['t'] < 1790467200000][-1]
+    pdl=float(prev['l'])
+    m5=sorted([x for x in scalp_engine._fetch_bybit_klines_historico('NEARUSD','5',2,fim_ts_ms=end_utc+300000) if start_utc <= x.get('t',0) <= end_utc],key=lambda x:x['t'])
+    rows=[{'t':x['t'],'o':x['o'],'h':x['h'],'l':x['l'],'c':x['c'],'low_minus_pdl':float(x['l'])-pdl,'below_pdl':float(x['l'])<pdl,'reclaim_same_close':float(x['l'])<pdl and float(x['c'])>pdl} for x in m5]
+    first=next((x for x in rows if x['below_pdl']),None)
+    reclaim=next((x for x in rows if first and x['t']>=first['t'] and float(x['c'])>pdl),None)
+    nearest=min(rows,key=lambda x:abs(float(x['l'])-pdl)) if rows else None
+    return jsonify({'ok':True,'read_only':True,'pair':'NEARUSD','pdl':pdl,'previous_d1_candle':prev,'window_lisbon':'27/09/2026 03:00-07:00','first_m5_below_pdl':first,'first_reclaim':reclaim,'nearest_m5':nearest,'classification':'SWEEP_AND_RECLAIM' if first and reclaim else ('BREACH_NO_RECLAIM' if first else 'NO_BREACH'),'m5_rows':rows})

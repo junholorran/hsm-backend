@@ -2330,6 +2330,37 @@ def _kairos_lux_dealing_range(candles, swing_size=50, tf=None):
             'swing_size':swing_size,'source':'TF_ISOLATED_LUX_TRAILING_EXTREMES'}
 
 
+
+def _kairos_previous_day_dealing_range(candles_por_tf, now_ts):
+    """Range do ultimo D1 FECHADO: PDH/PDL + EQ 50% + premium/discount.
+
+    Camada de localizacao apenas. Nao cria direcao, sweep, sinal ou entrada.
+    Mantem-se separada do dealing range estrutural Lux50.
+    """
+    refs=_kairos_previous_period_refs(candles_por_tf, now_ts)
+    pdh=refs.get('PDH'); pdl=refs.get('PDL')
+    if not pdh or not pdl:
+        return None
+    hi=float(pdh['level']); lo=float(pdl['level'])
+    if hi <= lo:
+        return None
+    eq=lo+(hi-lo)*0.5
+    d1=sorted([x for x in (candles_por_tf.get('D1') or []) if x.get('t') is not None and x['t'] <= now_ts], key=lambda x:x['t'])
+    px=None
+    if d1:
+        px=float(d1[-1]['c'])
+    else:
+        for tf in ('H1','M15','M5'):
+            cs=candles_por_tf.get(tf) or []
+            if cs:
+                px=float(cs[-1]['c']); break
+    loc=None if px is None else ('EQUILIBRIUM' if abs(px-eq)<1e-12 else ('PREMIUM' if px>eq else 'DISCOUNT'))
+    return {'high':hi,'low':lo,'equilibrium':eq,'location':loc,
+            'period_open_ts':pdh.get('period_open_ts'),
+            'confirmed_ts':max(pdh.get('confirmed_ts') or 0,pdl.get('confirmed_ts') or 0),
+            'source':'PREVIOUS_CLOSED_D1_RANGE'}
+
+
 def _kairos_context_bias(candles_por_tf):
     """Narrativa HTF hierárquica; contexto, NUNCA trava de direção.
 
@@ -2454,6 +2485,7 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
     contexto=_kairos_context_bias(candles_por_tf)
     resultado['context_bias']=contexto; resultado['bias']=contexto.get('final')
     resultado['dealing_ranges']={}
+    resultado['previous_day_range']=_kairos_previous_day_dealing_range(candles_por_tf, now_ts)
     for _tf in ('W1','D1','H4','H1'):
         _cs=candles_por_tf.get(_tf) or []
         _size=50

@@ -2122,6 +2122,12 @@ def _kairos_select_entry_zone(exec_candles, sweep, structure, mapa):
     leg_start=structure.get('leg_start_ts') or structure.get('protected_swing_origin_ts')
     if leg_start is None:
         return None
+    # O POI causal desta tese não pode existir antes da manipulação/captura
+    # que iniciou a cadeia. FVG/IFVG/OB antigos continuam válidos no mapa como
+    # contexto/obstáculo, mas não podem autorizar a execução desta nova tese.
+    capture_start=sweep.get('sweep_ts') or sweep.get('first_capture_ts')
+    if capture_start is not None:
+        leg_start=max(leg_start,capture_start)
     zones=[]
     for z in _kairos_fvg_states(exec_candles):
         effective_ts=z.get('flip_ts') or z.get('created_ts') or 0

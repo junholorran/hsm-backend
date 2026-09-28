@@ -2581,10 +2581,19 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
     resultado['zone_source_c']=zone.get('source_c')
     resultado['zone_flip_candle']=zone.get('flip_candle')
     zone_ts=zone.get('flip_ts') or zone.get('created_ts') or zone.get('t') or structure['t']
-    structure_confirm_ts=_kairos_candle_close_ts(structure['t'], '15') or structure['t']
+    major_confirm_ts=_kairos_candle_close_ts(structure['t'], '15') or structure['t']
+    internal=structure.get('internal_confirmation') or {}
+    internal_open_ts=internal.get('t')
+    internal_confirm_ts=(_kairos_candle_close_ts(internal_open_ts, '15') or internal_open_ts) if internal_open_ts is not None else None
+    # A estrutura maior autoriza; a interna confirma/tima. Micro só pode executar
+    # quando AMBAS já são conhecidas por candle fechado.
+    structure_confirm_ts=max(major_confirm_ts, internal_confirm_ts or major_confirm_ts)
+    resultado['m15_major_confirmation_close_ts']=major_confirm_ts
+    resultado['m15_internal_confirmation_open_ts']=internal_open_ts
+    resultado['m15_internal_confirmation_close_ts']=internal_confirm_ts
     after_ts=max(structure_confirm_ts,zone_ts)
 
-    # M15 confirmou a intenção; M5 só refina a execução da MESMA tese.
+    # M15 maior autorizou e o interno confirmou; M5 só refina a execução da MESMA tese.
     # Nunca volta a decidir direção nem cria tese independente.
     m5=candles_por_tf.get('M5') or []
     refined=_kairos_m5_refine_zone(m5,zone,structure.get('leg_start_ts') or sweep['sweep_ts'],structure_confirm_ts,sweep['direcao'],structure.get('nivel'))

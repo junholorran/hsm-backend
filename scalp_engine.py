@@ -2838,74 +2838,13 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
         obstacle_level = float(first_obstacle['nivel'])
         obstacle_rr = abs(obstacle_level - entry) / risk
         resultado['tp1_obstacle'] = dict(first_obstacle)
-        if obstacle_rr < 2.0:
-            # Plano principal 2R/3R bloqueado. Não transformamos CHoCH/MSS em
-            # entrada automática: a cadeia causal completa já foi validada acima.
-            # SCALP 1R só existe quando há espaço estrutural real >=1R.
-            resultado['swing_blocked_by_obstacle']=True
-            resultado['swing_obstacle_rr']=round(obstacle_rr,2)
-            if obstacle_rr >= 1.0:
-                be_1r = entry + sign * risk
-                structural_target=float(target['nivel'])
-                structural_rr=abs(structural_target-entry)/risk
-                resultado['tp1']=round(be_1r,6)
-                resultado['tp1_rr']=1.0
-                resultado['tp1_origem']='BE_TRIGGER_1R'
-                resultado['tp2']=round(structural_target,6)
-                resultado['tp2_rr']=round(structural_rr,2)
-                resultado['tp2_origem']=f"LIQUIDEZ_ESTRUTURAL_{target['tf']}_{target['tipo']}"
-                resultado['tp']=resultado['tp2']
-                resultado['rr']=round(structural_rr,2)
-                resultado['tp_origem']=resultado['tp2_origem']
-                resultado['be_trigger']=resultado['tp1']
-                resultado['be_price']=round(entry,6)
-                resultado['trade_mode']='OBSTACLE_BE_1R_RUN_STRUCTURAL'
-                resultado['structural_target_context']=round(float(target['nivel']),6)
-                resultado['structural_target_context_origin']=f"LIQUIDEZ_ESTRUTURAL_{target['tf']}_{target['tipo']}"
-                resultado['signal']=True
-                resultado['valid']=True
-                resultado['reason']=(
-                    f"LIQ={sweep['liquidity_tf']}:{sweep['liquidity_type']}@{sweep['nivel']} -> FIRST_CAPTURE_M15@{sweep['sweep_ts']} -> "
-                    f"{sweep.get('post_capture_state')} -> INTENT={intent['mode']}:{direction} -> {structure['tipo']}_M15 -> DISPLACEMENT(z={resultado['momentum_z']}) -> "
-                    f"{resultado['zone_source']} -> RETEST_{entry_tf} -> SL={sl_info.get('sl_classe')} -> BE_1R_RUN_STRUCTURAL -> "
-                    f"SETUP={resultado['setup_type']}"
-                )
-                return resultado
-            resultado['failure_reason']='OBSTACULO_ESTRUTURAL_ANTES_1R'
-            resultado['rr']=round(obstacle_rr,2)
-            return resultado
+        # Obstáculo é risco/contexto. Não fabrica TP fixo nem invalida sozinho
+        # uma cadeia causal já confirmada. O alvo continua estrutural.
+        resultado['swing_obstacle_rr']=round(obstacle_rr,2)
 
-    # A primeira liquidez estrutural do lado do trade também precisa deixar
-    # espaço mínimo para o plano 2R. Ela continua registrada como alvo/contexto.
+    # O alvo é sempre a primeira liquidez estrutural causal conhecida na entrada.
+    # RR apenas mede a distância; não cria TP 1R/2R/3R e não veta por threshold fixo.
     structural_rr = abs(float(target['nivel']) - entry) / risk
-    if structural_rr < 2.0:
-        resultado['rr']=round(structural_rr,2)
-        if structural_rr >= 1.0:
-            tp_scalp_1r = entry + sign * risk
-            resultado['tp1']=round(tp_scalp_1r,6)
-            resultado['tp1_rr']=1.0
-            resultado['tp1_origem']='SCALP_CAUSAL_1R'
-            resultado['tp2']=None
-            resultado['tp2_rr']=None
-            resultado['tp2_origem']=None
-            resultado['tp']=resultado['tp1']
-            resultado['rr']=1.0
-            resultado['tp_origem']='SCALP_CAUSAL_1R'
-            resultado['be_trigger']=None
-            resultado['be_price']=None
-            resultado['trade_mode']='SCALP_CAUSAL_1R'
-            resultado['signal']=True
-            resultado['valid']=True
-            resultado['reason']=(
-                f"LIQ={sweep['liquidity_tf']}:{sweep['liquidity_type']}@{sweep['nivel']} -> FIRST_CAPTURE_M15@{sweep['sweep_ts']} -> "
-                f"{sweep.get('post_capture_state')} -> INTENT={intent['mode']}:{direction} -> {structure['tipo']}_M15 -> DISPLACEMENT(z={resultado['momentum_z']}) -> "
-                f"{resultado['zone_source']} -> RETEST_{entry_tf} -> SL={sl_info.get('sl_classe')} -> SCALP_CAUSAL_1R -> "
-                f"SETUP={resultado['setup_type']}"
-            )
-            return resultado
-        resultado['failure_reason']='LIQUIDEZ_ESTRUTURAL_ANTES_1R'
-        return resultado
-
     # Plano normal: a estrutura escolhe o alvo. RR apenas mede o espaço.
     # Ao atingir +1R, o risco vai para BE; depois o trade segue até a primeira
     # liquidez estrutural causal já conhecida no timestamp da entrada.

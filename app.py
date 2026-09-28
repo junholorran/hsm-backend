@@ -2551,6 +2551,22 @@ def experiment_previous_day_liquidity():
     except Exception as e:
         return Response('Erro ao consultar Kairos',status=500,mimetype='text/plain; charset=utf-8')
 
+def _audit_btc_pdl_forward_after_capture(capture_close, expected, wall_now):
+    """Read-only: segue apenas candles fechados APOS a captura e prova major50 -> internal5."""
+    m15=sorted(scalp_engine._fetch_bybit_klines_historico('BTCUSD','15',3,wall_now),key=lambda x:x.get('t',0))
+    closed=[c for c in m15 if int(c.get('t',0))+900000<=wall_now]
+    majors=scalp_engine.compute_lux_structure_events(closed,swing_size=50)
+    internals=scalp_engine.compute_lux_internal_structure(closed,swing_size=5)
+    major=next((e for e in majors if int(e.get('t',0))+900000>capture_close and e.get('direcao')==expected and e.get('tipo') in ('CHoCH','BOS')),None)
+    if not major:
+        return {'major_swing50':None,'internal_swing5':None,'chain_status':'WAITING_MAJOR_M15'}
+    major_close=int(major.get('t',0))+900000
+    internal=next((e for e in internals if int(e.get('t',0))>=int(major.get('t',0)) and e.get('direcao')==expected and e.get('tipo') in ('CHoCH','BOS')),None)
+    return {'major_swing50':major,'major_confirm_close_ts':major_close,
+            'internal_swing5':internal,
+            'internal_confirm_close_ts':(int(internal.get('t',0))+900000 if internal else None),
+            'chain_status':('MAJOR_AND_INTERNAL_CONFIRMED' if internal else 'WAITING_INTERNAL_M15')}
+
 _KAIROS_BTC_PDL_CHAIN_AUDIT={'status':'IDLE','result':None,'error':None}
 
 def _run_btc_pdl_chain_audit():
@@ -2597,7 +2613,8 @@ def _run_btc_pdl_chain_audit():
                 'M15_state_known_at_capture':{
                     'major_swing50':next((e for e in reversed(majors) if e.get('t',0)<=capture_open),None),
                     'internal_swing5':next((e for e in reversed(internals) if e.get('t',0)<=capture_open),None)},
-                'next_step':'FOLLOW_FORWARD_FROM_CAPTURE_ONLY; no post-capture structure used in this snapshot'}
+                'forward_after_capture': _audit_btc_pdl_forward_after_capture(capture_close, expected, wall_now),
+                'next_step':'FORWARD_CHAIN_AUDITED_FROM_CAPTURE_CLOSE'}
         _KAIROS_BTC_PDL_CHAIN_AUDIT.update({'status':'DONE','result':result,'error':None})
     except Exception as e:
         _KAIROS_BTC_PDL_CHAIN_AUDIT.update({'status':'ERROR','result':None,'error':str(e)})

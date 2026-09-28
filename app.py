@@ -2526,6 +2526,48 @@ def experiment_audit_near_liquidity_impulse_20260927_start():
 def experiment_audit_near_liquidity_impulse_20260927():
     return jsonify(_KAIROS_NEAR_LIQ_IMPULSE_AUDIT)
 
+
+@app.route('/experiment/previous_day_liquidity', methods=['GET'])
+def experiment_previous_day_liquidity():
+    """Read-only: PDH/PDL do ultimo D1 fechado para UM par por consulta."""
+    pair=str(request.args.get('pair','BTCUSD')).upper().strip()
+    allowed=set(scalp_engine.PARES_MONITORADOS_REPLAY)
+    if pair not in allowed:
+        return jsonify({'ok':False,'error':'PAIR_NOT_ALLOWED','pair':pair,
+                        'allowed_pairs':sorted(allowed)}),400
+    try:
+        now_ts=int(time.time()*1000)
+        # Busca minima: D1 para refs; M15 apenas para o estado ACTIVE/CAPTURED do PDH/PDL.
+        d1=sorted(scalp_engine._fetch_bybit_klines_historico(pair,'D',5,fim_ts_ms=now_ts),
+                  key=lambda x:x.get('t',0))
+        m15=sorted(scalp_engine._fetch_bybit_klines_historico(pair,'15',200,fim_ts_ms=now_ts),
+                   key=lambda x:x.get('t',0))
+        candles={'D1':d1,'M15':m15}
+        refs=scalp_engine._kairos_previous_period_refs(candles,now_ts)
+        registry=scalp_engine._kairos_structural_registry(candles,now_ts)
+        def state_for(kind):
+            rows=[x for x in (registry or []) if str(x.get('tf'))=='D1' and str(x.get('type',x.get('tipo',''))).upper()==kind]
+            if not rows:
+                return None
+            x=rows[-1]
+            return {'state':x.get('state'),'captured_ts':x.get('captured_ts')}
+        pdh=refs.get('PDH'); pdl=refs.get('PDL')
+        if not pdh or not pdl:
+            return jsonify({'ok':False,'pair':pair,'error':'NO_CLOSED_D1_REFERENCE'}),404
+        prev=next((c for c in reversed(d1)
+                   if c.get('t')==pdh.get('period_open_ts')),None)
+        return jsonify({
+            'ok':True,'read_only':True,'source':'KAIROS_BYBIT',
+            'pair':pair,'now_ts':now_ts,
+            'previous_closed_d1':prev,
+            'PDH':{'level':pdh.get('level'),'period_open_ts':pdh.get('period_open_ts'),
+                   'confirmed_ts':pdh.get('confirmed_ts'),**(state_for('PDH') or {})},
+            'PDL':{'level':pdl.get('level'),'period_open_ts':pdl.get('period_open_ts'),
+                   'confirmed_ts':pdl.get('confirmed_ts'),**(state_for('PDL') or {})}
+        })
+    except Exception as e:
+        return jsonify({'ok':False,'pair':pair,'error':str(e)}),500
+
 @app.route('/experiment/audit_near_pdl_20260927', methods=['GET'])
 def experiment_audit_near_pdl_20260927():
     start_utc=1790474400000

@@ -1749,12 +1749,24 @@ def _kairos_direction_after_first_capture(candles, capture, swing_size=5):
     expected=('baixa' if side=='HIGH' else 'alta') if state=='REJECTION_RECLAIM' else ('alta' if side=='HIGH' else 'baixa')
 
     major_events=compute_lux_structure_events(candles,swing_size=50)
-    major=next((e for e in major_events
-                if e.get('t',0) > capture['sweep_ts']
-                and e.get('direcao')==expected
-                and e.get('tipo') in ('CHoCH','BOS')),None)
-    if not major:
+    # Lifecycle causal da tese: não existe validade por relógio. Depois da captura,
+    # o PRIMEIRO evento estrutural M15 maior resolvido decide se a tese sobrevive.
+    # Se a estrutura maior resolver primeiro contra a reação esperada, esta captura
+    # morreu e não pode ficar guardada até aparecer, dias depois, um evento favorável.
+    post_capture_major=[e for e in major_events
+                        if e.get('t',0) > capture['sweep_ts']
+                        and e.get('tipo') in ('CHoCH','BOS')]
+    if not post_capture_major:
         return None
+    first_major=min(post_capture_major,key=lambda e:e.get('t',0))
+    if first_major.get('direcao') != expected:
+        capture['thesis_lifecycle']='INVALIDATED_BY_FIRST_OPPOSING_MAJOR_M15'
+        capture['thesis_invalidated_ts']=first_major.get('t')
+        capture['thesis_invalidated_direction']=first_major.get('direcao')
+        return None
+    major=first_major
+    capture['thesis_lifecycle']='AUTHORIZED_BY_FIRST_MAJOR_M15'
+    capture['thesis_authorized_ts']=major.get('t')
 
     internal_events=compute_lux_internal_structure(candles,swing_size=swing_size)
     for e in internal_events:

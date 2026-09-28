@@ -2455,6 +2455,54 @@ def experiment_poi_lifecycle_abc_sol():
 
 
 
+
+@app.route('/experiment/audit_near_liquidity_impulse_20260927', methods=['GET'])
+def experiment_audit_near_liquidity_impulse_20260927():
+    """Read-only: prova qual pool estrutural foi realmente capturada antes do impulso NEAR de 27/09."""
+    pair='NEARUSD'
+    start_ts=1790467200000
+    impulse_ts=1790487900000
+    end_ts=1790488800000
+    tf_map={'MN':'M','W1':'W','D1':'D','H4':'240','H1':'60','M15':'15','M5':'5'}
+    candles={}
+    for label,interval in tf_map.items():
+        limit=1000 if label in ('H1','M15','M5') else 500
+        candles[label]=sorted(scalp_engine._fetch_bybit_klines_historico(pair,interval,limit,fim_ts_ms=end_ts+300000),key=lambda x:x.get('t',0))
+    registry=scalp_engine._kairos_structural_registry(candles, impulse_ts)
+    pools=[]
+    for x in (registry or []):
+        level=x.get('price',x.get('nivel',x.get('level')))
+        if level is None:
+            continue
+        try: level=float(level)
+        except Exception: continue
+        typ=str(x.get('type',x.get('tipo',''))).upper()
+        side='HIGH' if typ in ('SWING_HIGH','PDH','PWH','PMH','EQH') or typ.endswith('_HIGH') else ('LOW' if typ in ('SWING_LOW','PDL','PWL','PML','EQL') or typ.endswith('_LOW') else None)
+        if side is None:
+            continue
+        native_tf=str(x.get('tf',''))
+        rows=candles['M5']
+        first=None
+        for k in rows:
+            t=k.get('t',0)
+            if t < start_ts or t > impulse_ts: continue
+            breached=(float(k['h'])>level) if side=='HIGH' else (float(k['l'])<level)
+            if breached:
+                first={'t':t,'o':k['o'],'h':k['h'],'l':k['l'],'c':k['c'],
+                       'reclaim_same_close':(float(k['c'])<level) if side=='HIGH' else (float(k['c'])>level)}
+                break
+        pools.append({'tf':native_tf,'type':typ,'side':side,'level':level,
+                      'registry_state':x.get('state'),'origin_ts':x.get('origin_ts'),
+                      'confirmed_ts':x.get('confirmed_ts'),'captured_ts':x.get('captured_ts'),
+                      'first_m5_breach':first})
+    captured=[x for x in pools if x['first_m5_breach']]
+    captured.sort(key=lambda x:(x['first_m5_breach']['t'],x['tf'],x['level']))
+    nearest=sorted(pools,key=lambda x:min(abs(float(k['l'])-x['level']) if x['side']=='LOW' else abs(float(k['h'])-x['level']) for k in candles['M5'] if start_ts<=k.get('t',0)<=impulse_ts))[:20] if candles['M5'] else []
+    return jsonify({'ok':True,'read_only':True,'pair':pair,'window_ts':[start_ts,impulse_ts],
+                    'impulse_reference_ts':impulse_ts,'captured_structural_pools':captured,
+                    'captured_count':len(captured),'nearest_structural_pools':nearest,
+                    'all_structural_pools':pools})
+
 @app.route('/experiment/audit_near_pdl_20260927', methods=['GET'])
 def experiment_audit_near_pdl_20260927():
     start_utc=1790474400000

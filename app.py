@@ -2456,8 +2456,9 @@ def experiment_poi_lifecycle_abc_sol():
 
 
 
-@app.route('/experiment/audit_near_liquidity_impulse_20260927', methods=['GET'])
-def experiment_audit_near_liquidity_impulse_20260927():
+_KAIROS_NEAR_LIQ_IMPULSE_AUDIT={'status':'IDLE','result':None,'error':None,'started_at':None,'finished_at':None}
+
+def _build_near_liquidity_impulse_20260927():
     """Read-only: prova qual pool estrutural foi realmente capturada antes do impulso NEAR de 27/09."""
     pair='NEARUSD'
     start_ts=1790467200000
@@ -2498,10 +2499,32 @@ def experiment_audit_near_liquidity_impulse_20260927():
     captured=[x for x in pools if x['first_m5_breach']]
     captured.sort(key=lambda x:(x['first_m5_breach']['t'],x['tf'],x['level']))
     nearest=sorted(pools,key=lambda x:min(abs(float(k['l'])-x['level']) if x['side']=='LOW' else abs(float(k['h'])-x['level']) for k in candles['M5'] if start_ts<=k.get('t',0)<=impulse_ts))[:20] if candles['M5'] else []
-    return jsonify({'ok':True,'read_only':True,'pair':pair,'window_ts':[start_ts,impulse_ts],
-                    'impulse_reference_ts':impulse_ts,'captured_structural_pools':captured,
-                    'captured_count':len(captured),'nearest_structural_pools':nearest,
-                    'all_structural_pools':pools})
+    return {'ok':True,'read_only':True,'pair':pair,'window_ts':[start_ts,impulse_ts],
+            'impulse_reference_ts':impulse_ts,'captured_structural_pools':captured,
+            'captured_count':len(captured),'nearest_structural_pools':nearest,
+            'all_structural_pools':pools}
+
+
+def _run_near_liquidity_impulse_20260927():
+    _KAIROS_NEAR_LIQ_IMPULSE_AUDIT.update({'status':'RUNNING','result':None,'error':None,'started_at':int(time.time()*1000),'finished_at':None})
+    try:
+        result=_build_near_liquidity_impulse_20260927()
+        _KAIROS_NEAR_LIQ_IMPULSE_AUDIT.update({'status':'DONE','result':result,'finished_at':int(time.time()*1000)})
+        print('[NEAR_LIQ_IMPULSE_AUDIT] DONE captured='+str(result.get('captured_count')),flush=True)
+    except Exception as e:
+        _KAIROS_NEAR_LIQ_IMPULSE_AUDIT.update({'status':'ERROR','error':str(e),'finished_at':int(time.time()*1000)})
+        print('[NEAR_LIQ_IMPULSE_AUDIT] ERROR '+str(e),flush=True)
+
+@app.route('/experiment/audit_near_liquidity_impulse_20260927/start', methods=['GET'])
+def experiment_audit_near_liquidity_impulse_20260927_start():
+    if _KAIROS_NEAR_LIQ_IMPULSE_AUDIT.get('status')=='RUNNING':
+        return jsonify({'status':'RUNNING','started':False}),202
+    threading.Thread(target=_run_near_liquidity_impulse_20260927,daemon=True).start()
+    return jsonify({'status':'STARTING','started':True,'pair':'NEARUSD'}),202
+
+@app.route('/experiment/audit_near_liquidity_impulse_20260927', methods=['GET'])
+def experiment_audit_near_liquidity_impulse_20260927():
+    return jsonify(_KAIROS_NEAR_LIQ_IMPULSE_AUDIT)
 
 @app.route('/experiment/audit_near_pdl_20260927', methods=['GET'])
 def experiment_audit_near_pdl_20260927():

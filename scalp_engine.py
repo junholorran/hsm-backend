@@ -3238,6 +3238,14 @@ def replay_vortex_decision_layer_v2(pair, dias_historico=7, janelas_mfe_mae=JANE
         'experimental_sl_failures': experimental_sl_failures,
         'experimental_retest_wait_audit': experimental_retest_wait_audit,
         'experimental_intent_gate_audit': experimental_intent_gate_audit,
+        'experimental_intent_gate_summary': ({
+            'counts': dict(__import__('collections').Counter(x.get('verdict') for x in experimental_intent_gate_audit)),
+            'unique_samples': list({(
+                (x.get('capture') or {}).get('tf'), (x.get('capture') or {}).get('type'),
+                (x.get('capture') or {}).get('level'), (x.get('capture') or {}).get('sweep_ts'),
+                x.get('expected_direction'), (x.get('first_major_after_capture') or {}).get('t'),
+                x.get('verdict')): x for x in experimental_intent_gate_audit}.values())[:20]
+        } if experimental_intent_gate_audit is not None else None),
         'total_sinais_unicos': len(sinais_unicos),
         'auditoria_dedup': auditoria_dedup,
         'sinais_long': len(sinais_long), 'sinais_short': len(sinais_short),

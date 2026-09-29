@@ -2111,6 +2111,56 @@ def experiment_audit_btc_m15_after_82800():
         print(f"[BTC_M15_82800_AUDIT_ERROR] {e}",flush=True)
         return jsonify({'ok':False,'error':str(e)}),500
 
+@app.route('/experiment/audit_eth_poi_leg', methods=['GET'])
+def experiment_audit_eth_poi_leg():
+    """READ-ONLY: autopsia todos FVG/IFVG/OB M15 da perna ETH antes do major bearish."""
+    try:
+        now_ts=int(time.time()*1000); cap=1789948800000; invalid=1790168400000
+        m15=sorted(scalp_engine._fetch_bybit_klines_historico('ETHUSD','15',12,now_ts),key=lambda x:x.get('t',0))
+        m15=[x for x in m15 if int(x.get('t',0))+900000<=now_ts]
+        majors=sorted([e for e in scalp_engine.compute_lux_structure_events(m15,swing_size=50)
+                       if e.get('tipo') in ('CHoCH','BOS')],key=lambda e:e.get('t',0))
+        ints=sorted([e for e in scalp_engine.compute_lux_internal_structure(m15,swing_size=5)
+                     if e.get('tipo') in ('CHoCH','BOS') and cap<e.get('t',0)<invalid and e.get('direcao')=='alta'],
+                    key=lambda e:e.get('t',0))
+        zones=scalp_engine._kairos_fvg_states(m15)
+        rows=[]
+        for z in zones:
+            eff=z.get('flip_ts') or z.get('created_ts') or 0
+            src=[z.get('source_a'),z.get('source_mid'),z.get('source_c')]
+            src_ts=[x.get('t') for x in src if isinstance(x,dict) and x.get('t') is not None]
+            if not (cap<=eff<invalid) and not any(cap<=t<invalid for t in src_ts): continue
+            reasons=[]
+            if z.get('direcao')!='alta': reasons.append('DIRECTION_NOT_BULLISH')
+            if z.get('state') not in ('ATIVA','TOCADA','PARCIAL','IFVG'): reasons.append('STATE_NOT_ENTRY_ELIGIBLE')
+            if z.get('created_ts') is not None and z.get('created_ts')<cap: reasons.append('MOTHER_PRE_CAPTURE')
+            if not all(isinstance(x,dict) and x.get('t') is not None for x in src): reasons.append('MISSING_ABC')
+            elif min(src_ts)<cap: reasons.append('ABC_STARTS_PRE_CAPTURE')
+            rows.append({'tipo':z.get('tipo'),'direcao':z.get('direcao'),'state':z.get('state'),
+                         'bottom':z.get('bottom'),'top':z.get('top'),'created_ts':z.get('created_ts'),
+                         'flip_ts':z.get('flip_ts'),'lux_fvg':z.get('lux_fvg'),
+                         'mother_fvg_id':z.get('mother_fvg_id'),'source_ts':src_ts,'base_rejections':reasons})
+        obs=[]
+        for ev in ints:
+            idx=next((i for i,x in enumerate(m15) if x.get('t')==ev.get('t')),None)
+            if idx is None: continue
+            e=dict(ev); e['full_idx']=idx
+            ob=scalp_engine._kairos_ob_from_break(m15,idx,'alta')
+            obs.append({'structure':ev,'ob':ob})
+        result={'ok':True,'read_only':True,'pair':'ETHUSD','capture_ts':cap,'invalidating_major_ts':invalid,
+                'bullish_internal_events':ints,'fvg_ifvg_candidates':rows,'ob_by_internal_break':obs,
+                'counts':{'internal':len(ints),'fvg_ifvg':len(rows),'ob_checks':len(obs)}}
+        print(f"[ETH_POI_LEG_AUDIT] counts={result['counts']}",flush=True)
+        for z in rows:
+            print(f"[ETH_POI_ZONE] {z['tipo']} {z['bottom']}-{z['top']} created={z['created_ts']} flip={z['flip_ts']} lux={z['lux_fvg']} reject={z['base_rejections']}",flush=True)
+        for o in obs:
+            ev=o['structure']; ob=o['ob']
+            print(f"[ETH_POI_OB] internal={ev.get('tipo')}@{ev.get('nivel')} ts={ev.get('t')} ob={ob}",flush=True)
+        return jsonify(result)
+    except Exception as e:
+        print(f"[ETH_POI_LEG_AUDIT_ERROR] {e}",flush=True)
+        return jsonify({'ok':False,'error':str(e)}),500
+
 @app.route('/experiment/audit_eth_capture_lifecycle', methods=['GET'])
 def experiment_audit_eth_capture_lifecycle():
     """READ-ONLY: prova causalmente a janela ETH entre captura H4 2670.98 e primeiro major50 contrario."""

@@ -2603,9 +2603,17 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
         }
         resultado['failure_reason']='SEM_INTENCAO_M15_APOS_CAPTURA_ESTRUTURAL'; return resultado
     direction=intent['direction']; structure=intent['structure']
+    # A estrutura MAIOR mantém a autorização/estado. O internal confirmado é a
+    # quebra executável que produz o POI causal desta tese. Não deixamos o micro
+    # escolher a narrativa; apenas ligamos o POI à quebra interna já autorizada.
+    internal_structure=structure.get('internal_confirmation') or structure
+    if internal_structure.get('full_idx') is None and internal_structure.get('t') is not None:
+        internal_structure={**internal_structure,
+                            'full_idx':next((j for j,cc in enumerate(exec_candles)
+                                             if cc.get('t')==internal_structure.get('t')),None)}
     sweep['direcao']=intent['direcao']
     resultado['direction']=direction; resultado['execution_tf']=exec_tf; resultado['choch_confirmed']=True
-    resultado['choch_timestamp']=structure['t']; resultado['choch_level']=round(structure['nivel'],6)
+    resultado['choch_timestamp']=internal_structure['t']; resultado['choch_level']=round(internal_structure['nivel'],6)
     z=intent.get('momentum_z'); resultado['momentum_z']=round(z,3) if z is not None else None
 
     ctx=contexto.get('final'); trade_dir=intent['direcao']
@@ -2614,16 +2622,16 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
     elif ctx in ('alta','baixa'): resultado['setup_type']='PULLBACK_REVERSAL'
     else: resultado['setup_type']='LOCAL'
 
-    zone=_kairos_select_entry_zone(exec_candles,sweep,structure,mapa)
+    zone=_kairos_select_entry_zone(exec_candles,sweep,internal_structure,mapa)
     if experimental_poi_policy:
         lifecycle_audit={}
-        zone=_kairos_experimental_apply_poi_policy(zone,exec_candles,sweep,structure,mapa,experimental_poi_policy,experimental_poi_state,lifecycle_audit)
+        zone=_kairos_experimental_apply_poi_policy(zone,exec_candles,sweep,internal_structure,mapa,experimental_poi_policy,experimental_poi_state,lifecycle_audit)
         resultado['experimental_poi_lifecycle']=lifecycle_audit
     if not zone:
         resultado['failure_reason']=f'SEM_FVG_IFVG_OB_{exec_tf}_CAUSAL'; return resultado
     # SHADOW ONLY: prova matemática/causal do POI escolhido. Não bloqueia nem altera sinal.
     try:
-        poi_shadow=_kairos_shadow_validate_poi(zone, exec_candles, sweep=sweep, structure=structure, tf=exec_tf)
+        poi_shadow=_kairos_shadow_validate_poi(zone, exec_candles, sweep=sweep, structure=internal_structure, tf=exec_tf)
         resultado['poi_shadow_audit']=poi_shadow
         _kairos_shadow_log_poi(audit_pair, zone, poi_shadow)
     except Exception as _poi_shadow_exc:
@@ -2654,7 +2662,7 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
     # M15 maior autorizou e o interno confirmou; M5 só refina a execução da MESMA tese.
     # Nunca volta a decidir direção nem cria tese independente.
     m5=candles_por_tf.get('M5') or []
-    refined=_kairos_m5_refine_zone(m5,zone,structure.get('leg_start_ts') or sweep['sweep_ts'],structure_confirm_ts,sweep['direcao'],structure.get('nivel'))
+    refined=_kairos_m5_refine_zone(m5,zone,internal_structure.get('leg_start_ts') or sweep['sweep_ts'],structure_confirm_ts,sweep['direcao'],internal_structure.get('nivel'))
     resultado['m5_refinement_candidate_found']=bool(refined)
     resultado['m5_refinement_candidate_type']=refined.get('tipo') if refined else None
     resultado['m5_refinement_candidate_top']=round(refined['top'],6) if refined and refined.get('top') is not None else None

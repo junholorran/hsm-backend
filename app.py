@@ -2143,6 +2143,35 @@ def experiment_audit_btc_internal_after_84352():
         return jsonify({'ok':False,'error':str(e)}),500
 
 
+
+@app.route('/experiment/audit_btc_structure_parity_84315', methods=['GET'])
+def experiment_audit_btc_structure_parity_84315():
+    """READ-ONLY: expõe candles M15 + eventos major50/internal5 no trecho 84315->83862 para paridade visual."""
+    try:
+        now_ts=int(time.time()*1000)
+        start_ts=1790683200000
+        end_ts=1790696700000
+        m15=sorted(scalp_engine._fetch_bybit_klines_historico('BTCUSD','15',5,now_ts),key=lambda x:x.get('t',0))
+        closed=[x for x in m15 if int(x.get('t',0))+900000<=now_ts]
+        candles=[x for x in closed if start_ts<=int(x.get('t',0))<=end_ts]
+        majors=[e for e in scalp_engine.compute_lux_structure_events(closed,swing_size=50)
+                if start_ts<=int(e.get('t',0))<=end_ts and e.get('tipo') in ('CHoCH','BOS')]
+        internals=[e for e in scalp_engine.compute_lux_internal_structure(closed,swing_size=5)
+                   if start_ts<=int(e.get('t',0))<=end_ts and e.get('tipo') in ('CHoCH','BOS')]
+        result={'ok':True,'read_only':True,'pair':'BTCUSD','tf':'M15','start_ts':start_ts,'end_ts':end_ts,
+                'candles':candles,'major50_events':majors,'internal5_events':internals,
+                'counts':{'candles':len(candles),'major50':len(majors),'internal5':len(internals)}}
+        print(f"[BTC_STRUCTURE_PARITY_84315] counts={result['counts']}",flush=True)
+        for e in majors:
+            print(f"[BTC_STRUCTURE_PARITY_MAJOR] {e.get('tipo')} {e.get('direcao')} level={e.get('nivel')} t={e.get('t')} broken_origin={e.get('broken_swing_origin_ts')} protected={e.get('protected_swing_type')}@{e.get('protected_swing_level')}",flush=True)
+        for e in internals:
+            print(f"[BTC_STRUCTURE_PARITY_INTERNAL] {e.get('tipo')} {e.get('direcao')} level={e.get('nivel')} t={e.get('t')} broken_origin={e.get('broken_swing_origin_ts')} protected={e.get('protected_swing_type')}@{e.get('protected_swing_level')}",flush=True)
+        return jsonify(result)
+    except Exception as e:
+        print(f"[BTC_STRUCTURE_PARITY_84315_ERROR] {e}",flush=True)
+        return jsonify({'ok':False,'error':str(e)}),500
+
+
 @app.route('/experiment/audit_eth_poi_leg', methods=['GET'])
 def experiment_audit_eth_poi_leg():
     """READ-ONLY: autopsia todos FVG/IFVG/OB M15 da perna ETH antes do major bearish."""

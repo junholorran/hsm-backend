@@ -2111,6 +2111,38 @@ def experiment_audit_btc_m15_after_82800():
         print(f"[BTC_M15_82800_AUDIT_ERROR] {e}",flush=True)
         return jsonify({'ok':False,'error':str(e)}),500
 
+
+@app.route('/experiment/audit_btc_internal_after_84352', methods=['GET'])
+def experiment_audit_btc_internal_after_84352():
+    """READ-ONLY: prova a estrutura internal5 conhecida apos o CHoCH major M15 bullish 84352.9."""
+    try:
+        now_ts=int(time.time()*1000)
+        major_open=1790686800000
+        major_close=major_open+900000
+        m15=sorted(scalp_engine._fetch_bybit_klines_historico('BTCUSD','15',5,now_ts),key=lambda x:x.get('t',0))
+        closed=[x for x in m15 if int(x.get('t',0))+900000<=now_ts]
+        majors=sorted([e for e in scalp_engine.compute_lux_structure_events(closed,swing_size=50)
+                       if e.get('tipo') in ('CHoCH','BOS')],key=lambda e:e.get('t',0))
+        internals=sorted([e for e in scalp_engine.compute_lux_internal_structure(closed,swing_size=5)
+                          if e.get('tipo') in ('CHoCH','BOS')],key=lambda e:e.get('t',0))
+        major=next((e for e in majors if e.get('t')==major_open and e.get('direcao')=='alta'),None)
+        after=[e for e in internals if int(e.get('t',0))+900000>major_close]
+        bullish=[e for e in after if e.get('direcao')=='alta']
+        bearish=[e for e in after if e.get('direcao')=='baixa']
+        around=[e for e in internals if major_open-6*3600000 <= e.get('t',0) <= now_ts]
+        result={'ok':True,'read_only':True,'pair':'BTCUSD','major_open_ts':major_open,'major_confirm_close_ts':major_close,
+                'major_event':major,'internal5_after_major_close':after,'bullish_internal_after_major':bullish,
+                'bearish_internal_after_major':bearish,'internal5_around_major':around,
+                'counts':{'after':len(after),'bullish_after':len(bullish),'bearish_after':len(bearish)}}
+        print(f"[BTC_INTERNAL_84352_AUDIT] counts={result['counts']} major={major}",flush=True)
+        for e in after:
+            print(f"[BTC_INTERNAL_84352_EVENT] type={e.get('tipo')} dir={e.get('direcao')} level={e.get('nivel')} open_ts={e.get('t')} close_ts={int(e.get('t',0))+900000}",flush=True)
+        return jsonify(result)
+    except Exception as e:
+        print(f"[BTC_INTERNAL_84352_AUDIT_ERROR] {e}",flush=True)
+        return jsonify({'ok':False,'error':str(e)}),500
+
+
 @app.route('/experiment/audit_eth_poi_leg', methods=['GET'])
 def experiment_audit_eth_poi_leg():
     """READ-ONLY: autopsia todos FVG/IFVG/OB M15 da perna ETH antes do major bearish."""

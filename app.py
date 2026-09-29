@@ -2111,6 +2111,55 @@ def experiment_audit_btc_m15_after_82800():
         print(f"[BTC_M15_82800_AUDIT_ERROR] {e}",flush=True)
         return jsonify({'ok':False,'error':str(e)}),500
 
+@app.route('/experiment/audit_eth_capture_lifecycle', methods=['GET'])
+def experiment_audit_eth_capture_lifecycle():
+    """READ-ONLY: prova causalmente a janela ETH entre captura H4 2670.98 e primeiro major50 contrario."""
+    try:
+        now_ts=int(time.time()*1000)
+        capture_open=1789948800000
+        capture_close=capture_open+900000
+        expected='alta'
+        m15=sorted(scalp_engine._fetch_bybit_klines_historico('ETHUSD','15',12,now_ts),key=lambda x:x.get('t',0))
+        m5=sorted(scalp_engine._fetch_bybit_klines_historico('ETHUSD','5',12,now_ts),key=lambda x:x.get('t',0))
+        m15=[x for x in m15 if int(x.get('t',0))+900000<=now_ts]
+        m5=[x for x in m5 if int(x.get('t',0))+300000<=now_ts]
+        majors=sorted([e for e in scalp_engine.compute_lux_structure_events(m15,swing_size=50)
+                       if e.get('tipo') in ('CHoCH','BOS')],key=lambda e:e.get('t',0))
+        internals=sorted([e for e in scalp_engine.compute_lux_internal_structure(m15,swing_size=5)
+                          if e.get('tipo') in ('CHoCH','BOS')],key=lambda e:e.get('t',0))
+        state_at_capture=next((e for e in reversed(majors) if e.get('t',0)<=capture_open),None)
+        opposing=next((e for e in majors if e.get('t',0)>capture_open and e.get('direcao')!=expected),None)
+        opposing_open=opposing.get('t') if opposing else now_ts
+        opposing_close=(int(opposing_open)+900000 if opposing else None)
+        window_internal=[e for e in internals if e.get('t',0)>capture_open and e.get('t',0)<opposing_open and e.get('direcao')==expected]
+        # Independente do replay: para cada corte internal bullish dentro da janela, prova que nenhum major bearish futuro
+        # ainda era conhecido naquele corte e expõe candles M5 fechados disponíveis depois da confirmação.
+        checkpoints=[]
+        for e in window_internal:
+            confirm=int(e.get('t',0))+900000
+            known_major=next((x for x in reversed(majors) if x.get('t',0)<=e.get('t',0)),None)
+            m5_after=[x for x in m5 if x.get('t',0)>=confirm and x.get('t',0)<opposing_open]
+            checkpoints.append({'internal':e,'internal_confirm_close_ts':confirm,
+                                'major_state_known_at_internal':known_major,
+                                'major_matches_expected':bool(known_major and known_major.get('direcao')==expected),
+                                'closed_m5_available_before_opposing_major':len(m5_after),
+                                'first_m5_after_internal':m5_after[0] if m5_after else None})
+        result={'ok':True,'read_only':True,'pair':'ETHUSD','capture_level':2670.98,
+                'capture_open_ts':capture_open,'capture_close_ts':capture_close,'expected_direction':expected,
+                'major_state_at_capture':state_at_capture,'first_opposing_major_after_capture':opposing,
+                'opposing_major_confirm_close_ts':opposing_close,
+                'bullish_internal_events_before_opposing_major':window_internal,
+                'checkpoints':checkpoints,
+                'verdict':('CAUSAL_WINDOW_EXISTED_BEFORE_OPPOSING_MAJOR' if checkpoints else 'NO_BULLISH_INTERNAL_WINDOW_BEFORE_OPPOSING_MAJOR')}
+        print(f"[ETH_CAPTURE_LIFECYCLE_AUDIT] verdict={result['verdict']} state={state_at_capture} opposing={opposing} bullish_internal_count={len(window_internal)}",flush=True)
+        for x in checkpoints:
+            e=x['internal']; km=x['major_state_known_at_internal'] or {}
+            print(f"[ETH_CAPTURE_LIFECYCLE_CHECKPOINT] internal={e.get('tipo')}:{e.get('direcao')}@{e.get('nivel')} ts={e.get('t')} confirm={x.get('internal_confirm_close_ts')} known_major={km.get('tipo')}:{km.get('direcao')}@{km.get('nivel')} major_ts={km.get('t')} m5_before_opposing={x.get('closed_m5_available_before_opposing_major')}",flush=True)
+        return jsonify(result)
+    except Exception as e:
+        print(f"[ETH_CAPTURE_LIFECYCLE_AUDIT_ERROR] {e}",flush=True)
+        return jsonify({'ok':False,'error':str(e)}),500
+
 @app.route('/experiment/poi_lifecycle_a_eth_1d/start', methods=['GET'])
 def experiment_poi_lifecycle_a_eth_1d_start():
     """Mesmo replay/auditoria A_CURRENT de 1 dia, isolado para ETHUSD."""

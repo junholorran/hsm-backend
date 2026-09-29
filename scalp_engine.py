@@ -2993,6 +2993,7 @@ def replay_vortex_decision_layer_v2(pair, dias_historico=7, janelas_mfe_mae=JANE
     experimental_poi_state = {} if experimental_poi_policy else None
     experimental_poi_audit = [] if experimental_poi_policy else None
     experimental_sl_failures = [] if experimental_poi_policy else None
+    experimental_retest_wait_audit = [] if experimental_poi_policy else None
 
     for i in range(MIN_M5_IDX, len(m5)):
         # Avaliamos o estado imediatamente APÓS o fecho deste M5.
@@ -3056,6 +3057,32 @@ def replay_vortex_decision_layer_v2(pair, dias_historico=7, janelas_mfe_mae=JANE
             a.update({'ts_corte':ts_corte,'failure_reason':r.get('failure_reason'),'zone_type':r.get('zone_type'),
                       'zone_created_ts':r.get('zone_created_ts'),'zone_bottom':r.get('zone_bottom'),'zone_top':r.get('zone_top')})
             experimental_poi_audit.append(a)
+        if experimental_retest_wait_audit is not None and r.get('failure_reason')=='AGUARDANDO_RETESTE_ZONA':
+            # AUDITORIA READ-ONLY independente do helper de reteste:
+            # usa diretamente os M5 brutos já fechados neste ts_corte e testa
+            # interseção geométrica high>=bottom && low<=top somente após autorização.
+            zbot=r.get('zone_bottom'); ztop=r.get('zone_top')
+            auth_ts=max(x for x in [r.get('m15_major_confirmation_close_ts'),
+                                    r.get('m15_internal_confirmation_close_ts'),
+                                    r.get('zone_created_ts'), r.get('zone_flip_ts')] if x is not None)
+            raw_after=[c for c in m5_ate_agora if c.get('t') is not None and c['t'] >= auth_ts]
+            raw_touches=[]
+            if zbot is not None and ztop is not None:
+                raw_touches=[{'t':c['t'],'o':c['o'],'h':c['h'],'l':c['l'],'c':c['c']}
+                             for c in raw_after
+                             if float(c['h']) >= float(zbot) and float(c['l']) <= float(ztop)]
+            experimental_retest_wait_audit.append({
+                'ts_corte':ts_corte,'direction':r.get('direction'),
+                'zone_type':r.get('zone_type'),'zone_bottom':zbot,'zone_top':ztop,
+                'zone_created_ts':r.get('zone_created_ts'),'zone_flip_ts':r.get('zone_flip_ts'),
+                'major_confirm_close_ts':r.get('m15_major_confirmation_close_ts'),
+                'internal_confirm_close_ts':r.get('m15_internal_confirmation_close_ts'),
+                'authorization_ts':auth_ts,'m5_closed_after_authorization':len(raw_after),
+                'raw_touch_found':bool(raw_touches),'raw_touch_count':len(raw_touches),
+                'first_raw_touch':raw_touches[0] if raw_touches else None,
+                'engine_retest_found':bool(r.get('m5_refinement_retest_found')),
+                'verdict':('BUG_ENGINE_MISSED_RAW_TOUCH' if raw_touches else 'CORRECT_NO_RAW_TOUCH_YET')
+            })
         if experimental_sl_failures is not None and r.get('failure_reason')=='SEM_ANCORA_SL_CAUSAL_VALIDA':
             experimental_sl_failures.append({
                 'ts_corte':ts_corte,'direction':r.get('direction'),'entry':r.get('entry'),'entry_ts':r.get('timestamp'),
@@ -3184,6 +3211,7 @@ def replay_vortex_decision_layer_v2(pair, dias_historico=7, janelas_mfe_mae=JANE
         'experimental_poi_audit': experimental_poi_audit,
         'experimental_obstacle_blocks': experimental_obstacle_blocks,
         'experimental_sl_failures': experimental_sl_failures,
+        'experimental_retest_wait_audit': experimental_retest_wait_audit,
         'total_sinais_unicos': len(sinais_unicos),
         'auditoria_dedup': auditoria_dedup,
         'sinais_long': len(sinais_long), 'sinais_short': len(sinais_short),

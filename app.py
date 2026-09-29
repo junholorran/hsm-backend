@@ -2068,6 +2068,15 @@ def _run_kairos_a_btc_background(dias, fim_ts_ms):
         print(f'[POI_A_BTC_PROGRESS] pair=BTCUSD dias={dias} phase=START', flush=True)
         r=scalp_engine.replay_poi_lifecycle_abc_sol(dias_historico=dias,fim_ts_ms=fim_ts_ms,pair='BTCUSD',policies=('A_CURRENT',))
         _KAIROS_A_BTC_CACHE.update({'status':'DONE','result':r,'finished_at':int(time.time()*1000)})
+        try:
+            _pol=(r.get('policies') or {}).get('A_CURRENT') or r.get('A_CURRENT') or {}
+            _sum=_pol.get('experimental_intent_gate_summary') or {}
+            print(f"[KAIROS_INTENT_AUDIT_SUMMARY] counts={_sum.get('counts')} unique_samples={len(_sum.get('unique_samples') or [])}", flush=True)
+            for _x in (_sum.get('unique_samples') or []):
+                _cap=_x.get('capture') or {}; _maj=_x.get('first_major_after_capture') or {}; _intr=_x.get('internal_after_major_same_direction') or {}
+                print(f"[KAIROS_INTENT_AUDIT_SAMPLE] verdict={_x.get('verdict')} capture={_cap.get('tf')}:{_cap.get('type')}@{_cap.get('level')} sweep={_cap.get('sweep_ts')} reaction={_cap.get('reaction')} expected={_x.get('expected_direction')} major={_maj.get('tipo')}:{_maj.get('direcao')}@{_maj.get('nivel')} ts={_maj.get('t')} internal={_intr.get('tipo')}:{_intr.get('direcao')}@{_intr.get('nivel')} ts={_intr.get('t')}", flush=True)
+        except Exception as _audit_log_exc:
+            print(f"[KAIROS_INTENT_AUDIT_LOG_ERROR] {_audit_log_exc}", flush=True)
         print(f'[POI_A_BTC_PROGRESS] pair=BTCUSD dias={dias} phase=DONE', flush=True)
     except Exception as e:
         _KAIROS_A_BTC_CACHE.update({'status':'ERROR','error':str(e),'finished_at':int(time.time()*1000)})

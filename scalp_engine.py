@@ -1735,13 +1735,12 @@ def _kairos_select_htf_poi_location(mapa, m15_candles, now_ts):
     return max(candidates,key=lambda x:(x['touch_ts'],KAIROS_TF_PESO.get(x['tf'],1)))
 
 def _kairos_direction_after_first_capture(candles, capture, swing_size=5):
-    """M15 hierárquico: swing50 mantém o ESTADO maior; internal5 só confirma/tima.
+    """Lifecycle causal M15: futuro nunca invalida retroativamente uma autorização passada.
 
-    A captura não obriga um novo swing50 a nascer. O último evento swing50 já
-    confirmado antes/na captura é o estado estrutural vigente. Depois da captura:
-    - novo swing50, se aparecer, atualiza/invalida esse estado;
-    - internal5 só pode autorizar quando concorda com o estado maior vigente
-      e com a reação esperada da captura.
+    O swing50 vigente na captura é o estado maior inicial. Depois da captura,
+    percorremos eventos em ordem temporal. Um internal5 só confirma se, naquele
+    instante, o último swing50 conhecido concorda com a reação esperada.
+    Um swing50 contrário posterior invalida somente dali em diante.
     """
     if not candles or not capture:
         return None
@@ -1751,47 +1750,43 @@ def _kairos_direction_after_first_capture(candles, capture, swing_size=5):
     expected=('baixa' if side=='HIGH' else 'alta') if state=='REJECTION_RECLAIM' else ('alta' if side=='HIGH' else 'baixa')
     capture_ts=capture.get('sweep_ts',0)
 
-    major_events=[e for e in compute_lux_structure_events(candles,swing_size=50)
-                  if e.get('tipo') in ('CHoCH','BOS')]
-    major_events.sort(key=lambda e:e.get('t',0))
-    major_state=next((e for e in reversed(major_events) if e.get('t',0) <= capture_ts),None)
-    post_major=[e for e in major_events if e.get('t',0) > capture_ts]
-
-    # O primeiro novo swing50 posterior atualiza o estado maior. Não ignoramos
-    # evento contrário esperando um evento futuro conveniente.
-    first_post_major=post_major[0] if post_major else None
-    if first_post_major is not None:
-        major_state=first_post_major
-
-    if major_state is None:
+    major_events=sorted([e for e in compute_lux_structure_events(candles,swing_size=50)
+                         if e.get('tipo') in ('CHoCH','BOS')],key=lambda e:e.get('t',0))
+    major_at_capture=next((e for e in reversed(major_events) if e.get('t',0)<=capture_ts),None)
+    if major_at_capture is None:
         capture['thesis_lifecycle']='WAITING_MAJOR_M15_STATE'
         return None
-    if major_state.get('direcao') != expected:
-        capture['thesis_lifecycle']='MAJOR_M15_STATE_OPPOSES_REACTION'
-        capture['major_state_ts']=major_state.get('t')
-        capture['major_state_direction']=major_state.get('direcao')
-        return None
 
-    capture['thesis_lifecycle']='AUTHORIZED_BY_ACTIVE_MAJOR_M15_STATE'
-    capture['thesis_authorized_ts']=major_state.get('t')
-    capture['major_state_source']=('POST_CAPTURE_UPDATE' if first_post_major is not None else 'PREEXISTING_CONFIRMED_STATE')
+    internal_events=sorted([e for e in compute_lux_internal_structure(candles,swing_size=swing_size)
+                            if e.get('tipo') in ('CHoCH','BOS') and e.get('t',0)>capture_ts],
+                           key=lambda e:e.get('t',0))
 
-    internal_events=compute_lux_internal_structure(candles,swing_size=swing_size)
-    # Internal é confirmação pós-captura; nunca cria a narrativa sozinho.
-    for e in internal_events:
-        if e.get('t',0) <= capture_ts or e.get('direcao') != expected or e.get('tipo') not in ('CHoCH','BOS'):
+    for internal in internal_events:
+        if internal.get('direcao') != expected:
             continue
-        # Se houver um novo major até este internal, ele é o estado vigente.
-        latest_major=next((m for m in reversed(major_events) if m.get('t',0) <= e.get('t',0)),None)
-        if latest_major is None or latest_major.get('direcao') != expected:
+        # Estado maior conhecido EXATAMENTE no instante deste internal.
+        active_major=next((m for m in reversed(major_events) if m.get('t',0)<=internal.get('t',0)),None)
+        if active_major is None or active_major.get('direcao') != expected:
             continue
-        full_idx=next((j for j,x in enumerate(candles) if x['t']==e['t']),None)
+        full_idx=next((j for j,x in enumerate(candles) if x.get('t')==internal.get('t')),None)
         if full_idx is None:
             continue
+        capture['thesis_lifecycle']='AUTHORIZED_CAUSALLY_BY_ACTIVE_MAJOR_AND_INTERNAL'
+        capture['thesis_authorized_ts']=internal.get('t')
+        capture['major_state_ts']=active_major.get('t')
+        capture['major_state_direction']=active_major.get('direcao')
+        capture['major_state_source']=('PREEXISTING_CONFIRMED_STATE' if active_major.get('t',0)<=capture_ts
+                                       else 'POST_CAPTURE_UPDATE_BEFORE_INTERNAL')
         return {'direction':'LONG' if expected=='alta' else 'SHORT','direcao':expected,
                 'mode':'REVERSAL' if state=='REJECTION_RECLAIM' else 'CONTINUATION',
-                'major_structure':latest_major,
-                'structure':{**e,'full_idx':full_idx},'momentum_z':None}
+                'major_structure':active_major,
+                'structure':{**internal,'full_idx':full_idx},'momentum_z':None}
+
+    # Diagnóstico do estado no corte atual, sem reescrever o passado.
+    latest_major=major_events[-1] if major_events else None
+    capture['thesis_lifecycle']=('NO_INTERNAL_CONFIRMED_WHILE_MAJOR_MATCHED'
+                                 if latest_major and latest_major.get('direcao')==expected
+                                 else 'MAJOR_M15_STATE_CURRENTLY_OPPOSES_REACTION')
     return None
 
 def _kairos_m5_refine_zone(m5_candles, m15_zone, sweep_ts, structure_ts, direction, structure_level=None):

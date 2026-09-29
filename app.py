@@ -2111,6 +2111,30 @@ def experiment_audit_btc_m15_after_82800():
         print(f"[BTC_M15_82800_AUDIT_ERROR] {e}",flush=True)
         return jsonify({'ok':False,'error':str(e)}),500
 
+@app.route('/experiment/poi_lifecycle_a_eth_1d/start', methods=['GET'])
+def experiment_poi_lifecycle_a_eth_1d_start():
+    """Mesmo replay/auditoria A_CURRENT de 1 dia, isolado para ETHUSD."""
+    if _KAIROS_A_BTC_CACHE.get('status') != 'RUNNING' and _KAIROS_A13_CACHE.get('status') != 'RUNNING' and _KAIROS_ABC_CACHE.get('status') != 'RUNNING':
+        def _run_eth():
+            try:
+                _KAIROS_A_BTC_CACHE.update({'status':'RUNNING','result':None,'error':None,'started_at':int(time.time()*1000),'finished_at':None})
+                print('[POI_A_ETH_PROGRESS] pair=ETHUSD dias=1 phase=START',flush=True)
+                r=scalp_engine.replay_poi_lifecycle_abc_sol(dias_historico=1,fim_ts_ms=None,pair='ETHUSD',policies=('A_CURRENT',))
+                _KAIROS_A_BTC_CACHE.update({'status':'DONE','result':r,'finished_at':int(time.time()*1000)})
+                _pol=(r.get('policies') or {}).get('A_CURRENT') or r.get('A_CURRENT') or {}
+                _sum=_pol.get('experimental_intent_gate_summary') or {}
+                print(f"[KAIROS_ETH_INTENT_AUDIT_SUMMARY] counts={_sum.get('counts')} unique_samples={len(_sum.get('unique_samples') or [])}",flush=True)
+                for _x in (_sum.get('unique_samples') or []):
+                    _cap=_x.get('capture') or {}; _maj=_x.get('active_major_state') or {}; _intr=_x.get('internal_after_capture_same_direction') or {}
+                    print(f"[KAIROS_ETH_INTENT_AUDIT_SAMPLE] verdict={_x.get('verdict')} capture={_cap.get('tf')}:{_cap.get('type')}@{_cap.get('level')} sweep={_cap.get('sweep_ts')} reaction={_cap.get('reaction')} expected={_x.get('expected_direction')} major_source={_x.get('active_major_source')} active_major={_maj.get('tipo')}:{_maj.get('direcao')}@{_maj.get('nivel')} ts={_maj.get('t')} internal={_intr.get('tipo')}:{_intr.get('direcao')}@{_intr.get('nivel')} ts={_intr.get('t')}",flush=True)
+                print('[POI_A_ETH_PROGRESS] pair=ETHUSD dias=1 phase=DONE',flush=True)
+            except Exception as e:
+                _KAIROS_A_BTC_CACHE.update({'status':'ERROR','error':str(e),'finished_at':int(time.time()*1000)})
+                print('[POI_A_ETH_ERROR] '+str(e),flush=True)
+        threading.Thread(target=_run_eth,daemon=True).start()
+        return jsonify({'status':'STARTING','started':True,'pair':'ETHUSD','policy':'A_CURRENT','dias':1}),202
+    return jsonify({'status':'RUNNING','started':False}),409
+
 @app.route('/experiment/poi_lifecycle_a_btc_1d/start', methods=['GET'])
 def experiment_poi_lifecycle_a_btc_1d_start():
     """Atalho sem query string para iniciar o replay BTC A_CURRENT de 1 dia."""

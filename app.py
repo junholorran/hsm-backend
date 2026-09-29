@@ -2082,6 +2082,35 @@ def _run_kairos_a_btc_background(dias, fim_ts_ms):
         _KAIROS_A_BTC_CACHE.update({'status':'ERROR','error':str(e),'finished_at':int(time.time()*1000)})
         print('[POI_A_BTC_ERROR] '+str(e), flush=True)
 
+@app.route('/experiment/audit_btc_m15_after_82800', methods=['GET'])
+def experiment_audit_btc_m15_after_82800():
+    """READ-ONLY: prova eventos M15 swing50/internal5 apos a captura H1 82800."""
+    try:
+        now_ts=int(time.time()*1000)
+        capture_open=1790573400000
+        capture_close=capture_open+900000
+        m15=sorted(scalp_engine._fetch_bybit_klines_historico('BTCUSD','15',3,now_ts),key=lambda x:x.get('t',0))
+        closed=[x for x in m15 if int(x.get('t',0))+900000<=now_ts]
+        majors=scalp_engine.compute_lux_structure_events(closed,swing_size=50)
+        internals=scalp_engine.compute_lux_internal_structure(closed,swing_size=5)
+        post_major=[e for e in majors if int(e.get('t',0))+900000>capture_close and e.get('tipo') in ('CHoCH','BOS')]
+        post_internal=[e for e in internals if int(e.get('t',0))+900000>capture_close and e.get('tipo') in ('CHoCH','BOS')]
+        raw=[x for x in closed if int(x.get('t',0))>=capture_open]
+        hi=max((float(x['h']) for x in raw),default=None); lo=min((float(x['l']) for x in raw),default=None)
+        result={'ok':True,'read_only':True,'capture_level':82800.0,'capture_open_ts':capture_open,
+                'capture_close_ts':capture_close,'closed_m15_after_capture':len(raw),
+                'raw_high_after_capture':hi,'raw_low_after_capture':lo,
+                'major50_events_after_capture':post_major,
+                'internal5_events_after_capture':post_internal,
+                'latest_major50_before_or_at_capture':next((e for e in reversed(majors) if int(e.get('t',0))+900000<=capture_close),None)}
+        print(f"[BTC_M15_82800_AUDIT] major50={len(post_major)} internal5={len(post_internal)} raw_high={hi} raw_low={lo} latest_major_before={result['latest_major50_before_or_at_capture']}",flush=True)
+        for e in post_major:
+            print(f"[BTC_M15_82800_MAJOR50] type={e.get('tipo')} dir={e.get('direcao')} level={e.get('nivel')} open_ts={e.get('t')} close_ts={int(e.get('t',0))+900000}",flush=True)
+        return jsonify(result)
+    except Exception as e:
+        print(f"[BTC_M15_82800_AUDIT_ERROR] {e}",flush=True)
+        return jsonify({'ok':False,'error':str(e)}),500
+
 @app.route('/experiment/poi_lifecycle_a_btc_1d/start', methods=['GET'])
 def experiment_poi_lifecycle_a_btc_1d_start():
     """Atalho sem query string para iniciar o replay BTC A_CURRENT de 1 dia."""

@@ -2568,27 +2568,43 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
 
     resultado['intent_m15_found']=bool(intent)
     if not intent:
-        # READ-ONLY: prova por que a captura não virou intenção. Não altera gate.
+        # READ-ONLY: espelha exatamente o gate atual (estado major50 vigente + captura + internal5).
         _side=sweep.get('liquidity_side'); _state=sweep.get('post_capture_state')
         _expected=(('baixa' if _side=='HIGH' else 'alta') if _state=='REJECTION_RECLAIM'
                    else ('alta' if _side=='HIGH' else 'baixa') if _state=='ACCEPTANCE_CONTINUATION' else None)
-        _maj=[e for e in compute_lux_structure_events(exec_candles,swing_size=50)
-              if e.get('t',0)>sweep.get('sweep_ts',0) and e.get('tipo') in ('CHoCH','BOS')]
-        _first=min(_maj,key=lambda e:e.get('t',0)) if _maj else None
-        _ints=(compute_lux_internal_structure(exec_candles,swing_size=5) if _first and _first.get('direcao')==_expected else [])
-        _int=next((e for e in _ints if e.get('t',0)>=_first.get('t',0)
-                   and e.get('direcao')==_expected and e.get('tipo') in ('CHoCH','BOS')),None) if _first else None
+        _capture_ts=sweep.get('sweep_ts',0)
+        _maj_all=sorted([e for e in compute_lux_structure_events(exec_candles,swing_size=50)
+                         if e.get('tipo') in ('CHoCH','BOS')],key=lambda e:e.get('t',0))
+        _major_at_capture=next((e for e in reversed(_maj_all) if e.get('t',0)<=_capture_ts),None)
+        _post_major=[e for e in _maj_all if e.get('t',0)>_capture_ts]
+        _first_post=_post_major[0] if _post_major else None
+        _active_major=_first_post if _first_post is not None else _major_at_capture
+        _ints=compute_lux_internal_structure(exec_candles,swing_size=5)
+        _int=None
+        if _active_major and _active_major.get('direcao')==_expected:
+            for _e in _ints:
+                if _e.get('t',0)<=_capture_ts or _e.get('direcao')!=_expected or _e.get('tipo') not in ('CHoCH','BOS'):
+                    continue
+                _latest_major=next((m for m in reversed(_maj_all) if m.get('t',0)<=_e.get('t',0)),None)
+                if _latest_major and _latest_major.get('direcao')==_expected:
+                    _int=_e; break
+        _verdict=('NO_MAJOR_M15_STATE_AT_CAPTURE' if not _active_major else
+                  'MAJOR_M15_STATE_OPPOSES_REACTION' if _active_major.get('direcao')!=_expected else
+                  'NO_INTERNAL_CONFIRMATION_WITH_ACTIVE_MAJOR' if not _int else
+                  'UNEXPECTED_INTENT_MISS')
         resultado['intent_gate_audit']={
             'capture':{'tf':sweep.get('liquidity_tf'),'type':sweep.get('liquidity_type'),
-                       'level':sweep.get('nivel'),'sweep_ts':sweep.get('sweep_ts'),
+                       'level':sweep.get('nivel'),'sweep_ts':_capture_ts,
                        'confirm_ts':sweep.get('confirm_ts'),'side':_side,'reaction':_state},
             'expected_direction':_expected,
-            'first_major_after_capture':_first,
-            'first_major_matches_expected':bool(_first and _first.get('direcao')==_expected),
-            'internal_after_major_same_direction':_int,
-            'verdict':('NO_MAJOR_AFTER_CAPTURE' if not _first else
-                       'INVALIDATED_BY_FIRST_OPPOSING_MAJOR_M15' if _first.get('direcao')!=_expected else
-                       'NO_INTERNAL_CONFIRMATION_AFTER_MAJOR' if not _int else 'UNEXPECTED_INTENT_MISS')
+            'major_state_at_capture':_major_at_capture,
+            'first_major_after_capture':_first_post,
+            'active_major_state':_active_major,
+            'active_major_source':('POST_CAPTURE_UPDATE' if _first_post is not None else
+                                   'PREEXISTING_CONFIRMED_STATE' if _major_at_capture is not None else None),
+            'active_major_matches_expected':bool(_active_major and _active_major.get('direcao')==_expected),
+            'internal_after_capture_same_direction':_int,
+            'verdict':_verdict
         }
         resultado['failure_reason']='SEM_INTENCAO_M15_APOS_CAPTURA_ESTRUTURAL'; return resultado
     direction=intent['direction']; structure=intent['structure']
@@ -3256,7 +3272,8 @@ def replay_vortex_decision_layer_v2(pair, dias_historico=7, janelas_mfe_mae=JANE
             'unique_samples': list({(
                 (x.get('capture') or {}).get('tf'), (x.get('capture') or {}).get('type'),
                 (x.get('capture') or {}).get('level'), (x.get('capture') or {}).get('sweep_ts'),
-                x.get('expected_direction'), (x.get('first_major_after_capture') or {}).get('t'),
+                x.get('expected_direction'), (x.get('active_major_state') or {}).get('t'),
+                (x.get('internal_after_capture_same_direction') or {}).get('t'),
                 x.get('verdict')): x for x in experimental_intent_gate_audit}.values())[:20]
         } if experimental_intent_gate_audit is not None else None),
         'total_sinais_unicos': len(sinais_unicos),

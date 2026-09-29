@@ -2555,6 +2555,28 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
 
     resultado['intent_m15_found']=bool(intent)
     if not intent:
+        # READ-ONLY: prova por que a captura não virou intenção. Não altera gate.
+        _side=sweep.get('liquidity_side'); _state=sweep.get('post_capture_state')
+        _expected=(('baixa' if _side=='HIGH' else 'alta') if _state=='REJECTION_RECLAIM'
+                   else ('alta' if _side=='HIGH' else 'baixa') if _state=='ACCEPTANCE_CONTINUATION' else None)
+        _maj=[e for e in compute_lux_structure_events(exec_candles,swing_size=50)
+              if e.get('t',0)>sweep.get('sweep_ts',0) and e.get('tipo') in ('CHoCH','BOS')]
+        _first=min(_maj,key=lambda e:e.get('t',0)) if _maj else None
+        _ints=(compute_lux_internal_structure(exec_candles,swing_size=5) if _first and _first.get('direcao')==_expected else [])
+        _int=next((e for e in _ints if e.get('t',0)>=_first.get('t',0)
+                   and e.get('direcao')==_expected and e.get('tipo') in ('CHoCH','BOS')),None) if _first else None
+        resultado['intent_gate_audit']={
+            'capture':{'tf':sweep.get('liquidity_tf'),'type':sweep.get('liquidity_type'),
+                       'level':sweep.get('nivel'),'sweep_ts':sweep.get('sweep_ts'),
+                       'confirm_ts':sweep.get('confirm_ts'),'side':_side,'reaction':_state},
+            'expected_direction':_expected,
+            'first_major_after_capture':_first,
+            'first_major_matches_expected':bool(_first and _first.get('direcao')==_expected),
+            'internal_after_major_same_direction':_int,
+            'verdict':('NO_MAJOR_AFTER_CAPTURE' if not _first else
+                       'INVALIDATED_BY_FIRST_OPPOSING_MAJOR_M15' if _first.get('direcao')!=_expected else
+                       'NO_INTERNAL_CONFIRMATION_AFTER_MAJOR' if not _int else 'UNEXPECTED_INTENT_MISS')
+        }
         resultado['failure_reason']='SEM_INTENCAO_M15_APOS_CAPTURA_ESTRUTURAL'; return resultado
     direction=intent['direction']; structure=intent['structure']
     sweep['direcao']=intent['direcao']
@@ -2994,6 +3016,7 @@ def replay_vortex_decision_layer_v2(pair, dias_historico=7, janelas_mfe_mae=JANE
     experimental_poi_audit = [] if experimental_poi_policy else None
     experimental_sl_failures = [] if experimental_poi_policy else None
     experimental_retest_wait_audit = [] if experimental_poi_policy else None
+    experimental_intent_gate_audit = [] if experimental_poi_policy else None
 
     for i in range(MIN_M5_IDX, len(m5)):
         # Avaliamos o estado imediatamente APÓS o fecho deste M5.
@@ -3057,6 +3080,8 @@ def replay_vortex_decision_layer_v2(pair, dias_historico=7, janelas_mfe_mae=JANE
             a.update({'ts_corte':ts_corte,'failure_reason':r.get('failure_reason'),'zone_type':r.get('zone_type'),
                       'zone_created_ts':r.get('zone_created_ts'),'zone_bottom':r.get('zone_bottom'),'zone_top':r.get('zone_top')})
             experimental_poi_audit.append(a)
+        if experimental_intent_gate_audit is not None and r.get('failure_reason')=='SEM_INTENCAO_M15_APOS_CAPTURA_ESTRUTURAL' and r.get('intent_gate_audit'):
+            experimental_intent_gate_audit.append({'ts_corte':ts_corte, **r['intent_gate_audit']})
         if experimental_retest_wait_audit is not None and r.get('failure_reason')=='AGUARDANDO_RETESTE_ZONA':
             # AUDITORIA READ-ONLY independente do helper de reteste:
             # usa diretamente os M5 brutos já fechados neste ts_corte e testa
@@ -3212,6 +3237,7 @@ def replay_vortex_decision_layer_v2(pair, dias_historico=7, janelas_mfe_mae=JANE
         'experimental_obstacle_blocks': experimental_obstacle_blocks,
         'experimental_sl_failures': experimental_sl_failures,
         'experimental_retest_wait_audit': experimental_retest_wait_audit,
+        'experimental_intent_gate_audit': experimental_intent_gate_audit,
         'total_sinais_unicos': len(sinais_unicos),
         'auditoria_dedup': auditoria_dedup,
         'sinais_long': len(sinais_long), 'sinais_short': len(sinais_short),

@@ -1,5 +1,5 @@
 //@version=5
-indicator("KAIROS SMC — Lux Math Foundation", "KAIROS SMC", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=500)
+indicator("KAIROS SMC — Lux Parity Base", "KAIROS SMC", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=500)
 
 // Base estrutural portada da matemática LuxAlgo fornecida pelo utilizador.
 // Camada 1: estrutura Swing 50 + Internal 5, PDH/PDL/PWH/PWL/PMH/PML,
@@ -20,6 +20,9 @@ showInternal = input.bool(true, "Internal BOS/CHoCH")
 showRefs = input.bool(true, "Previous D/W/M High/Low")
 showPD = input.bool(true, "Premium/Discount")
 showPanel = input.bool(true, "MTF panel")
+showOB = input.bool(true, "Lux-style Order Blocks")
+showFVG = input.bool(true, "Lux-style FVG")
+obMitigationClose = input.bool(false, "OB mitigation by Close")
 
 type Pivot
     float current
@@ -31,12 +34,36 @@ type Pivot
 type Trend
     int bias
 
+type OrderBlock
+    float hi
+    float lo
+    int t
+    int bias
+    box bx
+
+type Fvg
+    float top
+    float bottom
+    int bias
+    box bx
+
 var Pivot swingHigh = Pivot.new(na,na,false,time,bar_index)
 var Pivot swingLow = Pivot.new(na,na,false,time,bar_index)
 var Pivot internalHigh = Pivot.new(na,na,false,time,bar_index)
 var Pivot internalLow = Pivot.new(na,na,false,time,bar_index)
 var Trend swingTrend = Trend.new(0)
 var Trend internalTrend = Trend.new(0)
+var array<float> parsedHighs = array.new_float()
+var array<float> parsedLows = array.new_float()
+var array<int> barTimes = array.new_int()
+var array<OrderBlock> obs = array.new<OrderBlock>()
+var array<Fvg> fvgs = array.new<Fvg>()
+atr200 = ta.atr(200)
+volatilityMeasure = atr200
+highVolatilityBar = (high-low) >= 2*volatilityMeasure
+parsedHighs.push(highVolatilityBar ? low : high)
+parsedLows.push(highVolatilityBar ? high : low)
+barTimes.push(time)
 
 leg(int size) =>
     var int l = 0
@@ -68,6 +95,22 @@ updatePivots(int size, bool internal) =>
             p.t := time[size]
             p.idx := bar_index[size]
 
+storeOB(Pivot p, int bias) =>
+    if showOB and p.idx >= 0 and p.idx < bar_index
+        int from = p.idx
+        int to = bar_index
+        array<float> a = bias == BEARISH ? parsedHighs.slice(from,to) : parsedLows.slice(from,to)
+        if a.size() > 0
+            int rel = bias == BEARISH ? a.indexof(a.max()) : a.indexof(a.min())
+            int ix = from + rel
+            float bh = parsedHighs.get(ix)
+            float bl = parsedLows.get(ix)
+            box b = box.new(barTimes.get(ix),bh,time,bl,xloc=xloc.bar_time,extend=extend.right,bgcolor=color.new(bias==BULLISH?color.blue:color.red,85),border_color=color.new(color.gray,70))
+            obs.unshift(OrderBlock.new(bh,bl,barTimes.get(ix),bias,b))
+            if obs.size()>30
+                OrderBlock old=obs.pop()
+                old.bx.delete()
+
 drawBreak(Pivot p, string tag, bool bull, bool internal) =>
     line.new(p.t,p.current,time,p.current,xloc=xloc.bar_time,style=internal?line.style_dashed:line.style_solid)
     label.new(bar_index,p.current,tag,style=bull?label.style_label_down:label.style_label_up,size=internal?size.tiny:size.small)
@@ -84,17 +127,49 @@ displayStructure(bool internal) =>
         tr.bias := BULLISH
         if (internal and showInternal) or (not internal and showSwing)
             drawBreak(hi,tag,true,internal)
+        storeOB(hi,BULLISH)
     if ta.crossunder(close,lo.current) and not lo.crossed and bearExtra
         tag = tr.bias == BULLISH ? "CHoCH" : "BOS"
         lo.crossed := true
         tr.bias := BEARISH
         if (internal and showInternal) or (not internal and showSwing)
             drawBreak(lo,tag,false,internal)
+        storeOB(lo,BEARISH)
 
 updatePivots(swingLen,false)
 updatePivots(internalLen,true)
 displayStructure(true)
 displayStructure(false)
+
+// Lux OB mitigation lifecycle
+if obs.size()>0
+    for i=obs.size()-1 to 0
+        OrderBlock ob=obs.get(i)
+        bearSrc=obMitigationClose?close:high
+        bullSrc=obMitigationClose?close:low
+        crossed=(ob.bias==BEARISH and bearSrc>ob.hi) or (ob.bias==BULLISH and bullSrc<ob.lo)
+        if crossed
+            ob.bx.delete()
+            obs.remove(i)
+
+// Lux FVG formula from the supplied source, evaluated on chart timeframe.
+barDeltaPercent=(close[1]-open[1])/(open[1]*100)
+threshold=ta.cum(math.abs(barDeltaPercent))/math.max(bar_index,1)*2
+newBullFvg=showFVG and low>high[2] and close[1]>high[2] and barDeltaPercent>threshold
+newBearFvg=showFVG and high<low[2] and close[1]<low[2] and -barDeltaPercent>threshold
+if newBullFvg
+    box b=box.new(time[1],low,time,high[2],xloc=xloc.bar_time,extend=extend.right,bgcolor=color.new(color.green,82),border_color=color.new(color.green,60))
+    fvgs.unshift(Fvg.new(low,high[2],BULLISH,b))
+if newBearFvg
+    box b=box.new(time[1],low[2],time,high,xloc=xloc.bar_time,extend=extend.right,bgcolor=color.new(color.red,82),border_color=color.new(color.red,60))
+    fvgs.unshift(Fvg.new(high,low[2],BEARISH,b))
+if fvgs.size()>0
+    for i=fvgs.size()-1 to 0
+        Fvg g=fvgs.get(i)
+        invalid=(g.bias==BULLISH and low<g.bottom) or (g.bias==BEARISH and high>g.top)
+        if invalid
+            g.bx.delete()
+            fvgs.remove(i)
 
 // Previous CLOSED period references
 pdh = request.security(syminfo.tickerid,"D",high[1],lookahead=barmerge.lookahead_on)
@@ -111,7 +186,6 @@ plot(showRefs?pmh:na,"PMH")
 plot(showRefs?pml:na,"PML")
 
 // Lux EQH/EQL formula: abs(levelA-levelB) < threshold * ATR(200)
-atr200 = ta.atr(200)
 eqLeg = leg(eqLen)
 eqNew = ta.change(eqLeg) != 0
 var float prevEqHigh = na

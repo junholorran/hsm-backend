@@ -105,7 +105,7 @@ storeOB(Pivot p, int bias) =>
             int ix = from + rel
             float bh = parsedHighs.get(ix)
             float bl = parsedLows.get(ix)
-            box b = box.new(barTimes.get(ix),bh,time,bl,xloc=xloc.bar_time,extend=extend.right,bgcolor=color.new(bias==BULLISH?color.blue:color.red,85),border_color=color.new(color.gray,70))
+            box b = box.new(barTimes.get(ix),bh,time,bl,xloc=xloc.bar_time,extend=extend.right,bgcolor=color.new(bias==BULLISH?obBullColor:obBearColor,showOldPois?poiTransparency:100),border_color=color.new(color.gray,70))
             obs.unshift(OrderBlock.new(bh,bl,barTimes.get(ix),bias,b))
             if obs.size()>30
                 OrderBlock old=obs.pop()
@@ -158,10 +158,10 @@ threshold=ta.cum(math.abs(barDeltaPercent))/math.max(bar_index,1)*2
 newBullFvg=showFVG and low>high[2] and close[1]>high[2] and barDeltaPercent>threshold
 newBearFvg=showFVG and high<low[2] and close[1]<low[2] and -barDeltaPercent>threshold
 if newBullFvg
-    box b=box.new(time[1],low,time,high[2],xloc=xloc.bar_time,extend=extend.right,bgcolor=color.new(color.green,82),border_color=color.new(color.green,60))
+    box b=box.new(time[1],low,time,high[2],xloc=xloc.bar_time,extend=extend.right,bgcolor=color.new(fvgBullColor,showOldPois?poiTransparency:100),border_color=color.new(fvgBullColor,60))
     fvgs.unshift(Fvg.new(low,high[2],BULLISH,b))
 if newBearFvg
-    box b=box.new(time[1],low[2],time,high,xloc=xloc.bar_time,extend=extend.right,bgcolor=color.new(color.red,82),border_color=color.new(color.red,60))
+    box b=box.new(time[1],low[2],time,high,xloc=xloc.bar_time,extend=extend.right,bgcolor=color.new(fvgBearColor,showOldPois?poiTransparency:100),border_color=color.new(fvgBearColor,60))
     fvgs.unshift(Fvg.new(high,low[2],BEARISH,b))
 if fvgs.size()>0
     for i=fvgs.size()-1 to 0
@@ -178,12 +178,12 @@ pwh = request.security(syminfo.tickerid,"W",high[1],lookahead=barmerge.lookahead
 pwl = request.security(syminfo.tickerid,"W",low[1],lookahead=barmerge.lookahead_on)
 pmh = request.security(syminfo.tickerid,"M",high[1],lookahead=barmerge.lookahead_on)
 pml = request.security(syminfo.tickerid,"M",low[1],lookahead=barmerge.lookahead_on)
-plot(showRefs?pdh:na,"PDH")
-plot(showRefs?pdl:na,"PDL")
-plot(showRefs?pwh:na,"PWH")
-plot(showRefs?pwl:na,"PWL")
-plot(showRefs?pmh:na,"PMH")
-plot(showRefs?pml:na,"PML")
+plot(showRefs and showLiquidityRefs?pdh:na,"PDH",color=liqColor)
+plot(showRefs and showLiquidityRefs?pdl:na,"PDL",color=liqColor)
+plot(showRefs and showLiquidityRefs?pwh:na,"PWH",color=liqColor)
+plot(showRefs and showLiquidityRefs?pwl:na,"PWL",color=liqColor)
+plot(showRefs and showLiquidityRefs?pmh:na,"PMH",color=liqColor)
+plot(showRefs and showLiquidityRefs?pml:na,"PML",color=liqColor)
 
 // Lux EQH/EQL formula: abs(levelA-levelB) < threshold * ATR(200)
 eqLeg = leg(eqLen)

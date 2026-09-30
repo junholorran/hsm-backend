@@ -237,18 +237,6 @@ biasText(int b) =>
     else if b == BEARISH
         txt := "↓"
     txt
-var table panel = table.new(position.top_right,2,8)
-if barstate.islast and showPanel
-    table.cell(panel,0,0,"KAIROS")
-    table.cell(panel,1,0,"ESTRUTURA")
-    table.cell(panel,0,1,"MN"), table.cell(panel,1,1,biasText(mnBias))
-    table.cell(panel,0,2,"W1"), table.cell(panel,1,2,biasText(wBias))
-    table.cell(panel,0,3,"D1"), table.cell(panel,1,3,biasText(dBias))
-    table.cell(panel,0,4,"H4"), table.cell(panel,1,4,biasText(h4Bias))
-    table.cell(panel,0,5,"H1"), table.cell(panel,1,5,biasText(h1Bias))
-    table.cell(panel,0,6,"M15"),table.cell(panel,1,6,biasText(m15Bias))
-    table.cell(panel,0,7,"M5"), table.cell(panel,1,7,biasText(m5Bias))
-
 
 //-----------------------------------------------------
 // KAIROS CAUSAL EXECUTION LAYER
@@ -305,12 +293,40 @@ if na(poiTop) and obs.size() > 0
 poiReady = internalAuthorized and not na(poiTop)
 retest = poiReady and high >= poiBottom and low <= poiTop
 
-// Execution: M15 can execute itself; M5 refines when chart is M5.
+// Execution only exists after the causal chain has reached the retest.
 isExecTf = timeframe.period=="15" or timeframe.period=="5"
-entry = reaction==BULLISH ? poiTop : reaction==BEARISH ? poiBottom : na
-slRaw = reaction==BULLISH ? captureExtreme - atr14*0.25 : reaction==BEARISH ? captureExtreme + atr14*0.25 : na
-risk = not na(entry) and not na(slRaw) ? math.abs(entry-slRaw) : na
-beTrigger = reaction==BULLISH ? entry+risk : reaction==BEARISH ? entry-risk : na
+executionAuthorized = isExecTf and reaction!=0 and majorAuthorized and internalAuthorized and poiReady and retest
+
+float entry = na
+if executionAuthorized
+    if reaction == BULLISH
+        entry := poiTop
+    else if reaction == BEARISH
+        entry := poiBottom
+
+// Temporary structural safety rule: never expose an invalid-sided stop.
+float slCandidate = na
+if executionAuthorized
+    if reaction == BULLISH
+        slCandidate := captureExtreme - atr14*0.25
+    else if reaction == BEARISH
+        slCandidate := captureExtreme + atr14*0.25
+
+float slRaw = na
+if executionAuthorized and reaction == BULLISH and not na(slCandidate) and slCandidate < entry
+    slRaw := slCandidate
+else if executionAuthorized and reaction == BEARISH and not na(slCandidate) and slCandidate > entry
+    slRaw := slCandidate
+
+float risk = na
+if not na(entry) and not na(slRaw)
+    risk := math.abs(entry-slRaw)
+
+float beTrigger = na
+if reaction == BULLISH and not na(risk)
+    beTrigger := entry+risk
+else if reaction == BEARISH and not na(risk)
+    beTrigger := entry-risk
 
 // Nearest valid/relevant liquidity ahead. Micro-to-macro candidates; no fixed RR target.
 nearestAbove(float e) =>
@@ -330,8 +346,14 @@ nearestBelow(float e) =>
             t:=na(t)?v:math.max(t,v)
     t
 
-target = reaction==BULLISH and not na(entry) ? nearestAbove(entry) : reaction==BEARISH and not na(entry) ? nearestBelow(entry) : na
-fullChain = showKairos and isExecTf and reaction!=0 and majorAuthorized and internalAuthorized and poiReady and retest and not na(entry) and not na(slRaw) and not na(target)
+float target = na
+if executionAuthorized and reaction == BULLISH and not na(entry)
+    target := nearestAbove(entry)
+else if executionAuthorized and reaction == BEARISH and not na(entry)
+    target := nearestBelow(entry)
+
+targetSideOk = (reaction==BULLISH and not na(target) and target>entry) or (reaction==BEARISH and not na(target) and target<entry)
+fullChain = showKairos and executionAuthorized and not na(entry) and not na(slRaw) and not na(target) and targetSideOk
 
 plot(showKairos and poiReady ? poiTop : na, "KAIROS POI top", style=plot.style_linebr)
 plot(showKairos and poiReady ? poiBottom : na, "KAIROS POI bottom", style=plot.style_linebr)
@@ -361,24 +383,83 @@ else if na(target)
 else if fullChain
     missingLink := "TRADE READY"
 
-var table causal=table.new(position.bottom_right,2,10)
+stateText = fullChain ? (reaction==BULLISH ? "LONG READY" : "SHORT READY") : (poiReady and not retest ? "AGUARDANDO RETESTE" : "SEM TRADE")
+stateColor = fullChain ? color.new(color.green,0) : color.new(color.orange,0)
+okColor = color.new(color.green,0)
+waitColor = color.new(color.gray,35)
+bearColor = color.new(color.red,0)
+bullColor = color.new(color.green,0)
+headerBg = color.new(color.black,0)
+sectionBg = color.new(color.gray,85)
+
+var table dash = table.new(position.top_right,4,13,border_width=1)
+
 if barstate.islast and showKairos
-    table.cell(causal,0,0,"KAIROS CAUSAL")
-    table.cell(causal,1,0,fullChain?"READY":"SEM TRADE")
-    string reactionText = "—"
-    if reaction == BULLISH
-        reactionText := "BULLISH"
-    else if reaction == BEARISH
-        reactionText := "BEARISH"
-    table.cell(causal,0,1,"REACTION"), table.cell(causal,1,1,reactionText)
-    table.cell(causal,0,2,"M15 MAJOR"), table.cell(causal,1,2,majorAuthorized?"✓":"—")
-    table.cell(causal,0,3,"M15 INTERNAL"), table.cell(causal,1,3,internalAuthorized?"✓":"—")
-    table.cell(causal,0,4,"POI"), table.cell(causal,1,4,poiReady?"✓":"—")
-    table.cell(causal,0,5,"RETEST"), table.cell(causal,1,5,retest?"✓":"—")
-    table.cell(causal,0,6,"ENTRY"), table.cell(causal,1,6,na(entry)?"—":str.tostring(entry,format.mintick))
-    table.cell(causal,0,7,"SL"), table.cell(causal,1,7,na(slRaw)?"—":str.tostring(slRaw,format.mintick))
-    table.cell(causal,0,8,"TARGET"), table.cell(causal,1,8,na(target)?"—":str.tostring(target,format.mintick))
-    table.cell(causal,0,9,"FALTA"), table.cell(causal,1,9,missingLink)
+    table.clear(dash,0,0,3,12)
+    table.cell(dash,0,0,"KAIROS",text_color=color.white,bgcolor=headerBg,text_size=size.small)
+    table.cell(dash,1,0,syminfo.ticker,text_color=color.white,bgcolor=headerBg)
+    table.cell(dash,2,0,timeframe.period,text_color=color.white,bgcolor=headerBg)
+    table.cell(dash,3,0,stateText,text_color=color.white,bgcolor=stateColor)
+
+    table.cell(dash,0,1,"MACRO",text_color=color.white,bgcolor=sectionBg)
+    table.cell(dash,1,1,"MN "+biasText(mnBias),text_color=color.white,bgcolor=sectionBg)
+    table.cell(dash,2,1,"W1 "+biasText(wBias),text_color=color.white,bgcolor=sectionBg)
+    table.cell(dash,3,1,"D1 "+biasText(dBias),text_color=color.white,bgcolor=sectionBg)
+
+    table.cell(dash,0,2,"H4 "+biasText(h4Bias),text_color=color.white)
+    table.cell(dash,1,2,"H1 "+biasText(h1Bias),text_color=color.white)
+    table.cell(dash,2,2,"M15 "+biasText(m15Bias),text_color=color.white)
+    table.cell(dash,3,2,"M5 "+biasText(m5Bias),text_color=color.white)
+
+    table.cell(dash,0,3,"CADEIA CAUSAL",text_color=color.white,bgcolor=sectionBg)
+    table.cell(dash,1,3,"",bgcolor=sectionBg)
+    table.cell(dash,2,3,"",bgcolor=sectionBg)
+    table.cell(dash,3,3,"",bgcolor=sectionBg)
+
+    table.cell(dash,0,4,"Liquidez")
+    table.cell(dash,1,4,reaction==0?"—":"✓",text_color=reaction==0?waitColor:okColor)
+    table.cell(dash,2,4,"Reação")
+    table.cell(dash,3,4,reaction==BULLISH?"BULL":reaction==BEARISH?"BEAR":"—",text_color=reaction==BULLISH?bullColor:reaction==BEARISH?bearColor:waitColor)
+
+    table.cell(dash,0,5,"M15 Major")
+    table.cell(dash,1,5,majorAuthorized?"✓":"—",text_color=majorAuthorized?okColor:waitColor)
+    table.cell(dash,2,5,"M15 Internal")
+    table.cell(dash,3,5,internalAuthorized?"✓":"—",text_color=internalAuthorized?okColor:waitColor)
+
+    table.cell(dash,0,6,"POI causal")
+    table.cell(dash,1,6,poiReady?"✓":"—",text_color=poiReady?okColor:waitColor)
+    table.cell(dash,2,6,"Reteste")
+    table.cell(dash,3,6,retest?"✓":"—",text_color=retest?okColor:waitColor)
+
+    table.cell(dash,0,7,"EXECUÇÃO",text_color=color.white,bgcolor=sectionBg)
+    table.cell(dash,1,7,"",bgcolor=sectionBg)
+    table.cell(dash,2,7,"",bgcolor=sectionBg)
+    table.cell(dash,3,7,"",bgcolor=sectionBg)
+
+    table.cell(dash,0,8,"ENTRY")
+    table.cell(dash,1,8,na(entry)?"—":str.tostring(entry,format.mintick))
+    table.cell(dash,2,8,"SL")
+    table.cell(dash,3,8,na(slRaw)?"—":str.tostring(slRaw,format.mintick))
+
+    table.cell(dash,0,9,"+1R → BE")
+    table.cell(dash,1,9,na(beTrigger)?"—":str.tostring(beTrigger,format.mintick))
+    table.cell(dash,2,9,"TARGET")
+    table.cell(dash,3,9,na(target)?"—":str.tostring(target,format.mintick))
+
+    table.cell(dash,0,10,"LOCALIZAÇÃO",text_color=color.white,bgcolor=sectionBg)
+    table.cell(dash,1,10,close>prevDayEq?"PREMIUM":"DISCOUNT",bgcolor=sectionBg)
+    table.cell(dash,2,10,"D1 EQ",bgcolor=sectionBg)
+    table.cell(dash,3,10,str.tostring(prevDayEq,format.mintick),bgcolor=sectionBg)
+
+    table.cell(dash,0,11,"FALTA",text_color=color.white)
+    table.cell(dash,1,11,missingLink,text_color=fullChain?okColor:color.orange)
+    table.cell(dash,2,11,"Estado")
+    table.cell(dash,3,11,stateText,text_color=stateColor)
+
+    table.cell(dash,0,12,"SEM CADEIA = SEM TRADE",text_color=color.white,bgcolor=headerBg)
+    table.cell(dash,1,12,"",bgcolor=headerBg)
+    table.cell(dash,2,12,"",bgcolor=headerBg)
+    table.cell(dash,3,12,"",bgcolor=headerBg)
 
 alertcondition(fullChain and reaction==BULLISH, "KAIROS LONG READY", "KAIROS LONG: cadeia causal completa")
 alertcondition(fullChain and reaction==BEARISH, "KAIROS SHORT READY", "KAIROS SHORT: cadeia causal completa")

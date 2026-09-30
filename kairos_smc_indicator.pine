@@ -98,8 +98,8 @@ updatePivots(int size, bool internal) =>
 storeOB(Pivot p, int bias) =>
     if showOB and p.idx >= 0 and p.idx < bar_index
         int from = p.idx
-        int to = bar_index
-        array<float> a = bias == BEARISH ? parsedHighs.slice(from,to) : parsedLows.slice(from,to)
+        int endIdx = bar_index
+        array<float> a = bias == BEARISH ? parsedHighs.slice(from,endIdx) : parsedLows.slice(from,endIdx)
         if a.size() > 0
             int rel = bias == BEARISH ? a.indexof(a.max()) : a.indexof(a.min())
             int ix = from + rel

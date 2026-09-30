@@ -11,6 +11,48 @@ BEARISH_LEG = 0
 BULLISH = 1
 BEARISH = -1
 
+// =====================================================
+// VISUAL / DASHBOARD SETTINGS
+// =====================================================
+grpDash = "Dashboard"
+dashPosInput = input.string("Superior direito", "Posição", options=["Superior direito","Inferior direito"], group=grpDash)
+dashSizeInput = input.string("Pequeno", "Tamanho", options=["Minúsculo","Pequeno","Normal"], group=grpDash)
+dashBg = input.color(color.rgb(17,19,24), "Fundo", group=grpDash)
+dashHeader = input.color(color.rgb(28,31,38), "Cabeçalho", group=grpDash)
+dashText = input.color(color.white, "Texto", group=grpDash)
+dashMuted = input.color(color.rgb(150,155,165), "Texto secundário", group=grpDash)
+dashTransparency = input.int(5, "Transparência", minval=0, maxval=95, group=grpDash)
+bullUi = input.color(color.rgb(35,180,120), "Bullish / confirmado", group=grpDash)
+bearUi = input.color(color.rgb(235,80,80), "Bearish", group=grpDash)
+waitUi = input.color(color.rgb(240,170,45), "Aguardando", group=grpDash)
+
+grpStruct = "Estrutura"
+swingColor = input.color(color.rgb(70,120,255), "Swing", group=grpStruct)
+internalColor = input.color(color.rgb(110,145,255), "Internal", group=grpStruct)
+
+grpLiq = "Liquidez"
+liqColor = input.color(color.rgb(80,135,255), "D/W/M", group=grpLiq)
+showSweepLabels = input.bool(true, "Mostrar sweeps", group=grpLiq)
+
+grpPoi = "POIs"
+bullFvgColor = input.color(color.rgb(40,180,120), "FVG bullish", group=grpPoi)
+bearFvgColor = input.color(color.rgb(220,75,75), "FVG bearish", group=grpPoi)
+bullObColor = input.color(color.rgb(65,115,235), "OB bullish", group=grpPoi)
+bearObColor = input.color(color.rgb(210,80,80), "OB bearish", group=grpPoi)
+poiTransparency = input.int(86, "Transparência POI", minval=0, maxval=100, group=grpPoi)
+
+grpExec = "Execução"
+entryColor = input.color(color.rgb(65,120,255), "Entry", group=grpExec)
+slColor = input.color(color.rgb(230,75,75), "Stop", group=grpExec)
+beColor = input.color(color.rgb(240,175,45), "+1R → BE", group=grpExec)
+targetColor = input.color(color.rgb(35,180,120), "Target", group=grpExec)
+execLineWidth = input.int(2, "Espessura", minval=1, maxval=4, group=grpExec)
+
+dashPos = dashPosInput == "Inferior direito" ? position.bottom_right : position.top_right
+dashTextSize = dashSizeInput == "Minúsculo" ? size.tiny : dashSizeInput == "Normal" ? size.normal : size.small
+dashBgFinal = color.new(dashBg,dashTransparency)
+dashHeaderFinal = color.new(dashHeader,dashTransparency)
+
 swingLen = input.int(50, "Swing length", minval=10)
 internalLen = input.int(5, "Internal length", minval=1)
 eqLen = input.int(3, "EQH/EQL confirmation", minval=1)
@@ -19,7 +61,6 @@ showSwing = input.bool(true, "Swing BOS/CHoCH")
 showInternal = input.bool(true, "Internal BOS/CHoCH")
 showRefs = input.bool(true, "Previous D/W/M High/Low")
 showPD = input.bool(true, "Premium/Discount")
-showPanel = input.bool(true, "MTF panel")
 showOB = input.bool(true, "Lux-style Order Blocks")
 showFVG = input.bool(true, "Lux-style FVG")
 obMitigationClose = input.bool(false, "OB mitigation by Close")
@@ -105,14 +146,14 @@ storeOB(Pivot p, int bias) =>
             int ix = from + rel
             float bh = parsedHighs.get(ix)
             float bl = parsedLows.get(ix)
-            box b = box.new(barTimes.get(ix),bh,time,bl,xloc=xloc.bar_time,extend=extend.right,bgcolor=color.new(bias==BULLISH?obBullColor:obBearColor,showOldPois?poiTransparency:100),border_color=color.new(color.gray,70))
+            box b = box.new(barTimes.get(ix),bh,time,bl,xloc=xloc.bar_time,extend=extend.right,bgcolor=color.new(bias==BULLISH?obBullColor:obBearColor,showOldPois?poiTransparency:100),border_color=color.new(bias==BULLISH?bullObColor:bearObColor,55))
             obs.unshift(OrderBlock.new(bh,bl,barTimes.get(ix),bias,b))
             if obs.size()>30
                 OrderBlock old=obs.pop()
                 old.bx.delete()
 
 drawBreak(Pivot p, string tag, bool bull, bool internal) =>
-    line.new(p.t,p.current,time,p.current,xloc=xloc.bar_time,style=internal?line.style_dashed:line.style_solid)
+    line.new(p.t,p.current,time,p.current,xloc=xloc.bar_time,style=internal?line.style_dashed:line.style_solid,color=internal?internalColor:swingColor)
     label.new(bar_index,p.current,tag,style=bull?label.style_label_down:label.style_label_up,size=internal?size.tiny:size.small)
 
 displayStructure(bool internal) =>
@@ -357,13 +398,13 @@ fullChain = showKairos and executionAuthorized and not na(entry) and not na(slRa
 
 plot(showKairos and poiReady ? poiTop : na, "KAIROS POI top", style=plot.style_linebr)
 plot(showKairos and poiReady ? poiBottom : na, "KAIROS POI bottom", style=plot.style_linebr)
-plot(showKairos and fullChain ? entry : na, "ENTRY", style=plot.style_linebr, linewidth=2)
-plot(showKairos and fullChain ? slRaw : na, "SL", style=plot.style_linebr, linewidth=2)
-plot(showKairos and fullChain ? beTrigger : na, "+1R BE", style=plot.style_linebr)
-plot(showKairos and fullChain ? target : na, "TARGET LIQ", style=plot.style_linebr, linewidth=2)
+plot(showKairos and fullChain ? entry : na, "ENTRY", style=plot.style_linebr, linewidth=execLineWidth, color=entryColor)
+plot(showKairos and fullChain ? slRaw : na, "SL", style=plot.style_linebr, linewidth=execLineWidth, color=slColor)
+plot(showKairos and fullChain ? beTrigger : na, "+1R BE", style=plot.style_linebr, linewidth=execLineWidth, color=beColor)
+plot(showKairos and fullChain ? target : na, "TARGET LIQ", style=plot.style_linebr, linewidth=execLineWidth, color=targetColor)
 
-plotshape(showKairos and sweepHigh, title="External BSL captured", text="BSL SWEEP", style=shape.labeldown, location=location.abovebar, size=size.tiny)
-plotshape(showKairos and sweepLow, title="External SSL captured", text="SSL SWEEP", style=shape.labelup, location=location.belowbar, size=size.tiny)
+plotshape(showKairos and showSweepLabels and sweepHigh, title="External BSL captured", text="BSL SWEEP", style=shape.labeldown, location=location.abovebar, size=size.tiny)
+plotshape(showKairos and showSweepLabels and sweepLow, title="External SSL captured", text="SSL SWEEP", style=shape.labelup, location=location.belowbar, size=size.tiny)
 plotshape(fullChain and reaction==BULLISH, title="KAIROS LONG", text="KAIROS LONG", style=shape.labelup, location=location.belowbar)
 plotshape(fullChain and reaction==BEARISH, title="KAIROS SHORT", text="KAIROS SHORT", style=shape.labeldown, location=location.abovebar)
 
@@ -383,83 +424,61 @@ else if na(target)
 else if fullChain
     missingLink := "TRADE READY"
 
-stateText = fullChain ? (reaction==BULLISH ? "LONG READY" : "SHORT READY") : (poiReady and not retest ? "AGUARDANDO RETESTE" : "SEM TRADE")
-stateColor = fullChain ? color.new(color.green,0) : color.new(color.orange,0)
-okColor = color.new(color.green,0)
-waitColor = color.new(color.gray,35)
-bearColor = color.new(color.red,0)
-bullColor = color.new(color.green,0)
-headerBg = color.new(color.black,0)
-sectionBg = color.new(color.gray,85)
+string stateText = "SEM TRADE"
+if fullChain
+    stateText := reaction==BULLISH ? "LONG READY" : "SHORT READY"
+else if poiReady and not retest
+    stateText := "AGUARDANDO"
 
-var table dash = table.new(position.top_right,4,13,border_width=1)
+stateColor = fullChain ? bullUi : waitUi
+reactionText = reaction==BULLISH ? "BULL" : reaction==BEARISH ? "BEAR" : "—"
+pdText = close > prevDayEq ? "PREMIUM" : "DISCOUNT"
+execTfText = isExecTf ? timeframe.period : "M15/M5"
 
-if barstate.islast and showKairos
-    table.clear(dash,0,0,3,12)
-    table.cell(dash,0,0,"KAIROS",text_color=color.white,bgcolor=headerBg,text_size=size.small)
-    table.cell(dash,1,0,syminfo.ticker,text_color=color.white,bgcolor=headerBg)
-    table.cell(dash,2,0,timeframe.period,text_color=color.white,bgcolor=headerBg)
-    table.cell(dash,3,0,stateText,text_color=color.white,bgcolor=stateColor)
+var table dash = table.new(dashPos,4,7,border_width=0,frame_width=1,frame_color=color.new(dashMuted,75))
 
-    table.cell(dash,0,1,"MACRO",text_color=color.white,bgcolor=sectionBg)
-    table.cell(dash,1,1,"MN "+biasText(mnBias),text_color=color.white,bgcolor=sectionBg)
-    table.cell(dash,2,1,"W1 "+biasText(wBias),text_color=color.white,bgcolor=sectionBg)
-    table.cell(dash,3,1,"D1 "+biasText(dBias),text_color=color.white,bgcolor=sectionBg)
+if barstate.islast
+    table.clear(dash,0,0,3,6)
+    if showKairos
+        // Header
+        table.cell(dash,0,0,"KAIROS",text_color=dashText,bgcolor=dashHeaderFinal,text_size=dashTextSize)
+        table.cell(dash,1,0,syminfo.ticker+" · "+timeframe.period,text_color=dashText,bgcolor=dashHeaderFinal,text_size=dashTextSize)
+        table.cell(dash,2,0,"",bgcolor=dashHeaderFinal)
+        table.cell(dash,3,0,stateText,text_color=stateColor,bgcolor=dashHeaderFinal,text_size=dashTextSize)
 
-    table.cell(dash,0,2,"H4 "+biasText(h4Bias),text_color=color.white)
-    table.cell(dash,1,2,"H1 "+biasText(h1Bias),text_color=color.white)
-    table.cell(dash,2,2,"M15 "+biasText(m15Bias),text_color=color.white)
-    table.cell(dash,3,2,"M5 "+biasText(m5Bias),text_color=color.white)
+        // Macro map
+        table.cell(dash,0,1,"MN "+biasText(mnBias),text_color=dashMuted,bgcolor=dashBgFinal,text_size=dashTextSize)
+        table.cell(dash,1,1,"W1 "+biasText(wBias),text_color=dashMuted,bgcolor=dashBgFinal,text_size=dashTextSize)
+        table.cell(dash,2,1,"D1 "+biasText(dBias),text_color=dashMuted,bgcolor=dashBgFinal,text_size=dashTextSize)
+        table.cell(dash,3,1,"H4 "+biasText(h4Bias)+"  H1 "+biasText(h1Bias),text_color=dashMuted,bgcolor=dashBgFinal,text_size=dashTextSize)
 
-    table.cell(dash,0,3,"CADEIA CAUSAL",text_color=color.white,bgcolor=sectionBg)
-    table.cell(dash,1,3,"",bgcolor=sectionBg)
-    table.cell(dash,2,3,"",bgcolor=sectionBg)
-    table.cell(dash,3,3,"",bgcolor=sectionBg)
+        // Causal chain
+        table.cell(dash,0,2,"LIQ "+(reaction==0?"—":"✓"),text_color=reaction==0?dashMuted:bullUi,bgcolor=dashBgFinal,text_size=dashTextSize)
+        table.cell(dash,1,2,reactionText,text_color=reaction==BULLISH?bullUi:reaction==BEARISH?bearUi:dashMuted,bgcolor=dashBgFinal,text_size=dashTextSize)
+        table.cell(dash,2,2,"M15 M "+(majorAuthorized?"✓":"—"),text_color=majorAuthorized?bullUi:dashMuted,bgcolor=dashBgFinal,text_size=dashTextSize)
+        table.cell(dash,3,2,"INT "+(internalAuthorized?"✓":"—"),text_color=internalAuthorized?bullUi:dashMuted,bgcolor=dashBgFinal,text_size=dashTextSize)
 
-    table.cell(dash,0,4,"Liquidez")
-    table.cell(dash,1,4,reaction==0?"—":"✓",text_color=reaction==0?waitColor:okColor)
-    table.cell(dash,2,4,"Reação")
-    table.cell(dash,3,4,reaction==BULLISH?"BULL":reaction==BEARISH?"BEAR":"—",text_color=reaction==BULLISH?bullColor:reaction==BEARISH?bearColor:waitColor)
+        table.cell(dash,0,3,"POI "+(poiReady?"✓":"—"),text_color=poiReady?bullUi:dashMuted,bgcolor=dashBgFinal,text_size=dashTextSize)
+        table.cell(dash,1,3,"RET "+(retest?"✓":"—"),text_color=retest?bullUi:dashMuted,bgcolor=dashBgFinal,text_size=dashTextSize)
+        table.cell(dash,2,3,pdText,text_color=dashMuted,bgcolor=dashBgFinal,text_size=dashTextSize)
+        table.cell(dash,3,3,"EXEC "+execTfText,text_color=isExecTf?dashText:waitUi,bgcolor=dashBgFinal,text_size=dashTextSize)
 
-    table.cell(dash,0,5,"M15 Major")
-    table.cell(dash,1,5,majorAuthorized?"✓":"—",text_color=majorAuthorized?okColor:waitColor)
-    table.cell(dash,2,5,"M15 Internal")
-    table.cell(dash,3,5,internalAuthorized?"✓":"—",text_color=internalAuthorized?okColor:waitColor)
+        // Execution
+        table.cell(dash,0,4,"ENTRY",text_color=dashMuted,bgcolor=dashBgFinal,text_size=dashTextSize)
+        table.cell(dash,1,4,na(entry)?"—":str.tostring(entry,format.mintick),text_color=na(entry)?dashMuted:entryColor,bgcolor=dashBgFinal,text_size=dashTextSize)
+        table.cell(dash,2,4,"SL",text_color=dashMuted,bgcolor=dashBgFinal,text_size=dashTextSize)
+        table.cell(dash,3,4,na(slRaw)?"—":str.tostring(slRaw,format.mintick),text_color=na(slRaw)?dashMuted:slColor,bgcolor=dashBgFinal,text_size=dashTextSize)
 
-    table.cell(dash,0,6,"POI causal")
-    table.cell(dash,1,6,poiReady?"✓":"—",text_color=poiReady?okColor:waitColor)
-    table.cell(dash,2,6,"Reteste")
-    table.cell(dash,3,6,retest?"✓":"—",text_color=retest?okColor:waitColor)
+        table.cell(dash,0,5,"+1R→BE",text_color=dashMuted,bgcolor=dashBgFinal,text_size=dashTextSize)
+        table.cell(dash,1,5,na(beTrigger)?"—":str.tostring(beTrigger,format.mintick),text_color=na(beTrigger)?dashMuted:beColor,bgcolor=dashBgFinal,text_size=dashTextSize)
+        table.cell(dash,2,5,"TARGET",text_color=dashMuted,bgcolor=dashBgFinal,text_size=dashTextSize)
+        table.cell(dash,3,5,na(target)?"—":str.tostring(target,format.mintick),text_color=na(target)?dashMuted:targetColor,bgcolor=dashBgFinal,text_size=dashTextSize)
 
-    table.cell(dash,0,7,"EXECUÇÃO",text_color=color.white,bgcolor=sectionBg)
-    table.cell(dash,1,7,"",bgcolor=sectionBg)
-    table.cell(dash,2,7,"",bgcolor=sectionBg)
-    table.cell(dash,3,7,"",bgcolor=sectionBg)
-
-    table.cell(dash,0,8,"ENTRY")
-    table.cell(dash,1,8,na(entry)?"—":str.tostring(entry,format.mintick))
-    table.cell(dash,2,8,"SL")
-    table.cell(dash,3,8,na(slRaw)?"—":str.tostring(slRaw,format.mintick))
-
-    table.cell(dash,0,9,"+1R → BE")
-    table.cell(dash,1,9,na(beTrigger)?"—":str.tostring(beTrigger,format.mintick))
-    table.cell(dash,2,9,"TARGET")
-    table.cell(dash,3,9,na(target)?"—":str.tostring(target,format.mintick))
-
-    table.cell(dash,0,10,"LOCALIZAÇÃO",text_color=color.white,bgcolor=sectionBg)
-    table.cell(dash,1,10,close>prevDayEq?"PREMIUM":"DISCOUNT",bgcolor=sectionBg)
-    table.cell(dash,2,10,"D1 EQ",bgcolor=sectionBg)
-    table.cell(dash,3,10,str.tostring(prevDayEq,format.mintick),bgcolor=sectionBg)
-
-    table.cell(dash,0,11,"FALTA",text_color=color.white)
-    table.cell(dash,1,11,missingLink,text_color=fullChain?okColor:color.orange)
-    table.cell(dash,2,11,"Estado")
-    table.cell(dash,3,11,stateText,text_color=stateColor)
-
-    table.cell(dash,0,12,"SEM CADEIA = SEM TRADE",text_color=color.white,bgcolor=headerBg)
-    table.cell(dash,1,12,"",bgcolor=headerBg)
-    table.cell(dash,2,12,"",bgcolor=headerBg)
-    table.cell(dash,3,12,"",bgcolor=headerBg)
+        // Missing causal link
+        table.cell(dash,0,6,"FALTA",text_color=waitUi,bgcolor=dashHeaderFinal,text_size=dashTextSize)
+        table.cell(dash,1,6,missingLink,text_color=fullChain?bullUi:waitUi,bgcolor=dashHeaderFinal,text_size=dashTextSize)
+        table.cell(dash,2,6,"D1 EQ",text_color=dashMuted,bgcolor=dashHeaderFinal,text_size=dashTextSize)
+        table.cell(dash,3,6,str.tostring(prevDayEq,format.mintick),text_color=dashText,bgcolor=dashHeaderFinal,text_size=dashTextSize)
 
 alertcondition(fullChain and reaction==BULLISH, "KAIROS LONG READY", "KAIROS LONG: cadeia causal completa")
 alertcondition(fullChain and reaction==BEARISH, "KAIROS SHORT READY", "KAIROS SHORT: cadeia causal completa")

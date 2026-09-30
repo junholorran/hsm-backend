@@ -41,6 +41,10 @@ bullObColor = input.color(color.rgb(65,115,235), "OB bullish", group=grpPoi)
 bearObColor = input.color(color.rgb(210,80,80), "OB bearish", group=grpPoi)
 poiTransparency = input.int(86, "Transparência POI", minval=0, maxval=100, group=grpPoi)
 
+grpAudit = "Auditoria"
+showAudit = input.bool(true, "Mostrar auditoria resumida", group=grpAudit)
+auditPosInput = input.string("Inferior direito", "Posição auditoria", options=["Superior esquerdo","Inferior esquerdo","Inferior direito"], group=grpAudit)
+
 grpExec = "Execução"
 entryColor = input.color(color.rgb(65,120,255), "Entry", group=grpExec)
 slColor = input.color(color.rgb(230,75,75), "Stop", group=grpExec)

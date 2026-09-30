@@ -517,6 +517,69 @@ if barstate.islast
         table.cell(audit,1,9,capTxt,text_color=dashText,bgcolor=dashBgFinal,text_size=size.tiny)
         table.cell(audit,2,9,na(captureExtreme)?"—":str.tostring(captureExtreme,format.mintick),text_color=dashText,bgcolor=dashBgFinal,text_size=size.tiny)
 
+// =====================================================
+// AUDITOR A — READ ONLY
+// Só expõe a cadeia atual. Não altera gates/sinais.
+// =====================================================
+auditPos = auditPosInput == "Superior esquerdo" ? position.top_left : auditPosInput == "Inferior esquerdo" ? position.bottom_left : position.bottom_right
+auditMark(bool passed, bool waiting) => passed ? "✓" : waiting ? "○" : "·"
+auditStatus(bool passed, bool waiting) => passed ? "PASS" : waiting ? "AGUARDA" : "BLOQ"
+liqAudit = reaction != 0
+majorWait = liqAudit and not majorAuthorized
+internalWait = majorAuthorized and not internalAuthorized
+poiWait = internalAuthorized and not poiReady
+retestWait = poiReady and not retest
+execAudit = not na(slRaw) and not na(target) and targetSideOk
+execWait = retest and not execAudit
+string firstPending = "LIQUIDEZ"
+if liqAudit
+    firstPending := "M15 MAJOR"
+if majorAuthorized
+    firstPending := "M15 INTERNAL"
+if internalAuthorized
+    firstPending := "POI CAUSAL"
+if poiReady
+    firstPending := "RETESTE"
+if retest
+    firstPending := "SL / TARGET"
+if fullChain
+    firstPending := "CADEIA COMPLETA"
+var table audit = table.new(auditPos,3,10,border_width=0,frame_width=1,frame_color=color.new(dashMuted,80))
+if barstate.islast
+    table.clear(audit,0,0,2,9)
+    if showAudit
+        table.cell(audit,0,0,"AUDITOR A",text_color=dashText,bgcolor=dashHeaderFinal,text_size=size.tiny)
+        table.cell(audit,1,0,syminfo.ticker,text_color=dashText,bgcolor=dashHeaderFinal,text_size=size.tiny)
+        table.cell(audit,2,0,fullChain?"OK":"EM TESTE",text_color=fullChain?bullUi:waitUi,bgcolor=dashHeaderFinal,text_size=size.tiny)
+        table.cell(audit,0,1,"LIQUIDEZ",text_color=dashMuted,bgcolor=dashBgFinal,text_size=size.tiny)
+        table.cell(audit,1,1,auditMark(liqAudit,true),text_color=liqAudit?bullUi:waitUi,bgcolor=dashBgFinal,text_size=size.tiny)
+        table.cell(audit,2,1,liqAudit?"PASS":"AGUARDA",text_color=liqAudit?bullUi:waitUi,bgcolor=dashBgFinal,text_size=size.tiny)
+        table.cell(audit,0,2,"REAÇÃO",text_color=dashMuted,bgcolor=dashBgFinal,text_size=size.tiny)
+        table.cell(audit,1,2,liqAudit?reactionText:"·",text_color=reaction==BULLISH?bullUi:reaction==BEARISH?bearUi:dashMuted,bgcolor=dashBgFinal,text_size=size.tiny)
+        table.cell(audit,2,2,liqAudit?"PASS":"BLOQ",text_color=liqAudit?bullUi:dashMuted,bgcolor=dashBgFinal,text_size=size.tiny)
+        table.cell(audit,0,3,"M15 MAJOR",text_color=dashMuted,bgcolor=dashBgFinal,text_size=size.tiny)
+        table.cell(audit,1,3,auditMark(majorAuthorized,majorWait),text_color=majorAuthorized?bullUi:majorWait?waitUi:dashMuted,bgcolor=dashBgFinal,text_size=size.tiny)
+        table.cell(audit,2,3,auditStatus(majorAuthorized,majorWait),text_color=majorAuthorized?bullUi:majorWait?waitUi:dashMuted,bgcolor=dashBgFinal,text_size=size.tiny)
+        table.cell(audit,0,4,"M15 INTERNAL",text_color=dashMuted,bgcolor=dashBgFinal,text_size=size.tiny)
+        table.cell(audit,1,4,auditMark(internalAuthorized,internalWait),text_color=internalAuthorized?bullUi:internalWait?waitUi:dashMuted,bgcolor=dashBgFinal,text_size=size.tiny)
+        table.cell(audit,2,4,auditStatus(internalAuthorized,internalWait),text_color=internalAuthorized?bullUi:internalWait?waitUi:dashMuted,bgcolor=dashBgFinal,text_size=size.tiny)
+        table.cell(audit,0,5,"POI CAUSAL",text_color=dashMuted,bgcolor=dashBgFinal,text_size=size.tiny)
+        table.cell(audit,1,5,auditMark(poiReady,poiWait),text_color=poiReady?bullUi:poiWait?waitUi:dashMuted,bgcolor=dashBgFinal,text_size=size.tiny)
+        table.cell(audit,2,5,auditStatus(poiReady,poiWait),text_color=poiReady?bullUi:poiWait?waitUi:dashMuted,bgcolor=dashBgFinal,text_size=size.tiny)
+        table.cell(audit,0,6,"RETESTE",text_color=dashMuted,bgcolor=dashBgFinal,text_size=size.tiny)
+        table.cell(audit,1,6,auditMark(retest,retestWait),text_color=retest?bullUi:retestWait?waitUi:dashMuted,bgcolor=dashBgFinal,text_size=size.tiny)
+        table.cell(audit,2,6,auditStatus(retest,retestWait),text_color=retest?bullUi:retestWait?waitUi:dashMuted,bgcolor=dashBgFinal,text_size=size.tiny)
+        table.cell(audit,0,7,"SL / TARGET",text_color=dashMuted,bgcolor=dashBgFinal,text_size=size.tiny)
+        table.cell(audit,1,7,auditMark(execAudit,execWait),text_color=execAudit?bullUi:execWait?waitUi:dashMuted,bgcolor=dashBgFinal,text_size=size.tiny)
+        table.cell(audit,2,7,auditStatus(execAudit,execWait),text_color=execAudit?bullUi:execWait?waitUi:dashMuted,bgcolor=dashBgFinal,text_size=size.tiny)
+        table.cell(audit,0,8,"PRÓXIMO",text_color=waitUi,bgcolor=dashHeaderFinal,text_size=size.tiny)
+        table.cell(audit,1,8,firstPending,text_color=fullChain?bullUi:waitUi,bgcolor=dashHeaderFinal,text_size=size.tiny)
+        table.cell(audit,2,8,fullChain?"PASS":"VERIFICAR",text_color=fullChain?bullUi:waitUi,bgcolor=dashHeaderFinal,text_size=size.tiny)
+        capTxt = na(captureTs) ? "—" : str.format_time(captureTs,"dd/MM HH:mm")
+        table.cell(audit,0,9,"CAPTURA",text_color=dashMuted,bgcolor=dashBgFinal,text_size=size.tiny)
+        table.cell(audit,1,9,capTxt,text_color=dashText,bgcolor=dashBgFinal,text_size=size.tiny)
+        table.cell(audit,2,9,na(captureExtreme)?"—":str.tostring(captureExtreme,format.mintick),text_color=dashText,bgcolor=dashBgFinal,text_size=size.tiny)
+
 var table dash = table.new(dashPos,4,7,border_width=0,frame_width=1,frame_color=color.new(dashMuted,75))
 
 if barstate.islast

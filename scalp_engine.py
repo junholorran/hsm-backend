@@ -2123,20 +2123,11 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
                             target_level=pre_target['nivel'], limit=8,
                             allowed_tfs=('M15','H1','H4','D1','W1')
                         )
-                        # Pré-alerta usa a mesma gestão operacional do sinal:
-                        # 2R parcial + BE, 3R final. Liquidez/POIs continuam como
-                        # validação de espaço; não viram alvo remoto arbitrário.
+                        # Pré-alerta preserva a gestão operacional existente.
+                        # Obstáculos não vetam; o mínimo de liquidez permanece.
                         pre_sign = 1.0 if direction == 'LONG' else -1.0
-                        pre_blocked = False
-                        if pre_obstacles:
-                            pre_o = pre_obstacles[0]
-                            pre_o_rr = abs(float(pre_o['nivel']) - pre_limit) / pre_risk
-                            if pre_o_rr < 2.0:
-                                pre_blocked = True
                         pre_struct_rr = abs(float(pre_target['nivel']) - pre_limit) / pre_risk
-                        if pre_struct_rr < 2.0:
-                            pre_blocked = True
-                        if not pre_blocked:
+                        if pre_struct_rr >= 2.0:
                             resultado['prealert_tp1'] = round(pre_limit + pre_sign * 2.0 * pre_risk, 6)
                             resultado['prealert_tp1_rr'] = 2.0
                             resultado['prealert_tp1_origem'] = 'GESTAO_FIXA_2R_PARCIAL_BE'
@@ -2188,9 +2179,8 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
     resultado['target_obstacles']=obstacles
     # Gestão operacional fixa e auditável:
     # TP1 = 2R (parcial + mover SL para BE); TP2 = 3R.
-    # A liquidez estrutural continua mapeada como contexto/obstáculo, mas não
-    # transforma um swing remoto em TP de 10R/30R. Se houver obstáculo estrutural
-    # relevante ANTES de 2R, rejeitamos o setup em vez de fabricar RR.
+    # Obstáculos ficam registados como informação, sem veto antes de 2R.
+    # O mínimo de espaço até à liquidez estrutural permanece obrigatório.
     sign = 1.0 if direction == 'LONG' else -1.0
     tp1_2r = entry + sign * (2.0 * risk)
     tp2_3r = entry + sign * (3.0 * risk)
@@ -2200,10 +2190,6 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
         obstacle_level = float(first_obstacle['nivel'])
         obstacle_rr = abs(obstacle_level - entry) / risk
         resultado['tp1_obstacle'] = dict(first_obstacle)
-        if obstacle_rr < 2.0:
-            resultado['failure_reason']='OBSTACULO_ESTRUTURAL_ANTES_2R'
-            resultado['rr']=round(obstacle_rr,2)
-            return resultado
 
     # A primeira liquidez estrutural do lado do trade também precisa deixar
     # espaço mínimo para o plano 2R. Ela continua registrada como alvo/contexto.
@@ -3507,4 +3493,3 @@ def paper_trading_v2_export_endpoint():
 # é avaliado isoladamente e causalmente, igual ao replay/paper já
 # aprovados).
 # ═══════════════════════════════════════════════════════════════════════
-

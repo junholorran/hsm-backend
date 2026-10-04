@@ -3028,8 +3028,3 @@ def experiment_audit_near_pdl_20260927():
     reclaim=next((x for x in rows if first and x['t']>=first['t'] and float(x['c'])>pdl),None)
     nearest=min(rows,key=lambda x:abs(float(x['l'])-pdl)) if rows else None
     return jsonify({'ok':True,'read_only':True,'pair':'NEARUSD','pdl':pdl,'previous_d1_candle':prev,'window_lisbon':'27/09/2026 03:00-07:00','first_m5_below_pdl':first,'first_reclaim':reclaim,'nearest_m5':nearest,'classification':'SWEEP_AND_RECLAIM' if first and reclaim else ('BREACH_NO_RECLAIM' if first else 'NO_BREACH'),'m5_rows':rows})
-
-# Read-only production-snapshot BTC 24-hour audit. Experimental service only.
-if os.environ.get('RAILWAY_SERVICE_NAME') == 'kairos-poi-abc-sol':
-    from replay_obstacle_probe_20261004 import start_obstacle_replay_probe
-    start_obstacle_replay_probe()

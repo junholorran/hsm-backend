@@ -1,0 +1,2 @@
+KAIROS experimental clean V4 build marker.
+Purpose: force Railway to build a fresh image from repository source; preDeploy applies only patch_htf_structure_radar_v4.py.

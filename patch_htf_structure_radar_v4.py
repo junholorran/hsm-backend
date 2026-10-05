@@ -26,7 +26,6 @@ def _kairos_radar_first_closed_choch(candles, sweep_ts, swing_size, tf):
 '''
     s=s.replace(helper_anchor,helper+helper_anchor,1)
 
-    # Replay-local state. This survives every M5 step in this replay.
     loop="    for i in range(MIN_M5_IDX, len(m5)):\n"
     if loop not in s: raise SystemExit('replay loop missing')
     init="""    _kairos_v7_armed=None
@@ -37,15 +36,13 @@ def _kairos_radar_first_closed_choch(candles, sweep_ts, swing_size, tf):
 """
     s=s.replace(loop,init,1)
 
-    # Critical fix: tap the EXACT selector result inside avaliar_vortex_decision_layer_v2,
-    # before reaction/FVG/OB/retest/SL/RR can reject the full engine result.
-    selector="""    sweep,sweep_audit=_kairos_select_structural_first_capture_sweep(candles_por_tf,now_ts)
+    selector="""    sweep,sweep_audit=_kairos_select_structural_first_capture_sweep(candles_por_tf,now_ts,liquidity_policy=liquidity_policy)
     resultado['structural_sweep_audit']=sweep_audit
 """
     if selector not in s: raise SystemExit('selector anchor missing')
-    tapped="""    sweep,sweep_audit=_kairos_select_structural_first_capture_sweep(candles_por_tf,now_ts)
+    tapped="""    sweep,sweep_audit=_kairos_select_structural_first_capture_sweep(candles_por_tf,now_ts,liquidity_policy=liquidity_policy)
     resultado['structural_sweep_audit']=sweep_audit
-    # Export the exact recognized capture immediately; downstream failures must not erase it.
+    # Exporta a captura no ponto exato em que o motor a reconhece.
     if sweep:
         resultado['_radar_capture']={
             'liquidity_tf':sweep.get('liquidity_tf'),

@@ -7,6 +7,7 @@ import sqlite3
 import re
 import hashlib
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import base64
 import io
 from datetime import datetime, timezone
@@ -1861,7 +1862,8 @@ _KAIROS_LIVE_PAIRS = (
 _KAIROS_LIVE_LAST_TS = {pair: int(time.time() * 1000) for pair in _KAIROS_LIVE_PAIRS}
 _KAIROS_LIVE_SEEN = {pair: set() for pair in _KAIROS_LIVE_PAIRS}
 _KAIROS_RADAR_SEEN = {pair: set() for pair in _KAIROS_LIVE_PAIRS}
-_KAIROS_LIVE_INTERVAL_SECONDS = 5 * 60
+_KAIROS_LIVE_INTERVAL_SECONDS = 60
+_KAIROS_LIVE_PHASE_STATE={pair:{} for pair in _KAIROS_LIVE_PAIRS}
 
 def _kairos_send_capture_events(pair, result, cutoff):
     """Confirm Telegram delivery before consuming a capture event."""
@@ -1901,7 +1903,7 @@ def _kairos_send_setup_events(pair, result, cutoff):
     for event in events:
         if event.get('phase')!='ARMED' or event.get('tf')!='M5' or event['setup_key'] in touched or event['setup_key'] not in pending:
             continue
-        if event['key'] in _KAIROS_SETUP_SEEN[pair] or not (_KAIROS_LIVE_LAST_TS[pair]<event['timestamp']<=cutoff):
+        if event['key'] in _KAIROS_SETUP_SEEN[pair] or not (_KAIROS_LIVE_LAST_TS[pair]<=event['timestamp']<=cutoff):
             continue
         msg=(f"⏳ <b>KAIROS — SETUP M5 ARMADO</b> | {pair} | {event['direction']}\n"
              f"Nível proximal a observar: {event['level']}\n"
@@ -1910,6 +1912,7 @@ def _kairos_send_setup_events(pair, result, cutoff):
              "Aguardando reteste. Nível planeado, sem preenchimento assumido. DEMO/manual.")
         if send_telegram(msg):
             _KAIROS_SETUP_SEEN[pair].add(event['key'])
+            _KAIROS_LIVE_PHASE_STATE.get(pair,{}).get(event['setup_key'],{}).pop('armed_event',None)
         else:
             delivered=False
     return delivered
@@ -1918,64 +1921,71 @@ def _kairos_send_setup_events(pair, result, cutoff):
 def _kairos_live_scanner_loop():
     while True:
         cycle_started_ms = int(time.time() * 1000)
-        for pair in _KAIROS_LIVE_PAIRS:
-            try:
-                r = scalp_engine.replay_vortex_decision_layer_v2(
-                    pair, dias_historico=1, fim_ts_ms=cycle_started_ms,
-                    experimental_poi_policy='A_CURRENT',
-                )
-                sinais = r.get('sinais_unicos_completos', []) if isinstance(r, dict) else []
-                if not isinstance(r, dict) or r.get('erro'):
-                    raise RuntimeError('Replay failed; preserving delivery watermark')
-                if any(str(k).startswith('EXCECAO:') and count for k, count in (r.get('distribuicao_motivos_todos_ciclos') or {}).items()):
-                    raise RuntimeError('Replay has failed evaluations; preserving delivery watermark')
-                delivered = _kairos_send_capture_events(pair, r, cycle_started_ms)
-                delivered = _kairos_send_setup_events(pair, r, cycle_started_ms) and delivered
-                novos = []
-                for s in sinais:
-                    ts = s.get('retest_confirm_close_ts')
-                    sig = (s.get('choch_timestamp'), s.get('direction'), s.get('zone_type'),
-                           s.get('zone_created_ts'), s.get('zone_bottom'), s.get('zone_top'))
-                    if (ts is None or ts <= _KAIROS_LIVE_LAST_TS[pair] or
-                            ts > cycle_started_ms or sig in _KAIROS_LIVE_SEEN[pair]):
-                        continue
-                    novos.append((ts, sig, s))
-                novos.sort(key=lambda x: x[0])
-                for ts, sig, s in novos:
-                    direction = s.get('direction')
-                    entry = s.get('entry')
-                    sl = s.get('sl')
-                    tp1 = s.get('tp1')
-                    tp2 = s.get('tp2')
-                    zone = s.get('zone_type')
-                    choch = s.get('choch_timestamp')
-                    msg = (
-                        "⚡ <b>KAIROS — SINAL CAUSAL NOVO</b>\n\n"
-                        f"{'📈' if direction == 'LONG' else '📉'} <b>{direction}</b> | {pair}\n"
-                        f"🎯 <b>Nível histórico do reteste:</b> {entry}\n"
-                        f"Fecho observado: {s.get('observed_retest_close')} — verificar preço atual antes de qualquer decisão manual.\n"
-                        f"🛑 <b>SL estrutural:</b> {sl}\n"
-                        f"✅ <b>TP1:</b> {tp1}\n"
-                        f"🏁 <b>TP2:</b> {tp2}\n"
-                        f"🧩 <b>POI:</b> {zone}\n"
-                        f"🔗 <b>MSS/CHoCH:</b> {choch}\n"
-                        "🧪 Demo/manual — A_CURRENT, candles fechados, sem score."
-                    )
-                    if send_telegram(msg):
-                        _KAIROS_LIVE_SEEN[pair].add(sig)
-                        print(f"[KAIROS_LIVE] ALERT pair={pair} ts={ts} sig={sig} entry={entry} sl={sl}", flush=True)
-                    else:
-                        delivered = False
-                if delivered:
-                    _KAIROS_LIVE_LAST_TS[pair] = cycle_started_ms
-                print(f"[KAIROS_LIVE] scan done pair={pair} signals={len(sinais)} new={len(novos)} watermark={_KAIROS_LIVE_LAST_TS[pair]}", flush=True)
-            except Exception as e:
-                print(f"[KAIROS_LIVE] scan error pair={pair}: {e}", flush=True)
-        time.sleep(_KAIROS_LIVE_INTERVAL_SECONDS)
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            jobs={pool.submit(scalp_engine._kairos_scan_latest_closed,pair,cycle_started_ms,
+                              _KAIROS_LIVE_PHASE_STATE[pair]):pair for pair in _KAIROS_LIVE_PAIRS}
+            for job in as_completed(jobs):
+                pair=jobs[job]
+                try:
+                    r = job.result()
+                    sinais = r.get('sinais_unicos_completos', []) if isinstance(r, dict) else []
+                    if not isinstance(r, dict) or r.get('erro'):
+                        raise RuntimeError('Replay failed; preserving delivery watermark')
+                    if any(str(k).startswith('EXCECAO:') and count for k, count in (r.get('distribuicao_motivos_todos_ciclos') or {}).items()):
+                        raise RuntimeError('Replay has failed evaluations; preserving delivery watermark')
+                    delivered = _kairos_send_capture_events(pair, r, cycle_started_ms)
+                    delivered = _kairos_send_setup_events(pair, r, cycle_started_ms) and delivered
+                    novos = []
+                    for s in sinais:
+                        ts = s.get('retest_confirm_close_ts')
+                        sig = (s.get('choch_timestamp'), s.get('direction'), s.get('zone_type'),
+                               s.get('zone_created_ts'), s.get('zone_bottom'), s.get('zone_top'))
+                        if (ts is None or ts <= _KAIROS_LIVE_LAST_TS[pair] or
+                                ts > cycle_started_ms or sig in _KAIROS_LIVE_SEEN[pair]):
+                            continue
+                        novos.append((ts, sig, s))
+                    novos.sort(key=lambda x: x[0])
+                    for ts, sig, s in novos:
+                        direction = s.get('direction')
+                        entry = s.get('entry')
+                        sl = s.get('sl')
+                        tp1 = s.get('tp1')
+                        tp2 = s.get('tp2')
+                        zone = s.get('zone_type')
+                        choch = s.get('choch_timestamp')
+                        msg = (
+                            "⚡ <b>KAIROS — SINAL CAUSAL NOVO</b>\n\n"
+                            f"{'📈' if direction == 'LONG' else '📉'} <b>{direction}</b> | {pair}\n"
+                            f"🎯 <b>Nível histórico do reteste:</b> {entry}\n"
+                            f"Fecho observado: {s.get('observed_retest_close')} — verificar preço atual antes de qualquer decisão manual.\n"
+                            f"🛑 <b>SL estrutural:</b> {sl}\n"
+                            f"✅ <b>TP1:</b> {tp1}\n"
+                            f"🏁 <b>TP2:</b> {tp2}\n"
+                            f"🧩 <b>POI:</b> {zone}\n"
+                            f"🔗 <b>MSS/CHoCH:</b> {choch}\n"
+                            "🧪 Demo/manual — A_CURRENT, candles fechados, sem score."
+                        )
+                        if send_telegram(msg):
+                            _KAIROS_LIVE_SEEN[pair].add(sig)
+                            delivery_key=(s.get('entry_setup') or {}).get('key')
+                            _KAIROS_LIVE_PHASE_STATE[pair].get(delivery_key,{}).pop('signal_snapshot',None)
+                            print(f"[KAIROS_LIVE] ALERT pair={pair} ts={ts} sig={sig} entry={entry} sl={sl}", flush=True)
+                        else:
+                            delivered = False
+                    if delivered:
+                        _KAIROS_LIVE_LAST_TS[pair] = cycle_started_ms
+                        for pending_state in _KAIROS_LIVE_PHASE_STATE[pair].values():
+                            cached=pending_state.get('signal_snapshot') or {}
+                            if cached.get('retest_confirm_close_ts',cycle_started_ms+1)<=cycle_started_ms:
+                                pending_state.pop('signal_snapshot',None)
+                    print(f"[KAIROS_LIVE] scan done pair={pair} signals={len(sinais)} new={len(novos)} watermark={_KAIROS_LIVE_LAST_TS[pair]}", flush=True)
+                except Exception as e:
+                    print(f"[KAIROS_LIVE] scan error pair={pair}: {e}", flush=True)
+        time.sleep(max(0.1,_KAIROS_LIVE_INTERVAL_SECONDS-(time.time()-cycle_started_ms/1000)))
 
 if os.environ.get('RAILWAY_SERVICE_NAME') == 'kairos-poi-abc-sol':
     threading.Thread(target=_kairos_live_scanner_loop, daemon=True).start()
-    print(f"[KAIROS_LIVE] scanner ENABLED pairs={len(_KAIROS_LIVE_PAIRS)} A_CURRENT interval=5m demo/manual", flush=True)
+    print(f"[KAIROS_LIVE] scanner ENABLED pairs={len(_KAIROS_LIVE_PAIRS)} A_CURRENT latest-closed snapshot target interval=60s workers=3 demo/manual", flush=True)
 
 
 # EXPERIMENTAL BRANCH ONLY — POI lifecycle A/B/C replay. Read-only, no DB/Telegram.

@@ -37,7 +37,7 @@ class EntryLifecycleTests(unittest.TestCase):
 class SetupDeliveryTests(unittest.TestCase):
     def sender(self, success):
         self.sent=[];self.seen={'BTCUSD':set()}
-        ns={'_KAIROS_SETUP_SEEN':self.seen,'_KAIROS_LIVE_LAST_TS':{'BTCUSD':0},
+        ns={'_KAIROS_LIVE_PHASE_STATE':{'BTCUSD':{}},'_KAIROS_SETUP_SEEN':self.seen,'_KAIROS_LIVE_LAST_TS':{'BTCUSD':0},
             'send_telegram':lambda msg:(self.sent.append(msg) or success)}
         return load_functions('app.py',['_kairos_send_setup_events'],ns)['_kairos_send_setup_events']
     def event(self):

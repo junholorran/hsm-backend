@@ -3139,6 +3139,64 @@ def _kairos_record_entry_audit(store, result, cutoff_ts, start_ts):
     }
 
 
+def _kairos_snapshot_freshness(tf_map, cutoff):
+    """Each native TF must include its latest fully closed bar, calendar-aware."""
+    intervals={'MN':'M','W1':'W','D1':'D','H4':'240','H1':'60','M30':'30','M15':'15','M5':'5','M1':'1'}
+    stale={}
+    for tf,iv in intervals.items():
+        cs=tf_map.get(tf) or []
+        if not cs:
+            stale[tf]='NO_CLOSED_CANDLES';continue
+        last_close=_kairos_candle_close_ts(cs[-1]['t'],iv)
+        next_close=_kairos_candle_close_ts(last_close,iv) if last_close is not None else None
+        if last_close is None or next_close is None or not (last_close<=cutoff<next_close):
+            stale[tf]={'last_close':last_close,'next_close':next_close,'cutoff':cutoff}
+    return stale
+
+
+def _kairos_scan_latest_closed(pair, observed_ts, phase_state):
+    """Forward snapshot: one decision evaluation, same native history and closed clock."""
+    cutoff=int(observed_ts)//300000*300000
+    symbol=pair.upper().replace('USD','USDT')
+    specs={'MN':('M',3650),'W1':('W',901),'D1':('D',261),'H4':('240',121),
+           'H1':('60',36),'M30':('30',19),'M15':('15',10),'M5':('5',5),'M1':('1',2)}
+    tf_map={}; validation={}
+    for tf,(iv,days) in specs.items():
+        raw=_fetch_bybit_klines_historico(symbol,iv,days,fim_ts_ms=cutoff)
+        clean,validation[tf]=_validar_e_limpar_candles(raw,iv)
+        tf_map[tf]=_kairos_candles_fechados_ate(clean,iv,cutoff)
+    if len(tf_map['M15'])<40 or len(tf_map['M5'])<80:
+        return {'erro':'INSUFFICIENT_CLOSED_CANDLES','validacao_dados':validation}
+    stale=_kairos_snapshot_freshness(tf_map,cutoff)
+    if stale:
+        return {'erro':'STALE_CLOSED_CANDLES','stale_tfs':stale,'validacao_dados':validation}
+    r=avaliar_vortex_decision_layer_v2(
+        tf_map['M15'],tf_map['M5'],tf_map['D1'],candles_por_tf=tf_map,
+        audit_pair=pair,experimental_poi_policy='A_CURRENT',experimental_poi_state={},cutoff_ts=cutoff)
+    events=[]
+    _kairos_apply_entry_phase(phase_state,r,cutoff,cutoff-900000,events)
+    setup=r.get('entry_setup') or {}
+    rec=phase_state.get(setup.get('key')) or {}
+    pending=bool(setup and not setup.get('retest') and not setup.get('parent_retest')
+                 and setup['ready_ts']<=cutoff and not rec.get('touched'))
+    for event in events:
+        if event['phase']=='ARMED':
+            event['timestamp']=int(observed_ts)
+            rec['armed_event']=dict(event)
+    if pending and rec.get('armed_event') and not any(e['phase']=='ARMED' for e in events):
+        events.append(dict(rec['armed_event']))
+    if r.get('valid') and rec:
+        rec['signal_snapshot']=dict(r)
+    signals=[value['signal_snapshot'] for value in phase_state.values() if value.get('signal_snapshot')]
+    return {'pair':pair,'scan_mode':'LATEST_CLOSED_SNAPSHOT','evaluations':1,
+            'cutoff_ts':cutoff,'validacao_dados':validation,
+            'sinais_unicos_completos':signals,
+            'radar_captures':_kairos_capture_radar_events(r,tf_map,cutoff),
+            'entry_phase_events':events,'entry_setup_states':phase_state,
+            'pending_setup_keys':[setup['key']] if pending else [],
+            'distribuicao_motivos_todos_ciclos':{r.get('failure_reason') or 'SINAL_VALIDO':1}}
+
+
 def replay_vortex_decision_layer_v2(pair, dias_historico=7, janelas_mfe_mae=JANELAS_MFE_MAE_PADRAO, fim_ts_ms=None, experimental_poi_policy=None, liquidity_policy=None, audit_entries_only=False):
     """
     Replay causal completo do KAIROS V2.2 (HTF liquidity→FIRST CAPTURE→

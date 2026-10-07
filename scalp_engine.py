@@ -1921,6 +1921,71 @@ def _kairos_m5_refine_zone(m5_candles, m15_zone, sweep_ts, structure_ts, directi
             'refinement_basis':'M15_BREAK_LUX_PARSED_EXTREME_M5'}
 
 
+def _kairos_m5_continuation_zone(m5_candles, m15_candles, authorization_ts, direction, cutoff_ts):
+    """New Lux M5 BOS OB under the still-authorized M15 thesis, closed data only.
+
+    A contrary major OR internal M15 break ends continuation eligibility at its
+    close. Earlier observed retests remain historical evidence. The OB origin
+    and broken M5 pivot must both belong to the post-authorization leg.
+    """
+    if not authorization_ts or direction not in ('alta', 'baixa') or cutoff_ts is None:
+        return None
+    m15=[c for c in m15_candles if c['t']+900000 <= cutoff_ts]
+    m5=[c for c in m5_candles if c['t']+300000 <= cutoff_ts]
+    if not m15 or not m5:
+        return None
+    streams=[compute_lux_structure_events(m15,50), compute_lux_internal_structure(m15,5)]
+    states=[next((x for x in reversed(es) if x['t']+900000 <= authorization_ts),None) for es in streams]
+    if any(not s or s['direcao'] != direction for s in states):
+        return None
+    invalidation=min((x['t']+900000 for es in streams for x in es
+                      if x['t']+900000 > authorization_ts and x['direcao'] != direction),default=None)
+    boundary=states[1].get('protected_swing_level')
+    if boundary is None:
+        return None
+    # Missing candles cannot prove an uninterrupted thesis or first retest.
+    for cs,dur in ((m15,900000),(m5,300000)):
+        relevant=[c for c in cs if c['t'] >= authorization_ts]
+        if not relevant or relevant[0]['t'] != authorization_ts:
+            return None
+        if any(b['t']-a['t'] != dur for a,b in zip(relevant,relevant[1:])):
+            return None
+    candidates=[]
+    for event in compute_lux_internal_structure(m5,5):
+        ready=event['t']+300000
+        if event['tipo'] != 'BOS' or event['direcao'] != direction or ready <= authorization_ts:
+            continue
+        if invalidation is not None and ready >= invalidation:
+            continue
+        if (event.get('broken_swing_origin_ts') or 0) < authorization_ts:
+            continue
+        prefix=m5[:event['index']+1]
+        ob=_kairos_ob_from_break(prefix,event['index'],direction,structure=event)
+        if not ob or ob['top'] < ob['bottom'] or ob['t'] < authorization_ts:
+            continue
+        if (direction=='baixa' and ob['top'] > boundary) or (direction=='alta' and ob['bottom'] < boundary):
+            continue
+        touch=None; dead=False
+        for candle in m5[event['index']+1:]:
+            if invalidation is not None and candle['t']+300000 >= invalidation:
+                break
+            invalid=(candle['c'] > ob['top']) if direction=='baixa' else (candle['c'] < ob['bottom'])
+            if invalid:
+                dead=True; break
+            if candle['h'] >= ob['bottom'] and candle['l'] <= ob['top']:
+                touch=dict(candle); break
+        if dead or (touch is None and invalidation is not None):
+            continue
+        candidates.append({**ob,'created_ts':event['t'],'origin_ts':ob['t'],
+            'ready_ts':ready,'retest':touch,'state':'ATIVA','source_tf':'M5',
+            'refinement_basis':'M15_AUTHORIZED_M5_CONTINUATION_BOS_OB',
+            'm15_authorization_ts':authorization_ts,'m15_protected_boundary':boundary,
+            'm15_invalidation_close_ts':invalidation,
+            'causal_break_m5':dict(m5[event['index']]),'causal_structure_m5':dict(event),
+            'origin_candle':dict(m5[ob['idx']])})
+    return max(candidates,key=lambda x:x['ready_ts']) if candidates else None
+
+
 def _kairos_last_causal_m5_sweep(m5_candles, direction, leg_start_ts, confirm_ts):
     """Último sweep M5 causal antes da confirmação M15, sem lookahead.
 
@@ -2739,6 +2804,24 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
     # Nunca volta a decidir direção nem cria tese independente.
     m5=candles_por_tf.get('M5') or []
     refined=_kairos_m5_refine_zone(m5,zone,internal_structure.get('leg_start_ts') or sweep['sweep_ts'],structure_confirm_ts,sweep['direcao'],internal_structure.get('nivel'),structure_origin_ts=internal_structure.get('broken_swing_origin_ts'))
+    # Entry-only forward/replay: continue the authorized thesis without changing
+    # the legacy management engine. Preserve an already retested initial POI.
+    if audit_entries_only:
+        continuation_authorization=max(structure_confirm_ts,
+            (sweep.get('confirm_ts') or sweep['first_capture_ts'])+900000,
+            sweep.get('native_capture_confirm_ts') or 0)
+        initial_touch=(_kairos_retest_zone(m5,refined,structure_confirm_ts,tf='5')
+                       if refined else None)
+        continuation=_kairos_m5_continuation_zone(
+            m5,exec_candles,continuation_authorization,sweep['direcao'],
+            cutoff_ts if cutoff_ts is not None else (m5[-1]['t']+300000 if m5 else None))
+        # If both have retested, preserve the earlier observation, rather than
+        # letting a later original-zone touch replace an earlier continuation.
+        continuation_first=bool(continuation and continuation.get('retest') and
+            initial_touch and continuation['retest']['t'] < initial_touch['t'])
+        if continuation and (initial_touch is None or continuation_first):
+            refined=continuation
+        resultado['m5_continuation_selected']=bool(refined and refined.get('refinement_basis')=='M15_AUTHORIZED_M5_CONTINUATION_BOS_OB')
     resultado['m5_refinement_candidate_found']=bool(refined)
     resultado['m5_refinement_candidate_type']=refined.get('tipo') if refined else None
     resultado['m5_refinement_candidate_top']=round(refined['top'],6) if refined and refined.get('top') is not None else None
@@ -2749,14 +2832,15 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
         resultado['failure_reason']='SEM_REFINAMENTO_M5'; return resultado
     if refined:
         rz_ts=refined.get('flip_ts') or refined.get('created_ts') or refined.get('t') or structure['t']
-        r5=_kairos_retest_zone(m5,refined,max(structure_confirm_ts,rz_ts),tf='5')
+        r5=(refined.get('retest') if refined.get('refinement_basis')=='M15_AUTHORIZED_M5_CONTINUATION_BOS_OB'
+            else _kairos_retest_zone(m5,refined,max(structure_confirm_ts,rz_ts),tf='5'))
         resultado['m5_refinement_retest_found']=bool(r5)
         resultado['m5_refinement_retest_after_ts']=max(structure_confirm_ts,rz_ts)
         if r5:
             retest=r5; active_zone=refined; entry_tf='M5'; resultado['refinement_tf']='M5'
             resultado['zone_type']=refined.get('tipo',resultado['zone_type'])
             resultado['zone_top']=round(refined['top'],6); resultado['zone_bottom']=round(refined['bottom'],6)
-            resultado['zone_source']=f"{refined.get('tipo','POI')}_M5_REFINO_DENTRO_M15"
+            resultado['zone_source']=f"{refined.get('tipo','POI')}_M5_"+('CONTINUACAO_M15' if refined.get('ready_ts') else 'REFINO_DENTRO_M15')
     if retest is None and not refined:
         retest=_kairos_retest_zone(exec_candles,zone,after_ts,tf='15')
     # Freeze the prospective execution level BEFORE the retest, independent of SL.
@@ -2766,10 +2850,13 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
     preview_level=float(preview_zone['top'] if direction=='LONG' else preview_zone['bottom'])
     ready_ts=max(structure_confirm_ts,
                  (sweep.get('confirm_ts') or sweep['first_capture_ts'])+900000,
-                 sweep.get('native_capture_confirm_ts') or 0)
+                 sweep.get('native_capture_confirm_ts') or 0,
+                 preview_zone.get('ready_ts') or 0)
     setup_key=repr((sweep.get('liquidity_tf'),sweep.get('liquidity_type'),sweep.get('liquidity_origin_ts'),
                    sweep['first_capture_ts'],internal_structure['t'],direction,preview_tf,
                    preview_zone['bottom'],preview_zone['top']))
+    if preview_zone.get('refinement_basis')=='M15_AUTHORIZED_M5_CONTINUATION_BOS_OB':
+        setup_key+=':CONTINUATION:'+str(preview_zone['ready_ts'])
     resultado['entry_setup']={
         'key':setup_key,'ready_ts':ready_ts,'tf':preview_tf,'direction':direction,
         'level':round(preview_level,6),'bottom':preview_zone['bottom'],'top':preview_zone['top'],

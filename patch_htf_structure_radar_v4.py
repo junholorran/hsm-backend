@@ -59,7 +59,7 @@ def _kairos_radar_first_closed_choch(candles, sweep_ts, swing_size, tf):
                 audit_pair=pair,
                 experimental_poi_policy=experimental_poi_policy,
                 experimental_poi_state=experimental_poi_state,
-                liquidity_policy=liquidity_policy, cutoff_ts=ts_corte
+                liquidity_policy=liquidity_policy, cutoff_ts=ts_corte, audit_entries_only=audit_entries_only
             )
 """
     if call not in s: raise SystemExit('engine call missing')

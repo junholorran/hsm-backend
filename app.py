@@ -3067,3 +3067,38 @@ def experiment_audit_near_pdl_20260927():
     reclaim=next((x for x in rows if first and x['t']>=first['t'] and float(x['c'])>pdl),None)
     nearest=min(rows,key=lambda x:abs(float(x['l'])-pdl)) if rows else None
     return jsonify({'ok':True,'read_only':True,'pair':'NEARUSD','pdl':pdl,'previous_d1_candle':prev,'window_lisbon':'27/09/2026 03:00-07:00','first_m5_below_pdl':first,'first_reclaim':reclaim,'nearest_m5':nearest,'classification':'SWEEP_AND_RECLAIM' if first and reclaim else ('BREACH_NO_RECLAIM' if first else 'NO_BREACH'),'m5_rows':rows})
+
+
+# Independent read-only BTC entry-chain replay. Never used by forward/Telegram.
+_KAIROS_ENTRY_CHAIN_CACHE={'status':'IDLE','result':None,'error':None}
+_KAIROS_ENTRY_CHAIN_LOCK=threading.Lock()
+
+def _run_kairos_entry_chain_audit(dias, fim_ts_ms):
+    try:
+        raw=scalp_engine.replay_vortex_decision_layer_v2(
+            'BTCUSD',dias_historico=dias,fim_ts_ms=fim_ts_ms,
+            experimental_poi_policy='A_CURRENT',audit_entries_only=True)
+        result={k:raw.get(k) for k in ('erro','pair','janela_fixa','validacao_dados','funil',
+                  'distribuicao_motivos_todos_ciclos','entry_audit_candidates','radar_captures','audit_entries_only')}
+        _KAIROS_ENTRY_CHAIN_CACHE.update(status='ERROR' if raw.get('erro') else 'DONE',result=result)
+    except Exception as exc:
+        _KAIROS_ENTRY_CHAIN_CACHE.update(status='ERROR',error=str(exc))
+    finally:
+        _KAIROS_ENTRY_CHAIN_LOCK.release()
+
+@app.route('/experiment/btc_entry_chain_replay',methods=['GET'])
+def experiment_btc_entry_chain_replay():
+    if request.args.get('start')=='1':
+        try:
+            dias=int(request.args.get('dias','1'))
+            fim=int(request.args.get('fim_ts_ms') or int(time.time()*1000))
+            if dias<1 or dias>7 or fim>int(time.time()*1000):
+                raise ValueError('dias 1..7; fim_ts_ms cannot be future')
+        except ValueError as exc:
+            return jsonify({'error':str(exc)}),400
+        if not _KAIROS_ENTRY_CHAIN_LOCK.acquire(blocking=False):
+            return jsonify({'status':'RUNNING','started':False}),409
+        _KAIROS_ENTRY_CHAIN_CACHE.update(status='RUNNING',result=None,error=None)
+        threading.Thread(target=_run_kairos_entry_chain_audit,args=(dias,fim),daemon=True).start()
+        return jsonify({'status':'STARTING','started':True,'mode':'ENTRY_CHAIN_ONLY_NO_SL_BE_TP'}),202
+    return jsonify(_KAIROS_ENTRY_CHAIN_CACHE)

@@ -2478,7 +2478,7 @@ def _kairos_experimental_apply_poi_policy(current, exec_candles, sweep, structur
 
 def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=None,
                                       candles_por_tf=None, audit_pair=None,
-                                      experimental_poi_policy=None, experimental_poi_state=None, liquidity_policy=None, cutoff_ts=None):
+                                      experimental_poi_policy=None, experimental_poi_state=None, liquidity_policy=None, cutoff_ts=None, audit_entries_only=False):
     """KAIROS Paper V2.2 — liquidez HTF estrutural, M15 executa, M5 refina.
 
     Cadeia autorizadora:
@@ -2757,6 +2757,18 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
         resultado['causal_break_level_m15']=active_zone.get('causal_break_level_m15')
         resultado['m5_refinement_origin_candle']=active_zone.get('origin_candle')
 
+    if audit_entries_only:
+        # Read-only replay: expose the chain up to entry, never authorize a trade.
+        resultado['entry_audit_only']=True
+        resultado['failure_reason']='AUDIT_ENTRY_IDENTIFIED'
+        resultado['entry_audit_evidence']={
+            'capture':dict(sweep), 'intent':dict(intent),
+            'm15_zone':dict(zone), 'execution_zone':dict(active_zone),
+            'retest':dict(retest),
+            'authorization_ts':max(structure_confirm_ts, active_zone.get('flip_ts') or active_zone.get('created_ts') or active_zone.get('t') or structure_confirm_ts),
+        }
+        return resultado
+
     # M15 confirma a tese; M5 apenas refina. O SL fica atrás do ÚLTIMO
     # sweep local causal real: um pivot Lux M5 já confirmado foi varrido por wick
     # e reclamado no fecho, dentro da perna que antecede a confirmação M15.
@@ -3014,7 +3026,42 @@ def _kairos_capture_radar_events(result, tf_map, now_ts):
     return events
 
 
-def replay_vortex_decision_layer_v2(pair, dias_historico=7, janelas_mfe_mae=JANELAS_MFE_MAE_PADRAO, fim_ts_ms=None, experimental_poi_policy=None, liquidity_policy=None):
+def _kairos_record_entry_audit(store, result, cutoff_ts, start_ts):
+    """Keep first observed entry evidence; stale candidates remain explicitly stale."""
+    if not result.get('entry_audit_only'):
+        return
+    ts=result.get('timestamp')
+    key=repr((result.get('direction'),ts,result.get('entry'),result.get('choch_timestamp'),
+              result.get('zone_type'),result.get('zone_bottom'),result.get('zone_top')))
+    if key in store:
+        store[key]['evaluations']+=1
+        return
+    evidence=result.get('entry_audit_evidence') or {}
+    retest=evidence.get('retest') or {}
+    auth=evidence.get('authorization_ts')
+    major=result.get('m15_major_confirmation_close_ts')
+    internal=result.get('m15_internal_confirmation_close_ts')
+    checks={
+        'entry_not_future': ts is not None and ts<=cutoff_ts,
+        'retest_after_authorization': ts is not None and auth is not None and ts>=auth,
+        'major_before_internal': major is not None and internal is not None and major<=internal,
+        'retest_touches_zone': (retest.get('h') is not None and retest.get('l') is not None and
+                               result.get('zone_bottom') is not None and result.get('zone_top') is not None and
+                               retest['h']>=result['zone_bottom'] and retest['l']<=result['zone_top']),
+    }
+    known=[major,internal,result.get('m5_refinement_created_ts'),auth]
+    checks['confirmations_known_at_cutoff']=all(t<=cutoff_ts for t in known if t is not None)
+    store[key]={
+        'key':key,'first_seen_cutoff_ts':cutoff_ts,'evaluations':1,
+        'window_status':('ENTRY_BEFORE_WINDOW' if ts is not None and ts<start_ts else
+                         'ENTRY_IN_WINDOW' if ts is not None and ts<=cutoff_ts else 'ENTRY_FUTURE_INVALID'),
+        'checks':checks,'timing_geometry_pass':all(checks.values()),
+        'snapshot':dict(result),
+        'note':'Timing/overlap audit only; upstream chain evidence is exported for independent review. No SL, BE, TP or P&L.',
+    }
+
+
+def replay_vortex_decision_layer_v2(pair, dias_historico=7, janelas_mfe_mae=JANELAS_MFE_MAE_PADRAO, fim_ts_ms=None, experimental_poi_policy=None, liquidity_policy=None, audit_entries_only=False):
     """
     Replay causal completo do KAIROS V2.2 (HTF liquidity→FIRST CAPTURE→
     reaction/displacement→M15 MSS/CHoCH/BOS→causal FVG/IFVG/OB→retest→ENTRY→SL→TP1/TP2). Mesma metodologia já aprovada (fetch único por
@@ -3083,6 +3130,7 @@ def replay_vortex_decision_layer_v2(pair, dias_historico=7, janelas_mfe_mae=JANE
     distribuicao_motivos = {}
     sinais_completos_brutos = []
     radar_captures = {}
+    entry_audit_candidates = {}
     experimental_obstacle_blocks = [] if experimental_poi_policy else None
     experimental_poi_state = {} if experimental_poi_policy else None
     experimental_poi_audit = [] if experimental_poi_policy else None
@@ -3119,11 +3167,13 @@ def replay_vortex_decision_layer_v2(pair, dias_historico=7, janelas_mfe_mae=JANE
                 audit_pair=pair,
                 experimental_poi_policy=experimental_poi_policy,
                 experimental_poi_state=experimental_poi_state,
-                liquidity_policy=liquidity_policy, cutoff_ts=ts_corte
+                liquidity_policy=liquidity_policy, cutoff_ts=ts_corte, audit_entries_only=audit_entries_only
             )
         except Exception as e:
             distribuicao_motivos[f'EXCECAO: {e}'] = distribuicao_motivos.get(f'EXCECAO: {e}', 0) + 1
             continue
+
+        _kairos_record_entry_audit(entry_audit_candidates, r, ts_corte, inicio_ts_ms)
 
         for radar_event in _kairos_capture_radar_events(r, tf_map, ts_corte):
             radar_captures.setdefault(radar_event['key'], radar_event)
@@ -3333,6 +3383,8 @@ def replay_vortex_decision_layer_v2(pair, dias_historico=7, janelas_mfe_mae=JANE
         'mfe_mae_causal': {'global': mfe_mae_global, 'LONG': mfe_mae_long, 'SHORT': mfe_mae_short},
         'sinais_unicos_completos': sinais_unicos,
         'radar_captures': list(radar_captures.values()),
+        'entry_audit_candidates': list(entry_audit_candidates.values()),
+        'audit_entries_only': bool(audit_entries_only),
         'm5_completo': m5,
     }
 

@@ -1036,6 +1036,8 @@ KAIROS_REAL_LIQUIDITY_AUDIT_TFS = {
 
 def _kairos_audit_lux50_structural_levels(candles, tf, now_ts, sample_limit=100):
     """Audita a genealogia causal dos Swing High/Low Lux50 sem alterar produção."""
+    interval = {'MN':'M','W1':'W','D1':'D','H4':'240','H1':'60','M30':'30','M15':'15','M5':'5','M1':'1'}.get(tf)
+    candles = _kairos_candles_fechados_ate(candles, interval, now_ts)
     levels = _kairos_lux50_structural_levels(candles, tf, now_ts)
     by_ts = {c['t']: i for i, c in enumerate(candles)}
     checks = []
@@ -1043,7 +1045,7 @@ def _kairos_audit_lux50_structural_levels(candles, tf, now_ts, sample_limit=100)
         oi = by_ts.get(lv.get('origin_ts'))
         expected_ci = None if oi is None else oi + KAIROS_STRUCTURAL_SWING_SIZE
         ci_ok = expected_ci is not None and expected_ci < len(candles)
-        expected_confirm = candles[expected_ci]['t'] if ci_ok else None
+        expected_confirm = _kairos_candle_close_ts(candles[expected_ci]['t'], interval) if ci_ok else None
         typ = lv.get('type')
         expected_level = None
         if oi is not None:
@@ -1061,7 +1063,7 @@ def _kairos_audit_lux50_structural_levels(candles, tf, now_ts, sample_limit=100)
             'captured_ts': lv.get('captured_ts'),
             'origin_price_ok': expected_level == lv.get('level'),
             'confirmation_delay_ok': ci_ok and expected_confirm == lv.get('confirmed_ts'),
-            'known_before_capture': lv.get('captured_ts') is None or (lv.get('confirmed_ts') is not None and lv.get('confirmed_ts') < lv.get('captured_ts')),
+            'known_before_capture': lv.get('captured_ts') is None or (lv.get('confirmed_ts') is not None and lv.get('confirmed_ts') <= lv.get('captured_ts')),
             'first_capture_ok': first_capture == lv.get('captured_ts'),
             'lookahead_ok': lv.get('confirmed_ts') is not None and lv.get('confirmed_ts') <= now_ts,
         })
@@ -1499,7 +1501,10 @@ def _kairos_lux50_structural_levels(candles, tf, now_ts):
     """Reusa _extrair_swings_lux_algo(swing_size=50) e expõe a confirmação
     causal do próprio algoritmo (origin_idx + swing_size). Não redefine swing.
     """
-    cs = [c for c in candles if c.get('t') is not None and c['t'] <= now_ts]
+    interval = {'MN':'M','W1':'W','D1':'D','H4':'240','H1':'60','M30':'30','M15':'15','M5':'5','M1':'1'}.get(tf)
+    if interval is None:
+        return []
+    cs = _kairos_candles_fechados_ate(candles, interval, now_ts)
     if len(cs) < KAIROS_STRUCTURAL_SWING_SIZE + 5:
         return []
     swings = _extrair_swings_lux_algo(cs, swing_size=KAIROS_STRUCTURAL_SWING_SIZE)
@@ -1512,7 +1517,7 @@ def _kairos_lux50_structural_levels(candles, tf, now_ts):
         ci = oi + KAIROS_STRUCTURAL_SWING_SIZE
         if ci >= len(cs):
             continue
-        confirm_ts = cs[ci]['t']
+        confirm_ts = _kairos_candle_close_ts(cs[ci]['t'], interval)
         if confirm_ts > now_ts:
             continue
         level = sw.get('valor')
@@ -1652,7 +1657,7 @@ def _kairos_select_structural_first_capture_sweep(candles_por_tf, now_ts, liquid
 
         first_idx=None
         for i,c in enumerate(m15):
-            if c['t'] <= confirm_ts:
+            if c['t'] < confirm_ts:
                 continue
             if c['t'] < native_capture_ts or c['t'] >= native_capture_end:
                 continue
@@ -1672,6 +1677,7 @@ def _kairos_select_structural_first_capture_sweep(candles_por_tf, now_ts, liquid
         state='REJECTION_RECLAIM' if reclaimed else ('ACCEPTANCE_CONTINUATION' if accepted else 'UNRESOLVED_REACTION')
         rec={'liquidity_tf':liq['tf'],'liquidity_type':liq['type'],'nivel':level,
              'liquidity_origin_ts':liq.get('origin_ts'),'liquidity_confirm_ts':confirm_ts,
+             'native_capture_confirm_ts':native_capture_end,
              'capture_tf':'M15','first_capture_ts':c['t'],'first_capture_idx':first_idx,
              'extremo':c['h'] if is_high else c['l'],'liquidity_side':'HIGH' if is_high else 'LOW',
              'post_capture_state':state,'first_capture_reclaimed':bool(reclaimed),
@@ -2472,7 +2478,7 @@ def _kairos_experimental_apply_poi_policy(current, exec_candles, sweep, structur
 
 def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=None,
                                       candles_por_tf=None, audit_pair=None,
-                                      experimental_poi_policy=None, experimental_poi_state=None, liquidity_policy=None):
+                                      experimental_poi_policy=None, experimental_poi_state=None, liquidity_policy=None, cutoff_ts=None):
     """KAIROS Paper V2.2 — liquidez HTF estrutural, M15 executa, M5 refina.
 
     Cadeia autorizadora:
@@ -2507,7 +2513,7 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
         candles_por_tf.setdefault('M15',m15_ate_agora)
         candles_por_tf.setdefault('M5',m5_ate_agora)
 
-    now_ts=max((cs[-1]['t'] for cs in candles_por_tf.values() if cs),default=resultado['timestamp'] or 0)
+    now_ts = int(cutoff_ts) if cutoff_ts is not None else max((cs[-1]['t'] for cs in candles_por_tf.values() if cs),default=resultado['timestamp'] or 0)
     mapa=_kairos_build_mtf_map(candles_por_tf)
     contexto=_kairos_context_bias(candles_por_tf)
     resultado['context_bias']=contexto; resultado['bias']=contexto.get('final')
@@ -2975,6 +2981,39 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
 KAIROS_DECISION_LAYER_V2_VERSAO = 'KAIROS V2.2 — HTF LIQUIDITY→FIRST CAPTURE→REACTION→DISPLACEMENT→M15 MSS/CHoCH/BOS→CAUSAL FVG/IFVG/OB→RETEST→STRUCTURAL SL→TP1/TP2'
 
 
+def _kairos_capture_radar_events(result, tf_map, now_ts):
+    """Informational HTF capture alert, independent of entry eligibility."""
+    candidates = (result.get('structural_sweep_audit') or {}).get('candidates') or []
+    known = []
+    for capture in candidates:
+        if capture.get('liquidity_tf') not in ('W1', 'D1', 'H4', 'H1'):
+            continue
+        opened = capture.get('first_capture_ts')
+        if opened is None or capture.get('nivel') is None:
+            continue
+        confirmed = max(opened + 900000, capture.get('native_capture_confirm_ts') or opened + 900000)
+        reaction = capture.get('post_capture_state') or 'UNRESOLVED_REACTION'
+        if reaction != 'UNRESOLVED_REACTION':
+            reaction_open = capture.get('confirm_ts')
+            if reaction_open is None:
+                continue
+            confirmed = max(confirmed, reaction_open + 900000)
+        if confirmed <= now_ts:
+            known.append((confirmed, capture, reaction))
+    events = []
+    for confirmed, capture, reaction in known:
+        key = repr((capture.get('liquidity_tf'), capture.get('liquidity_type'), capture.get('liquidity_origin_ts'), capture.get('nivel'), capture.get('first_capture_ts'), reaction))
+        intervals = {'W1':'W','D1':'D','H4':'240','H1':'60'}
+        events.append({
+            'key': key, 'timestamp': confirmed, 'capture_confirm_ts': capture['first_capture_ts'] + 900000,
+            'liquidity_tf': capture['liquidity_tf'], 'liquidity_type': capture.get('liquidity_type'),
+            'level': capture['nivel'], 'capture_open_ts': capture['first_capture_ts'],
+            'reaction': reaction,
+            'context': {tf: compute_lux_structure_bias(_kairos_candles_fechados_ate(tf_map.get(tf) or [], iv, confirmed), swing_size=50) for tf, iv in intervals.items()},
+        })
+    return events
+
+
 def replay_vortex_decision_layer_v2(pair, dias_historico=7, janelas_mfe_mae=JANELAS_MFE_MAE_PADRAO, fim_ts_ms=None, experimental_poi_policy=None, liquidity_policy=None):
     """
     Replay causal completo do KAIROS V2.2 (HTF liquidity→FIRST CAPTURE→
@@ -3043,6 +3082,7 @@ def replay_vortex_decision_layer_v2(pair, dias_historico=7, janelas_mfe_mae=JANE
     }
     distribuicao_motivos = {}
     sinais_completos_brutos = []
+    radar_captures = {}
     experimental_obstacle_blocks = [] if experimental_poi_policy else None
     experimental_poi_state = {} if experimental_poi_policy else None
     experimental_poi_audit = [] if experimental_poi_policy else None
@@ -3079,11 +3119,14 @@ def replay_vortex_decision_layer_v2(pair, dias_historico=7, janelas_mfe_mae=JANE
                 audit_pair=pair,
                 experimental_poi_policy=experimental_poi_policy,
                 experimental_poi_state=experimental_poi_state,
-                liquidity_policy=liquidity_policy
+                liquidity_policy=liquidity_policy, cutoff_ts=ts_corte
             )
         except Exception as e:
             distribuicao_motivos[f'EXCECAO: {e}'] = distribuicao_motivos.get(f'EXCECAO: {e}', 0) + 1
             continue
+
+        for radar_event in _kairos_capture_radar_events(r, tf_map, ts_corte):
+            radar_captures.setdefault(radar_event['key'], radar_event)
 
         if r['bias'] in ('alta', 'baixa'):
             funil['bias_ok'] += 1
@@ -3289,6 +3332,7 @@ def replay_vortex_decision_layer_v2(pair, dias_historico=7, janelas_mfe_mae=JANE
         'exemplos_sinais_completos': sinais_unicos[:10],
         'mfe_mae_causal': {'global': mfe_mae_global, 'LONG': mfe_mae_long, 'SHORT': mfe_mae_short},
         'sinais_unicos_completos': sinais_unicos,
+        'radar_captures': list(radar_captures.values()),
         'm5_completo': m5,
     }
 
@@ -4575,4 +4619,3 @@ def paper_trading_v2_export_endpoint():
 # é avaliado isoladamente e causalmente, igual ao replay/paper já
 # aprovados).
 # ═══════════════════════════════════════════════════════════════════════
-

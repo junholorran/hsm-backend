@@ -219,11 +219,15 @@ def init_db():
 
 
 def send_telegram(message):
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        return False
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"}, timeout=10)
+        response = requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"}, timeout=10)
+        return response.status_code == 200 and response.json().get('ok') is True
     except Exception as e:
         print(f"Telegram erro: {e}")
+        return False
 
 
 def check_alerts_inline():
@@ -1856,7 +1860,34 @@ _KAIROS_LIVE_PAIRS = (
 )
 _KAIROS_LIVE_LAST_TS = {pair: int(time.time() * 1000) for pair in _KAIROS_LIVE_PAIRS}
 _KAIROS_LIVE_SEEN = {pair: set() for pair in _KAIROS_LIVE_PAIRS}
+_KAIROS_RADAR_SEEN = {pair: set() for pair in _KAIROS_LIVE_PAIRS}
 _KAIROS_LIVE_INTERVAL_SECONDS = 5 * 60
+
+def _kairos_send_capture_events(pair, result, cutoff):
+    """Confirm Telegram delivery before consuming a capture event."""
+    all_delivered = True
+    events = result.get('radar_captures') or []
+    for event in events:
+        ts = event['timestamp']; key = event['key']
+        if ts <= _KAIROS_LIVE_LAST_TS[pair] or ts > cutoff or key in _KAIROS_RADAR_SEEN[pair]:
+            continue
+        context = event['context']
+        reaction = {'REJECTION_RECLAIM': 'rejeição / recuperação', 'ACCEPTANCE_CONTINUATION': 'fechamento além do nível', 'UNRESOLVED_REACTION': 'reação ainda indefinida'}.get(event['reaction'], 'indefinida')
+        msg = (
+            f"🔎 <b>KAIROS — CAPTURA DE LIQUIDEZ</b> | {pair}\n"
+            f"W1: {context['W1']} · D1: {context['D1']}\n"
+            f"H4: {context['H4']} · H1: {context['H1']}\n"
+            f"Nível: {event['liquidity_tf']} {event['liquidity_type']} @ {event['level']}\n"
+            f"Reação: {reaction}\n"
+            "Atenção ao M15; M5 refina após autorização. Alerta de contexto, sem entrada autorizada. DEMO/manual."
+        )
+        if send_telegram(msg):
+            _KAIROS_RADAR_SEEN[pair].add(key)
+            print(f"[KAIROS_RADAR] delivered pair={pair} ts={ts} key={key}", flush=True)
+        else:
+            all_delivered = False
+            print(f"[KAIROS_RADAR] delivery failed pair={pair} ts={ts}; retry next cycle", flush=True)
+    return all_delivered
 
 def _kairos_live_scanner_loop():
     while True:
@@ -1868,6 +1899,11 @@ def _kairos_live_scanner_loop():
                     experimental_poi_policy='A_CURRENT',
                 )
                 sinais = r.get('sinais_unicos_completos', []) if isinstance(r, dict) else []
+                if not isinstance(r, dict) or r.get('erro'):
+                    raise RuntimeError('Replay failed; preserving delivery watermark')
+                if any(str(k).startswith('EXCECAO:') and count for k, count in (r.get('distribuicao_motivos') or {}).items()):
+                    raise RuntimeError('Replay has failed evaluations; preserving delivery watermark')
+                delivered = _kairos_send_capture_events(pair, r, cycle_started_ms)
                 novos = []
                 for s in sinais:
                     ts = s.get('timestamp')
@@ -1897,10 +1933,13 @@ def _kairos_live_scanner_loop():
                         f"🔗 <b>MSS/CHoCH:</b> {choch}\n"
                         "🧪 Demo/manual — A_CURRENT, candles fechados, sem score."
                     )
-                    send_telegram(msg)
-                    _KAIROS_LIVE_SEEN[pair].add(sig)
-                    print(f"[KAIROS_LIVE] ALERT pair={pair} ts={ts} sig={sig} entry={entry} sl={sl}", flush=True)
-                _KAIROS_LIVE_LAST_TS[pair] = cycle_started_ms
+                    if send_telegram(msg):
+                        _KAIROS_LIVE_SEEN[pair].add(sig)
+                        print(f"[KAIROS_LIVE] ALERT pair={pair} ts={ts} sig={sig} entry={entry} sl={sl}", flush=True)
+                    else:
+                        delivered = False
+                if delivered:
+                    _KAIROS_LIVE_LAST_TS[pair] = cycle_started_ms
                 print(f"[KAIROS_LIVE] scan done pair={pair} signals={len(sinais)} new={len(novos)} watermark={_KAIROS_LIVE_LAST_TS[pair]}", flush=True)
             except Exception as e:
                 print(f"[KAIROS_LIVE] scan error pair={pair}: {e}", flush=True)

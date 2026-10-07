@@ -1889,6 +1889,32 @@ def _kairos_send_capture_events(pair, result, cutoff):
             print(f"[KAIROS_RADAR] delivery failed pair={pair} ts={ts}; retry next cycle", flush=True)
     return all_delivered
 
+_KAIROS_SETUP_SEEN={pair:set() for pair in _KAIROS_LIVE_PAIRS}
+
+def _kairos_send_setup_events(pair, result, cutoff):
+    """Only send still-pending setups; never send an armed alert after its retest."""
+    events=result.get('entry_phase_events') or []
+    touched={e['setup_key'] for e in events if e.get('phase')=='RETEST_OBSERVED'}
+    touched.update(k for k,v in (result.get('entry_setup_states') or {}).items() if v.get('touched'))
+    pending=set(result.get('pending_setup_keys') or [])
+    delivered=True
+    for event in events:
+        if event.get('phase')!='ARMED' or event.get('tf')!='M5' or event['setup_key'] in touched or event['setup_key'] not in pending:
+            continue
+        if event['key'] in _KAIROS_SETUP_SEEN[pair] or not (_KAIROS_LIVE_LAST_TS[pair]<event['timestamp']<=cutoff):
+            continue
+        msg=(f"⏳ <b>KAIROS — SETUP M5 ARMADO</b> | {pair} | {event['direction']}\n"
+             f"Nível proximal a observar: {event['level']}\n"
+             f"{event['zone_type']} M5: {event['bottom']}–{event['top']}\n"
+             f"Liquidez {event['capture_tf']}: {event['capture_level']} → M15 confirmado.\n"
+             "Aguardando reteste. Nível planeado, sem preenchimento assumido. DEMO/manual.")
+        if send_telegram(msg):
+            _KAIROS_SETUP_SEEN[pair].add(event['key'])
+        else:
+            delivered=False
+    return delivered
+
+
 def _kairos_live_scanner_loop():
     while True:
         cycle_started_ms = int(time.time() * 1000)
@@ -1901,12 +1927,13 @@ def _kairos_live_scanner_loop():
                 sinais = r.get('sinais_unicos_completos', []) if isinstance(r, dict) else []
                 if not isinstance(r, dict) or r.get('erro'):
                     raise RuntimeError('Replay failed; preserving delivery watermark')
-                if any(str(k).startswith('EXCECAO:') and count for k, count in (r.get('distribuicao_motivos') or {}).items()):
+                if any(str(k).startswith('EXCECAO:') and count for k, count in (r.get('distribuicao_motivos_todos_ciclos') or {}).items()):
                     raise RuntimeError('Replay has failed evaluations; preserving delivery watermark')
                 delivered = _kairos_send_capture_events(pair, r, cycle_started_ms)
+                delivered = _kairos_send_setup_events(pair, r, cycle_started_ms) and delivered
                 novos = []
                 for s in sinais:
-                    ts = s.get('timestamp')
+                    ts = s.get('retest_confirm_close_ts')
                     sig = (s.get('choch_timestamp'), s.get('direction'), s.get('zone_type'),
                            s.get('zone_created_ts'), s.get('zone_bottom'), s.get('zone_top'))
                     if (ts is None or ts <= _KAIROS_LIVE_LAST_TS[pair] or
@@ -1925,7 +1952,8 @@ def _kairos_live_scanner_loop():
                     msg = (
                         "⚡ <b>KAIROS — SINAL CAUSAL NOVO</b>\n\n"
                         f"{'📈' if direction == 'LONG' else '📉'} <b>{direction}</b> | {pair}\n"
-                        f"🎯 <b>Entry:</b> {entry}\n"
+                        f"🎯 <b>Nível histórico do reteste:</b> {entry}\n"
+                        f"Fecho observado: {s.get('observed_retest_close')} — verificar preço atual antes de qualquer decisão manual.\n"
                         f"🛑 <b>SL estrutural:</b> {sl}\n"
                         f"✅ <b>TP1:</b> {tp1}\n"
                         f"🏁 <b>TP2:</b> {tp2}\n"
@@ -3079,7 +3107,8 @@ def _run_kairos_entry_chain_audit(dias, fim_ts_ms):
             'BTCUSD',dias_historico=dias,fim_ts_ms=fim_ts_ms,
             experimental_poi_policy='A_CURRENT',audit_entries_only=True)
         result={k:raw.get(k) for k in ('erro','pair','janela_fixa','validacao_dados','funil',
-                  'distribuicao_motivos_todos_ciclos','entry_audit_candidates','radar_captures','audit_entries_only')}
+                  'distribuicao_motivos_todos_ciclos','entry_audit_candidates','historical_entry_candidates',
+                  'entry_phase_events','entry_setup_states','pending_setup_keys','radar_captures','audit_entries_only')}
         _KAIROS_ENTRY_CHAIN_CACHE.update(status='ERROR' if raw.get('erro') else 'DONE',result=result)
     except Exception as exc:
         _KAIROS_ENTRY_CHAIN_CACHE.update(status='ERROR',error=str(exc))

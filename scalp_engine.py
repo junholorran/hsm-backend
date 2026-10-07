@@ -2323,7 +2323,7 @@ def _kairos_shadow_log_poi(pair, zone, audit):
     except Exception as exc:
         print(f"[POI_SHADOW_AUDIT_ERR] {exc}")
 
-def _kairos_retest_zone(candles, zone, after_ts):
+def _kairos_retest_zone(candles, zone, after_ts, tf=None):
     """Primeiro reteste causal em candle POSTERIOR à estrutura/POI.
 
     O candle que confirma MSS/BOS, cria a FVG ou confirma o flip IFVG nunca
@@ -2332,9 +2332,14 @@ def _kairos_retest_zone(candles, zone, after_ts):
     if not zone:
         return None
     zone_ready_ts=zone.get('flip_ts') or zone.get('created_ts') or zone.get('break_ts') or zone.get('t') or 0
+    duration=300000 if tf=='5' else 900000
+    if str(zone.get('tipo','')).startswith(('FVG_', 'IFVG_')):
+        zone_ready_ts+=duration
+    elif zone.get('break_ts') is not None:
+        zone_ready_ts=max(zone_ready_ts,zone['break_ts']+duration)
     ready_ts=max(after_ts or 0, zone_ready_ts)
     for c in candles:
-        if c['t'] <= ready_ts:
+        if c['t'] < ready_ts:
             continue
         if c['h'] >= zone['bottom'] and c['l'] <= zone['top']:
             return c
@@ -2677,7 +2682,7 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
     retest=None; active_zone=zone; entry_tf=exec_tf
     if refined:
         rz_ts=refined.get('flip_ts') or refined.get('created_ts') or refined.get('t') or structure['t']
-        r5=_kairos_retest_zone(m5,refined,max(structure_confirm_ts,rz_ts))
+        r5=_kairos_retest_zone(m5,refined,max(structure_confirm_ts,rz_ts),tf='5')
         resultado['m5_refinement_retest_found']=bool(r5)
         resultado['m5_refinement_retest_after_ts']=max(structure_confirm_ts,rz_ts)
         if r5:
@@ -2686,54 +2691,74 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
             resultado['zone_top']=round(refined['top'],6); resultado['zone_bottom']=round(refined['bottom'],6)
             resultado['zone_source']=f"{refined.get('tipo','POI')}_M5_REFINO_DENTRO_M15"
     if retest is None:
-        retest=_kairos_retest_zone(exec_candles,zone,after_ts)
+        retest=_kairos_retest_zone(exec_candles,zone,after_ts,tf='15')
+    # Freeze the prospective execution level BEFORE the retest, independent of SL.
+    preview_zone=refined or zone
+    preview_tf='M5' if refined else exec_tf
+    preview_retest=r5 if refined else retest
+    preview_level=float(preview_zone['top'] if direction=='LONG' else preview_zone['bottom'])
+    ready_ts=max(structure_confirm_ts,
+                 (sweep.get('confirm_ts') or sweep['first_capture_ts'])+900000,
+                 sweep.get('native_capture_confirm_ts') or 0)
+    setup_key=repr((sweep.get('liquidity_tf'),sweep.get('liquidity_type'),sweep.get('liquidity_origin_ts'),
+                   sweep['first_capture_ts'],internal_structure['t'],direction,preview_tf,
+                   preview_zone['bottom'],preview_zone['top']))
+    resultado['entry_setup']={
+        'key':setup_key,'ready_ts':ready_ts,'tf':preview_tf,'direction':direction,
+        'level':round(preview_level,6),'bottom':preview_zone['bottom'],'top':preview_zone['top'],
+        'zone_type':preview_zone['tipo'],'retest':dict(preview_retest) if preview_retest else None,
+        'parent_retest':dict(retest) if refined and not preview_retest and retest else None,
+        'capture_tf':sweep.get('liquidity_tf'),'capture_level':sweep.get('nivel'),
+        'major_confirm_ts':major_confirm_ts,'internal_confirm_ts':internal_confirm_ts,
+        'poi':dict(preview_zone),
+    }
     if not retest:
         # PRE-ALERTA: o setup já está armado, mas o preço ainda NÃO retestou a zona.
-        # A referência de LIMIT é o CE (50%) da zona ativa. Isto é apenas para observação/manual demo;
-        # NÃO altera a regra oficial abaixo, que continua exigindo reteste e usa o close do reteste.
-        pre_limit = (float(active_zone['top']) + float(active_zone['bottom'])) / 2.0
+        # Usa o proximal do refinamento M5 já conhecido. Ainda não houve reteste nem fill.
+        pre_limit = preview_level
         resultado['prealert_limit'] = round(pre_limit, 6)
-        resultado['prealert_zone_tf'] = entry_tf
+        resultado['prealert_zone_tf'] = preview_tf
 
-        # SL de referência estritamente atrás do sweep estrutural narrativo + buffer ATR,
-        # sem permitir que o pré-alerta invente uma âncora local diferente.
-        try:
-            if intent.get('mode')=='CONTINUATION':
-                seg=[c for c in exec_candles if sweep['sweep_ts'] <= c['t'] <= structure['t']]
-                base=(min(c['l'] for c in seg) if direction=='LONG' else max(c['h'] for c in seg)) if seg else sweep.get('extremo')
-                pre_sl=aplicar_buffer_stop_atr(base, sweep['direcao'], exec_candles)
-            else:
-                pre_sl=aplicar_buffer_stop_atr(sweep.get('extremo'), sweep['direcao'], exec_candles)
-        except Exception:
-            pre_sl = None
-        if pre_sl is not None:
-            right_side = (pre_sl < pre_limit) if direction == 'LONG' else (pre_sl > pre_limit)
-            if right_side:
-                pre_risk = abs(pre_limit - pre_sl)
-                resultado['prealert_sl'] = round(pre_sl, 6)
-                if pre_risk > 0:
-                    pre_ts=structure['t']
-                    pre_tf_map={tf:[c for c in cs if c.get('t') is not None and c['t'] <= pre_ts] for tf,cs in candles_por_tf.items()}
-                    pre_targets = _kairos_structural_targets(
-                        pre_tf_map, pre_ts, pre_limit, direction, limit=12
-                    )
-                    if pre_targets:
-                        pre_target = pre_targets[0]
-                        pre_obstacles = _kairos_opposing_zone_obstacles(
-                            _kairos_build_mtf_map(pre_tf_map), pre_limit, direction,
-                            target_level=pre_target['nivel'], limit=8,
-                            allowed_tfs=('M15','H1','H4','D1','W1')
+        if not audit_entries_only:
+            # SL de referência estritamente atrás do sweep estrutural narrativo + buffer ATR,
+            # sem permitir que o pré-alerta invente uma âncora local diferente.
+            try:
+                if intent.get('mode')=='CONTINUATION':
+                    seg=[c for c in exec_candles if sweep['sweep_ts'] <= c['t'] <= structure['t']]
+                    base=(min(c['l'] for c in seg) if direction=='LONG' else max(c['h'] for c in seg)) if seg else sweep.get('extremo')
+                    pre_sl=aplicar_buffer_stop_atr(base, sweep['direcao'], exec_candles)
+                else:
+                    pre_sl=aplicar_buffer_stop_atr(sweep.get('extremo'), sweep['direcao'], exec_candles)
+            except Exception:
+                pre_sl = None
+            if pre_sl is not None:
+                right_side = (pre_sl < pre_limit) if direction == 'LONG' else (pre_sl > pre_limit)
+                if right_side:
+                    pre_risk = abs(pre_limit - pre_sl)
+                    resultado['prealert_sl'] = round(pre_sl, 6)
+                    if pre_risk > 0:
+                        pre_ts=structure['t']
+                        pre_tf_map={tf:[c for c in cs if c.get('t') is not None and c['t'] <= pre_ts] for tf,cs in candles_por_tf.items()}
+                        pre_targets = _kairos_structural_targets(
+                            pre_tf_map, pre_ts, pre_limit, direction, limit=12
                         )
-                        # Pré-alerta espelha a gestão causal atual:
-                        # +1R é gatilho de BE; o alvo continua sendo liquidez estrutural.
-                        pre_sign = 1.0 if direction == 'LONG' else -1.0
-                        pre_struct_rr = abs(float(pre_target['nivel']) - pre_limit) / pre_risk
-                        resultado['prealert_be_trigger_1r'] = round(pre_limit + pre_sign * pre_risk, 6)
-                        resultado['prealert_be_price'] = round(pre_limit, 6)
-                        resultado['prealert_target'] = round(float(pre_target['nivel']), 6)
-                        resultado['prealert_target_rr'] = round(pre_struct_rr, 3)
-                        resultado['prealert_target_origem'] = pre_target.get('type') or pre_target.get('tipo') or 'STRUCTURAL_LIQUIDITY'
-                        resultado['prealert_obstacles'] = pre_obstacles or []
+                        if pre_targets:
+                            pre_target = pre_targets[0]
+                            pre_obstacles = _kairos_opposing_zone_obstacles(
+                                _kairos_build_mtf_map(pre_tf_map), pre_limit, direction,
+                                target_level=pre_target['nivel'], limit=8,
+                                allowed_tfs=('M15','H1','H4','D1','W1')
+                            )
+                            # Pré-alerta espelha a gestão causal atual:
+                            # +1R é gatilho de BE; o alvo continua sendo liquidez estrutural.
+                            pre_sign = 1.0 if direction == 'LONG' else -1.0
+                            pre_struct_rr = abs(float(pre_target['nivel']) - pre_limit) / pre_risk
+                            resultado['prealert_be_trigger_1r'] = round(pre_limit + pre_sign * pre_risk, 6)
+                            resultado['prealert_be_price'] = round(pre_limit, 6)
+                            resultado['prealert_target'] = round(float(pre_target['nivel']), 6)
+                            resultado['prealert_target_rr'] = round(pre_struct_rr, 3)
+                            resultado['prealert_target_origem'] = pre_target.get('type') or pre_target.get('tipo') or 'STRUCTURAL_LIQUIDITY'
+                            resultado['prealert_obstacles'] = pre_obstacles or []
 
         resultado['failure_reason']='AGUARDANDO_RETESTE_ZONA'; return resultado
     entry=(float(active_zone['top']) if direction=='LONG' else float(active_zone['bottom'])) if entry_tf=='M5' else retest['c']; resultado['entry']=round(entry,6); resultado['timestamp']=retest['t']
@@ -3026,6 +3051,60 @@ def _kairos_capture_radar_events(result, tf_map, now_ts):
     return events
 
 
+def _kairos_apply_entry_phase(state, result, cutoff_ts, start_ts, events):
+    """Emit prospective levels once; closed retests are observations, never live fills."""
+    setup=result.get('entry_setup')
+    if not setup or setup.get('ready_ts') is None or setup['ready_ts']>cutoff_ts:
+        return
+    key=setup['key']; rec=state.setdefault(key,{'armed':False,'touched':False})
+    retest=setup.get('retest')
+    def suppress(reason):
+        result['post_entry_gate_reason']=result.get('failure_reason')
+        result['failure_reason']=reason
+        result['valid']=False
+    parent=setup.get('parent_retest')
+    if parent and parent['t']+900000<=cutoff_ts:
+        closed=parent['t']+900000
+        result['retest_open_ts']=parent['t']
+        result['retest_confirm_close_ts']=closed
+        result['observed_retest_close']=parent.get('c')
+        rec['touched']=True
+        rec['cancelled_reason']='PARENT_M15_RETEST_ALREADY_OBSERVED'
+        if parent['t']<start_ts:
+            suppress('ENTRY_BEFORE_REPLAY_WINDOW')
+        elif closed<cutoff_ts:
+            suppress('ENTRY_ALREADY_OBSERVED')
+        return
+    if retest:
+        duration=300000 if setup['tf']=='M5' else 900000
+        opened=retest['t']; closed=opened+duration
+        result['retest_open_ts']=opened
+        result['retest_confirm_close_ts']=closed
+        result['observed_retest_close']=retest.get('c')
+        if opened<start_ts:
+            suppress('ENTRY_BEFORE_REPLAY_WINDOW');rec['touched']=True;return
+        if closed>cutoff_ts:
+            suppress('RETEST_NOT_CLOSED');return
+        if rec['touched']:
+            suppress('ENTRY_ALREADY_OBSERVED');return
+        rec['touched']=True
+        # Never turn a retrospective retest into a fresh execution notification.
+        if closed<cutoff_ts:
+            suppress('RETEST_ALREADY_PAST_AT_FIRST_OBSERVATION');return
+        events.append({**setup,'key':key+':RETEST_OBSERVED','setup_key':key,
+                       'phase':'RETEST_OBSERVED','timestamp':closed,
+                       'retest_open_ts':opened,'observed_close':retest.get('c'),
+                       'armed_before_retest':rec['armed'],
+                       'note':'Historical retest level; observed close is separate. No fill assumed.'})
+        return
+    if rec['touched'] or rec['armed']:
+        return
+    rec['armed']=True
+    events.append({**setup,'key':key+':ARMED','setup_key':key,
+                   'phase':'ARMED','timestamp':cutoff_ts,'retest':None,
+                   'note':'Prospective proximal level; awaiting retest. Not a filled trade.'})
+
+
 def _kairos_record_entry_audit(store, result, cutoff_ts, start_ts):
     """Keep first observed entry evidence; stale candidates remain explicitly stale."""
     if not result.get('entry_audit_only'):
@@ -3034,7 +3113,6 @@ def _kairos_record_entry_audit(store, result, cutoff_ts, start_ts):
     key=repr((result.get('direction'),ts,result.get('entry'),result.get('choch_timestamp'),
               result.get('zone_type'),result.get('zone_bottom'),result.get('zone_top')))
     if key in store:
-        store[key]['evaluations']+=1
         return
     evidence=result.get('entry_audit_evidence') or {}
     retest=evidence.get('retest') or {}
@@ -3131,6 +3209,9 @@ def replay_vortex_decision_layer_v2(pair, dias_historico=7, janelas_mfe_mae=JANE
     sinais_completos_brutos = []
     radar_captures = {}
     entry_audit_candidates = {}
+    entry_phase_state = {}
+    entry_phase_events = []
+    pending_setup_keys = []
     experimental_obstacle_blocks = [] if experimental_poi_policy else None
     experimental_poi_state = {} if experimental_poi_policy else None
     experimental_poi_audit = [] if experimental_poi_policy else None
@@ -3174,6 +3255,11 @@ def replay_vortex_decision_layer_v2(pair, dias_historico=7, janelas_mfe_mae=JANE
             continue
 
         _kairos_record_entry_audit(entry_audit_candidates, r, ts_corte, inicio_ts_ms)
+        _kairos_apply_entry_phase(entry_phase_state, r, ts_corte, inicio_ts_ms, entry_phase_events)
+        pending=r.get('entry_setup') or {}
+        pending_setup_keys=([pending['key']] if pending and not pending.get('retest')
+                            and not pending.get('parent_retest') and pending['ready_ts']<=ts_corte
+                            and not entry_phase_state.get(pending['key'],{}).get('touched') else [])
 
         for radar_event in _kairos_capture_radar_events(r, tf_map, ts_corte):
             radar_captures.setdefault(radar_event['key'], radar_event)
@@ -3383,7 +3469,11 @@ def replay_vortex_decision_layer_v2(pair, dias_historico=7, janelas_mfe_mae=JANE
         'mfe_mae_causal': {'global': mfe_mae_global, 'LONG': mfe_mae_long, 'SHORT': mfe_mae_short},
         'sinais_unicos_completos': sinais_unicos,
         'radar_captures': list(radar_captures.values()),
-        'entry_audit_candidates': list(entry_audit_candidates.values()),
+        'entry_audit_candidates': [x for x in entry_audit_candidates.values() if x['window_status']=='ENTRY_IN_WINDOW'],
+        'historical_entry_candidates': [x for x in entry_audit_candidates.values() if x['window_status']!='ENTRY_IN_WINDOW'],
+        'entry_phase_events': entry_phase_events,
+        'entry_setup_states': entry_phase_state,
+        'pending_setup_keys': pending_setup_keys,
         'audit_entries_only': bool(audit_entries_only),
         'm5_completo': m5,
     }

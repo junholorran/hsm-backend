@@ -1677,7 +1677,7 @@ def _kairos_select_structural_first_capture_sweep(candles_por_tf, now_ts, liquid
         state='REJECTION_RECLAIM' if reclaimed else ('ACCEPTANCE_CONTINUATION' if accepted else 'UNRESOLVED_REACTION')
         rec={'liquidity_tf':liq['tf'],'liquidity_type':liq['type'],'nivel':level,
              'liquidity_origin_ts':liq.get('origin_ts'),'liquidity_confirm_ts':confirm_ts,
-             'native_capture_confirm_ts':native_capture_end,
+             'native_capture_confirm_ts':c['t'] + 900000 if liq.get('type') in ('PDH','PDL','PWH','PWL') else native_capture_end,
              'capture_tf':'M15','first_capture_ts':c['t'],'first_capture_idx':first_idx,
              'extremo':c['h'] if is_high else c['l'],'liquidity_side':'HIGH' if is_high else 'LOW',
              'post_capture_state':state,'first_capture_reclaimed':bool(reclaimed),

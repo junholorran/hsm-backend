@@ -119,6 +119,15 @@ class RadarRegression(unittest.TestCase):
             ns['avaliar_vortex_decision_layer_v2']([c],[c],candles_por_tf={'M1':[c]},cutoff_ts=14400000)
         self.assertEqual(captured,[14400000])
 
+    def test_previous_day_capture_does_not_wait_an_extra_day(self):
+        liq = {'tf':'D1','type':'PDH','level':100.,'confirmed_ts':0,'state':'CAPTURED','captured_ts':900000}
+        ns = load_functions('scalp_engine.py', ['_kairos_select_structural_first_capture_sweep'], {
+            '_kairos_structural_registry': lambda *a: [liq], 'KAIROS_PRIMARY_SETUP_LIQUIDITY_TFS': ('D1',), 'KAIROS_PRIMARY_LIQUIDITY_PRIORITY': {'D1':1},
+        })
+        cs = [{'t':900000,'h':101.,'l':98.,'c':99.}, {'t':1800000,'h':99.,'l':97.,'c':98.}, {'t':2700000,'h':99.,'l':97.,'c':98.}]
+        sweep, _ = ns['_kairos_select_structural_first_capture_sweep']({'M15':cs}, 3600000)
+        self.assertEqual(sweep['native_capture_confirm_ts'], 1800000)
+
 
 if __name__ == '__main__':
     unittest.main()

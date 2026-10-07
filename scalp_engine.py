@@ -630,7 +630,8 @@ def _kairos_fvg_states(candles, lookback=250):
     confirma inversão e transforma a FVG em IFVG. IFVG pode ser INVALIDADA
     se depois fechar de volta através do lado oposto.
     """
-    c=candles[-lookback:] if len(candles) > lookback else candles
+    c=candles
+    retain_from=max(2, len(c)-max(1,int(lookback)))
     if len(c) < 3:
         return []
     states=[]
@@ -641,12 +642,15 @@ def _kairos_fvg_states(candles, lookback=250):
     #   barDeltaPercent = (lastClose-lastOpen)/(lastOpen*100)
     #   threshold = cumulative(abs(barDeltaPercent))/bar_index*2
     cumulative_abs_delta=0.0
-    for i in range(2, len(c)):
-        a, meio, atual = c[i-2], c[i-1], c[i]
+    for i in range(1, len(c)):
+        meio=c[i-1]
         denom=(float(meio['o'])*100.0) if meio.get('o') not in (None,0) else None
         bar_delta=((float(meio['c'])-float(meio['o']))/denom) if denom else 0.0
         cumulative_abs_delta += abs(bar_delta)
         threshold=(cumulative_abs_delta / float(i) * 2.0) if i > 0 else 0.0
+        if i < retain_from:
+            continue
+        a, atual=c[i-2], c[i]
         bull_geom=atual['l'] > a['h']
         bear_geom=atual['h'] < a['l']
         bull_lux=bull_geom and meio['c'] > a['h'] and bar_delta > threshold
@@ -747,20 +751,38 @@ def _kairos_momentum_z(candles, period=50):
     return 0.0 if std == 0 else (w[-1]-avg)/std
 
 
-def _kairos_ob_from_break(candles, break_idx, direcao, search_back=10):
-    """OB causal ligado à quebra: primeiro candle oposto nos 10 candles
-    anteriores ao break; zona = high/low inteiro do candle, não body arbitrário.
+def _kairos_ob_from_break(candles, break_idx, direcao, search_back=10, structure=None):
+    """LuxAlgo default ATR OB: parsed extreme from broken pivot to break (exclusive).
+
+    search_back is retained for call compatibility; it never limits the pivot leg.
+    Volatility is evaluated on each source candle with causal ATR(200), seeded
+    from the first 200 true ranges, including the initial high-low range.
     """
-    if break_idx is None or break_idx <= 0:
+    if not isinstance(break_idx,int) or not 0 < break_idx < len(candles):
         return None
-    for j in range(break_idx-1, max(-1, break_idx-search_back-1), -1):
-        c=candles[j]
-        bearish = c['c'] < c['o']
-        bullish = c['c'] > c['o']
-        if (direcao=='alta' and bearish) or (direcao=='baixa' and bullish):
-            return {'tipo':'OB_bullish' if direcao=='alta' else 'OB_bearish', 'direcao':direcao,
-                    'top':c['h'],'bottom':c['l'],'t':c['t'],'idx':j,'break_idx':break_idx}
-    return None
+    if not structure:
+        structure=next((e for e in compute_lux_structure_events(candles[:break_idx+1],swing_size=5)
+                        if e.get('index')==break_idx and e.get('direcao')==direcao),None)
+    origin=(structure or {}).get('broken_swing_origin_ts')
+    start=next((i for i,c in enumerate(candles[:break_idx]) if c['t']==origin),None)
+    if start is None or direcao not in ('alta','baixa'):
+        return None
+    parsed=[]; trs=[]; atr=None
+    for i,c in enumerate(candles[:break_idx]):
+        tr=c['h']-c['l'] if i==0 else max(c['h']-c['l'],abs(c['h']-candles[i-1]['c']),abs(c['l']-candles[i-1]['c']))
+        trs.append(tr)
+        if i==199: atr=sum(trs)/200.0
+        elif i>=200: atr=(atr*199.0+tr)/200.0
+        volatile=atr is not None and c['h']-c['l']>=2.0*atr
+        parsed.append((c['l'],c['h']) if volatile else (c['h'],c['l']))
+    field=0 if direcao=='baixa' else 1
+    values=[parsed[i][field] for i in range(start,break_idx)]
+    extreme=max(values) if direcao=='baixa' else min(values)
+    idx=start+values.index(extreme)
+    top,bottom=parsed[idx]
+    return {'tipo':'OB_bullish' if direcao=='alta' else 'OB_bearish','direcao':direcao,
+            'top':top,'bottom':bottom,'t':candles[idx]['t'],'idx':idx,'break_idx':break_idx,
+            'break_ts':candles[break_idx]['t'],'broken_swing_origin_ts':origin,'lux_ob':True}
 
 
 def _kairos_volume_context(candles, bins=24, lookback=200):
@@ -905,20 +927,18 @@ def _kairos_liquidity_pools(candles, pivots=None, atr=None, min_touches=2):
     return pools
 
 
-def _kairos_order_blocks_map(candles, swing_size=20, lookback=300):
-    """OBs persistentes ligados a BOS/CHoCH, usando a matemática já escolhida:
-    quebra estrutural -> primeiro candle oposto nos 10 candles anteriores.
-    Mantém somente metadados causais e estado operacional simples.
-    """
+def _kairos_order_blocks_map(candles, swing_size=50, lookback=300):
+    """LuxAlgo swing OB formation; operational close-invalidation lifecycle."""
     if not candles or len(candles)<20:
         return []
-    cs=candles[-lookback:] if len(candles)>lookback else candles
-    size=min(swing_size,max(5,len(cs)//6))
-    events=compute_lux_structure_events(cs,swing_size=size)
+    cs=candles
+    events=compute_lux_structure_events(cs,swing_size=swing_size)
+    lower=cs[max(0,len(cs)-lookback)]['t']
     out=[]; seen=set()
     for e in events:
-        ob=_kairos_ob_from_break(cs,e.get('index'),e.get('direcao'),search_back=10)
-        if not ob:
+        if e['t'] < lower: continue
+        ob=_kairos_ob_from_break(cs,e.get('index'),e.get('direcao'),structure=e)
+        if not ob or ob['top'] < ob['bottom']:
             continue
         key=(ob['t'],ob['direcao'],round(ob['top'],10),round(ob['bottom'],10))
         if key in seen: continue
@@ -1795,7 +1815,7 @@ def _kairos_direction_after_first_capture(candles, capture, swing_size=5):
                                  else 'MAJOR_M15_STATE_CURRENTLY_OPPOSES_REACTION')
     return None
 
-def _kairos_m5_refine_zone(m5_candles, m15_zone, sweep_ts, structure_ts, direction, structure_level=None):
+def _kairos_m5_refine_zone(m5_candles, m15_zone, sweep_ts, structure_ts, direction, structure_level=None, structure_origin_ts=None):
     """M5 refina a tese já confirmada no M15; não cria uma segunda tese estrutural.
 
     Procura POI M5 causal da perna M15 e contido/overlap no POI M15.
@@ -1827,9 +1847,8 @@ def _kairos_m5_refine_zone(m5_candles, m15_zone, sweep_ts, structure_ts, directi
     if zones:
         return max(zones,key=lambda z:z.get('flip_ts') or z.get('created_ts') or 0)
 
-    # Sem segunda quebra M5: o M15 já confirmou a intenção.
-    # Para OB, usamos o último candle M5 oposto dentro da perna causal
-    # imediatamente anterior à confirmação M15, desde que sobreponha o POI M15.
+    # M15 already authorizes the thesis. Find its first closed M5 displacement
+    # and select the Lux parsed extreme over the same broken-pivot interval.
     leg=[(i,c) for i,c in enumerate(m5_candles)
          if sweep_ts <= c.get('t',0) < structure_ts]
     break_m5=None
@@ -1842,26 +1861,20 @@ def _kairos_m5_refine_zone(m5_candles, m15_zone, sweep_ts, structure_ts, directi
     if break_m5 is None:
         return None
     break_idx,break_candle=break_m5
-    wanted_opposite = (lambda c: c.get('c',0) < c.get('o',0)) if direction=='alta' else (lambda c: c.get('c',0) > c.get('o',0))
-    for idx,c in reversed([(i,x) for i,x in leg if i < break_idx]):
-        if not wanted_opposite(c):
-            continue
-        top=c.get('h'); bottom=c.get('l')
-        if top is None or bottom is None:
-            continue
-        if top < m15_zone['bottom'] or bottom > m15_zone['top']:
-            continue
-        return {
-            'tipo':'OB_bullish' if direction=='alta' else 'OB_bearish',
-            'direcao':direction,
-            'top':top,'bottom':bottom,
-            'created_ts':c.get('t'),'origin_ts':c.get('t'),
-            'state':'ATIVA','source_tf':'M5',
-            'origin_candle':dict(c),
+    # Refinement shares the confirmed M15 pivot and displacement; it does not
+    # pretend that the M15 level is an independently confirmed M5 pivot.
+    origin=structure_origin_ts
+    ob=_kairos_ob_from_break(m5_candles,break_idx,direction,
+                            structure={'broken_swing_origin_ts':origin})
+    if not ob or ob['top'] < ob['bottom'] or ob['t'] < sweep_ts:
+        return None
+    if ob['top'] < m15_zone['bottom'] or ob['bottom'] > m15_zone['top']:
+        return None
+    return {**ob,'created_ts':break_candle['t'],'origin_ts':ob['t'],
+            'state':'ATIVA','source_tf':'M5','origin_candle':dict(m5_candles[ob['idx']]),
             'causal_break_m5':dict(break_candle),'causal_break_level_m15':structure_level,
-            'refinement_basis':'M15_BREAK_CAUSAL_LAST_OPPOSITE_M5'
-        }
-    return None
+            'refinement_basis':'M15_BREAK_LUX_PARSED_EXTREME_M5'}
+
 
 def _kairos_last_causal_m5_sweep(m5_candles, direction, leg_start_ts, confirm_ts):
     """Último sweep M5 causal antes da confirmação M15, sem lookahead.
@@ -2191,8 +2204,8 @@ def _kairos_select_entry_zone(exec_candles, sweep, structure, mapa):
         return max(ifvg,key=lambda z:(1 if z.get('liquidity_inside') else 0,z.get('flip_ts') or z.get('created_ts') or 0))
 
     # OB é derivado diretamente do break e só entra se não houver FVG/IFVG causal.
-    ob=_kairos_ob_from_break(exec_candles, structure.get('full_idx'), direction)
-    if ob:
+    ob=_kairos_ob_from_break(exec_candles, structure.get('full_idx'), direction, structure=structure)
+    if ob and ob['top'] >= ob['bottom']:
         origin_ts=ob.get('origin_ts') or ob.get('created_ts') or ob.get('t')
         if origin_ts is None or not (leg_start <= origin_ts <= st):
             return None
@@ -2264,10 +2277,12 @@ def _kairos_shadow_validate_poi(zone, candles, sweep=None, structure=None, tf='M
         causal_ok=True
         if sweep and break_ok: causal_ok=candles[break_idx]['t']>sweep.get('sweep_ts',0)
         if structure and break_ok: causal_ok=causal_ok and candles[break_idx]['t']==structure.get('t')
-        ok=idx_ok and break_ok and opposite and bounds_ok and causal_ok
+        expected=_kairos_ob_from_break(candles,break_idx,direction,structure=structure or {'broken_swing_origin_ts':zone.get('broken_swing_origin_ts')}) if break_ok else None
+        bounds_ok=bool(expected and expected['idx']==idx and abs(float(zone['top'])-float(expected['top']))<1e-9 and abs(float(zone['bottom'])-float(expected['bottom']))<1e-9)
+        ok=idx_ok and break_ok and zone.get('lux_ob') is True and zone['top'] >= zone['bottom'] and bounds_ok and causal_ok
         break_candle=candles[break_idx] if break_ok else None
         out.update({'pass':bool(ok),'reason':'OK' if ok else 'OB_ORIGEM_OU_BREAK_CAUSAL_INVALIDO','origin_candle':candle,
-                    'break_candle':break_candle,'idx_ok':idx_ok,'break_ok':break_ok,'opposite_candle_ok':opposite,
+                    'break_candle':break_candle,'idx_ok':idx_ok,'break_ok':break_ok,'lux_extreme_ok':bool(expected and expected['idx']==idx),
                     'bounds_ok':bounds_ok,'causal_ok':causal_ok})
         return out
     out['reason']='TIPO_POI_DESCONHECIDO'; return out
@@ -2315,7 +2330,7 @@ def _kairos_shadow_log_poi(pair, zone, audit):
                   + f" break={audit.get('break_candle')}"
                   + f" idx_ok={audit.get('idx_ok')}"
                   + f" break_ok={audit.get('break_ok')}"
-                  + f" opposite_ok={audit.get('opposite_candle_ok')}"
+                  + f" lux_extreme_ok={audit.get('lux_extreme_ok')}"
                   + f" bounds_ok={audit.get('bounds_ok')}"
                   + f" causal_ok={audit.get('causal_ok')}")
         else:
@@ -2439,8 +2454,8 @@ def _kairos_experimental_eligible_entry_zones(exec_candles, sweep, structure, ma
         if not (sweep['sweep_ts'] <= effective_ts <= st): continue
         if z.get('created_ts') is not None and z.get('created_ts') < sweep['sweep_ts']: continue
         z2=dict(z); z2['liquidity_inside']=_kairos_zone_contains_liquidity(z2,mapa); zones.append(z2)
-    ob=_kairos_ob_from_break(exec_candles, structure.get('full_idx'), direction)
-    if ob:
+    ob=_kairos_ob_from_break(exec_candles, structure.get('full_idx'), direction, structure=structure)
+    if ob and ob['top'] >= ob['bottom']:
         ob['liquidity_inside']=_kairos_zone_contains_liquidity(ob,mapa); zones.append(ob)
     return zones
 
@@ -2673,7 +2688,7 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
     # M15 maior autorizou e o interno confirmou; M5 só refina a execução da MESMA tese.
     # Nunca volta a decidir direção nem cria tese independente.
     m5=candles_por_tf.get('M5') or []
-    refined=_kairos_m5_refine_zone(m5,zone,internal_structure.get('leg_start_ts') or sweep['sweep_ts'],structure_confirm_ts,sweep['direcao'],internal_structure.get('nivel'))
+    refined=_kairos_m5_refine_zone(m5,zone,internal_structure.get('leg_start_ts') or sweep['sweep_ts'],structure_confirm_ts,sweep['direcao'],internal_structure.get('nivel'),structure_origin_ts=internal_structure.get('broken_swing_origin_ts'))
     resultado['m5_refinement_candidate_found']=bool(refined)
     resultado['m5_refinement_candidate_type']=refined.get('tipo') if refined else None
     resultado['m5_refinement_candidate_top']=round(refined['top'],6) if refined and refined.get('top') is not None else None

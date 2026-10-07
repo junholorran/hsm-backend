@@ -1673,7 +1673,8 @@ def _kairos_select_structural_first_capture_sweep(candles_por_tf, now_ts, liquid
     # M15 permanece no registry/auditoria, mas não pode ser a liquidez
     # primária que autoriza um setup. MN fica como mapa macro/contexto.
     setup_levels=([x for x in levels if x.get('type') in ('PDH','PDL')] if liquidity_policy=='PDH_PDL_ONLY' else [x for x in levels if x.get('tf') in KAIROS_PRIMARY_SETUP_LIQUIDITY_TFS])
-    m15=[c for c in (candles_por_tf.get('M15') or []) if c.get('t') is not None and c['t'] <= now_ts]
+    m15=sorted((c for c in (candles_por_tf.get('M15') or [])
+                if c.get('t') is not None and c['t']+900000<=now_ts),key=lambda c:c['t'])
     if len(m15) < 3:
         return None, {'levels':levels,'candidates':[]}
     candidates=[]
@@ -1683,33 +1684,50 @@ def _kairos_select_structural_first_capture_sweep(candles_por_tf, now_ts, liquid
             continue
         is_high=liq.get('type') in ('SWING_HIGH','PDH','PWH','PMH','EQH')
 
-        # FIRST CAPTURE precisa ser demonstrável no TF nativo ANTES de refinarmos
-        # o instante no M15. Isso impede uma captura antiga/consumida de reaparecer
-        # como "nova" só porque a janela M15 curta não contém o primeiro sweep.
+        # The LEVEL must already be confirmed on its native TF. A subsequent
+        # crossing is observable from a CLOSED M15 without waiting for the
+        # currently forming native candle to close. Earlier native consumption
+        # still blocks a repeated touch outside the available M15 history.
         native_capture_ts=liq.get('captured_ts')
-        if liq.get('state') != 'CAPTURED' or native_capture_ts is None:
-            continue
-        tf_ms={'W1':7*86400000,'D1':86400000,'H4':4*3600000,'H1':3600000}.get(liq.get('tf'))
-        if tf_ms is None:
-            continue
-        native_capture_end=native_capture_ts + tf_ms
-        # Se o candle nativo da PRIMEIRA captura ficou fora do histórico M15,
-        # não inventamos timing: o nível é consumido e inelegível para setup.
-        if not m15 or native_capture_end <= m15[0]['t']:
-            continue
+        capture_end=None
+        if native_capture_ts is not None:
+            evidence_tf=liq.get('captured_tf') or liq.get('tf')
+            evidence_ms={'M15':900000,'H1':3600000,'H4':14400000,
+                         'D1':86400000,'W1':604800000}.get(evidence_tf)
+            capture_end=native_capture_ts+evidence_ms if evidence_ms else native_capture_ts
+            # Native capture timestamps locate the candle OPEN, not the touch.
+            # An overlapping native bar must preserve its observed M15 capture
+            # after it closes. Only a fully prehistory capture is excluded.
+            if capture_end<=m15[0]['t']:
+                continue
 
         first_idx=None
         for i,c in enumerate(m15):
             if c['t'] < confirm_ts:
                 continue
-            if c['t'] < native_capture_ts or c['t'] >= native_capture_end:
+            if native_capture_ts is not None and not (native_capture_ts<=c['t']<capture_end):
                 continue
             if (is_high and c['h'] > level) or ((not is_high) and c['l'] < level):
                 first_idx=i; break
         if first_idx is None:
             continue
         c=m15[first_idx]
+        # A partial native bar may hide an earlier crossing. Require coverage
+        # since the level became available or since that native bar opened;
+        # otherwise a repeated tail crossing cannot prove FIRST capture.
+        coverage_start=confirm_ts
+        if liq.get('type') in ('SWING_HIGH','SWING_LOW','EQH','EQL'):
+            native_ms={'H1':3600000,'H4':14400000,'D1':86400000,'W1':604800000}[liq['tf']]
+            week_offset=345600000 if liq['tf']=='W1' else 0
+            native_open=((c['t']-week_offset)//native_ms)*native_ms+week_offset
+            coverage_start=max(confirm_ts,native_open)
+        coverage=[x['t'] for x in m15[:first_idx+1] if x['t']>=coverage_start]
+        if (not coverage or coverage[0]!=coverage_start or
+                any(b-a!=900000 for a,b in zip(coverage,coverage[1:]))):
+            continue
         nxt=m15[first_idx+1] if first_idx+1 < len(m15) else None
+        if nxt is not None and nxt['t']!=c['t']+900000:
+            nxt=None
         # Estado pós-captura: rejeição/reclaim OU aceitação além do nível.
         if is_high:
             reclaimed=(c['c'] < level) and (nxt is not None and nxt['c'] < level)
@@ -1720,7 +1738,11 @@ def _kairos_select_structural_first_capture_sweep(candles_por_tf, now_ts, liquid
         state='REJECTION_RECLAIM' if reclaimed else ('ACCEPTANCE_CONTINUATION' if accepted else 'UNRESOLVED_REACTION')
         rec={'liquidity_tf':liq['tf'],'liquidity_type':liq['type'],'nivel':level,
              'liquidity_origin_ts':liq.get('origin_ts'),'liquidity_confirm_ts':confirm_ts,
-             'native_capture_confirm_ts':c['t'] + 900000 if liq.get('type') in ('PDH','PDL','PWH','PWL') else native_capture_end,
+             # Compatibility field: availability now comes from M15 evidence,
+             # not the future close of the native candle containing the touch.
+             'native_capture_confirm_ts':c['t']+900000,
+             'capture_confirm_ts':c['t']+900000,'capture_evidence_tf':'M15',
+             'capture_confirmation_basis':'CLOSED_M15_CROSS_OF_CONFIRMED_HTF_LEVEL',
              'capture_tf':'M15','first_capture_ts':c['t'],'first_capture_idx':first_idx,
              'extremo':c['h'] if is_high else c['l'],'liquidity_side':'HIGH' if is_high else 'LOW',
              'post_capture_state':state,'first_capture_reclaimed':bool(reclaimed),
@@ -2573,6 +2595,15 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
 
     sweep,sweep_audit=_kairos_select_structural_first_capture_sweep(candles_por_tf,now_ts,liquidity_policy=liquidity_policy)
     resultado['structural_sweep_audit']=sweep_audit
+    # Exporta a captura no ponto exato em que o motor a reconhece.
+    if sweep:
+        resultado['_radar_capture']={
+            'liquidity_tf':sweep.get('liquidity_tf'),
+            'liquidity_type':sweep.get('liquidity_type'),
+            'nivel':sweep.get('nivel'),
+            'sweep_ts':sweep.get('first_capture_ts') or sweep.get('sweep_ts'),
+            'extremo':sweep.get('extremo'),
+        }
 
     # HARD BLOCK CAUSAL: POI HTF (FVG/IFVG/OB) é localização/contexto, NÃO liquidez.
     # Sem captura estrutural real + reação resolvida, não existe autorização de trade.
@@ -3346,6 +3377,10 @@ def replay_vortex_decision_layer_v2(pair, dias_historico=7, janelas_mfe_mae=JANE
     experimental_retest_wait_audit = [] if experimental_poi_policy else None
     experimental_intent_gate_audit = [] if experimental_poi_policy else None
 
+    _kairos_v7_armed=None
+    _kairos_v7_consumed=set()
+    _kairos_v7_signals=set()
+
     for i in range(MIN_M5_IDX, len(m5)):
         # Avaliamos o estado imediatamente APÓS o fecho deste M5.
         ts_corte = m5[i]['t'] + INTERVALO_MS_POR_LABEL['5']
@@ -3377,6 +3412,31 @@ def replay_vortex_decision_layer_v2(pair, dias_historico=7, janelas_mfe_mae=JANE
                 experimental_poi_state=experimental_poi_state,
                 liquidity_policy=liquidity_policy, cutoff_ts=ts_corte, audit_entries_only=audit_entries_only
             )
+
+            _cap=r.get('_radar_capture') or {}
+            _cap_tf=_cap.get('liquidity_tf')
+            _cap_ts=_cap.get('sweep_ts')
+            if _kairos_v7_armed is None and _cap_tf in ('W1','D1','H4','H1') and _cap_ts is not None:
+                _key=(_cap_tf,_cap.get('liquidity_type'),_cap.get('nivel'),_cap_ts)
+                if _key not in _kairos_v7_consumed:
+                    _kairos_v7_armed=dict(_cap)
+                    _kairos_v7_armed['_radar_key']=_key
+                    print(f"[KAIROS_SWEEP_ARMED] pair={pair} htf={_cap_tf} type={_cap.get('liquidity_type')} level={_cap.get('nivel')} sweep_ts={_cap_ts} extreme={_cap.get('extremo')}",flush=True)
+
+            if _kairos_v7_armed is not None:
+                _st=_kairos_v7_armed['sweep_ts']
+                _m15=_kairos_radar_first_closed_choch(tf_map.get('M15') or [],_st,50,'15')
+                _m5=_kairos_radar_first_closed_choch(tf_map.get('M5') or [],_st,5,'5')
+                _available=[x for x in (_m15,_m5) if x and x['close_ts']<=ts_corte]
+                _choch=min(_available,key=lambda x:x['close_ts']) if _available else None
+                if _choch:
+                    _a=_kairos_v7_armed
+                    _sig=(_a['_radar_key'],_choch['tf'],_choch['close_ts'],_choch['direction'])
+                    if _sig not in _kairos_v7_signals:
+                        _kairos_v7_signals.add(_sig)
+                        print(f"[KAIROS_STRUCTURAL_RADAR_SIGNAL] pair={pair} direction={_choch['direction']} htf={_a.get('liquidity_tf')} liquidity_type={_a.get('liquidity_type')} liquidity_level={_a.get('nivel')} sweep_ts={_a.get('sweep_ts')} structure_tf={_choch['tf']} structure_type=CHoCH structure_level={_choch['level']} structure_close_ts={_choch['close_ts']}",flush=True)
+                    _kairos_v7_consumed.add(_a['_radar_key'])
+                    _kairos_v7_armed=None
         except Exception as e:
             distribuicao_motivos[f'EXCECAO: {e}'] = distribuicao_motivos.get(f'EXCECAO: {e}', 0) + 1
             continue
@@ -4219,6 +4279,24 @@ def _paper_v2_tentar_prealerta(db_file, pair, r, agora_ts_ms):
         print(f"[paper_v2_prealert] erro em {pair}: {e}")
         return False
 
+
+# KAIROS_HTF_STRUCTURE_RADAR_V7_CAPTURE_POINT
+# Radar independente: HTF sweep reconhecido -> ARMED -> primeiro CHoCH fechado M15/M5.
+def _kairos_radar_first_closed_choch(candles, sweep_ts, swing_size, tf):
+    out=[]
+    for ev in compute_lux_structure_events(candles, swing_size=swing_size):
+        if ev.get('tipo') != 'CHoCH':
+            continue
+        ots=ev.get('t')
+        if ots is None:
+            continue
+        cts=_kairos_candle_close_ts(ots,tf)
+        if cts is not None and cts>sweep_ts:
+            out.append((cts,ev))
+    if not out:
+        return None
+    cts,ev=min(out,key=lambda x:x[0])
+    return {'tf':tf,'direction':'LONG' if ev.get('direcao')=='alta' else 'SHORT','level':ev.get('nivel'),'close_ts':cts}
 
 def _paper_trading_v2_enviar_telegram(mensagem):
     """

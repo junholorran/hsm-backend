@@ -2781,6 +2781,9 @@ def _formatar_mensagem_prealerta_paper_v2(pair, r):
 
 def _paper_v2_tentar_prealerta(db_file, pair, r, agora_ts_ms):
     """Envia UMA vez por setup causal. Reserva a chave no SQLite antes do Telegram para matar spam."""
+    if os.environ.get('PAPER_TRADING_TELEGRAM_ENABLED', '1').strip().lower() in ('0', 'false', 'off', 'no'):
+        print(f"[paper_v2_prealert] DISABLED pair={pair} legacy Telegram muted")
+        return False
     if r.get('failure_reason') != 'AGUARDANDO_RETESTE_ZONA':
         return False
     if r.get('prealert_limit') is None:
@@ -2846,6 +2849,9 @@ def _paper_trading_v2_enviar_telegram(mensagem):
     — só usar se você realmente quiser o paper misturado com alertas
     reais, o que normalmente NÃO é recomendado).
     """
+    if os.environ.get('PAPER_TRADING_TELEGRAM_ENABLED', '1').strip().lower() in ('0', 'false', 'off', 'no'):
+        print('[paper_trading_v2] legacy Telegram notifications DISABLED')
+        return False
     token = os.environ.get('PAPER_TRADING_TELEGRAM_TOKEN') or os.environ.get('TELEGRAM_TOKEN')
     chat_id = os.environ.get('PAPER_TRADING_TELEGRAM_CHAT_ID') or os.environ.get('TELEGRAM_CHAT_ID')
     if not token or not chat_id:

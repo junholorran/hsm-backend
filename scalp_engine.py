@@ -2313,10 +2313,18 @@ def _kairos_select_entry_zone(exec_candles, sweep, structure, mapa):
     ob=_kairos_ob_from_break(exec_candles, structure.get('full_idx'), direction, structure=structure)
     if ob and ob['top'] >= ob['bottom']:
         origin_ts=ob.get('origin_ts') or ob.get('created_ts') or ob.get('t')
-        if origin_ts is None or not (leg_start <= origin_ts <= st):
+        # Lux OB uses the broken-pivot -> break interval, not the latest
+        # protected pivot used by FVG selection. Equal extremes can put its
+        # legitimate source before that protected pivot (SOL 07/10 07:30).
+        ob_leg_start=structure.get('broken_swing_origin_ts')
+        if ob_leg_start is None:
+            return None
+        if capture_start is not None:
+            ob_leg_start=max(ob_leg_start,capture_start)
+        if origin_ts is None or not (ob_leg_start <= origin_ts <= st):
             return None
         ob['liquidity_inside']=_kairos_zone_contains_liquidity(ob,mapa)
-        ob['leg_start_ts']=leg_start; ob['leg_end_ts']=st
+        ob['leg_start_ts']=ob_leg_start; ob['leg_end_ts']=st
         return ob
     return None
 
@@ -2803,7 +2811,10 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
     # M15 maior autorizou e o interno confirmou; M5 só refina a execução da MESMA tese.
     # Nunca volta a decidir direção nem cria tese independente.
     m5=candles_por_tf.get('M5') or []
-    refined=_kairos_m5_refine_zone(m5,zone,internal_structure.get('leg_start_ts') or sweep['sweep_ts'],structure_confirm_ts,sweep['direcao'],internal_structure.get('nivel'),structure_origin_ts=internal_structure.get('broken_swing_origin_ts'))
+    # Refine the selected POI's audited native interval; a later protected
+    # pivot must not cut off the legitimate Lux OB source on M5 either.
+    refinement_start=zone.get('leg_start_ts') or internal_structure.get('leg_start_ts') or sweep['sweep_ts']
+    refined=_kairos_m5_refine_zone(m5,zone,refinement_start,structure_confirm_ts,sweep['direcao'],internal_structure.get('nivel'),structure_origin_ts=internal_structure.get('broken_swing_origin_ts'))
     # Entry-only forward/replay: continue the authorized thesis without changing
     # the legacy management engine. Preserve an already retested initial POI.
     if audit_entries_only:

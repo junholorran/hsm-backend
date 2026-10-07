@@ -1859,7 +1859,8 @@ _KAIROS_LIVE_PAIRS = (
     'BTCUSD', 'ETHUSD', 'SOLUSD', 'XRPUSD', 'LINKUSD', 'ADAUSD', 'AVAXUSD',
     'BNBUSD', 'AAVEUSD', 'NEARUSD', 'PENDLEUSD', 'INJUSD', 'ONDOUSD',
 )
-_KAIROS_LIVE_LAST_TS = {pair: int(time.time() * 1000) for pair in _KAIROS_LIVE_PAIRS}
+_KAIROS_LIVE_STARTED_TS = int(time.time() * 1000)
+_KAIROS_LIVE_LAST_TS = {pair: _KAIROS_LIVE_STARTED_TS for pair in _KAIROS_LIVE_PAIRS}
 _KAIROS_LIVE_SEEN = {pair: set() for pair in _KAIROS_LIVE_PAIRS}
 _KAIROS_RADAR_SEEN = {pair: set() for pair in _KAIROS_LIVE_PAIRS}
 _KAIROS_LIVE_INTERVAL_SECONDS = 60
@@ -1893,6 +1894,33 @@ def _kairos_send_capture_events(pair, result, cutoff):
 
 _KAIROS_SETUP_SEEN={pair:set() for pair in _KAIROS_LIVE_PAIRS}
 
+def _kairos_deliver_setup_once(pair, event, message):
+    """Persist acknowledged delivery; baseline pre-boot setups without reannouncing."""
+    try:
+        with sqlite3.connect(DB_FILE, timeout=15) as conn:
+            conn.execute("CREATE TABLE IF NOT EXISTS kairos_setup_delivery (pair TEXT NOT NULL, event_key TEXT NOT NULL, ready_ts INTEGER NOT NULL, status TEXT NOT NULL, PRIMARY KEY (pair,event_key))")
+            conn.execute('BEGIN IMMEDIATE')
+            row=conn.execute('SELECT status FROM kairos_setup_delivery WHERE pair=? AND event_key=?', (pair,event['key'])).fetchone()
+            if row and row[0] in ('DELIVERED','PRE_BOOT_BASELINE'):
+                return True
+            ready_ts=int(event['ready_ts'])
+            if not row and ready_ts < _KAIROS_LIVE_STARTED_TS:
+                conn.execute('INSERT INTO kairos_setup_delivery VALUES (?,?,?,?)', (pair,event['key'],ready_ts,'PRE_BOOT_BASELINE'))
+                status='PRE_BOOT_BASELINE'
+            else:
+                if not row:
+                    conn.execute('INSERT INTO kairos_setup_delivery VALUES (?,?,?,?)', (pair,event['key'],ready_ts,'PENDING'))
+                if not send_telegram(message):
+                    return False
+                conn.execute("UPDATE kairos_setup_delivery SET status='DELIVERED' WHERE pair=? AND event_key=?", (pair,event['key']))
+                status='DELIVERED'
+        print(f"[KAIROS_SETUP] {status} pair={pair} ready_ts={ready_ts} key={event['key']}", flush=True)
+        return True
+    except Exception as exc:
+        print(f"[KAIROS_SETUP] delivery/storage error pair={pair}: {exc}", flush=True)
+        return False
+
+
 def _kairos_send_setup_events(pair, result, cutoff):
     """Only send still-pending setups; never send an armed alert after its retest."""
     events=result.get('entry_phase_events') or []
@@ -1910,7 +1938,7 @@ def _kairos_send_setup_events(pair, result, cutoff):
              f"{event['zone_type']} M5: {event['bottom']}–{event['top']}\n"
              f"Liquidez {event['capture_tf']}: {event['capture_level']} → M15 confirmado.\n"
              "Aguardando reteste. Nível planeado, sem preenchimento assumido. DEMO/manual.")
-        if send_telegram(msg):
+        if _kairos_deliver_setup_once(pair,event,msg):
             _KAIROS_SETUP_SEEN[pair].add(event['key'])
             _KAIROS_LIVE_PHASE_STATE.get(pair,{}).get(event['setup_key'],{}).pop('armed_event',None)
         else:
@@ -1989,7 +2017,7 @@ def _kairos_live_scanner_loop():
 
 if os.environ.get('RAILWAY_SERVICE_NAME') == 'kairos-poi-abc-sol':
     threading.Thread(target=_kairos_live_scanner_loop, daemon=True).start()
-    print(f"[KAIROS_LIVE] scanner ENABLED pairs={len(_KAIROS_LIVE_PAIRS)} A_CURRENT latest-closed snapshot target interval=60s workers=3 demo/manual entry-only M5 no-management", flush=True)
+    print(f"[KAIROS_LIVE] scanner ENABLED pairs={len(_KAIROS_LIVE_PAIRS)} A_CURRENT latest-closed snapshot target interval=60s workers=3 demo/manual entry-only M5 no-management persistent-setup-dedup", flush=True)
 
 
 # EXPERIMENTAL BRANCH ONLY — POI lifecycle A/B/C replay. Read-only, no DB/Telegram.

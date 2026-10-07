@@ -36,12 +36,14 @@ class EntryLifecycleTests(unittest.TestCase):
 
 class SetupDeliveryTests(unittest.TestCase):
     def sender(self, success):
+        import tempfile,sqlite3
+        tmp=tempfile.TemporaryDirectory();self.addCleanup(tmp.cleanup)
         self.sent=[];self.seen={'BTCUSD':set()}
-        ns={'_KAIROS_LIVE_PHASE_STATE':{'BTCUSD':{}},'_KAIROS_SETUP_SEEN':self.seen,'_KAIROS_LIVE_LAST_TS':{'BTCUSD':0},
+        ns={'sqlite3':sqlite3,'DB_FILE':tmp.name+'/alerts.db','_KAIROS_LIVE_STARTED_TS':0,'_KAIROS_LIVE_PHASE_STATE':{'BTCUSD':{}},'_KAIROS_SETUP_SEEN':self.seen,'_KAIROS_LIVE_LAST_TS':{'BTCUSD':0},
             'send_telegram':lambda msg:(self.sent.append(msg) or success)}
-        return load_functions('app.py',['_kairos_send_setup_events'],ns)['_kairos_send_setup_events']
+        return load_functions('app.py',['_kairos_send_setup_events','_kairos_deliver_setup_once'],ns)['_kairos_send_setup_events']
     def event(self):
-        return {'key':'A:ARMED','setup_key':'A','phase':'ARMED','timestamp':100,'tf':'M5',
+        return {'key':'A:ARMED','setup_key':'A','phase':'ARMED','timestamp':100,'ready_ts':100,'tf':'M5',
                 'direction':'LONG','level':100.,'bottom':99.,'top':100.,'zone_type':'OB_bullish',
                 'capture_tf':'H1','capture_level':105.}
     def test_no_pending_alert_after_retest(self):

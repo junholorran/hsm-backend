@@ -1480,22 +1480,26 @@ def _kairos_periodo_completo(candle, tf, now_ts):
     """True apenas quando o candle do período já fechou no timestamp auditado."""
     if not candle or candle.get('t') is None:
         return False
+    if tf == 'MN':
+        return _kairos_candle_close_ts(candle['t'], 'M') <= now_ts
     dur = 7 * 86400000 if tf == 'W1' else 86400000 if tf == 'D1' else None
     return bool(dur and candle['t'] + dur <= now_ts)
 
 
 def _kairos_previous_period_refs(candles_por_tf, now_ts):
-    """PDH/PDL/PWH/PWL vêm somente de períodos COMPLETOS anteriores.
+    """PDH/PDL/PWH/PWL/PMH/PML vêm somente de períodos COMPLETOS anteriores.
     Open atual e close anterior são contexto, nunca liquidity pool.
     """
     out = {
-        'PDH': None, 'PDL': None, 'PWH': None, 'PWL': None,
+        'PDH': None, 'PDL': None, 'PWH': None, 'PWL': None, 'PMH': None, 'PML': None,
         'daily_open': None, 'previous_daily_close': None,
         'weekly_open': None, 'previous_weekly_close': None,
+        'monthly_open': None, 'previous_monthly_close': None,
     }
     for tf, high_key, low_key, open_key, close_key in (
         ('D1', 'PDH', 'PDL', 'daily_open', 'previous_daily_close'),
         ('W1', 'PWH', 'PWL', 'weekly_open', 'previous_weekly_close'),
+        ('MN', 'PMH', 'PML', 'monthly_open', 'previous_monthly_close'),
     ):
         cs = sorted([c for c in (candles_por_tf.get(tf) or []) if c.get('t') is not None and c['t'] <= now_ts], key=lambda x: x['t'])
         if not cs:
@@ -1503,9 +1507,9 @@ def _kairos_previous_period_refs(candles_por_tf, now_ts):
         completos = [c for c in cs if _kairos_periodo_completo(c, tf, now_ts)]
         if completos:
             prev = completos[-1]
-            out[high_key] = {'level': prev['h'], 'period_open_ts': prev['t'], 'confirmed_ts': prev['t'] + (7 * 86400000 if tf == 'W1' else 86400000)}
-            out[low_key] = {'level': prev['l'], 'period_open_ts': prev['t'], 'confirmed_ts': prev['t'] + (7 * 86400000 if tf == 'W1' else 86400000)}
-            out[close_key] = {'level': prev['c'], 'period_open_ts': prev['t'], 'confirmed_ts': prev['t'] + (7 * 86400000 if tf == 'W1' else 86400000), 'role': 'CONTEXT'}
+            out[high_key] = {'level': prev['h'], 'period_open_ts': prev['t'], 'confirmed_ts': (_kairos_candle_close_ts(prev['t'], 'M') if tf == 'MN' else prev['t'] + (7 * 86400000 if tf == 'W1' else 86400000))}
+            out[low_key] = {'level': prev['l'], 'period_open_ts': prev['t'], 'confirmed_ts': (_kairos_candle_close_ts(prev['t'], 'M') if tf == 'MN' else prev['t'] + (7 * 86400000 if tf == 'W1' else 86400000))}
+            out[close_key] = {'level': prev['c'], 'period_open_ts': prev['t'], 'confirmed_ts': (_kairos_candle_close_ts(prev['t'], 'M') if tf == 'MN' else prev['t'] + (7 * 86400000 if tf == 'W1' else 86400000)), 'role': 'CONTEXT'}
         # candle vigente: último candle cujo open já aconteceu e cujo período ainda não terminou.
         current = next((c for c in reversed(cs) if not _kairos_periodo_completo(c, tf, now_ts)), None)
         if current:
@@ -1588,6 +1592,40 @@ def _kairos_structural_poi_overlaps(levels, candles_por_tf, now_ts):
 
 
 
+def _kairos_previous_period_liquidity(candles_por_tf, now_ts):
+    """Shared period levels and causal capture state for registry and telemetry."""
+    levels=[]
+    refs=_kairos_previous_period_refs(candles_por_tf, now_ts)
+    for key,tf in (('PDH','D1'),('PDL','D1'),('PWH','W1'),('PWL','W1'),('PMH','MN'),('PML','MN')):
+        rec=refs.get(key)
+        if not rec:
+            continue
+        typ=key; level=rec['level']; confirmed_ts=rec['confirmed_ts']
+        m15=_kairos_candles_fechados_ate(candles_por_tf.get('M15') or [], '15', now_ts)
+        history=[(c,'M15') for c in m15]
+        if tf == 'MN':
+            # A monthly level can be consumed before the short M15 history begins.
+            first_m15=min((c['t'] for c in m15),default=now_ts)
+            older=_kairos_candles_fechados_ate(candles_por_tf.get('D1') or [], 'D', now_ts)
+            # Include the closed day overlapping a partial M15 history too.
+            # D1 proves consumption but does not identify an exact intraday touch.
+            history=[(c,'D1') for c in older if c['t'] < first_m15]+history
+        history.sort(key=lambda x:x[0]['t'])
+        is_high=typ in ('PDH','PWH','PMH')
+        captured=None; captured_tf=None; capture_confirm_ts=None
+        for c,source_tf in history:
+            if c['t'] < confirmed_ts:
+                continue
+            if (is_high and c['h'] > level) or ((not is_high) and c['l'] < level):
+                captured=c['t']; captured_tf=source_tf
+                capture_confirm_ts=c['t'] + (86400000 if source_tf == 'D1' else 900000)
+                break
+        levels.append({'tf':tf,'type':typ,'level':level,'origin_ts':rec['period_open_ts'],
+                       'confirmed_ts':confirmed_ts,'state':'CAPTURED' if captured is not None else 'ACTIVE',
+                       'captured_ts':captured,'captured_tf':captured_tf,'capture_confirm_ts':capture_confirm_ts})
+    return levels
+
+
 def _kairos_structural_registry(candles_por_tf, now_ts):
     """Registro operacional causal de TODA liquidez estrutural relevante.
 
@@ -1614,23 +1652,7 @@ def _kairos_structural_registry(candles_por_tf, now_ts):
                     'state':'CAPTURED' if eq.get('state')=='SWEPT' else 'ACTIVE',
                     'captured_ts':eq.get('swept_ts'),'touches':eq.get('toques'),
                 })
-    refs=_kairos_previous_period_refs(candles_por_tf, now_ts)
-    for key,tf in (('PDH','D1'),('PDL','D1'),('PWH','W1'),('PWL','W1')):
-        rec=refs.get(key)
-        if not rec:
-            continue
-        typ=key; level=rec['level']; confirmed_ts=rec['confirmed_ts']
-        m15=[c for c in (candles_por_tf.get('M15') or []) if c.get('t') is not None and c['t'] <= now_ts]
-        is_high=typ in ('PDH','PWH')
-        captured=None
-        for c in m15:
-            if c['t'] <= confirmed_ts:
-                continue
-            if (is_high and c['h'] > level) or ((not is_high) and c['l'] < level):
-                captured=c['t']; break
-        levels.append({'tf':tf,'type':typ,'level':level,'origin_ts':rec['period_open_ts'],
-                       'confirmed_ts':confirmed_ts,'state':'CAPTURED' if captured else 'ACTIVE',
-                       'captured_ts':captured})
+    levels.extend(_kairos_previous_period_liquidity(candles_por_tf, now_ts))
     out=[]; seen=set()
     for x in levels:
         if x.get('level') is None: continue
@@ -1963,13 +1985,7 @@ def _kairos_build_structural_liquidity_telemetry(candles_por_tf, now_ts, signal_
         structural.extend(_kairos_lux50_structural_levels(candles_por_tf.get(tf) or [], tf, now_ts))
 
     refs = _kairos_previous_period_refs(candles_por_tf, now_ts)
-    for key, tf, typ in (
-        ('PDH', 'D1', 'PDH'), ('PDL', 'D1', 'PDL'),
-        ('PWH', 'W1', 'PWH'), ('PWL', 'W1', 'PWL'),
-    ):
-        rec = refs.get(key)
-        if rec:
-            structural.append({'tf': tf, 'type': typ, 'level': rec['level'], 'origin_ts': rec['period_open_ts'], 'confirmed_ts': rec['confirmed_ts'], 'state': 'ACTIVE', 'captured_ts': None})
+    structural.extend(_kairos_previous_period_liquidity(candles_por_tf, now_ts))
 
     # Lux EQH/EQL and separate 20/20 cluster pools are complementary HTF/M15 layers.
     equal_liquidity = []
@@ -2007,12 +2023,14 @@ def _kairos_build_structural_liquidity_telemetry(candles_por_tf, now_ts, signal_
         'asof_ts': now_ts,
         'structural_tfs': list(KAIROS_STRUCTURAL_LIQUIDITY_TFS),
         'structural_liquidity': structural[-160:],
-        'previous_periods': {k: refs.get(k) for k in ('PDH', 'PDL', 'PWH', 'PWL')},
+        'previous_periods': {k: refs.get(k) for k in ('PDH', 'PDL', 'PWH', 'PWL', 'PMH', 'PML')},
         'context_refs': {
             'daily_open': refs.get('daily_open'),
             'previous_daily_close': refs.get('previous_daily_close'),
             'weekly_open': refs.get('weekly_open'),
             'previous_weekly_close': refs.get('previous_weekly_close'),
+            'monthly_open': refs.get('monthly_open'),
+            'previous_monthly_close': refs.get('previous_monthly_close'),
         },
         'equal_liquidity': equal_liquidity[-80:],
         'liquidity_pools': liquidity_pools[-80:],

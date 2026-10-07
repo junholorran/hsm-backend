@@ -58,7 +58,7 @@ class RadarRegression(unittest.TestCase):
         self.assertIs(self.telegram(False), False)
 
     def test_capture_radar_has_htf_context_without_trade(self):
-        ns = load_functions('scalp_engine.py', ['_kairos_capture_radar_events'], {'compute_lux_structure_bias': lambda candles, swing_size: 'alta' if candles else 'neutro', '_kairos_candles_fechados_ate':lambda cs, iv, cutoff:cs})
+        ns = load_functions('scalp_engine.py', ['_kairos_capture_radar_events'], {'_kairos_monthly_capture_context':lambda *a:[], 'compute_lux_structure_bias': lambda candles, swing_size: 'alta' if candles else 'neutro', '_kairos_candles_fechados_ate':lambda cs, iv, cutoff:cs})
         candidate = {'liquidity_tf': 'H1', 'liquidity_type': 'SWING_LOW', 'nivel': 100., 'liquidity_origin_ts': 0, 'first_capture_ts': 900000, 'post_capture_state': 'UNRESOLVED_REACTION'}
         result = {'valid': False, 'structural_sweep_audit': {'candidates': [candidate]}}
         event = ns['_kairos_capture_radar_events'](result, {'W1': [1], 'D1': [1], 'H4': [], 'H1': [1]}, 1800000)[0]
@@ -80,7 +80,7 @@ class RadarRegression(unittest.TestCase):
         self.assertEqual(sweep['first_capture_ts'], 900000)
 
     def test_radar_delayed_native_recognition_uses_availability(self):
-        ns = load_functions('scalp_engine.py', ['_kairos_capture_radar_events'], {'compute_lux_structure_bias': lambda *a, **k: 'neutro', '_kairos_candles_fechados_ate':lambda cs, iv, cutoff:cs})
+        ns = load_functions('scalp_engine.py', ['_kairos_capture_radar_events'], {'_kairos_monthly_capture_context':lambda *a:[], 'compute_lux_structure_bias': lambda *a, **k: 'neutro', '_kairos_candles_fechados_ate':lambda cs, iv, cutoff:cs})
         captures = [{'liquidity_tf':tf,'liquidity_type':'SWING_LOW','nivel':100.,'first_capture_ts':900000,'native_capture_confirm_ts':14400000,'post_capture_state':'UNRESOLVED_REACTION'} for tf in ('H1','H4')]
         events = ns['_kairos_capture_radar_events']({'structural_sweep_audit':{'candidates':captures}}, {}, 14400000)
         self.assertIsInstance(events, list)
@@ -94,7 +94,7 @@ class RadarRegression(unittest.TestCase):
         def send(message):
             calls.append(message)
             return success.pop(0)
-        ns = load_functions('app.py', ['_kairos_send_capture_events'], {'send_telegram':send, '_KAIROS_LIVE_LAST_TS':{'BTCUSD':0}, '_KAIROS_RADAR_SEEN':{'BTCUSD':set()}})
+        ns = load_functions('app.py', ['_kairos_send_capture_events'], {'datetime':datetime,'timezone':timezone,'send_telegram':send, '_KAIROS_LIVE_LAST_TS':{'BTCUSD':0}, '_KAIROS_RADAR_SEEN':{'BTCUSD':set()}})
         event={'key':'capture','timestamp':1800000,'context':{tf:'alta' for tf in ('W1','D1','H4','H1')},'reaction':'UNRESOLVED_REACTION','liquidity_tf':'H1','liquidity_type':'SWING_LOW','level':100.}
         result={'radar_captures':[event]}
         self.assertFalse(ns['_kairos_send_capture_events']('BTCUSD',result,1800000))

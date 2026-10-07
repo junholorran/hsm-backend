@@ -3054,12 +3054,50 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
 KAIROS_DECISION_LAYER_V2_VERSAO = 'KAIROS V2.2 — HTF LIQUIDITY→FIRST CAPTURE→REACTION→DISPLACEMENT→M15 MSS/CHoCH/BOS→CAUSAL FVG/IFVG/OB→RETEST→STRUCTURAL SL→TP1/TP2'
 
 
+def _kairos_monthly_capture_context(tf_map, now_ts):
+    """Previous-month capture evidence only; never a setup authorization."""
+    m15=_kairos_candles_fechados_ate(tf_map.get('M15') or [], '15', now_ts)
+    by_ts={c['t']:i for i,c in enumerate(m15)}
+    out=[]
+    for liq in _kairos_previous_period_liquidity(tf_map, now_ts):
+        if liq['tf']!='MN' or liq['state']!='CAPTURED':
+            continue
+        opened=liq['captured_ts']; confirmed=liq['capture_confirm_ts']
+        evidence_tf=liq.get('captured_tf')
+        # Keep the first available proof for notifications. A subsequently closed
+        # overlapping D1 must not replace an already observed M15 with a new key
+        # and a later timestamp. The conservative registry remains unchanged.
+        if evidence_tf=='D1':
+            exact=next((c for c in m15 if c['t']>=liq['confirmed_ts'] and
+                        ((c['h']>liq['level']) if liq['type']=='PMH' else (c['l']<liq['level']))),None)
+            if exact is not None and exact['t']+900000<confirmed:
+                opened=exact['t'];confirmed=opened+900000;evidence_tf='M15'
+        if opened is None or confirmed is None or confirmed>now_ts:
+            continue
+        reaction='UNRESOLVED_REACTION'; reaction_open=None
+        i=by_ts.get(opened) if evidence_tf=='M15' else None
+        if i is not None and i+1<len(m15) and m15[i+1]['t']==opened+900000:
+            c,nxt=m15[i],m15[i+1]; level=liq['level']
+            is_high=liq['type']=='PMH'
+            reclaimed=(c['c']<level and nxt['c']<level) if is_high else (c['c']>level and nxt['c']>level)
+            accepted=(c['c']>level and nxt['c']>level) if is_high else (c['c']<level and nxt['c']<level)
+            reaction='REJECTION_RECLAIM' if reclaimed else ('ACCEPTANCE_CONTINUATION' if accepted else 'UNRESOLVED_REACTION')
+            if reaction!='UNRESOLVED_REACTION':reaction_open=nxt['t']
+        out.append({'liquidity_tf':'MN','liquidity_type':liq['type'],'nivel':liq['level'],
+                    'liquidity_origin_ts':liq['origin_ts'],'first_capture_ts':opened,
+                    'native_capture_confirm_ts':confirmed,'capture_confirm_ts':confirmed,
+                    'capture_evidence_tf':evidence_tf,'context_only':True,
+                    'post_capture_state':reaction,'confirm_ts':reaction_open})
+    return out
+
+
 def _kairos_capture_radar_events(result, tf_map, now_ts):
     """Informational HTF capture alert, independent of entry eligibility."""
-    candidates = (result.get('structural_sweep_audit') or {}).get('candidates') or []
+    candidates = list((result.get('structural_sweep_audit') or {}).get('candidates') or [])
+    candidates.extend(_kairos_monthly_capture_context(tf_map,now_ts))
     known = []
     for capture in candidates:
-        if capture.get('liquidity_tf') not in ('W1', 'D1', 'H4', 'H1'):
+        if capture.get('liquidity_tf') not in ('MN', 'W1', 'D1', 'H4', 'H1'):
             continue
         opened = capture.get('first_capture_ts')
         if opened is None or capture.get('nivel') is None:
@@ -3076,9 +3114,11 @@ def _kairos_capture_radar_events(result, tf_map, now_ts):
     events = []
     for confirmed, capture, reaction in known:
         key = repr((capture.get('liquidity_tf'), capture.get('liquidity_type'), capture.get('liquidity_origin_ts'), capture.get('nivel'), capture.get('first_capture_ts'), reaction))
-        intervals = {'W1':'W','D1':'D','H4':'240','H1':'60'}
+        intervals = {'MN':'M','W1':'W','D1':'D','H4':'240','H1':'60'}
         events.append({
-            'key': key, 'timestamp': confirmed, 'capture_confirm_ts': capture['first_capture_ts'] + 900000,
+            'key': key, 'timestamp': confirmed, 'capture_confirm_ts': capture.get('capture_confirm_ts') or capture['first_capture_ts'] + 900000,
+            'context_only':bool(capture.get('context_only')),
+            'capture_evidence_tf':capture.get('capture_evidence_tf') or 'M15',
             'liquidity_tf': capture['liquidity_tf'], 'liquidity_type': capture.get('liquidity_type'),
             'level': capture['nivel'], 'capture_open_ts': capture['first_capture_ts'],
             'reaction': reaction,

@@ -1876,13 +1876,21 @@ def _kairos_send_capture_events(pair, result, cutoff):
             continue
         context = event['context']
         reaction = {'REJECTION_RECLAIM': 'rejeição / recuperação', 'ACCEPTANCE_CONTINUATION': 'fechamento além do nível', 'UNRESOLVED_REACTION': 'reação ainda indefinida'}.get(event['reaction'], 'indefinida')
+        confirmed_utc=datetime.fromtimestamp(ts/1000,timezone.utc).strftime('%Y-%m-%d %H:%M')
+        evidence=event.get('capture_evidence_tf') or 'M15'
+        evidence_note='Evidência D1; instante intradiário não determinado.\n' if evidence=='D1' else ''
+        action_note=('Apenas contexto mensal; não autoriza entrada sozinho. DEMO/manual.'
+                     if event.get('context_only') else
+                     'Atenção ao M15; M5 refina após autorização. Alerta de contexto, sem entrada autorizada. DEMO/manual.')
         msg = (
             f"🔎 <b>KAIROS — CAPTURA DE LIQUIDEZ</b> | {pair}\n"
+            f"MN: {context.get('MN','neutro')}\n"
             f"W1: {context['W1']} · D1: {context['D1']}\n"
             f"H4: {context['H4']} · H1: {context['H1']}\n"
             f"Nível: {event['liquidity_tf']} {event['liquidity_type']} @ {event['level']}\n"
+            f"Confirmação (UTC): {confirmed_utc} · evidência {evidence}\n"
             f"Reação: {reaction}\n"
-            "Atenção ao M15; M5 refina após autorização. Alerta de contexto, sem entrada autorizada. DEMO/manual."
+            f"{evidence_note}{action_note}"
         )
         if send_telegram(msg):
             _KAIROS_RADAR_SEEN[pair].add(key)

@@ -1918,6 +1918,24 @@ def _kairos_send_setup_events(pair, result, cutoff):
     return delivered
 
 
+def _kairos_format_entry_observation(pair, signal):
+    """Entry-chain audit only: proximal and observed close are distinct, no fill assumed."""
+    if not signal.get('entry_audit_only') or signal.get('entry_tf')!='M5':
+        return None
+    def utc_time(value):
+        return datetime.fromtimestamp(value/1000, timezone.utc).strftime('%d/%m/%Y %H:%M UTC') if value else 'não informado'
+    return (
+        "🔎 <b>KAIROS — RETESTE M5 OBSERVADO</b>\n\n"
+        f"<b>{signal.get('direction')}</b> | {pair}\n"
+        f"POI M5: {signal.get('zone_type')} [{signal.get('zone_bottom')}–{signal.get('zone_top')}]\n"
+        f"Nível proximal planeado: {signal.get('entry')}\n"
+        f"Fechamento observado: {signal.get('observed_retest_close')}\n"
+        f"Confirmação M15: {utc_time(signal.get('m15_internal_confirmation_close_ts'))}\n"
+        f"Reteste M5 fechado: {utc_time(signal.get('retest_confirm_close_ts'))}\n"
+        "Auditoria da cadeia; preenchimento não comprovado. DEMO/manual."
+    )
+
+
 def _kairos_live_scanner_loop():
     while True:
         cycle_started_ms = int(time.time() * 1000)
@@ -1937,6 +1955,8 @@ def _kairos_live_scanner_loop():
                     delivered = _kairos_send_setup_events(pair, r, cycle_started_ms) and delivered
                     novos = []
                     for s in sinais:
+                        if not s.get('entry_observation_confirmed') or not s.get('entry_audit_only') or s.get('entry_tf')!='M5':
+                            continue
                         ts = s.get('retest_confirm_close_ts')
                         sig = (s.get('choch_timestamp'), s.get('direction'), s.get('zone_type'),
                                s.get('zone_created_ts'), s.get('zone_bottom'), s.get('zone_top'))
@@ -1948,28 +1968,12 @@ def _kairos_live_scanner_loop():
                     for ts, sig, s in novos:
                         direction = s.get('direction')
                         entry = s.get('entry')
-                        sl = s.get('sl')
-                        tp1 = s.get('tp1')
-                        tp2 = s.get('tp2')
-                        zone = s.get('zone_type')
-                        choch = s.get('choch_timestamp')
-                        msg = (
-                            "⚡ <b>KAIROS — SINAL CAUSAL NOVO</b>\n\n"
-                            f"{'📈' if direction == 'LONG' else '📉'} <b>{direction}</b> | {pair}\n"
-                            f"🎯 <b>Nível histórico do reteste:</b> {entry}\n"
-                            f"Fecho observado: {s.get('observed_retest_close')} — verificar preço atual antes de qualquer decisão manual.\n"
-                            f"🛑 <b>SL estrutural:</b> {sl}\n"
-                            f"✅ <b>TP1:</b> {tp1}\n"
-                            f"🏁 <b>TP2:</b> {tp2}\n"
-                            f"🧩 <b>POI:</b> {zone}\n"
-                            f"🔗 <b>MSS/CHoCH:</b> {choch}\n"
-                            "🧪 Demo/manual — A_CURRENT, candles fechados, sem score."
-                        )
+                        msg = _kairos_format_entry_observation(pair, s)
                         if send_telegram(msg):
                             _KAIROS_LIVE_SEEN[pair].add(sig)
                             delivery_key=(s.get('entry_setup') or {}).get('key')
                             _KAIROS_LIVE_PHASE_STATE[pair].get(delivery_key,{}).pop('signal_snapshot',None)
-                            print(f"[KAIROS_LIVE] ALERT pair={pair} ts={ts} sig={sig} entry={entry} sl={sl}", flush=True)
+                            print(f"[KAIROS_LIVE] M5_RETEST_OBSERVED pair={pair} ts={ts} sig={sig} proximal={entry}", flush=True)
                         else:
                             delivered = False
                     if delivered:
@@ -1985,7 +1989,7 @@ def _kairos_live_scanner_loop():
 
 if os.environ.get('RAILWAY_SERVICE_NAME') == 'kairos-poi-abc-sol':
     threading.Thread(target=_kairos_live_scanner_loop, daemon=True).start()
-    print(f"[KAIROS_LIVE] scanner ENABLED pairs={len(_KAIROS_LIVE_PAIRS)} A_CURRENT latest-closed snapshot target interval=60s workers=3 demo/manual", flush=True)
+    print(f"[KAIROS_LIVE] scanner ENABLED pairs={len(_KAIROS_LIVE_PAIRS)} A_CURRENT latest-closed snapshot target interval=60s workers=3 demo/manual entry-only M5 no-management", flush=True)
 
 
 # EXPERIMENTAL BRANCH ONLY — POI lifecycle A/B/C replay. Read-only, no DB/Telegram.

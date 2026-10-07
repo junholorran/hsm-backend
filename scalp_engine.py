@@ -2696,6 +2696,8 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
     resultado['m5_refinement_candidate_bottom']=round(refined['bottom'],6) if refined and refined.get('bottom') is not None else None
     resultado['m5_refinement_candidate_ts']=(refined.get('flip_ts') or refined.get('created_ts') or refined.get('t')) if refined else None
     retest=None; active_zone=zone; entry_tf=exec_tf
+    if audit_entries_only and not refined:
+        resultado['failure_reason']='SEM_REFINAMENTO_M5'; return resultado
     if refined:
         rz_ts=refined.get('flip_ts') or refined.get('created_ts') or refined.get('t') or structure['t']
         r5=_kairos_retest_zone(m5,refined,max(structure_confirm_ts,rz_ts),tf='5')
@@ -2706,7 +2708,7 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
             resultado['zone_type']=refined.get('tipo',resultado['zone_type'])
             resultado['zone_top']=round(refined['top'],6); resultado['zone_bottom']=round(refined['bottom'],6)
             resultado['zone_source']=f"{refined.get('tipo','POI')}_M5_REFINO_DENTRO_M15"
-    if retest is None:
+    if retest is None and not refined:
         retest=_kairos_retest_zone(exec_candles,zone,after_ts,tf='15')
     # Freeze the prospective execution level BEFORE the retest, independent of SL.
     preview_zone=refined or zone
@@ -3080,16 +3082,7 @@ def _kairos_apply_entry_phase(state, result, cutoff_ts, start_ts, events):
         result['valid']=False
     parent=setup.get('parent_retest')
     if parent and parent['t']+900000<=cutoff_ts:
-        closed=parent['t']+900000
-        result['retest_open_ts']=parent['t']
-        result['retest_confirm_close_ts']=closed
-        result['observed_retest_close']=parent.get('c')
-        rec['touched']=True
-        rec['cancelled_reason']='PARENT_M15_RETEST_ALREADY_OBSERVED'
-        if parent['t']<start_ts:
-            suppress('ENTRY_BEFORE_REPLAY_WINDOW')
-        elif closed<cutoff_ts:
-            suppress('ENTRY_ALREADY_OBSERVED')
+        suppress('M15_RETEST_NOT_M5_EXECUTION')
         return
     if retest:
         duration=300000 if setup['tf']=='M5' else 900000
@@ -3112,6 +3105,7 @@ def _kairos_apply_entry_phase(state, result, cutoff_ts, start_ts, events):
                        'retest_open_ts':opened,'observed_close':retest.get('c'),
                        'armed_before_retest':rec['armed'],
                        'note':'Historical retest level; observed close is separate. No fill assumed.'})
+        result['entry_observation_confirmed']=bool(result.get('entry_audit_only') and setup['tf']=='M5')
         return
     if rec['touched'] or rec['armed']:
         return
@@ -3188,7 +3182,8 @@ def _kairos_scan_latest_closed(pair, observed_ts, phase_state):
         return {'erro':'STALE_CLOSED_CANDLES','stale_tfs':stale,'validacao_dados':validation}
     r=avaliar_vortex_decision_layer_v2(
         tf_map['M15'],tf_map['M5'],tf_map['D1'],candles_por_tf=tf_map,
-        audit_pair=pair,experimental_poi_policy='A_CURRENT',experimental_poi_state={},cutoff_ts=cutoff)
+        audit_pair=pair,experimental_poi_policy='A_CURRENT',experimental_poi_state={},cutoff_ts=cutoff,
+        audit_entries_only=True)
     events=[]
     _kairos_apply_entry_phase(phase_state,r,cutoff,cutoff-900000,events)
     setup=r.get('entry_setup') or {}
@@ -3201,7 +3196,7 @@ def _kairos_scan_latest_closed(pair, observed_ts, phase_state):
             rec['armed_event']=dict(event)
     if pending and rec.get('armed_event') and not any(e['phase']=='ARMED' for e in events):
         events.append(dict(rec['armed_event']))
-    if r.get('valid') and rec:
+    if r.get('entry_observation_confirmed') and rec:
         rec['signal_snapshot']=dict(r)
     signals=[value['signal_snapshot'] for value in phase_state.values() if value.get('signal_snapshot')]
     return {'pair':pair,'scan_mode':'LATEST_CLOSED_SNAPSHOT','evaluations':1,

@@ -19,7 +19,7 @@ INTERVALO_MS_POR_LABEL = {'M': 2592000000, 'W': 604800000, 'D': 86400000, '240':
 
 def _extrair_swings_lux_algo(candles, swing_size=50):
     n = len(candles)
-    if n < swing_size + 5:
+    if n < swing_size + 1:
         return []
 
     legs = [0] * n
@@ -37,7 +37,7 @@ def _extrair_swings_lux_algo(candles, swing_size=50):
         legs[i] = current_leg
 
     swings = []
-    for i in range(swing_size + 1, n):
+    for i in range(swing_size, n):
         if legs[i] == legs[i - 1]:
             continue
         idx_pivot = i - swing_size
@@ -60,7 +60,7 @@ def compute_lux_structure_events(candles, swing_size=50):
     'nivel': float, 't': timestamp, 'index': int}
     """
     n = len(candles)
-    if n < swing_size + 5:
+    if n < swing_size + 1:
         return []
 
     legs = [0] * n
@@ -96,7 +96,7 @@ def compute_lux_structure_events(candles, swing_size=50):
     latest_high_origin_ts = None
     latest_low_origin_ts = None
 
-    for i in range(swing_size + 1, n):
+    for i in range(swing_size, n):
         if legs[i] != legs[i - 1]:
             idx_pivot = i - swing_size
             if idx_pivot < 0:
@@ -1528,7 +1528,7 @@ def _kairos_lux50_structural_levels(candles, tf, now_ts):
     if interval is None:
         return []
     cs = _kairos_candles_fechados_ate(candles, interval, now_ts)
-    if len(cs) < KAIROS_STRUCTURAL_SWING_SIZE + 5:
+    if len(cs) < KAIROS_STRUCTURAL_SWING_SIZE + 1:
         return []
     swings = _extrair_swings_lux_algo(cs, swing_size=KAIROS_STRUCTURAL_SWING_SIZE)
     by_ts = {c['t']: i for i, c in enumerate(cs)}
@@ -2561,7 +2561,7 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
     for _tf in ('W1','D1','H4','H1'):
         _cs=candles_por_tf.get(_tf) or []
         _size=50
-        if len(_cs) >= _size + 5:
+        if len(_cs) >= _size + 1:
             resultado['dealing_ranges'][_tf]=_kairos_lux_dealing_range(_cs,swing_size=_size,tf=_tf)
     resultado['mtf_summary']={tf:{
         'pivots':len(d.get('pivots',[])),'eq':len(d.get('equal_liquidity',[])),

@@ -826,36 +826,35 @@ def _kairos_liquidity_state(candles, tipo, nivel, confirm_ts):
     return 'ATIVA', None
 
 
-def _kairos_equal_liquidity_clusters(candles, pivots, atr):
-    """EQH/EQL em clusters confirmados de 2+ pivôs, sem score."""
-    if not atr:
-        return []
-    tol=0.1*atr
-    out=[]
-    for typ,name in (('high','EQH'),('low','EQL')):
-        pts=[p for p in pivots if p['tipo']==typ]
-        cluster=[]
-        for p in pts:
-            if not cluster:
-                cluster=[p]; continue
-            center=sum(x['nivel'] for x in cluster)/len(cluster)
-            if abs(p['nivel']-center) <= tol:
-                cluster.append(p)
-            else:
-                if len(cluster)>=2:
-                    nivel=sum(x['nivel'] for x in cluster)/len(cluster)
-                    cts=max(x['confirm_ts'] for x in cluster)
-                    state,swept_ts=_kairos_liquidity_state(candles,name,nivel,cts)
-                    out.append({'tipo':name,'nivel':nivel,'toques':len(cluster),'confirm_ts':cts,
-                                'origin_ts':min(x['origin_ts'] for x in cluster),'state':state,'swept_ts':swept_ts})
-                cluster=[p]
-        if len(cluster)>=2:
-            nivel=sum(x['nivel'] for x in cluster)/len(cluster)
-            cts=max(x['confirm_ts'] for x in cluster)
-            state,swept_ts=_kairos_liquidity_state(candles,name,nivel,cts)
-            out.append({'tipo':name,'nivel':nivel,'toques':len(cluster),'confirm_ts':cts,
-                        'origin_ts':min(x['origin_ts'] for x in cluster),'state':state,'swept_ts':swept_ts})
-    out.sort(key=lambda x:x['confirm_ts'])
+def _kairos_lux_equal_levels(candles, size=3, threshold=0.1):
+    """Literal LuxAlgo EQH/EQL formation: leg(size), previous same-side pivot,
+    strict threshold * native ATR(200) at confirmation, latest pivot price.
+    confirm_ts is the native bar OPEN; registry eligibility uses its CLOSE.
+    Captured/active is Kairos operational bookkeeping, not a Lux drawing state.
+    """
+    out=[]; leg=0; previous={'high':None,'low':None}; trs=[]; atr=None
+    for i,c in enumerate(candles):
+        tr=c['h']-c['l'] if i==0 else max(c['h']-c['l'],abs(c['h']-candles[i-1]['c']),abs(c['l']-candles[i-1]['c']))
+        trs.append(tr)
+        if i==199: atr=sum(trs)/200.0
+        elif i>=200: atr=(199.0*atr+tr)/200.0
+        if i < size: continue
+        origin=i-size; pivot=candles[origin]; window=candles[origin+1:i+1]
+        new_leg=leg
+        if pivot['h'] > max(x['h'] for x in window): new_leg=0
+        elif pivot['l'] < min(x['l'] for x in window): new_leg=1
+        if new_leg != leg:
+            side='low' if new_leg==1 else 'high'; typ='EQL' if new_leg==1 else 'EQH'
+            level=pivot['l' if side=='low' else 'h']; old=previous[side]
+            if old is not None and atr is not None and abs(old['level']-level) < threshold*atr:
+                state,swept_ts=_kairos_liquidity_state(candles,typ,level,c['t'])
+                out.append({'tipo':typ,'nivel':level,'toques':2,'confirm_ts':c['t'],
+                            'confirm_idx':i,'origin_ts':old['t'],'pivot_origin_ts':pivot['t'],
+                            'previous_level':old['level'],'atr_at_confirmation':atr,
+                            'tolerance':threshold*atr,'confirmation_bars':size,
+                            'state':state,'swept_ts':swept_ts,'source':'LUX_EQ'})
+            previous[side]={'level':level,'t':pivot['t']}
+        leg=new_leg
     return out
 
 
@@ -864,12 +863,12 @@ def _kairos_liquidity_pools(candles, pivots=None, atr=None, min_touches=2):
     """Pools operacionais de liquidez, não pivôs isolados.
 
     Um pool nasce quando 2+ pivôs CONFIRMADOS do mesmo lado ficam na mesma
-    faixa de preço (tolerância = 0.10 * ATR200, matemática coerente com EQH/EQL
-    do Lux SMC já usado no projeto). O pool guarda uma ZONA [bottom, top],
+    faixa de preço (tolerância = 0.10 * ATR200). Esta extensão de clusters
+    não é o detector EQH/EQL Lux de 3 barras. O pool guarda uma ZONA [bottom, top],
     número de toques, timestamps de origem/confirmação e estado causal.
 
-    BUY_SIDE  = cluster de highs / EQH.
-    SELL_SIDE = cluster de lows  / EQL.
+    BUY_SIDE  = cluster de highs.
+    SELL_SIDE = cluster de lows.
     """
     if not candles:
         return []
@@ -882,7 +881,7 @@ def _kairos_liquidity_pools(candles, pivots=None, atr=None, min_touches=2):
         return []
     tol=0.10*atr
     pools=[]
-    for typ,side,label in (('high','BUY_SIDE','EQH'),('low','SELL_SIDE','EQL')):
+    for typ,side,label in (('high','BUY_SIDE','POOL_HIGH'),('low','SELL_SIDE','POOL_LOW')):
         pts=sorted([p for p in pivots if p.get('tipo')==typ], key=lambda x:x['confirm_ts'])
         clusters=[]
         for p in pts:
@@ -1023,7 +1022,7 @@ def _kairos_liquidity_map_tf(candles, tf):
         q=dict(p)
         q['state'],q['swept_ts']=_kairos_liquidity_state(candles,p['tipo'],p['nivel'],p['confirm_ts'])
         enriched.append(q)
-    eq=_kairos_equal_liquidity_clusters(candles,enriched,atr)
+    eq=_kairos_lux_equal_levels(candles)
     fvg=_kairos_fvg_states(candles)
     obs=_kairos_order_blocks_map(candles)
     pools=_kairos_liquidity_pools(candles,pivots=enriched,atr=atr,min_touches=2)
@@ -1600,11 +1599,13 @@ def _kairos_structural_registry(candles_por_tf, now_ts):
     for tf in KAIROS_STRUCTURAL_LIQUIDITY_TFS:
         cs=[c for c in (candles_por_tf.get(tf) or []) if c.get('t') is not None and c['t'] <= now_ts]
         levels.extend(_kairos_lux50_structural_levels(cs, tf, now_ts))
-        # EQH/EQL são classe própria de liquidez. Mantemos o detector causal existente.
+        # EQH/EQL follow Lux formation; availability begins at the native confirmation CLOSE.
         if cs:
-            data=_kairos_liquidity_map_tf(cs, tf)
+            interval={'MN':'M','W1':'W','D1':'D','H4':'240','H1':'60','M30':'30','M15':'15','M5':'5','M1':'1'}[tf]
+            closed=_kairos_candles_fechados_ate(cs,interval,now_ts)
+            data=_kairos_liquidity_map_tf(closed, tf)
             for eq in data.get('equal_liquidity', []):
-                level=eq.get('nivel'); cts=eq.get('confirm_ts')
+                level=eq.get('nivel'); cts=_kairos_candle_close_ts(eq.get('confirm_ts'),interval)
                 if level is None or cts is None or cts > now_ts:
                     continue
                 levels.append({
@@ -1970,7 +1971,7 @@ def _kairos_build_structural_liquidity_telemetry(candles_por_tf, now_ts, signal_
         if rec:
             structural.append({'tf': tf, 'type': typ, 'level': rec['level'], 'origin_ts': rec['period_open_ts'], 'confirmed_ts': rec['confirmed_ts'], 'state': 'ACTIVE', 'captured_ts': None})
 
-    # EQH/EQL/pools 20/20 atuais ficam como camada COMPLEMENTAR, somente HTF/M15.
+    # Lux EQH/EQL and separate 20/20 cluster pools are complementary HTF/M15 layers.
     equal_liquidity = []
     liquidity_pools = []
     for tf in KAIROS_STRUCTURAL_LIQUIDITY_TFS:

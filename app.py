@@ -10,6 +10,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import base64
 import io
+import json
 from datetime import datetime, timezone
 from PIL import Image, ImageDraw, ImageFont
 
@@ -1979,6 +1980,43 @@ def _kairos_format_entry_observation(pair, signal):
     )
 
 
+def _kairos_replay_failure_audit(pair, cycle_started_ms, replay_result, watermark_prev, error_text):
+    """Read-only replay telemetry. Does not alter the replay/causal decision path."""
+    r = replay_result if isinstance(replay_result, dict) else {}
+    reasons = r.get('distribuicao_motivos_todos_ciclos') or {}
+    excecoes = {str(k): int(v) for k, v in reasons.items()
+                if str(k).startswith('EXCECAO:') and v}
+    if r.get('erro'):
+        why_code = f"REPLAY_ERROR:{r.get('erro')}"
+    elif excecoes:
+        why_code = max(excecoes.items(), key=lambda item: item[1])[0]
+    elif not isinstance(replay_result, dict):
+        why_code = 'REPLAY_NON_DICT_RESULT'
+    else:
+        why_code = 'REPLAY_FAILED_UNKNOWN'
+    validation = r.get('validacao_dados') or {}
+    m15_validation = validation.get('M15')
+    radar = r.get('radar_captures') or []
+    radar0 = radar[0] if isinstance(radar, list) and radar else {}
+    payload = {
+        'event': 'REPLAY_FAILED_WATERMARK',
+        'pair': pair,
+        'timestamp_ms': int(cycle_started_ms),
+        'cutoff_ts': r.get('cutoff_ts'),
+        'why_code': why_code,
+        'error': str(error_text),
+        'level_type': radar0.get('liquidity_type') or radar0.get('level_type'),
+        'capture_confirm_ts': radar0.get('capture_confirm_ts') or radar0.get('first_capture_ts'),
+        'capture_evidence_tf': radar0.get('capture_evidence_tf') or radar0.get('capture_tf'),
+        'm15_coverage_reason': m15_validation,
+        'failure_reason_counts': reasons,
+        'stale_tfs': r.get('stale_tfs'),
+        'watermark_prev': watermark_prev,
+        'watermark_new': watermark_prev,
+    }
+    print(f"[KAIROS_LIVE] REPLAY_FAILED_AUDIT {json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}", flush=True)
+
+
 def _kairos_live_scanner_loop():
     while True:
         cycle_started_ms = int(time.time() * 1000)
@@ -1988,11 +2026,16 @@ def _kairos_live_scanner_loop():
             for job in as_completed(jobs):
                 pair=jobs[job]
                 try:
+                    watermark_prev = _KAIROS_LIVE_LAST_TS[pair]
                     r = job.result()
                     sinais = r.get('sinais_unicos_completos', []) if isinstance(r, dict) else []
                     if not isinstance(r, dict) or r.get('erro'):
+                        _kairos_replay_failure_audit(pair, cycle_started_ms, r, watermark_prev,
+                                                      'Replay failed; preserving delivery watermark')
                         raise RuntimeError('Replay failed; preserving delivery watermark')
                     if any(str(k).startswith('EXCECAO:') and count for k, count in (r.get('distribuicao_motivos_todos_ciclos') or {}).items()):
+                        _kairos_replay_failure_audit(pair, cycle_started_ms, r, watermark_prev,
+                                                      'Replay has failed evaluations; preserving delivery watermark')
                         raise RuntimeError('Replay has failed evaluations; preserving delivery watermark')
                     delivered = _kairos_send_capture_events(pair, r, cycle_started_ms)
                     delivered = _kairos_send_setup_events(pair, r, cycle_started_ms) and delivered

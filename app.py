@@ -1855,12 +1855,10 @@ else:
 # EXPERIMENTAL 13-PAIR A_CURRENT LIVE SCANNER — demo/manual execution only.
 # Same closed-candle causal replay/decision layer used for BTC; no trading math changed.
 # Per-pair watermark + structural dedup prevent one pair from suppressing another.
-_KAIROS_DEFAULT_LIVE_PAIRS = (
+_KAIROS_LIVE_PAIRS = (
     'BTCUSD', 'ETHUSD', 'SOLUSD', 'XRPUSD', 'LINKUSD', 'ADAUSD', 'AVAXUSD',
     'BNBUSD', 'AAVEUSD', 'NEARUSD', 'PENDLEUSD', 'INJUSD', 'ONDOUSD',
 )
-_kairos_pairs_raw = os.environ.get('PAIRS', ','.join(_KAIROS_DEFAULT_LIVE_PAIRS))
-_KAIROS_LIVE_PAIRS = tuple(p.strip().upper() for p in _kairos_pairs_raw.split(',') if p.strip()) or _KAIROS_DEFAULT_LIVE_PAIRS
 _KAIROS_LIVE_STARTED_TS = int(time.time() * 1000)
 _KAIROS_LIVE_LAST_TS = {pair: _KAIROS_LIVE_STARTED_TS for pair in _KAIROS_LIVE_PAIRS}
 _KAIROS_LIVE_SEEN = {pair: set() for pair in _KAIROS_LIVE_PAIRS}

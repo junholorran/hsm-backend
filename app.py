@@ -1855,15 +1855,24 @@ else:
 # EXPERIMENTAL 13-PAIR A_CURRENT LIVE SCANNER — demo/manual execution only.
 # Same closed-candle causal replay/decision layer used for BTC; no trading math changed.
 # Per-pair watermark + structural dedup prevent one pair from suppressing another.
-_KAIROS_LIVE_PAIRS = (
+_KAIROS_DEFAULT_LIVE_PAIRS = (
     'BTCUSD', 'ETHUSD', 'SOLUSD', 'XRPUSD', 'LINKUSD', 'ADAUSD', 'AVAXUSD',
     'BNBUSD', 'AAVEUSD', 'NEARUSD', 'PENDLEUSD', 'INJUSD', 'ONDOUSD',
 )
+_kairos_pairs_raw = os.environ.get('PAIRS', ','.join(_KAIROS_DEFAULT_LIVE_PAIRS))
+_KAIROS_LIVE_PAIRS = tuple(p.strip().upper() for p in _kairos_pairs_raw.split(',') if p.strip()) or _KAIROS_DEFAULT_LIVE_PAIRS
 _KAIROS_LIVE_STARTED_TS = int(time.time() * 1000)
 _KAIROS_LIVE_LAST_TS = {pair: _KAIROS_LIVE_STARTED_TS for pair in _KAIROS_LIVE_PAIRS}
 _KAIROS_LIVE_SEEN = {pair: set() for pair in _KAIROS_LIVE_PAIRS}
 _KAIROS_RADAR_SEEN = {pair: set() for pair in _KAIROS_LIVE_PAIRS}
-_KAIROS_LIVE_INTERVAL_SECONDS = 60
+try:
+    _KAIROS_LIVE_INTERVAL_SECONDS = max(1, int(os.environ.get('SCANNER_INTERVAL', '60')))
+except (TypeError, ValueError):
+    _KAIROS_LIVE_INTERVAL_SECONDS = 60
+try:
+    _KAIROS_LIVE_WORKERS = max(1, int(os.environ.get('WORKERS', '3')))
+except (TypeError, ValueError):
+    _KAIROS_LIVE_WORKERS = 3
 _KAIROS_LIVE_PHASE_STATE={pair:{} for pair in _KAIROS_LIVE_PAIRS}
 
 def _kairos_send_capture_events(pair, result, cutoff):
@@ -1975,7 +1984,7 @@ def _kairos_format_entry_observation(pair, signal):
 def _kairos_live_scanner_loop():
     while True:
         cycle_started_ms = int(time.time() * 1000)
-        with ThreadPoolExecutor(max_workers=3) as pool:
+        with ThreadPoolExecutor(max_workers=_KAIROS_LIVE_WORKERS) as pool:
             jobs={pool.submit(scalp_engine._kairos_scan_latest_closed,pair,cycle_started_ms,
                               _KAIROS_LIVE_PHASE_STATE[pair]):pair for pair in _KAIROS_LIVE_PAIRS}
             for job in as_completed(jobs):
@@ -2023,9 +2032,9 @@ def _kairos_live_scanner_loop():
                     print(f"[KAIROS_LIVE] scan error pair={pair}: {e}", flush=True)
         time.sleep(max(0.1,_KAIROS_LIVE_INTERVAL_SECONDS-(time.time()-cycle_started_ms/1000)))
 
-if os.environ.get('RAILWAY_SERVICE_NAME') == 'kairos-poi-abc-sol':
+if os.environ.get('RAILWAY_SERVICE_NAME') == 'kairos-poi-abc-sol' and os.environ.get('SCANNER_ENABLED', 'true').strip().lower() == 'true':
     threading.Thread(target=_kairos_live_scanner_loop, daemon=True).start()
-    print(f"[KAIROS_LIVE] scanner ENABLED pairs={len(_KAIROS_LIVE_PAIRS)} A_CURRENT latest-closed snapshot target interval=60s workers=3 demo/manual entry-only M5 no-management persistent-setup-dedup", flush=True)
+    print(f"[KAIROS_LIVE] scanner ENABLED pairs={len(_KAIROS_LIVE_PAIRS)} A_CURRENT latest-closed snapshot target interval={_KAIROS_LIVE_INTERVAL_SECONDS}s workers={_KAIROS_LIVE_WORKERS} demo/manual entry-only M5 no-management persistent-setup-dedup", flush=True)
 
 
 # EXPERIMENTAL BRANCH ONLY — POI lifecycle A/B/C replay. Read-only, no DB/Telegram.

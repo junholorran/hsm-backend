@@ -8,7 +8,6 @@
     "preDeployCommand": [
       "PYTHONPATH=deps python -m pytest -q --ignore=legacy-mute"
     ],
-    "startCommand": "python -m app",
     "healthcheckPath": "/",
     "restartPolicyType": "ON_FAILURE"
   }

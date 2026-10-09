@@ -3415,8 +3415,18 @@ def _kairos_scan_latest_closed(pair, observed_ts, phase_state):
     specs={'MN':('M',3650),'W1':('W',901),'D1':('D',261),'H4':('240',121),
            'H1':('60',36),'M30':('30',19),'M15':('15',10),'M5':('5',5),'M1':('1',2)}
     tf_map={}; validation={}; fetch_audit={tf:[] for tf in specs}
+    try:
+        import inspect
+        fetch_params = inspect.signature(_fetch_bybit_klines_historico).parameters
+        fetch_supports_audit = ('audit_metrics' in fetch_params or
+                                any(p.kind == inspect.Parameter.VAR_KEYWORD for p in fetch_params.values()))
+    except (TypeError, ValueError):
+        fetch_supports_audit = False
     for tf,(iv,days) in specs.items():
-        raw=_fetch_bybit_klines_historico(symbol,iv,days,fim_ts_ms=cutoff,audit_metrics=fetch_audit[tf])
+        if fetch_supports_audit:
+            raw=_fetch_bybit_klines_historico(symbol,iv,days,fim_ts_ms=cutoff,audit_metrics=fetch_audit[tf])
+        else:
+            raw=_fetch_bybit_klines_historico(symbol,iv,days,fim_ts_ms=cutoff)
         clean,validation[tf]=_validar_e_limpar_candles(raw,iv)
         tf_map[tf]=_kairos_candles_fechados_ate(clean,iv,cutoff)
     candles_audit = {

@@ -347,7 +347,7 @@ def _validar_e_limpar_candles(candles_brutos, interval_label):
 
 
 
-def _fetch_bybit_klines_historico(symbol, interval, dias_historico, fim_ts_ms=None):
+def _fetch_bybit_klines_historico(symbol, interval, dias_historico, fim_ts_ms=None, audit_metrics=None):
     """
     Busca candles históricos direto da Bybit V5, com paginação (a API
     limita a 1000 candles por request). Só usado pelo replay — nunca
@@ -369,12 +369,39 @@ def _fetch_bybit_klines_historico(symbol, interval, dias_historico, fim_ts_ms=No
         url = f'https://api.bybit.com/v5/market/kline?category=linear&symbol={symbol}&interval={interval}&limit=1000'
         if end_ts:
             url += f'&end={end_ts}'
+        request_started_ms = int(time.time() * 1000)
+        resp = None
         try:
             resp = requests.get(url, timeout=10)
+            http_status = resp.status_code
             resp.raise_for_status()
             data = resp.json()
             lista = data.get('result', {}).get('list', [])
+            if audit_metrics is not None:
+                audit_metrics.append({
+                    'request_started_ms': request_started_ms,
+                    'request_finished_ms': int(time.time() * 1000),
+                    'latency_ms': int(time.time() * 1000) - request_started_ms,
+                    'http_status': http_status,
+                    'retCode': data.get('retCode') if isinstance(data, dict) else None,
+                    'retMsg': data.get('retMsg') if isinstance(data, dict) else None,
+                    'candles_returned': len(lista),
+                    'page': len(audit_metrics) + 1,
+                    'error': None,
+                })
         except Exception as e:
+            if audit_metrics is not None:
+                audit_metrics.append({
+                    'request_started_ms': request_started_ms,
+                    'request_finished_ms': int(time.time() * 1000),
+                    'latency_ms': int(time.time() * 1000) - request_started_ms,
+                    'http_status': getattr(resp, 'status_code', None),
+                    'retCode': None,
+                    'retMsg': None,
+                    'candles_returned': 0,
+                    'page': len(audit_metrics) + 1,
+                    'error': f"{type(e).__name__}: {e}",
+                })
             print(f"[replay] erro ao buscar candles de {symbol} ({interval}): {e}")
             break
         if not lista:
@@ -3387,16 +3414,56 @@ def _kairos_scan_latest_closed(pair, observed_ts, phase_state):
     symbol=pair.upper().replace('USD','USDT')
     specs={'MN':('M',3650),'W1':('W',901),'D1':('D',261),'H4':('240',121),
            'H1':('60',36),'M30':('30',19),'M15':('15',10),'M5':('5',5),'M1':('1',2)}
-    tf_map={}; validation={}
+    tf_map={}; validation={}; fetch_audit={tf:[] for tf in specs}
     for tf,(iv,days) in specs.items():
-        raw=_fetch_bybit_klines_historico(symbol,iv,days,fim_ts_ms=cutoff)
+        raw=_fetch_bybit_klines_historico(symbol,iv,days,fim_ts_ms=cutoff,audit_metrics=fetch_audit[tf])
         clean,validation[tf]=_validar_e_limpar_candles(raw,iv)
         tf_map[tf]=_kairos_candles_fechados_ate(clean,iv,cutoff)
+    candles_audit = {
+        tf: {
+            'candles_brutos': validation[tf].get('candles_brutos', 0),
+            'candles_finais_apos_validacao': validation[tf].get('candles_finais', 0),
+            'candles_fechados_ate_cutoff': len(tf_map[tf]),
+            'candles_em_formacao_removidos': validation[tf].get('candle_em_formacao_removido', False),
+            'duplicados_removidos': validation[tf].get('duplicados_removidos', 0),
+            'timestamps_validos': validation[tf].get('timestamps_validos'),
+            'gaps': (validation[tf].get('gaps') or {}).get('numero_de_gaps'),
+        } for tf in specs
+    }
+    base_audit = {
+        'cutoff_ts': cutoff,
+        'validacao_dados': validation,
+        'candles_por_tf_audit': candles_audit,
+        'fetch_audit_por_tf': fetch_audit,
+    }
     if len(tf_map['M15'])<40 or len(tf_map['M5'])<80:
-        return {'erro':'INSUFFICIENT_CLOSED_CANDLES','validacao_dados':validation}
+        deficits = {
+            'M15': max(0, 40 - len(tf_map['M15'])),
+            'M5': max(0, 80 - len(tf_map['M5'])),
+        }
+        failing = {tf: 'INSUFFICIENT_CLOSED_CANDLES' for tf, deficit in deficits.items() if deficit > 0}
+        return {
+            **base_audit,
+            'erro': 'INSUFFICIENT_CLOSED_CANDLES',
+            'failure_reason_counts': {tf: 1 for tf in failing},
+            'failure_reason_by_tf': failing,
+            'candles_deficit_by_tf': {tf: deficits[tf] for tf in failing},
+        }
     stale=_kairos_snapshot_freshness(tf_map,cutoff)
     if stale:
-        return {'erro':'STALE_CLOSED_CANDLES','stale_tfs':stale,'validacao_dados':validation}
+        failure_by_tf = {
+            tf: ('NO_CLOSED_CANDLES' if reason == 'NO_CLOSED_CANDLES'
+                 else 'STALE_CLOSED_CANDLES')
+            for tf, reason in stale.items()
+        }
+        return {
+            **base_audit,
+            'erro': 'STALE_CLOSED_CANDLES',
+            'stale_tfs': stale,
+            'failure_reason_counts': {tf: 1 for tf in failure_by_tf},
+            'failure_reason_by_tf': failure_by_tf,
+            'candles_deficit_by_tf': {},
+        }
     r=avaliar_vortex_decision_layer_v2(
         tf_map['M15'],tf_map['M5'],tf_map['D1'],candles_por_tf=tf_map,
         audit_pair=pair,experimental_poi_policy='A_CURRENT',experimental_poi_state={},cutoff_ts=cutoff,

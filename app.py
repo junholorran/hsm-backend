@@ -1995,22 +1995,39 @@ def _kairos_replay_failure_audit(pair, cycle_started_ms, replay_result, watermar
     else:
         why_code = 'REPLAY_FAILED_UNKNOWN'
     validation = r.get('validacao_dados') or {}
-    m15_validation = validation.get('M15')
+    stale_tfs = r.get('stale_tfs') or {}
+    failure_counts = r.get('failure_reason_counts') or {}
+    if not failure_counts and stale_tfs:
+        failure_counts = {str(tf): 1 for tf in stale_tfs}
+    if not failure_counts and r.get('erro') == 'INSUFFICIENT_CLOSED_CANDLES':
+        failure_counts = {tf: 1 for tf in ('M15', 'M5')
+                          if (r.get('candles_por_tf_audit') or {}).get(tf, {}).get('candles_fechados_ate_cutoff', 0)
+                          < {'M15': 40, 'M5': 80}[tf]}
+    if not failure_counts:
+        failure_counts = reasons
     radar = r.get('radar_captures') or []
     radar0 = radar[0] if isinstance(radar, list) and radar else {}
     payload = {
         'event': 'REPLAY_FAILED_WATERMARK',
         'pair': pair,
         'timestamp_ms': int(cycle_started_ms),
+        'event_logged_ts_ms': int(time.time() * 1000),
+        'cycle_started_ms': int(cycle_started_ms),
         'cutoff_ts': r.get('cutoff_ts'),
+        'cutoff_ts_source': 'replay_result' if r.get('cutoff_ts') is not None else 'missing_from_replay_result',
         'why_code': why_code,
         'error': str(error_text),
         'level_type': radar0.get('liquidity_type') or radar0.get('level_type'),
         'capture_confirm_ts': radar0.get('capture_confirm_ts') or radar0.get('first_capture_ts'),
         'capture_evidence_tf': radar0.get('capture_evidence_tf') or radar0.get('capture_tf'),
-        'm15_coverage_reason': m15_validation,
-        'failure_reason_counts': reasons,
-        'stale_tfs': r.get('stale_tfs'),
+        'm15_coverage_reason': validation.get('M15'),
+        'validacao_dados_por_tf': validation,
+        'candles_por_tf_audit': r.get('candles_por_tf_audit') or {},
+        'fetch_audit_por_tf': r.get('fetch_audit_por_tf') or {},
+        'failure_reason_counts': failure_counts,
+        'failure_reason_by_tf': r.get('failure_reason_by_tf') or {},
+        'candles_deficit_by_tf': r.get('candles_deficit_by_tf') or {},
+        'stale_tfs': stale_tfs,
         'watermark_prev': watermark_prev,
         'watermark_new': watermark_prev,
     }

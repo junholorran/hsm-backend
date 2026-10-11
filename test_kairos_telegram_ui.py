@@ -1,10 +1,12 @@
 import unittest
+from pathlib import Path
 
 from kairos_telegram_ui import (
     format_capture_message,
     format_setup_message,
     format_retest_message,
 )
+from patch_kairos_telegram_ui import patch_app_source
 
 
 class KairosTelegramUiTests(unittest.TestCase):
@@ -74,6 +76,18 @@ class KairosTelegramUiTests(unittest.TestCase):
         self.assertIn('Fecho observado: 2.205', msg)
         self.assertIn('Portugal', msg)
         self.assertIn('preenchimento não comprovado', msg.lower())
+
+    def test_build_patch_wires_only_message_formatting_and_compiles(self):
+        original = Path('app.py').read_text(encoding='utf-8')
+        patched = patch_app_source(original)
+        compile(patched, 'app.py', 'exec')
+        self.assertIn('from kairos_telegram_ui import', patched)
+        self.assertIn('msg = format_capture_message(pair, event)', patched)
+        self.assertIn('msg=format_setup_message(pair,event)', patched)
+        self.assertIn('return format_retest_message(pair, signal)', patched)
+        self.assertIn('jobs={pool.submit(scalp_engine._kairos_scan_latest_closed', patched)
+        self.assertIn('delivered = _kairos_send_capture_events(pair, r, cycle_started_ms)', patched)
+        self.assertIn('delivered = _kairos_send_setup_events(pair, r, cycle_started_ms) and delivered', patched)
 
 
 if __name__ == '__main__':

@@ -5,7 +5,7 @@ from test_radar_regression import load_functions
 class LiveSnapshotTests(unittest.TestCase):
     def ns(self,evaluate,stale=False):
         cutoff=1790895600001
-        def fetch(symbol,iv,days,fim_ts_ms):
+        def fetch(symbol,iv,days,fim_ts_ms,**kwargs):
             duration={'5':300000,'15':900000,'1':60000,'30':1800000,'60':3600000,'240':14400000,'D':86400000,'W':604800000}.get(iv)
             if duration:
                 end=cutoff//duration

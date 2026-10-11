@@ -55,7 +55,7 @@ def patch_app_source(source):
     )
     setup_block = source[setup_start:setup_end]
     if 'msg=format_setup_message(pair,event)' not in setup_block:
-        msg_start = setup_block.find('        msg=(\n')
+        msg_start = setup_block.find('        msg=(')
         deliver_anchor = setup_block.find('        if _kairos_deliver_setup_once(pair,event,msg):', msg_start)
         if msg_start < 0 or deliver_anchor < 0:
             raise RuntimeError('Setup message block anchor missing')

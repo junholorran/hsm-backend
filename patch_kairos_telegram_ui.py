@@ -1,13 +1,6 @@
 from pathlib import Path
 
 
-IMPORT_LINE = (
-    "from kairos_telegram_ui import (\n"
-    "    format_capture_message, format_setup_message, format_retest_message,\n"
-    ")\n"
-)
-
-
 def _function_slice(source, name, next_name):
     start_marker = f"def {name}("
     end_marker = f"def {next_name}("
@@ -28,12 +21,6 @@ def patch_app_source(source):
     if scanner_start >= 0 and scanner_end > scanner_start:
         original_scanner = source[scanner_start:scanner_end]
 
-    if IMPORT_LINE not in source:
-        anchor = 'import scalp_engine\n'
-        if source.count(anchor) != 1:
-            raise RuntimeError('Expected exactly one scalp_engine import anchor')
-        source = source.replace(anchor, anchor + IMPORT_LINE, 1)
-
     capture_start, capture_end = _function_slice(
         source, '_kairos_send_capture_events', '_kairos_deliver_setup_once'
     )
@@ -45,6 +32,7 @@ def patch_app_source(source):
             raise RuntimeError('Capture message block anchor missing')
         capture_block = (
             capture_block[:msg_start]
+            + '        from kairos_telegram_ui import format_capture_message\n'
             + '        msg = format_capture_message(pair, event)\n'
             + capture_block[send_anchor:]
         )
@@ -61,6 +49,7 @@ def patch_app_source(source):
             raise RuntimeError('Setup message block anchor missing')
         setup_block = (
             setup_block[:msg_start]
+            + '        from kairos_telegram_ui import format_setup_message\n'
             + '        msg=format_setup_message(pair,event)\n'
             + setup_block[deliver_anchor:]
         )
@@ -73,7 +62,9 @@ def patch_app_source(source):
     if 'return format_retest_message(pair, signal)' not in obs_block:
         replacement = (
             'def _kairos_format_entry_observation(pair, signal):\n'
-            '    """Presentation only; causal/retest state remains owned by scalp_engine."""\n'
+            "    if not signal.get('entry_audit_only') or signal.get('entry_tf') != 'M5':\n"
+            '        return None\n'
+            '    from kairos_telegram_ui import format_retest_message\n'
             '    return format_retest_message(pair, signal)\n\n\n'
         )
         source = source[:obs_start] + replacement + source[obs_end:]
@@ -86,7 +77,9 @@ def patch_app_source(source):
 
     compile(source, 'app.py', 'exec')
     required = (
+        'from kairos_telegram_ui import format_capture_message',
         'msg = format_capture_message(pair, event)',
+        'from kairos_telegram_ui import format_setup_message',
         'msg=format_setup_message(pair,event)',
         'return format_retest_message(pair, signal)',
         'jobs={pool.submit(scalp_engine._kairos_scan_latest_closed',

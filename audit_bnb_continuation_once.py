@@ -7,8 +7,9 @@ CUTS = [1791729600000, 1791729900000]
 END_TS = 1791730200000
 
 print('[BNB_CONTINUATION_AUDIT] START', flush=True)
-m15 = s._fetch_bybit_klines_historico(PAIR, '15', 1, fim_ts_ms=END_TS)
-m5 = s._fetch_bybit_klines_historico(PAIR, '5', 1, fim_ts_ms=END_TS)
+# Match the causal history depth used by the replay/forward decision path.
+m15 = s._fetch_bybit_klines_historico(PAIR, '15', 10, fim_ts_ms=END_TS)
+m5 = s._fetch_bybit_klines_historico(PAIR, '5', 5, fim_ts_ms=END_TS)
 print('[BNB_CONTINUATION_DATA] ' + json.dumps({'m15': len(m15 or []), 'm5': len(m5 or []), 'authorization_ts': AUTH_TS}, default=str), flush=True)
 
 for cutoff in CUTS:

@@ -35,10 +35,23 @@ def _local_time(ts_ms):
         return dt.strftime('%d/%m/%Y %H:%M UTC')
 
 
+def _utc_time(ts_ms):
+    if not ts_ms:
+        return None
+    return datetime.fromtimestamp(ts_ms / 1000, timezone.utc).strftime('%d/%m/%Y %H:%M UTC')
+
+
 def _context_line(event):
     context = event.get('context') or {}
-    tfs = ['W1', 'D1', 'H4', 'H1'] if event.get('liquidity_tf') == 'MN' else ['D1', 'H4', 'H1']
-    return ' | '.join(f"{tf} {_arrow(context.get(tf))}" for tf in tfs)
+    if event.get('liquidity_tf') == 'MN':
+        return ' | '.join([
+            f"MN: {_arrow(context.get('MN'))}",
+            f"W1 {_arrow(context.get('W1'))}",
+            f"D1 {_arrow(context.get('D1'))}",
+            f"H4 {_arrow(context.get('H4'))}",
+            f"H1 {_arrow(context.get('H1'))}",
+        ])
+    return ' | '.join(f"{tf} {_arrow(context.get(tf))}" for tf in ('D1', 'H4', 'H1'))
 
 
 def format_capture_message(pair, event):
@@ -70,18 +83,21 @@ def format_capture_message(pair, event):
         else:
             next_step = 'Aguardar reação e confirmação M15 antes de qualquer cenário operacional.'
 
-    monthly_note = ('\n🟣 Mensal é contexto HTF; não autoriza entrada sozinho.'
+    monthly_note = ('\n🟣 É contexto mensal HTF; não autoriza entrada sozinho.'
                     if tf == 'MN' else '')
     waiting = ('aguardando reação / confirmação M15'
                if reaction == 'UNRESOLVED_REACTION' else
                'aguardando confirmação M15 / construção M5')
+    confirmed = _utc_time(event.get('timestamp'))
+    confirmed_line = f'\n🕐 <b>Confirmação: {confirmed}</b>' if confirmed else ''
 
     return (
         '🔎 <b>KAIROS | LIQUIDEZ CAPTURADA</b>\n'
         f'<b>{pair}</b>\n\n'
         f'💧 <b>{tf} {typ} @ {level}</b>\n'
         f'🗺 <b>Contexto: {_context_line(event)}</b>\n'
-        f'⚡ <b>Reação: {reaction_label}</b>\n\n'
+        f'⚡ <b>Reação: {reaction_label}</b>'
+        f'{confirmed_line}\n\n'
         '🧠 <b>LEITURA</b>\n'
         f'{reading}{monthly_note}\n\n'
         '👀 <b>O QUE ESPERAR</b>\n'

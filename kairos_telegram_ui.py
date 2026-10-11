@@ -80,13 +80,13 @@ def format_capture_message(pair, event):
         '🔎 <b>KAIROS | LIQUIDEZ CAPTURADA</b>\n'
         f'<b>{pair}</b>\n\n'
         f'💧 <b>{tf} {typ} @ {level}</b>\n'
-        f'🗺 <b>Contexto:</b> {_context_line(event)}\n'
-        f'⚡ <b>Reação:</b> {reaction_label}\n\n'
+        f'🗺 <b>Contexto: {_context_line(event)}</b>\n'
+        f'⚡ <b>Reação: {reaction_label}</b>\n\n'
         '🧠 <b>LEITURA</b>\n'
         f'{reading}{monthly_note}\n\n'
         '👀 <b>O QUE ESPERAR</b>\n'
         f'{next_step}\n\n'
-        f'⏳ <b>AGORA:</b> {waiting}.\n'
+        f'⏳ <b>AGORA: {waiting}.</b>\n'
         '<b>SEM TRADE · DEMO / MANUAL</b>'
     )
 
@@ -103,12 +103,12 @@ def format_setup_message(pair, event):
     return (
         '⏳ <b>KAIROS | SETUP M5 ARMADO</b>\n'
         f'{icon} <b>{pair} | {direction}</b>\n\n'
-        f"💧 <b>Origem:</b> {event.get('capture_tf')} @ {_price(event.get('capture_level'))}\n"
-        f'✅ <b>M15 Major:</b> {structural}\n'
-        f'✅ <b>M15 Internal:</b> {structural}\n'
+        f"💧 <b>Origem: {event.get('capture_tf')} @ {_price(event.get('capture_level'))}</b>\n"
+        f'✅ <b>M15 Major: {structural}</b>\n'
+        f'✅ <b>M15 Internal: {structural}</b>\n'
         f'✅ <b>{m5_line}</b>\n\n'
-        f"📦 <b>{event.get('zone_type')} M5:</b> {_price(event.get('bottom'))}–{_price(event.get('top'))}\n"
-        f"📍 <b>Proximal / entrada planeada:</b> {_price(event.get('level'))}\n\n"
+        f"📦 <b>{event.get('zone_type')} M5: {_price(event.get('bottom'))}–{_price(event.get('top'))}</b>\n"
+        f"📍 <b>Proximal / entrada planeada: {_price(event.get('level'))}</b>\n\n"
         '🧬 <b>CADEIA CAUSAL COMPLETA ✅</b>\n\n'
         '🧠 <b>LEITURA</b>\n'
         'Estrutura de execução formada. Não perseguir preço; aguardar retorno ao POI.\n\n'
@@ -123,10 +123,10 @@ def format_retest_message(pair, signal):
     return (
         '🎯 <b>KAIROS | RETESTE M5</b>\n'
         f'{icon} <b>{pair} | {direction}</b>\n\n'
-        f"📦 <b>POI M5 retestado:</b> {signal.get('zone_type')} "
-        f"[{_price(signal.get('zone_bottom'))}–{_price(signal.get('zone_top'))}]\n"
-        f"📍 <b>Proximal planeada:</b> {_price(signal.get('entry'))}\n"
-        f"👁 <b>Fecho observado:</b> {_price(signal.get('observed_retest_close'))}\n\n"
+        f"📦 <b>POI M5 retestado: {signal.get('zone_type')} "
+        f"[{_price(signal.get('zone_bottom'))}–{_price(signal.get('zone_top'))}]</b>\n"
+        f"📍 <b>Proximal planeada: {_price(signal.get('entry'))}</b>\n"
+        f"👁 <b>Fecho observado: {_price(signal.get('observed_retest_close'))}</b>\n\n"
         '🧬 <b>MESMO SETUP CAUSAL</b> — sem nova tese.\n'
         f"🕐 M15 confirmado: {_local_time(signal.get('m15_internal_confirmation_close_ts'))}\n"
         f"🕐 Reteste observado: {_local_time(signal.get('retest_confirm_close_ts'))}\n\n"

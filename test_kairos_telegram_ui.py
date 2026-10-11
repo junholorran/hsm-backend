@@ -57,7 +57,7 @@ class KairosTelegramUiTests(unittest.TestCase):
         self.assertIn('OB_bullish M5: 2.202–2.21', msg)
         self.assertIn('Proximal / entrada planeada: 2.21', msg)
         self.assertIn('CADEIA CAUSAL COMPLETA', msg)
-        self.assertIn('aguardar retorno ao POI', msg.lower())
+        self.assertIn('aguardar retorno ao poi', msg.lower())
         self.assertNotIn('preenchido', msg.lower())
 
     def test_retest_message_preserves_observation_not_fill_and_uses_portugal_time(self):

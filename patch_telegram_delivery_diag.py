@@ -25,7 +25,11 @@ def send_telegram(message):
         return text[:400].replace('\n', ' ')
 
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        print('[KAIROS_TELEGRAM_DIAG] send_failed reason=MISSING_CONFIG', flush=True)
+        print(
+            '[KAIROS_TELEGRAM_DIAG] send_failed reason=MISSING_CONFIG '
+            f'token_present={bool(TELEGRAM_TOKEN)} chat_present={bool(TELEGRAM_CHAT_ID)}',
+            flush=True,
+        )
         return False
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"

@@ -14,16 +14,16 @@ def patch_app_source(source):
         raise RuntimeError('send_telegram end anchor missing')
     replacement = r'''# KAIROS_TELEGRAM_DELIVERY_DIAG_V1
 
-def _telegram_safe_text(value):
-    """Redact configured Telegram credentials before diagnostic logging."""
-    text = str(value or '')
-    for secret in (TELEGRAM_TOKEN, TELEGRAM_CHAT_ID):
-        if secret:
-            text = text.replace(str(secret), '[REDACTED]')
-    return text[:400].replace('\n', ' ')
-
-
 def send_telegram(message):
+    # Keep diagnostics self-contained because regression tests extract this
+    # function in isolation from app.py.
+    def _telegram_safe_text(value):
+        text = str(value or '')
+        for secret in (TELEGRAM_TOKEN, TELEGRAM_CHAT_ID):
+            if secret:
+                text = text.replace(str(secret), '[REDACTED]')
+        return text[:400].replace('\n', ' ')
+
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         print('[KAIROS_TELEGRAM_DIAG] send_failed reason=MISSING_CONFIG', flush=True)
         return False

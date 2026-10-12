@@ -372,10 +372,8 @@ def _fetch_bybit_klines_historico(symbol, interval, dias_historico, fim_ts_ms=No
         request_started_ms = int(time.time() * 1000)
         resp = None
         try:
-            resp = requests.get(url, timeout=10)
-            http_status = resp.status_code
-            resp.raise_for_status()
-            data = resp.json()
+            from kairos_bybit_data import get_kline_json
+            data, http_status, transport = get_kline_json(url, requests.get, timeout=10)
             lista = data.get('result', {}).get('list', [])
             if audit_metrics is not None:
                 audit_metrics.append({
@@ -388,6 +386,7 @@ def _fetch_bybit_klines_historico(symbol, interval, dias_historico, fim_ts_ms=No
                     'candles_returned': len(lista),
                     'page': len(audit_metrics) + 1,
                     'error': None,
+                    'transport': transport,
                 })
         except Exception as e:
             if audit_metrics is not None:
@@ -395,7 +394,7 @@ def _fetch_bybit_klines_historico(symbol, interval, dias_historico, fim_ts_ms=No
                     'request_started_ms': request_started_ms,
                     'request_finished_ms': int(time.time() * 1000),
                     'latency_ms': int(time.time() * 1000) - request_started_ms,
-                    'http_status': getattr(resp, 'status_code', None),
+                    'http_status': getattr(getattr(e, 'response', None), 'status_code', None),
                     'retCode': None,
                     'retMsg': None,
                     'candles_returned': 0,
@@ -3452,6 +3451,8 @@ def _kairos_scan_latest_closed(pair, observed_ts, phase_state):
             'M5': max(0, 80 - len(tf_map['M5'])),
         }
         failing = {tf: 'INSUFFICIENT_CLOSED_CANDLES' for tf, deficit in deficits.items() if deficit > 0}
+        from kairos_bybit_data import invalidate_pages
+        invalidate_pages(symbol, {specs[tf][0] for tf in failing})
         return {
             **base_audit,
             'erro': 'INSUFFICIENT_CLOSED_CANDLES',
@@ -3461,6 +3462,8 @@ def _kairos_scan_latest_closed(pair, observed_ts, phase_state):
         }
     stale=_kairos_snapshot_freshness(tf_map,cutoff)
     if stale:
+        from kairos_bybit_data import invalidate_pages
+        invalidate_pages(symbol, {specs[tf][0] for tf in stale})
         failure_by_tf = {
             tf: ('NO_CLOSED_CANDLES' if reason == 'NO_CLOSED_CANDLES'
                  else 'STALE_CLOSED_CANDLES')
@@ -5171,3 +5174,4 @@ def paper_trading_v2_export_endpoint():
 # é avaliado isoladamente e causalmente, igual ao replay/paper já
 # aprovados).
 # ═══════════════════════════════════════════════════════════════════════
+

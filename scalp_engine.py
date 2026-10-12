@@ -1861,6 +1861,107 @@ def _kairos_select_htf_poi_location(mapa, m15_candles, now_ts):
         return None
     return max(candidates,key=lambda x:(x['touch_ts'],KAIROS_TF_PESO.get(x['tf'],1)))
 
+print('[KAIROS_FVG_ENTRY] installed=true origin=HTF_FVG_TOUCH structure_sizes=50/5 detectors_changed=false', flush=True)
+
+
+def _kairos_fvg_touch_intent(mapa, m15_candles, m5_candles, now_ts, candles_por_tf=None):
+    """FVG is a distinct causal origin; closed Major50 + Internal5 choose direction.
+
+    Reuses native Lux geometry and structure events. A touch is not a sweep.
+    Only observed outside->inside M5 transitions after the HTF formation close
+    can start a thesis. No implicit historical touch at the data-window edge.
+    """
+    m15=[c for c in m15_candles if c['t']+900000 <= now_ts]
+    m5=[c for c in m5_candles if c['t']+300000 <= now_ts]
+    durations={'W1':604800000,'D1':86400000,'H4':14400000,'H1':3600000}
+    locations=[]
+    for tf,duration in durations.items():
+        for z in (mapa.get(tf) or {}).get('zones',[]):
+            if (z.get('tipo') not in ('FVG_bullish','FVG_bearish') or
+                    z.get('state') not in ('ATIVA','TOCADA','PARCIAL') or
+                    z.get('lux_fvg') is not True):
+                continue
+            born=z.get('created_ts'); top=z.get('top'); bottom=z.get('bottom')
+            if born is None or top is None or bottom is None or top < bottom:
+                continue
+            sources=[z.get('source_a'),z.get('source_mid'),z.get('source_c')]
+            if (not all(isinstance(c,dict) and c.get('t') is not None for c in sources) or
+                    [c['t'] for c in sources] != [born-2*duration,born-duration,born]):
+                continue
+            ready=born+duration
+            if ready > now_ts:
+                continue
+            if candles_por_tf is not None:
+                native=[c for c in candles_por_tf.get(tf,[]) if born <= c['t'] and c['t']+duration <= now_ts]
+                offset=345600000 if tf=='W1' else 0
+                latest_open=((now_ts-offset)//duration)*duration+offset-duration
+                if (not native or native[0]['t'] != born or native[-1]['t'] != latest_open or
+                        any(b['t']-a['t'] != duration for a,b in zip(native,native[1:]))):
+                    continue
+            entries=[]
+            for prev,c in zip(m5,m5[1:]):
+                if c['t'] < ready:
+                    continue
+                inside=c['h'] >= bottom and c['l'] <= top
+                prev_inside=prev['h'] >= bottom and prev['l'] <= top
+                if inside and not prev_inside and c['t']-prev['t']==300000:
+                    entries.append(c)
+            zone_id=z.get('id') or f"{z['tipo']}:{born}:{bottom}:{top}"
+            for entry in entries:
+                # A later interaction cannot erase a previously authorized touch.
+                covered=[c for c in m5 if c['t'] >= entry['t']]
+                if any(b['t']-a['t'] != 300000 for a,b in zip(covered,covered[1:])):
+                    continue
+                locations.append({'tf':tf,'tipo':z['tipo'],'zone_id':zone_id,
+                                  'top':top,'bottom':bottom,'origin_ts':born,
+                                  'formation_close_ts':ready,'touch_ts':entry['t'],
+                                  'touch_confirm_close_ts':entry['t']+300000,
+                                  'touch_price':entry['c'],'source':'HTF_FVG_TOUCH'})
+    audit={'origin_kind':'HTF_FVG_TOUCH','touch_candidates':len(locations),
+           'verdict':'NO_CONFIRMED_FVG_INTERACTION'}
+    if not locations:
+        return None,None,None,audit
+    locations.sort(key=lambda x:(x['touch_ts'],KAIROS_TF_PESO.get(x['tf'],1)),reverse=True)
+    major_events=sorted([x for x in compute_lux_structure_events(m15,50)
+                         if x.get('tipo') in ('CHoCH','BOS')],key=lambda x:x['t'])
+    internal_events=sorted([x for x in compute_lux_internal_structure(m15,5)
+                            if x.get('tipo') in ('CHoCH','BOS')],key=lambda x:x['t'])
+    for location in locations:
+        touch_close=location['touch_confirm_close_ts']
+        for internal in internal_events:
+            # The whole confirmation candle must follow the observed touch.
+            if internal['t'] < touch_close:
+                continue
+            major=next((x for x in reversed(major_events) if x['t'] <= internal['t']),None)
+            if (major is None or major['t'] < touch_close or
+                    major.get('direcao') != internal.get('direcao') or
+                    internal.get('direcao') not in ('alta','baixa')):
+                continue
+            segment=[c for c in m15 if touch_close <= c['t'] <= internal['t']]
+            if (not segment or segment[0]['t'] != ((touch_close+899999)//900000)*900000 or
+                    any(b['t']-a['t'] != 900000 for a,b in zip(segment,segment[1:]))):
+                continue
+            direction=internal['direcao']
+            index=next((i for i,c in enumerate(m15) if c['t']==internal['t']),None)
+            if index is None:
+                continue
+            # Compatibility anchor for shared POI/refinement timing only.
+            # Deliberately has no liquidity side/type/level and is never radar capture.
+            anchor={'sweep_ts':location['touch_ts'],'first_capture_ts':location['touch_ts'],
+                    'event_confirmation_close_ts':touch_close,
+                    'origin_kind':'HTF_FVG_TOUCH',
+                    'origin_key':location['tf']+'|'+location['zone_id']}
+            intent={'direction':'LONG' if direction=='alta' else 'SHORT',
+                    'direcao':direction,'mode':'POI_REACTION',
+                    'major_structure':major,'structure':{**internal,'full_idx':index},
+                    'momentum_z':None}
+            audit.update(verdict='AUTHORIZED_BY_POST_TOUCH_MAJOR_AND_INTERNAL',
+                         major_open_ts=major['t'],internal_open_ts=internal['t'])
+            return anchor,intent,location,audit
+    audit['verdict']='WAITING_POST_TOUCH_MAJOR_AND_INTERNAL'
+    return None,None,locations[0],audit
+
+
 def _kairos_direction_after_first_capture(candles, capture, swing_size=5):
     """Lifecycle causal M15: futuro nunca invalida retroativamente uma autorização passada.
 
@@ -2669,11 +2770,12 @@ def _kairos_experimental_apply_poi_policy(current, exec_candles, sweep, structur
 def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=None,
                                       candles_por_tf=None, audit_pair=None,
                                       experimental_poi_policy=None, experimental_poi_state=None, liquidity_policy=None, cutoff_ts=None, audit_entries_only=False):
-    """KAIROS Paper V2.2 — liquidez HTF estrutural, M15 executa, M5 refina.
+    """KAIROS — liquidity capture OR confirmed HTF FVG touch, M15 authorizes, M5 refines.
 
     Cadeia autorizadora:
     W1/D1/H4/H1 structural liquidity -> neutral FIRST capture -> rejection/reclaim OR acceptance/continuation -> intention/displacement -> M15 MSS/CHoCH/BOS
-    -> causal M15 FVG/IFVG/OB -> optional M5 refinement -> retest
+    OR W1/D1/H4/H1 FVG touch -> post-touch Major50 break + aligned Internal5.
+    Both origins -> causal M15 FVG/IFVG/OB -> optional M5 refinement -> retest
     -> SL behind causal sweep -> nearest active structural liquidity/obstacle TP.
 
     W1/D1/H4 podem originar a tese principal; H1 pode atuar como estrutura intermediária relevante.\n    M15/M5 executam, refinam e podem servir como alvo/obstáculo local; não autorizam sozinhos o setup. M1 não participa.
@@ -2734,25 +2836,37 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
             'extremo':sweep.get('extremo'),
         }
 
-    # HARD BLOCK CAUSAL: POI HTF (FVG/IFVG/OB) é localização/contexto, NÃO liquidez.
-    # Sem captura estrutural real + reação resolvida, não existe autorização de trade.
-    # Isto fecha apenas o antigo atalho HTF_POI_TOUCH; o pipeline validado após sweep
-    # (M15 -> POI causal -> M5 -> reteste -> Entry/SL/target) permanece intacto.
+    # Two distinct origins converge only AFTER M15 authorization.
+    # Existing liquidity authorization has precedence and remains unchanged.
     exec_tf='M15'; exec_candles=candles_por_tf.get('M15') or []
     location=None
-    if not sweep:
-        location=_kairos_select_htf_poi_location(mapa,exec_candles,now_ts)
+    intent=_kairos_direction_after_first_capture(exec_candles,sweep,swing_size=5) if sweep else None
+    if intent:
+        resultado['authorization_path']='STRUCTURAL_LIQUIDITY_CAPTURE'
+        resultado['sweep_tf']=sweep['liquidity_tf']; resultado['liquidity_tf']=sweep['liquidity_tf']
+        resultado['liquidity_type']=sweep['liquidity_type']; resultado['capture_tf']='M15'
+        resultado['first_capture_ts']=sweep['first_capture_ts']; resultado['sweep_confirm_ts']=sweep.get('confirm_ts')
+        resultado['sweep_level']=round(sweep['nivel'],6); resultado['sweep_extreme']=round(sweep['extremo'],6)
+    else:
+        anchor,fvg_intent,location,fvg_audit=_kairos_fvg_touch_intent(
+            mapa,exec_candles,candles_por_tf.get('M5') or [],now_ts,candles_por_tf=candles_por_tf)
         resultado['htf_location']=location
-        resultado['authorization_path']='BLOCKED_NO_STRUCTURAL_LIQUIDITY_CAPTURE'
-        resultado['failure_reason']='SEM_SWEEP_FIRST_CAPTURE'
-        return resultado
-
-    resultado['authorization_path']='STRUCTURAL_LIQUIDITY_CAPTURE'
-    resultado['sweep_tf']=sweep['liquidity_tf']; resultado['liquidity_tf']=sweep['liquidity_tf']
-    resultado['liquidity_type']=sweep['liquidity_type']; resultado['capture_tf']='M15'
-    resultado['first_capture_ts']=sweep['first_capture_ts']; resultado['sweep_confirm_ts']=sweep.get('confirm_ts')
-    resultado['sweep_level']=round(sweep['nivel'],6); resultado['sweep_extreme']=round(sweep['extremo'],6)
-    intent=_kairos_direction_after_first_capture(exec_candles,sweep,swing_size=5)
+        resultado['fvg_intent_audit']=fvg_audit
+        if fvg_intent:
+            sweep=anchor; intent=fvg_intent
+            resultado['authorization_path']='HTF_FVG_TOUCH'
+            resultado['causal_origin']={'kind':'HTF_FVG_TOUCH',**location}
+        elif not sweep:
+            resultado['authorization_path']='BLOCKED_NO_AUTHORIZED_ORIGIN'
+            resultado['failure_reason']=('SEM_INTENCAO_M15_APOS_FVG_HTF' if location else 'SEM_SWEEP_FIRST_CAPTURE')
+            return resultado
+        else:
+            # Preserve original liquidity failure diagnostics when neither path authorizes.
+            resultado['authorization_path']='STRUCTURAL_LIQUIDITY_CAPTURE'
+            resultado['sweep_tf']=sweep['liquidity_tf']; resultado['liquidity_tf']=sweep['liquidity_tf']
+            resultado['liquidity_type']=sweep['liquidity_type']; resultado['capture_tf']='M15'
+            resultado['first_capture_ts']=sweep['first_capture_ts']; resultado['sweep_confirm_ts']=sweep.get('confirm_ts')
+            resultado['sweep_level']=round(sweep['nivel'],6); resultado['sweep_extreme']=round(sweep['extremo'],6)
 
     # A cadeia M15 é uma só: a estrutura MAIOR autoriza a intenção e o interno
     # apenas confirma/tima. O POI causal pertence à perna da quebra MAIOR;
@@ -2842,7 +2956,7 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
     except Exception as _poi_shadow_exc:
         resultado['poi_shadow_audit']={'shadow_only':True,'pass':False,'reason':f'AUDIT_EXCEPTION:{_poi_shadow_exc}'}
     resultado['zone_type']=zone['tipo']; resultado['zone_top']=round(zone['top'],6); resultado['zone_bottom']=round(zone['bottom'],6)
-    resultado['zone_source']=f"{zone['tipo']}_{exec_tf}_APOS_SWEEP"; resultado['liquidity_inside_zone']=zone.get('liquidity_inside',[])
+    resultado['zone_source']=f"{zone['tipo']}_{exec_tf}_"+('APOS_FVG_HTF' if sweep.get('origin_kind')=='HTF_FVG_TOUCH' else 'APOS_SWEEP'); resultado['liquidity_inside_zone']=zone.get('liquidity_inside',[])
     # Auditoria causal da zona: não altera seleção/entrada; apenas expõe os candles exatos.
     resultado['zone_created_ts']=zone.get('created_ts')
     resultado['zone_origin_ts']=zone.get('origin_ts')
@@ -2875,7 +2989,7 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
     # the legacy management engine. Preserve an already retested initial POI.
     if audit_entries_only:
         continuation_authorization=max(structure_confirm_ts,
-            (sweep.get('confirm_ts') or sweep['first_capture_ts'])+900000,
+            sweep.get('event_confirmation_close_ts') or (sweep.get('confirm_ts') or sweep['first_capture_ts'])+900000,
             sweep.get('native_capture_confirm_ts') or 0)
         initial_touch=(_kairos_retest_zone(m5,refined,structure_confirm_ts,tf='5')
                        if refined else None)
@@ -2916,12 +3030,14 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
     preview_retest=r5 if refined else retest
     preview_level=float(preview_zone['top'] if direction=='LONG' else preview_zone['bottom'])
     ready_ts=max(structure_confirm_ts,
-                 (sweep.get('confirm_ts') or sweep['first_capture_ts'])+900000,
+                 sweep.get('event_confirmation_close_ts') or (sweep.get('confirm_ts') or sweep['first_capture_ts'])+900000,
                  sweep.get('native_capture_confirm_ts') or 0,
                  preview_zone.get('ready_ts') or 0)
     setup_key=repr((sweep.get('liquidity_tf'),sweep.get('liquidity_type'),sweep.get('liquidity_origin_ts'),
                    sweep['first_capture_ts'],internal_structure['t'],direction,preview_tf,
                    preview_zone['bottom'],preview_zone['top']))
+    if sweep.get('origin_kind')=='HTF_FVG_TOUCH':
+        setup_key+=':HTF_FVG_TOUCH:'+sweep['origin_key']
     if preview_zone.get('refinement_basis')=='M15_AUTHORIZED_M5_CONTINUATION_BOS_OB':
         setup_key+=':CONTINUATION:'+str(preview_zone['ready_ts'])
     resultado['entry_setup']={
@@ -2932,6 +3048,8 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
         'capture_tf':sweep.get('liquidity_tf'),'capture_level':sweep.get('nivel'),
         'major_confirm_ts':major_confirm_ts,'internal_confirm_ts':internal_confirm_ts,
         'poi':dict(preview_zone),
+        **({'origin_kind':'HTF_FVG_TOUCH','htf_location':dict(location)}
+           if sweep.get('origin_kind')=='HTF_FVG_TOUCH' else {}),
     }
     if not retest:
         # PRE-ALERTA: o setup já está armado, mas o preço ainda NÃO retestou a zona.
@@ -3008,7 +3126,8 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
         resultado['entry_audit_only']=True
         resultado['failure_reason']='AUDIT_ENTRY_IDENTIFIED'
         resultado['entry_audit_evidence']={
-            'capture':dict(sweep), 'intent':dict(intent),
+            **({'origin':dict(resultado['causal_origin'])} if sweep.get('origin_kind')=='HTF_FVG_TOUCH'
+               else {'capture':dict(sweep)}), 'intent':dict(intent),
             'm15_zone':dict(zone), 'execution_zone':dict(active_zone),
             'retest':dict(retest),
             'authorization_ts':max(structure_confirm_ts, active_zone.get('flip_ts') or active_zone.get('created_ts') or active_zone.get('t') or structure_confirm_ts),
@@ -3219,7 +3338,9 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
 
     resultado['signal']=True; resultado['valid']=True
     resultado['reason']=(
-        f"LIQ={sweep['liquidity_tf']}:{sweep['liquidity_type']}@{sweep['nivel']} -> FIRST_CAPTURE_M15@{sweep['sweep_ts']} -> "
+        (f"HTF_FVG_TOUCH={location['tf']}:{location['bottom']}-{location['top']}@{location['touch_ts']} -> "
+         if sweep.get('origin_kind')=='HTF_FVG_TOUCH' else
+         f"LIQ={sweep['liquidity_tf']}:{sweep['liquidity_type']}@{sweep['nivel']} -> FIRST_CAPTURE_M15@{sweep['sweep_ts']} -> ") +
         f"{sweep.get('post_capture_state')} -> INTENT={intent['mode']}:{direction} -> {structure['tipo']}_M15 -> DISPLACEMENT(z={resultado['momentum_z']}) -> "
         f"{resultado['zone_source']} -> RETEST_{entry_tf} -> SL={sl_info.get('sl_classe')} -> {resultado['tp_origem']} RR={resultado['rr']} -> "
         f"SETUP={resultado['setup_type']}"

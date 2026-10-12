@@ -116,10 +116,16 @@ def format_setup_message(pair, event):
     m5_line = ('M5 BOS + POI causal: confirmado'
                if continuation else 'M5 POI causal: confirmado')
 
+    location = event.get('htf_location') or {}
+    origin_line = (f"📦 <b>Origem: toque em FVG {location.get('tf')} "
+                   f"[{_price(location.get('bottom'))}–{_price(location.get('top'))}]</b>\n"
+                   if event.get('origin_kind') == 'HTF_FVG_TOUCH' else
+                   f"💧 <b>Origem: {event.get('capture_tf')} @ {_price(event.get('capture_level'))}</b>\n")
+
     return (
         '⏳ <b>KAIROS | SETUP M5 ARMADO</b>\n'
         f'{icon} <b>{pair} | {direction}</b>\n\n'
-        f"💧 <b>Origem: {event.get('capture_tf')} @ {_price(event.get('capture_level'))}</b>\n"
+        f'{origin_line}'
         f'✅ <b>M15 Major: {structural}</b>\n'
         f'✅ <b>M15 Internal: {structural}</b>\n'
         f'✅ <b>{m5_line}</b>\n\n'
@@ -149,3 +155,4 @@ def format_retest_message(pair, signal):
         '🧠 O preço voltou ao POI que já estava armado.\n'
         '<b>DEMO / MANUAL · preenchimento não comprovado</b>'
     )
+

@@ -28,6 +28,8 @@ def _event_payload(event, candles, close_ms):
 
 
 def _capture_payload(result):
+    if result.get("authorization_path") == "HTF_FVG_TOUCH":
+        return {}
     audit = result.get("structural_sweep_audit") or {}
     selected = audit.get("selected_capture") or {}
     candidates = audit.get("candidates") or []
@@ -71,6 +73,7 @@ def _emit(se, result, pair, cutoff_ts, m15):
     major = next((e for e in se.compute_lux_structure_events(m15, swing_size=50) if e.get("t") == major_open), None)
     internal = next((e for e in se.compute_lux_internal_structure(m15, swing_size=5) if e.get("t") == internal_open), None)
     cap = _capture_payload(result)
+    origin = result.get("causal_origin") or {}
     poi = setup.get("poi") or {}
     ready_ts = setup.get("ready_ts")
     internal_close = result.get("m15_internal_confirmation_close_ts")
@@ -84,12 +87,17 @@ def _emit(se, result, pair, cutoff_ts, m15):
         "poi_ready_by_cutoff": ready_ts is not None and cutoff_ts is not None and ready_ts <= cutoff_ts,
         "capture_before_internal": capture_ts is not None and internal_open is not None and capture_ts < internal_open,
     }
+    if origin.get("kind") == "HTF_FVG_TOUCH":
+        checks.pop("capture_level_confirmed_before_capture", None)
+        checks.pop("capture_before_internal", None)
+        checks["fvg_formed_before_touch"] = origin.get("formation_close_ts") <= origin.get("touch_ts")
+        checks["fvg_touch_before_major"] = origin.get("touch_confirm_close_ts") <= major_open
     proof = {
         "pair": pair,
         "cutoff_ts": cutoff_ts,
         "setup_key": setup.get("key"),
         "direction": setup.get("direction") or result.get("direction"),
-        "capture": cap,
+        **({"origin": origin} if origin else {"capture": cap}),
         "m15_major": _event_payload(major, m15, 900000),
         "m15_internal": _event_payload(internal, m15, 900000),
         "m5_poi": {
@@ -138,3 +146,4 @@ def install():
     _INSTALLED = True
     print("[KAIROS_CAUSAL_PROOF] telemetry_installed=true math_changed=false", flush=True)
     return True
+

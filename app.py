@@ -3248,3 +3248,9 @@ def experiment_btc_entry_chain_replay():
         threading.Thread(target=_run_kairos_entry_chain_audit,args=(dias,fim),daemon=True).start()
         return jsonify({'status':'STARTING','started':True,'mode':'ENTRY_CHAIN_ONLY_NO_SL_BE_TP'}),202
     return jsonify(_KAIROS_ENTRY_CHAIN_CACHE)
+
+
+
+# Isolated counterfactual replay; no live sender/database/strategy changes.
+from kairos_ob_2r_replay import register as _register_ob_2r_replay
+_register_ob_2r_replay(app, scalp_engine)

@@ -177,5 +177,33 @@ class OBReplayIntegrationTests(unittest.TestCase):
         self.assertEqual(client.get('/experiment/ob_2r_replay?start=1&fim_ts_ms=9999999999999').status_code,400)
         self.assertEqual(client.get('/experiment/ob_2r_replay').status_code,200)
 
+class NativeExportTests(unittest.TestCase):
+    def test_export_preserves_closed_ohlc_and_excludes_future(self):
+        from unittest.mock import patch
+        api=module(); end=60000000
+        closed={'t':end-300000,'o':10.,'h':11.,'l':9.,'c':10.5,'v':5.}
+        forming={**closed,'t':end}
+        with patch.object(api,'fetch_inputs',return_value=({'M5':[closed,forming]}, {'M5':[]})):
+            out=api.native_export(e,'AVAXUSD',end)
+        self.assertEqual(out['candles']['M5'],[closed])
+        self.assertTrue(out['read_only'])
+        self.assertFalse(out['fill_assumed'])
+        self.assertEqual(out['pair'],'AVAXUSD')
+
+    def test_failed_fetch_cannot_export_partial_as_success(self):
+        from unittest.mock import patch
+        api=module()
+        with patch.object(api,'fetch_inputs',side_effect=ValueError('INCOMPLETE_BYBIT_DATA:M5')):
+            with self.assertRaisesRegex(ValueError,'INCOMPLETE_BYBIT_DATA'):
+                api.native_export(e,'AVAXUSD',60000000)
+
+    def test_export_route_rejects_invalid_pair_and_future(self):
+        from flask import Flask
+        app=Flask('native_test');module().register(app,e)
+        client=app.test_client()
+        self.assertEqual(client.get('/experiment/native_candles?start=1&pair=INVALID').status_code,400)
+        self.assertEqual(client.get('/experiment/native_candles?start=1&fim_ts_ms=9999999999999').status_code,400)
+        self.assertEqual(client.get('/experiment/native_candles').status_code,200)
+
 if __name__ == '__main__':
     unittest.main()

@@ -19,6 +19,7 @@ PAIRS={'BTCUSD','ETHUSD','SOLUSD','XRPUSD','LINKUSD','ADAUSD','AVAXUSD',
        'BNBUSD','AAVEUSD','NEARUSD','PENDLEUSD','INJUSD','ONDOUSD'}
 _CACHE={'status':'IDLE','result':None,'error':None}
 _LOCK=threading.Lock()
+_EXPORT_CACHE={'status':'IDLE','result':None,'error':None}
 
 
 def ob_plan(event, candles, engine, buffer_mult=0.25):
@@ -225,6 +226,18 @@ def replay_from_candles(engine, pair, raw, start, end, buffer_mult=0.25):
                       'limits':'Historical reproduction; current OHLC may differ from first publication. Partial coverage is not a complete backtest.'}}
 
 
+def native_export(engine, pair, end):
+    """Bounded native OHLC export; never evaluates or records a trade."""
+    raw,audit=fetch_inputs(engine,pair,end-86400000,end)
+    candles={tf:engine._kairos_candles_fechados_ate(cs,LIVE_SPECS[tf][0],end)
+             for tf,cs in raw.items()}
+    return {'pair':pair,'instrument':engine._kairos_normalize_instrument(pair),
+            'cutoff_ts':end,'candles':candles,'fetch_audit':audit,
+            'sha256':hashlib.sha256(json.dumps(candles,sort_keys=True,separators=(',',':')).encode()).hexdigest(),
+            'read_only':True,'fill_assumed':False,'evaluation_performed':False,
+            'note':'Historical OHLC export, not proof of first-publication data or trade execution.'}
+
+
 def register(app, engine):
     from flask import jsonify, request
     def job(pair, start, end, buffer_mult):
@@ -259,4 +272,31 @@ def register(app, engine):
             threading.Thread(target=job,args=(pair,start,end,mult),daemon=True).start()
             return jsonify({'status':'STARTING','pair':pair,'read_only':True,'start_ts':start,'end_ts':end}),202
         return jsonify(_CACHE)
+    def export_job(pair,end):
+        try:
+            result=native_export(engine,pair,end)
+            _EXPORT_CACHE.update(status='DONE',result=result,error=None)
+            print(f'[KAIROS_NATIVE_EXPORT] DONE pair={pair} cutoff={end}',flush=True)
+        except Exception as exc:
+            _EXPORT_CACHE.update(status='ERROR',result=None,error=str(exc))
+            print('[KAIROS_NATIVE_EXPORT] ERROR '+str(exc),flush=True)
+        finally:
+            _LOCK.release()
+    @app.route('/experiment/native_candles',methods=['GET'])
+    def native_candles_endpoint():
+        if request.args.get('start')=='1':
+            try:
+                pair=request.args.get('pair','AVAXUSD').upper()
+                end=int(request.args.get('fim_ts_ms') or int(time.time()*1000))
+                if pair not in PAIRS or not 1577836800000<=end<=int(time.time()*1000):
+                    raise ValueError('Supported pair and cutoff between 2020 and now required')
+                end=end//300000*300000
+            except (TypeError,ValueError) as exc:
+                return jsonify({'error':str(exc)}),400
+            if not _LOCK.acquire(blocking=False):
+                return jsonify({'status':'BUSY','started':False}),409
+            _EXPORT_CACHE.update(status='RUNNING',result=None,error=None,pair=pair,cutoff_ts=end)
+            threading.Thread(target=export_job,args=(pair,end),daemon=True).start()
+            return jsonify({'status':'STARTING','pair':pair,'read_only':True}),202
+        return jsonify(_EXPORT_CACHE)
     print('[KAIROS_OB_2R_REPLAY] audit_route_installed=true live_math_changed=false',flush=True)

@@ -188,15 +188,9 @@ def compute_lux_structure_bias(candles, swing_size=50):
 
 
 def compute_lux_internal_structure(candles, swing_size=5):
-    """
-    Item 1 do ticket — 'estrutura interna' (janela curta, default 5
-    barras), reaproveitando compute_lux_structure_events sem duplicar
-    a lógica. Retorna a lista de eventos (BOS/CHoCH) dessa janela curta.
-    Isso é LUX_INTERNAL_CHoCH — mecanismo separado e paralelo de
-    detect_choch_after_sweep() (SWEEP_BASED_CHoCH), que continua
-    intocado.
-    """
-    return compute_lux_structure_events(candles, swing_size=swing_size)
+    """LuxAlgo SMC internal: close crossover and distinct external-50 level."""
+    from kairos_lux_internal import internal_structure_events
+    return internal_structure_events(candles,size=swing_size,external_size=50)
 
 
 def aplicar_buffer_stop(nivel, direcao, buffer_pct=STOP_BUFFER_PCT):
@@ -739,7 +733,7 @@ def _kairos_ob_from_break(candles, break_idx, direcao, search_back=10, structure
     if not isinstance(break_idx,int) or not 0 < break_idx < len(candles):
         return None
     if not structure:
-        structure=next((e for e in compute_lux_structure_events(candles[:break_idx+1],swing_size=5)
+        structure=next((e for e in compute_lux_internal_structure(candles[:break_idx+1],swing_size=5)
                         if e.get('index')==break_idx and e.get('direcao')==direcao),None)
     origin=(structure or {}).get('broken_swing_origin_ts')
     start=next((i for i,c in enumerate(candles[:break_idx]) if c['t']==origin),None)
@@ -905,34 +899,13 @@ def _kairos_liquidity_pools(candles, pivots=None, atr=None, min_touches=2):
 
 
 def _kairos_order_blocks_map(candles, swing_size=50, lookback=300):
-    """LuxAlgo swing OB formation; operational close-invalidation lifecycle."""
+    """LuxAlgo parsed-extreme formation and default High/Low lifecycle."""
+    from kairos_lux_ob import order_block_states
     if not candles or len(candles)<20:
         return []
-    cs=candles
-    events=compute_lux_structure_events(cs,swing_size=swing_size)
-    lower=cs[max(0,len(cs)-lookback)]['t']
-    out=[]; seen=set()
-    for e in events:
-        if e['t'] < lower: continue
-        ob=_kairos_ob_from_break(cs,e.get('index'),e.get('direcao'),structure=e)
-        if not ob or ob['top'] < ob['bottom']:
-            continue
-        key=(ob['t'],ob['direcao'],round(ob['top'],10),round(ob['bottom'],10))
-        if key in seen: continue
-        seen.add(key)
-        state='ATIVA'; invalidated_ts=None; first_touch_ts=None
-        for c in cs:
-            if c['t'] <= e['t']:
-                continue
-            if c['h']>=ob['bottom'] and c['l']<=ob['top'] and first_touch_ts is None:
-                first_touch_ts=c['t']
-            if ob['direcao']=='alta' and c['c'] < ob['bottom']:
-                state='INVALIDADA'; invalidated_ts=c['t']; break
-            if ob['direcao']=='baixa' and c['c'] > ob['top']:
-                state='INVALIDADA'; invalidated_ts=c['t']; break
-        out.append({**ob,'break_ts':e['t'],'break_tipo':e['tipo'],'state':state,
-                    'first_touch_ts':first_touch_ts,'invalidated_ts':invalidated_ts})
-    return out[-60:]
+    events=(compute_lux_internal_structure(candles,5) if swing_size==5
+            else compute_lux_structure_events(candles,swing_size=swing_size))
+    return order_block_states(candles,events,_kairos_ob_from_break,lookback=lookback)
 
 
 def _kairos_pool_poi_overlaps(pool, zones=None, order_blocks=None):
@@ -1994,6 +1967,9 @@ def _kairos_m5_refine_zone(m5_candles, m15_zone, sweep_ts, structure_ts, directi
         return None
     if ob['top'] < m15_zone['bottom'] or ob['bottom'] > m15_zone['top']:
         return None
+    from kairos_lux_ob import ob_eligible_through_retest
+    if not ob_eligible_through_retest(ob,m5_candles,max(structure_ts,ob['break_ts']+300000)):
+        return None
     return {**ob,'created_ts':break_candle['t'],'origin_ts':ob['t'],
             'state':'ATIVA','source_tf':'M5','origin_candle':dict(m5_candles[ob['idx']]),
             'causal_break_m5':dict(break_candle),'causal_break_level_m15':structure_level,
@@ -2029,8 +2005,11 @@ def _kairos_m5_continuation_zone(m5_candles, m15_candles, authorization_ts, dire
             return None
         if any(b['t']-a['t'] != dur for a,b in zip(relevant,relevant[1:])):
             return None
+    from kairos_lux_ob import order_block_states,ob_eligible_through_retest
+    internal_events=compute_lux_internal_structure(m5,5)
+    native_obs=order_block_states(m5,internal_events,_kairos_ob_from_break,lookback=len(m5))
     candidates=[]
-    for event in compute_lux_internal_structure(m5,5):
+    for event in internal_events:
         ready=event['t']+300000
         if event['tipo'] != 'BOS' or event['direcao'] != direction or ready <= authorization_ts:
             continue
@@ -2044,15 +2023,28 @@ def _kairos_m5_continuation_zone(m5_candles, m15_candles, authorization_ts, dire
             continue
         if (direction=='baixa' and ob['top'] > boundary) or (direction=='alta' and ob['bottom'] < boundary):
             continue
+        record=next((z for z in native_obs if z['break_ts']==ob['break_ts'] and z['t']==ob['t']),None)
+        if record and record.get('removed_ts') is not None:
+            ob['capacity_removed_ts']=record['removed_ts']
+        if not ob_eligible_through_retest(ob,m5,ready,stream=record):
+            continue
         touch=None; dead=False
         for candle in m5[event['index']+1:]:
             if invalidation is not None and candle['t']+300000 >= invalidation:
                 break
-            invalid=(candle['c'] > ob['top']) if direction=='baixa' else (candle['c'] < ob['bottom'])
+            from kairos_lux_ob import ob_invalidated
+            removed=ob.get('capacity_removed_ts')
+            if removed is not None and candle['t']>removed:
+                dead=True;break
+            invalid=ob_invalidated(ob,candle) or (removed is not None and candle['t']==removed)
+            if candle['h'] >= ob['bottom'] and candle['l'] <= ob['top']:
+                touch=dict(candle)
+                if invalid:
+                    touch.update(poi_invalidated_same_bar=True,fill_assumed=False,intrabar_sequence='UNRESOLVED',
+                                 poi_removal_basis='LUX_CAPACITY' if removed==candle['t'] else 'LUX_HIGH_LOW')
+                break
             if invalid:
                 dead=True; break
-            if candle['h'] >= ob['bottom'] and candle['l'] <= ob['top']:
-                touch=dict(candle); break
         if dead or (touch is None and invalidation is not None):
             continue
         candidates.append({**ob,'created_ts':event['t'],'origin_ts':ob['t'],
@@ -2391,6 +2383,14 @@ def _kairos_select_entry_zone(exec_candles, sweep, structure, mapa):
     # OB é derivado diretamente do break e só entra se não houver FVG/IFVG causal.
     ob=_kairos_ob_from_break(exec_candles, structure.get('full_idx'), direction, structure=structure)
     if ob and ob['top'] >= ob['bottom']:
+        from kairos_lux_ob import ob_eligible_through_retest
+        streams=_kairos_order_blocks_map(exec_candles,swing_size=5,lookback=len(exec_candles))
+        record=next((z for z in streams if z['break_ts']==ob['break_ts'] and z['t']==ob['t']),None)
+        if record and record.get('removed_ts') is not None:
+            ob['capacity_removed_ts']=record['removed_ts']
+        if not ob_eligible_through_retest(ob,exec_candles,ob['break_ts']+900000,stream=record):
+            ob=None
+    if ob and ob['top'] >= ob['bottom']:
         origin_ts=ob.get('origin_ts') or ob.get('created_ts') or ob.get('t')
         # Lux OB uses the broken-pivot -> break interval, not the latest
         # protected pivot used by FVG selection. Equal extremes can put its
@@ -2532,11 +2532,7 @@ def _kairos_shadow_log_poi(pair, zone, audit):
         print(f"[POI_SHADOW_AUDIT_ERR] {exc}")
 
 def _kairos_retest_zone(candles, zone, after_ts, tf=None):
-    """Primeiro reteste causal em candle POSTERIOR à estrutura/POI.
-
-    O candle que confirma MSS/BOS, cria a FVG ou confirma o flip IFVG nunca
-    pode ser simultaneamente o candle de reteste/entrada.
-    """
+    """First causal touch; same-bar OB deletion is evidence, never a fill."""
     if not zone:
         return None
     zone_ready_ts=zone.get('flip_ts') or zone.get('created_ts') or zone.get('break_ts') or zone.get('t') or 0
@@ -2545,12 +2541,24 @@ def _kairos_retest_zone(candles, zone, after_ts, tf=None):
         zone_ready_ts+=duration
     elif zone.get('break_ts') is not None:
         zone_ready_ts=max(zone_ready_ts,zone['break_ts']+duration)
-    ready_ts=max(after_ts or 0, zone_ready_ts)
+    ready_ts=max(after_ts or 0,zone_ready_ts)
+    from kairos_lux_ob import ob_invalidated
+    is_ob=str(zone.get('tipo','')).startswith('OB_')
     for c in candles:
-        if c['t'] < ready_ts:
+        start_ts=(zone.get('break_ts') or 0) if is_ob else ready_ts
+        if c['t'] < start_ts:
             continue
-        if c['h'] >= zone['bottom'] and c['l'] <= zone['top']:
+        removed=zone.get('capacity_removed_ts') if is_ob else None
+        if removed is not None and c['t']>removed:
+            return None
+        invalid=is_ob and (ob_invalidated(zone,c) or (removed is not None and c['t']==removed))
+        if c['t']>=ready_ts and c['h'] >= zone['bottom'] and c['l'] <= zone['top']:
+            if invalid:
+                return dict(c,poi_invalidated_same_bar=True,fill_assumed=False,intrabar_sequence='UNRESOLVED',
+                            poi_removal_basis='LUX_CAPACITY' if removed==c['t'] else 'LUX_HIGH_LOW')
             return c
+        if invalid:
+            return None
     return None
 
 
@@ -2648,6 +2656,14 @@ def _kairos_experimental_eligible_entry_zones(exec_candles, sweep, structure, ma
         if z.get('created_ts') is not None and z.get('created_ts') < sweep['sweep_ts']: continue
         z2=dict(z); z2['liquidity_inside']=_kairos_zone_contains_liquidity(z2,mapa); zones.append(z2)
     ob=_kairos_ob_from_break(exec_candles, structure.get('full_idx'), direction, structure=structure)
+    if ob and ob['top'] >= ob['bottom']:
+        from kairos_lux_ob import ob_eligible_through_retest
+        streams=_kairos_order_blocks_map(exec_candles,swing_size=5,lookback=len(exec_candles))
+        record=next((z for z in streams if z['break_ts']==ob['break_ts'] and z['t']==ob['t']),None)
+        if record and record.get('removed_ts') is not None:
+            ob['capacity_removed_ts']=record['removed_ts']
+        if not ob_eligible_through_retest(ob,exec_candles,ob['break_ts']+900000,stream=record):
+            ob=None
     if ob and ob['top'] >= ob['bottom']:
         ob['liquidity_inside']=_kairos_zone_contains_liquidity(ob,mapa); zones.append(ob)
     return zones
@@ -2973,6 +2989,7 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
         **({'origin_kind':'HTF_FVG_TOUCH','htf_location':dict(location)}
            if sweep.get('origin_kind')=='HTF_FVG_TOUCH' else {}),
     }
+    resultado['poi_invalidated_same_bar']=bool(retest and retest.get('poi_invalidated_same_bar'))
     if not retest:
         # PRE-ALERTA: o setup já está armado, mas o preço ainda NÃO retestou a zona.
         # Usa o proximal do refinamento M5 já conhecido. Ainda não houve reteste nem fill.

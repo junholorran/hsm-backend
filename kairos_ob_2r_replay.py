@@ -237,7 +237,17 @@ def native_export(engine, pair, end, include_fvg=False):
             'read_only':True,'fill_assumed':False,'evaluation_performed':False,
             'note':'Historical OHLC export, not proof of first-publication data or trade execution.'}
     if include_fvg:
-        result['fvg_states']={tf:engine._kairos_fvg_states(cs) for tf,cs in candles.items() if tf in ('H1','H4')}
+        from kairos_calendar_map import closed_calendar_years
+        annual=closed_calendar_years(candles.get('MN') or [],end)
+        mapped={**candles,'Y1':annual}
+        result['fvg_states']={tf:engine._kairos_fvg_states(cs) for tf,cs in mapped.items()}
+        result['ob_states']={tf:engine._kairos_order_blocks_map(cs) for tf,cs in mapped.items()}
+        result['calendar_year_map']={'tf':'Y1','role':'CONTEXT_ONLY','calendar':'UTC',
+            'candles':annual,'structure_major':engine.compute_lux_structure_events(annual,50),
+            'structure_internal':engine.compute_lux_internal_structure(annual,5),
+            'coverage':{'closed_years':len(annual),'major_lookback':50,'internal_lookback':5,
+                        'atr_period':200,'partial_year_used':False},
+            'note':'Only contiguous complete 12-month years. No new signal authorization.'}
         result['fvg_math_performed']=True
         result['fvg_reference']='LUX_SMC_V6_AND_LUX_IFVG_V6'
     return result

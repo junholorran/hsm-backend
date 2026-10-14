@@ -19,5 +19,29 @@
     "display_limit": "drawings only; source signal calculation still considers logical queue"
   },
   "runtime": "closed native TF inputs; does not copy provisional/repainting intrabar drawings",
-  "limitations": "Finite native feed history and cumulative seed must match when comparing chart detection. Removed zones retained as inactive evidence. Lookback bounds archive, not active SMC age. No change to liquidity/structure confirmation or trade management."
+  "limitations": "Finite native feed history and cumulative seed must match when comparing chart detection. Closed native candles, not provisional intrabar drawings. Inactive records retained as evidence. Source-dependent formation/deletion corrected; liquidity capture and trade management unchanged. Annual context is on-demand and cannot create a new trade thesis.",
+  "ob": {
+    "reference": "SMC v6 same source snapshot",
+    "filter": "ATR200, Wilder seed including initial high-low",
+    "mitigation": "High/Low (official default)",
+    "logical_capacity": 100,
+    "show_last": "drawing limit does not expire active logical records",
+    "execution_observation": "first geometric retest preserved; same-bar deletion/eviction marked unresolved, no fill assumed"
+  },
+  "internal_structure": {
+    "reference": "SMC v6 displayStructure(true)",
+    "internal_size": 5,
+    "external_size": 50,
+    "confluence_filter": false,
+    "extra_condition": "internal pivot differs from confirmed same-side external pivot",
+    "confirmation": "actual close crossover/crossunder; rejected crosses do not change bias"
+  },
+  "annual": {
+    "tf": "Y1",
+    "role": "read-only context map, no signal authorization",
+    "data": "contiguous complete 12-month UTC calendar years only",
+    "current_year": "excluded until next January1",
+    "detectors": "same FVG, IFVG, OB, external50/internal5",
+    "missing_history": "no pivot/ATR invented or shortened"
+  }
 }

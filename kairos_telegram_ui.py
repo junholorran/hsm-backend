@@ -142,6 +142,9 @@ def format_setup_message(pair, event):
 def format_retest_message(pair, signal):
     direction = str(signal.get('direction') or '').upper()
     icon = '🟢' if direction == 'LONG' else '🔴' if direction == 'SHORT' else '⚪'
+    invalidation_note=('⚠️ <b>OB tocado e invalidado no mesmo candle — SEM NOVA ENTRADA.</b>\n'
+        'O toque foi observado; a sequência intrabar e o preenchimento não estão comprovados.\n'
+        if signal.get('poi_invalidated_same_bar') else '')
     return (
         '🎯 <b>KAIROS | RETESTE M5</b>\n'
         f'{icon} <b>{pair} | {direction}</b>\n\n'
@@ -153,6 +156,7 @@ def format_retest_message(pair, signal):
         f"🕐 M15 confirmado: {_local_time(signal.get('m15_internal_confirmation_close_ts'))}\n"
         f"🕐 Reteste observado: {_local_time(signal.get('retest_confirm_close_ts'))}\n\n"
         '🧠 O preço voltou ao POI que já estava armado.\n'
+        f'{invalidation_note}'
         '<b>DEMO / MANUAL · preenchimento não comprovado</b>'
     )
 

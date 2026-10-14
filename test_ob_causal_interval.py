@@ -35,9 +35,11 @@ class ObCausalIntervalTests(unittest.TestCase):
 
     def test_sol_authorized_ob_refines_using_its_native_leg(self):
         d = self.fixture
-        # Isolate already audited HTF capture; all M15/M5 selection is real.
+        # Isolate the OB path: independently sourced Lux IFVG may otherwise
+        # take existing POI priority. Capture, structure and OB calculations stay real.
         with patch.object(e, '_kairos_select_structural_first_capture_sweep',
-                          return_value=(dict(d['sweep']), {})):
+                          return_value=(dict(d['sweep']), {})), \
+             patch.object(e, '_kairos_fvg_states', return_value=[]):
             result = e.avaliar_vortex_decision_layer_v2(
                 d['M15'], d['M5'], [],
                 candles_por_tf={'M15':d['M15'], 'M5':d['M5']},
@@ -45,4 +47,5 @@ class ObCausalIntervalTests(unittest.TestCase):
         self.assertEqual(result['failure_reason'], 'AGUARDANDO_RETESTE_ZONA')
         self.assertEqual(result['entry_setup']['ready_ts'], 1791366300000)
         self.assertAlmostEqual(result['entry_setup']['level'], 118.83)
+
 

@@ -679,91 +679,13 @@ def _kairos_confirmed_pivots(candles, left=KAIROS_SWEEP_LEFT, right=KAIROS_SWEEP
 
 
 def _kairos_fvg_states(candles, lookback=250):
-    """FVG/IFVG com geometria ICT canônica de 3 candles e ciclo de vida operacional.
+    """Lux SMC FVG removal plus separately sourced Lux Inversion FVG states.
 
-    Estados operacionais: ATIVA -> TOCADA/PARCIAL. Wick profundo/full-fill
-    não mata sozinho a FVG. Fechamento através da extremidade invalidadora
-    confirma inversão e transforma a FVG em IFVG. IFVG pode ser INVALIDADA
-    se depois fechar de volta através do lado oposto.
+    All inputs are native candles supplied by the existing closed-bar pipeline.
+    Removed mothers remain audit records, not active POIs or HTF alerts.
     """
-    c=candles
-    retain_from=max(2, len(c)-max(1,int(lookback)))
-    if len(c) < 3:
-        return []
-    states=[]
-    # LuxAlgo SMC literal FVG filter (same-TF port of drawFairValueGaps):
-    # currentLow > high[2] / currentHigh < low[2], middle candle CLOSE beyond
-    # the old extreme, and middle-candle body delta beyond the cumulative auto threshold.
-    # Pine formula is intentionally preserved literally:
-    #   barDeltaPercent = (lastClose-lastOpen)/(lastOpen*100)
-    #   threshold = cumulative(abs(barDeltaPercent))/bar_index*2
-    cumulative_abs_delta=0.0
-    for i in range(1, len(c)):
-        meio=c[i-1]
-        denom=(float(meio['o'])*100.0) if meio.get('o') not in (None,0) else None
-        bar_delta=((float(meio['c'])-float(meio['o']))/denom) if denom else 0.0
-        cumulative_abs_delta += abs(bar_delta)
-        threshold=(cumulative_abs_delta / float(i) * 2.0) if i > 0 else 0.0
-        if i < retain_from:
-            continue
-        a, atual=c[i-2], c[i]
-        bull_geom=atual['l'] > a['h']
-        bear_geom=atual['h'] < a['l']
-        bull_lux=bull_geom and meio['c'] > a['h'] and bar_delta > threshold
-        bear_lux=bear_geom and meio['c'] < a['l'] and (-bar_delta) > threshold
-        novo=None
-        if bull_lux:
-            novo={'id':f"FVG_{meio['t']}_B",'tipo':'FVG_bullish','direcao':'alta','top':atual['l'],'bottom':a['h'],
-                  'created_ts':atual['t'],'origin_ts':meio['t'],'state':'ATIVA','flip_ts':None,'mother_fvg_id':None,
-                  'first_touch_ts':None,'mitigated_ts':None,'invalidated_ts':None,
-                  'source_a':dict(a),'source_mid':dict(meio),'source_c':dict(atual),'flip_candle':None,
-                  'lux_fvg':True,'lux_bar_delta_percent':bar_delta,'lux_threshold':threshold,
-                  'lux_middle_close_condition':True,'lux_geometry_condition':True}
-        elif bear_lux:
-            novo={'id':f"FVG_{meio['t']}_S",'tipo':'FVG_bearish','direcao':'baixa','top':a['l'],'bottom':atual['h'],
-                  'created_ts':atual['t'],'origin_ts':meio['t'],'state':'ATIVA','flip_ts':None,'mother_fvg_id':None,
-                  'first_touch_ts':None,'mitigated_ts':None,'invalidated_ts':None,
-                  'source_a':dict(a),'source_mid':dict(meio),'source_c':dict(atual),'flip_candle':None,
-                  'lux_fvg':True,'lux_bar_delta_percent':bar_delta,'lux_threshold':threshold,
-                  'lux_middle_close_condition':True,'lux_geometry_condition':True}
-        if novo:
-            states.append(novo)
-
-        for z in states:
-            if z['created_ts'] >= atual['t']:
-                continue
-            # FVG original: wick/touch NÃO mata a zona. O estado progride
-            # por profundidade de preenchimento; somente um CLOSE através da
-            # extremidade invalidadora confirma inversão e cria IFVG.
-            if z['tipo'] == 'FVG_bullish':
-                if atual['c'] < z['bottom']:
-                    z['state']='IFVG'; z['tipo']='IFVG_bearish'; z['direcao']='baixa'; z['mother_fvg_id']=z['id']; z['flip_ts']=atual['t']; z['flip_candle']=dict(atual)
-                elif atual['l'] <= z['bottom']:
-                    z['state']='PARCIAL'; z['first_touch_ts']=z['first_touch_ts'] or atual['t']
-                    z['mitigated_ts']=z['mitigated_ts'] or atual['t']
-                elif atual['l'] < z['top']:
-                    z['state']='PARCIAL' if atual['l'] < (z['top']+z['bottom'])/2 else 'TOCADA'
-                    z['first_touch_ts']=z['first_touch_ts'] or atual['t']
-            elif z['tipo'] == 'FVG_bearish':
-                if atual['c'] > z['top']:
-                    z['state']='IFVG'; z['tipo']='IFVG_bullish'; z['direcao']='alta'; z['mother_fvg_id']=z['id']; z['flip_ts']=atual['t']; z['flip_candle']=dict(atual)
-                elif atual['h'] >= z['top']:
-                    z['state']='PARCIAL'; z['first_touch_ts']=z['first_touch_ts'] or atual['t']
-                    z['mitigated_ts']=z['mitigated_ts'] or atual['t']
-                elif atual['h'] > z['bottom']:
-                    z['state']='PARCIAL' if atual['h'] > (z['top']+z['bottom'])/2 else 'TOCADA'
-                    z['first_touch_ts']=z['first_touch_ts'] or atual['t']
-            elif z['tipo'] == 'IFVG_bearish' and z['state'] != 'INVALIDADA':
-                if atual['c'] > z['top']:
-                    z['state']='INVALIDADA'; z['invalidated_ts']=atual['t']
-                elif atual['h'] >= z['bottom']:
-                    z['first_touch_ts']=z['first_touch_ts'] or atual['t']
-            elif z['tipo'] == 'IFVG_bullish' and z['state'] != 'INVALIDADA':
-                if atual['c'] < z['bottom']:
-                    z['state']='INVALIDADA'; z['invalidated_ts']=atual['t']
-                elif atual['l'] <= z['top']:
-                    z['first_touch_ts']=z['first_touch_ts'] or atual['t']
-    return states
+    from kairos_lux_fvg import combined_fvg_states
+    return combined_fvg_states(candles, lookback)
 
 
 def auditar_fvg_ifvg_h1_btc(dias=7, fim_ts_ms=None, lo=85000.0, hi=87000.0):
@@ -1087,7 +1009,7 @@ def _kairos_liquidity_map_tf(candles, tf):
     sweeps=_kairos_pool_sweeps(candles,pools)
     return {'tf':tf,'pivots':enriched[-40:],'equal_liquidity':eq[-30:],
             'liquidity_pools':pools[-40:],'sweeps':sweeps[-30:],
-            'zones':fvg[-80:],'order_blocks':obs[-60:],'volume':_kairos_volume_context(candles)}
+            'zones':fvg,'order_blocks':obs[-60:],'volume':_kairos_volume_context(candles)}
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -1861,7 +1783,7 @@ def _kairos_select_htf_poi_location(mapa, m15_candles, now_ts):
         return None
     return max(candidates,key=lambda x:(x['touch_ts'],KAIROS_TF_PESO.get(x['tf'],1)))
 
-print('[KAIROS_FVG_ENTRY] installed=true origin=HTF_FVG_TOUCH structure_sizes=50/5 detectors_changed=false', flush=True)
+print('[KAIROS_FVG_ENTRY] installed=true origin=HTF_FVG_TOUCH structure_sizes=50/5 fvg_reference=LUX_SMC_IFVG', flush=True)
 
 
 def _kairos_fvg_touch_intent(mapa, m15_candles, m5_candles, now_ts, candles_por_tf=None):
@@ -2526,8 +2448,8 @@ def _kairos_shadow_validate_poi(zone, candles, sweep=None, structure=None, tf='M
         if typ.startswith('IFVG_'):
             flip=zone.get('flip_candle'); fts=zone.get('flip_ts')
             flip_after=bool(isinstance(flip,dict) and fts==flip.get('t') and fts and fts>zone.get('created_ts',0))
-            if mother=='FVG_bearish': flip_geom=bool(flip and flip.get('c') is not None and flip['c'] > zone['top'] and typ=='IFVG_bullish')
-            elif mother=='FVG_bullish': flip_geom=bool(flip and flip.get('c') is not None and flip['c'] < zone['bottom'] and typ=='IFVG_bearish')
+            if mother=='FVG_bearish': flip_geom=bool(flip and flip.get('c') is not None and max(flip['o'],flip['c']) > zone['top'] and typ=='IFVG_bullish')
+            elif mother=='FVG_bullish': flip_geom=bool(flip and flip.get('c') is not None and min(flip['o'],flip['c']) < zone['bottom'] and typ=='IFVG_bearish')
             else: flip_geom=False
             out.update({'flip_after_creation':flip_after,'flip_geometry_ok':flip_geom,'flip_candle':flip})
             ok=ordered and bool(mother) and bounds_ok and created_ok and causal_ok and flip_after and flip_geom

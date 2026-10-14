@@ -1,0 +1,23 @@
+{
+  "retrieved_date": "2026-10-14",
+  "smc": {
+    "url": "https://www.luxalgo.com/library/indicator/smart-money-concepts-smc/",
+    "pine_version": 6,
+    "sha256": "a8046ad353c1b495e3c31e79365d7658a295be743ba56293e7d4c861813af48b",
+    "threshold": "Auto Threshold enabled; cumulative native-history delta",
+    "removal": "literal low < raw.bottom bullish or high > raw.top bearish, evaluated before new formation"
+  },
+  "ifvg": {
+    "url": "https://www.luxalgo.com/library/indicator/inversion-fair-value-gaps-ifvg/",
+    "pine_version": 6,
+    "sha256": "62c281f292707c611761f3bb6e8b980a5c99dbc063006fe42a11faa8507fa4eb",
+    "atr_multiplier": 0.25,
+    "signal_preference": "Close",
+    "buffer": 100,
+    "show_last": 5,
+    "flip_and_invalidation": "min(open,close) or max(open,close) per direction; no wick-only flip",
+    "display_limit": "drawings only; source signal calculation still considers logical queue"
+  },
+  "runtime": "closed native TF inputs; does not copy provisional/repainting intrabar drawings",
+  "limitations": "Finite native feed history and cumulative seed must match when comparing chart detection. Removed zones retained as inactive evidence. Lookback bounds archive, not active SMC age. No change to liquidity/structure confirmation or trade management."
+}

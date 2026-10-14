@@ -226,16 +226,21 @@ def replay_from_candles(engine, pair, raw, start, end, buffer_mult=0.25):
                       'limits':'Historical reproduction; current OHLC may differ from first publication. Partial coverage is not a complete backtest.'}}
 
 
-def native_export(engine, pair, end):
+def native_export(engine, pair, end, include_fvg=False):
     """Bounded native OHLC export; never evaluates or records a trade."""
     raw,audit=fetch_inputs(engine,pair,end-86400000,end)
     candles={tf:engine._kairos_candles_fechados_ate(cs,LIVE_SPECS[tf][0],end)
              for tf,cs in raw.items()}
-    return {'pair':pair,'instrument':engine._kairos_normalize_instrument(pair),
+    result={'pair':pair,'instrument':engine._kairos_normalize_instrument(pair),
             'cutoff_ts':end,'candles':candles,'fetch_audit':audit,
             'sha256':hashlib.sha256(json.dumps(candles,sort_keys=True,separators=(',',':')).encode()).hexdigest(),
             'read_only':True,'fill_assumed':False,'evaluation_performed':False,
             'note':'Historical OHLC export, not proof of first-publication data or trade execution.'}
+    if include_fvg:
+        result['fvg_states']={tf:engine._kairos_fvg_states(cs) for tf,cs in candles.items() if tf in ('H1','H4')}
+        result['fvg_math_performed']=True
+        result['fvg_reference']='LUX_SMC_V6_AND_LUX_IFVG_V6'
+    return result
 
 
 def register(app, engine):
@@ -272,9 +277,9 @@ def register(app, engine):
             threading.Thread(target=job,args=(pair,start,end,mult),daemon=True).start()
             return jsonify({'status':'STARTING','pair':pair,'read_only':True,'start_ts':start,'end_ts':end}),202
         return jsonify(_CACHE)
-    def export_job(pair,end):
+    def export_job(pair,end,include_fvg=False):
         try:
-            result=native_export(engine,pair,end)
+            result=native_export(engine,pair,end,include_fvg=include_fvg)
             _EXPORT_CACHE.update(status='DONE',result=result,error=None)
             print(f'[KAIROS_NATIVE_EXPORT] DONE pair={pair} cutoff={end}',flush=True)
         except Exception as exc:
@@ -286,6 +291,8 @@ def register(app, engine):
     def native_candles_endpoint():
         if request.args.get('start')=='1':
             try:
+                include_fvg=request.args.get('include_fvg','0')
+                if include_fvg not in ('0','1'):raise ValueError('include_fvg must be 0 or 1')
                 pair=request.args.get('pair','AVAXUSD').upper()
                 end=int(request.args.get('fim_ts_ms') or int(time.time()*1000))
                 if pair not in PAIRS or not 1577836800000<=end<=int(time.time()*1000):
@@ -296,7 +303,7 @@ def register(app, engine):
             if not _LOCK.acquire(blocking=False):
                 return jsonify({'status':'BUSY','started':False}),409
             _EXPORT_CACHE.update(status='RUNNING',result=None,error=None,pair=pair,cutoff_ts=end)
-            threading.Thread(target=export_job,args=(pair,end),daemon=True).start()
+            threading.Thread(target=export_job,args=(pair,end,include_fvg=='1'),daemon=True).start()
             return jsonify({'status':'STARTING','pair':pair,'read_only':True}),202
         return jsonify(_EXPORT_CACHE)
     print('[KAIROS_OB_2R_REPLAY] audit_route_installed=true live_math_changed=false',flush=True)

@@ -3399,6 +3399,10 @@ def _kairos_apply_entry_phase(state, result, cutoff_ts, start_ts, events):
             suppress('RETEST_NOT_CLOSED');return
         if rec['touched']:
             suppress('ENTRY_ALREADY_OBSERVED');return
+        if not rec['armed'] and any((v.get('signal_snapshot') or {}).get('retest_confirm_close_ts')==closed
+                                    and (v.get('signal_snapshot') or {}).get('armed_before_retest') is True for v in state.values()):
+            rec['touched']=True
+            suppress('RETEST_REPLACED_BY_PREARMED_POI_OBSERVATION');return
         rec['touched']=True
         # Never turn a retrospective retest into a fresh execution notification.
         if closed<cutoff_ts:
@@ -3408,12 +3412,17 @@ def _kairos_apply_entry_phase(state, result, cutoff_ts, start_ts, events):
                        'retest_open_ts':opened,'observed_close':retest.get('c'),
                        'armed_before_retest':rec['armed'],
                        'note':'Historical retest level; observed close is separate. No fill assumed.'})
+        result['armed_before_retest']=bool(rec['armed'] and rec.get('armed_observed_ts',cutoff_ts+1)<=opened)
+        result['armed_alert_delivered_before_retest']=bool(rec.get('armed_alert_delivered_ts') is not None and rec['armed_alert_delivered_ts']<=opened)
+        result['fill_assumed']=False
         result['entry_observation_confirmed']=bool(result.get('entry_audit_only') and setup['tf']=='M5')
         return
     if rec['touched'] or rec['armed']:
         return
     rec['armed']=True
-    events.append({**setup,'key':key+':ARMED','setup_key':key,
+    from kairos_setup_tracking import remember_armed
+    remember_armed(state,rec,result,setup,cutoff_ts)
+    events.append({**setup,**({'selection_change':rec['selection_change']} if rec.get('selection_change') else {}),'key':key+':ARMED','setup_key':key,
                    'phase':'ARMED','timestamp':cutoff_ts,'retest':None,
                    'note':'Prospective proximal level; awaiting retest. Not a filled trade.'})
 
@@ -3542,6 +3551,10 @@ def _kairos_scan_latest_closed(pair, observed_ts, phase_state):
         audit_pair=pair,experimental_poi_policy='A_CURRENT',experimental_poi_state={},cutoff_ts=cutoff,
         audit_entries_only=True)
     events=[]
+    # Observe frozen prospective levels before recomputing the current selection.
+    from kairos_setup_tracking import observe_armed
+    import sys
+    observe_armed(phase_state,r,tf_map['M5'],cutoff,sys.modules[__name__])
     _kairos_apply_entry_phase(phase_state,r,cutoff,cutoff-900000,events)
     setup=r.get('entry_setup') or {}
     rec=phase_state.get(setup.get('key')) or {}
@@ -3550,6 +3563,7 @@ def _kairos_scan_latest_closed(pair, observed_ts, phase_state):
     for event in events:
         if event['phase']=='ARMED':
             event['timestamp']=int(observed_ts)
+            rec['armed_observed_ts']=int(observed_ts)
             rec['armed_event']=dict(event)
     if pending and rec.get('armed_event') and not any(e['phase']=='ARMED' for e in events):
         events.append(dict(rec['armed_event']))

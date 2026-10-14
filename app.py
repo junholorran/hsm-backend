@@ -1929,6 +1929,10 @@ def _kairos_deliver_setup_once(pair, event, message):
                 if not send_telegram(message):
                     return False
                 conn.execute("UPDATE kairos_setup_delivery SET status='DELIVERED' WHERE pair=? AND event_key=?", (pair,event['key']))
+                import time as _delivery_clock
+                _record=globals().get('_KAIROS_LIVE_PHASE_STATE',{}).get(pair,{}).get(event.get('setup_key'),{})
+                if _record:
+                    _record['armed_alert_delivered_ts']=int(_delivery_clock.time()*1000)
                 status='DELIVERED'
         print(f"[KAIROS_SETUP] {status} pair={pair} ready_ts={ready_ts} key={event['key']}", flush=True)
         return True
@@ -2076,7 +2080,7 @@ def _kairos_live_scanner_loop():
                             _KAIROS_LIVE_SEEN[pair].add(sig)
                             delivery_key=(s.get('entry_setup') or {}).get('key')
                             _KAIROS_LIVE_PHASE_STATE[pair].get(delivery_key,{}).pop('signal_snapshot',None)
-                            print(f"[KAIROS_LIVE] M5_RETEST_OBSERVED pair={pair} ts={ts} sig={sig} proximal={entry}", flush=True)
+                            print(f"[KAIROS_LIVE] M5_RETEST_OBSERVED pair={pair} ts={ts} sig={sig} proximal={entry} armed_before_retest={s.get('armed_before_retest')} same_bar_removal={s.get('poi_invalidated_same_bar',False)}", flush=True)
                         else:
                             delivered = False
                     if delivered:

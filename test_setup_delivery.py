@@ -41,7 +41,19 @@ class SetupDeliveryTests(unittest.TestCase):
     def test_boot_does_not_reannounce_historical_pending_setup(self):
         self.assertTrue(self.send(self.ns(),self.event(ready=900)))
         self.assertEqual(self.sent,[])
+    def test_only_successful_send_proves_prior_delivery(self):
+        ns=self.ns(False);rec={'armed':True};ns['_KAIROS_LIVE_PHASE_STATE']['ADAUSD']['A']=rec
+        self.assertFalse(self.send(ns,self.event()))
+        self.assertNotIn('armed_alert_delivered_ts',rec)
+        ns['send_telegram']=lambda msg:True
+        self.assertTrue(self.send(ns,self.event()))
+        self.assertGreater(rec['armed_alert_delivered_ts'],0)
+    def test_preboot_baseline_never_claims_successful_announcement(self):
+        ns=self.ns();rec={'armed':True};ns['_KAIROS_LIVE_PHASE_STATE']['ADAUSD']['A']=rec
+        self.assertTrue(self.send(ns,self.event(ready=900)))
+        self.assertNotIn('armed_alert_delivered_ts',rec)
     def test_storage_failure_does_not_send_untracked_alert(self):
         ns=self.ns();ns['DB_FILE']=str(Path(self.tmp.name)/'missing'/'alerts.db')
         self.assertFalse(self.send(ns,self.event()))
         self.assertEqual(self.sent,[])
+

@@ -122,6 +122,10 @@ def format_setup_message(pair, event):
                    if event.get('origin_kind') == 'HTF_FVG_TOUCH' else
                    f"💧 <b>Origem: {event.get('capture_tf')} @ {_price(event.get('capture_level'))}</b>\n")
 
+    change=event.get('selection_change') or {}
+    change_note=(f'🔄 <b>POI ATUALIZADO</b> — anterior: {_price(change.get("previous_bottom"))}–{_price(change.get("previous_top"))}.\n'
+                 + ('Zona anterior removida pelo detector.\n' if change.get('reason')=='PRIOR_POI_REMOVED' else 'A seleção atual do motor passou a outra zona; não é um preenchimento da anterior.\n')
+                 if change else '')
     return (
         '⏳ <b>KAIROS | SETUP M5 ARMADO</b>\n'
         f'{icon} <b>{pair} | {direction}</b>\n\n'
@@ -131,6 +135,7 @@ def format_setup_message(pair, event):
         f'✅ <b>{m5_line}</b>\n\n'
         f"📦 <b>{event.get('zone_type')} M5: {_price(event.get('bottom'))}–{_price(event.get('top'))}</b>\n"
         f"📍 <b>Proximal / entrada planeada: {_price(event.get('level'))}</b>\n\n"
+        f'{change_note}'
         '🧬 <b>CADEIA CAUSAL COMPLETA ✅</b>\n\n'
         '🧠 <b>LEITURA</b>\n'
         'Estrutura de execução formada. Não perseguir preço; aguardar retorno ao POI.\n\n'
@@ -142,9 +147,17 @@ def format_setup_message(pair, event):
 def format_retest_message(pair, signal):
     direction = str(signal.get('direction') or '').upper()
     icon = '🟢' if direction == 'LONG' else '🔴' if direction == 'SHORT' else '⚪'
-    invalidation_note=('⚠️ <b>OB tocado e invalidado no mesmo candle — SEM NOVA ENTRADA.</b>\n'
+    poi_name='OB' if str(signal.get('zone_type','')).startswith('OB_') else 'IFVG' if str(signal.get('zone_type','')).startswith('IFVG_') else 'FVG'
+    invalidation_note=(f'⚠️ <b>{poi_name} tocado e invalidado no mesmo candle — SEM NOVA ENTRADA.</b>\n'
         'O toque foi observado; a sequência intrabar e o preenchimento não estão comprovados.\n'
         if signal.get('poi_invalidated_same_bar') else '')
+    armed=signal.get('armed_before_retest') is True
+    delivered=signal.get('armed_alert_delivered_before_retest') is True
+    observation_note=('🧠 O preço voltou ao POI que já estava armado e anunciado antes deste candle.\n' if armed and delivered else
+                      '⚠️ Nível selecionado antes do toque; envio prévio ao Telegram não comprovado — SEM NOVA ENTRADA.\n' if armed else
+                      '⚠️ Toque identificado sem armação prévia comprovada — SEM NOVA ENTRADA.\n')
+    if signal.get('authorization_not_current'):
+        observation_note+='⚠️ Autorização atual não comprovada neste ciclo — SEM NOVA ENTRADA.\n'
     return (
         '🎯 <b>KAIROS | RETESTE M5</b>\n'
         f'{icon} <b>{pair} | {direction}</b>\n\n'
@@ -155,7 +168,7 @@ def format_retest_message(pair, signal):
         '🧬 <b>MESMO SETUP CAUSAL</b> — sem nova tese.\n'
         f"🕐 M15 confirmado: {_local_time(signal.get('m15_internal_confirmation_close_ts'))}\n"
         f"🕐 Reteste observado: {_local_time(signal.get('retest_confirm_close_ts'))}\n\n"
-        '🧠 O preço voltou ao POI que já estava armado.\n'
+        f'{observation_note}'
         f'{invalidation_note}'
         '<b>DEMO / MANUAL · preenchimento não comprovado</b>'
     )

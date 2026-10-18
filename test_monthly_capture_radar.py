@@ -54,12 +54,12 @@ class MonthlyCaptureRadarTests(unittest.TestCase):
         start,data=self.fixtures();event=e._kairos_capture_radar_events({},data,start+1800000)[0]
         tree=ast.parse(Path('app.py').read_text())
         pairs=ast.literal_eval(next(n.value for n in tree.body if isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id=='_KAIROS_LIVE_PAIRS' for t in n.targets)))
-        self.assertEqual(len(pairs),13)
+        self.assertEqual(pairs,('BTCUSD','ETHUSD','SOLUSD','BNBUSD'))
         messages=[]
         ns=load_functions('app.py',['_kairos_send_capture_events'],{'send_telegram':lambda msg:messages.append(msg) or True,'datetime':datetime,'timezone':timezone,'_KAIROS_LIVE_LAST_TS':{p:0 for p in pairs},'_KAIROS_RADAR_SEEN':{p:set() for p in pairs}})
         for pair in pairs:
             self.assertTrue(ns['_kairos_send_capture_events'](pair,{'radar_captures':[event]},start+1800000))
-        self.assertEqual(len(messages),13)
+        self.assertEqual(len(messages),len(pairs))
         for msg in messages:
             self.assertIn('MN:',msg)
             self.assertIn('MN PMH @ 120',msg)
@@ -70,7 +70,7 @@ class MonthlyCaptureRadarTests(unittest.TestCase):
         pair=pairs[0];ns['_KAIROS_LIVE_LAST_TS'][pair]=start+3*86400000
         ns['_KAIROS_RADAR_SEEN'][pair].clear()
         ns['_kairos_send_capture_events'](pair,{'radar_captures':[event]},start+4*86400000)
-        self.assertEqual(len(messages),13)
+        self.assertEqual(len(messages),len(pairs))
 
     def test_overlapping_daily_close_does_not_reannounce_observed_capture(self):
         day=ts(2026,10,10);opened=day+13*3600000

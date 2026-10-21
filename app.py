@@ -3255,3 +3255,10 @@ def experiment_btc_entry_chain_replay():
 # Isolated counterfactual replay; no live sender/database/strategy changes.
 from kairos_ob_2r_replay import register as _register_ob_2r_replay
 _register_ob_2r_replay(app, scalp_engine)
+
+
+@app.route('/experiment/ludo_structure_shadow', methods=['GET'])
+def experiment_ludo_structure_shadow():
+    from kairos_ludo_structure import latest_shadow
+    return jsonify({'mode': 'SHADOW_ONLY', 'entry_authorized': False,
+                    'production_decision_changed': False, 'pairs': latest_shadow()})

@@ -3550,6 +3550,13 @@ def _kairos_scan_latest_closed(pair, observed_ts, phase_state):
         tf_map['M15'],tf_map['M5'],tf_map['D1'],candles_por_tf=tf_map,
         audit_pair=pair,experimental_poi_policy='A_CURRENT',experimental_poi_state={},cutoff_ts=cutoff,
         audit_entries_only=True)
+    # Additive Ludo structure observer: never replaces r or feeds entry phases.
+    # It shares the existing native candles and capture evidence; no new fetches.
+    try:
+        from kairos_ludo_structure import record_shadow
+        record_shadow(pair, tf_map, cutoff, r)
+    except Exception as shadow_exc:
+        print(f"[KAIROS_LUDO_SHADOW] error pair={pair} cutoff={cutoff}: {shadow_exc}", flush=True)
     events=[]
     # Observe frozen prospective levels before recomputing the current selection.
     from kairos_setup_tracking import observe_armed

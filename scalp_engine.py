@@ -1676,17 +1676,23 @@ def _kairos_select_structural_first_capture_sweep(candles_por_tf, now_ts, liquid
         if (not coverage or coverage[0]!=coverage_start or
                 any(b-a!=900000 for a,b in zip(coverage,coverage[1:]))):
             continue
-        nxt=m15[first_idx+1] if first_idx+1 < len(m15) else None
-        if nxt is not None and nxt['t']!=c['t']+900000:
-            nxt=None
-        # Estado pós-captura: rejeição/reclaim OU aceitação além do nível.
-        if is_high:
-            reclaimed=(c['c'] < level) and (nxt is not None and nxt['c'] < level)
-            accepted=(c['c'] > level) and (nxt is not None and nxt['c'] > level)
-        else:
-            reclaimed=(c['c'] > level) and (nxt is not None and nxt['c'] > level)
-            accepted=(c['c'] < level) and (nxt is not None and nxt['c'] < level)
-        state='REJECTION_RECLAIM' if reclaimed else ('ACCEPTANCE_CONTINUATION' if accepted else 'UNRESOLVED_REACTION')
+        # Re-evaluate the causal reaction on each CLOSED M15 prefix. Only two
+        # adjacent closes strictly on the same side confirm a state. Preserve
+        # the first capture; stamp only actual state transitions, not every bar.
+        state='UNRESOLVED_REACTION'; reaction_open=None
+        for j in range(first_idx+1,len(m15)):
+            previous,current=m15[j-1],m15[j]
+            if current['t']!=previous['t']+900000:
+                continue  # Never combine closes separated by missing evidence.
+            above=previous['c']>level and current['c']>level
+            below=previous['c']<level and current['c']<level
+            next_state=('ACCEPTANCE_CONTINUATION' if (above if is_high else below)
+                        else 'REJECTION_RECLAIM' if (below if is_high else above)
+                        else None)
+            if next_state is not None and next_state!=state:
+                state=next_state; reaction_open=current['t']
+        reclaimed=state=='REJECTION_RECLAIM'
+        accepted=state=='ACCEPTANCE_CONTINUATION'
         rec={'liquidity_tf':liq['tf'],'liquidity_type':liq['type'],'nivel':level,
              'liquidity_origin_ts':liq.get('origin_ts'),'liquidity_confirm_ts':confirm_ts,
              # Compatibility field: availability now comes from M15 evidence,
@@ -1698,7 +1704,8 @@ def _kairos_select_structural_first_capture_sweep(candles_por_tf, now_ts, liquid
              'extremo':c['h'] if is_high else c['l'],'liquidity_side':'HIGH' if is_high else 'LOW',
              'post_capture_state':state,'first_capture_reclaimed':bool(reclaimed),
              'first_capture_accepted':bool(accepted),'sweep_ts':c['t'],'tf':liq['tf'],
-             'confirm_ts':nxt['t'] if nxt is not None and state!='UNRESOLVED_REACTION' else None}
+             'confirm_ts':reaction_open,
+             'reaction_confirm_ts':reaction_open+900000 if reaction_open is not None else None}
         age=now_ts-c['t']; rec['age_ms']=age
         rec['status']='VALID_FIRST_CAPTURE_NEUTRAL' if state!='UNRESOLVED_REACTION' else 'AWAITING_REACTION'
         candidates.append(rec)
@@ -1872,6 +1879,7 @@ def _kairos_direction_after_first_capture(candles, capture, swing_size=5):
         return None
     expected=('baixa' if side=='HIGH' else 'alta') if state=='REJECTION_RECLAIM' else ('alta' if side=='HIGH' else 'baixa')
     capture_ts=capture.get('sweep_ts',0)
+    reaction_open=capture.get('confirm_ts')
 
     major_events=sorted([e for e in compute_lux_structure_events(candles,swing_size=50)
                          if e.get('tipo') in ('CHoCH','BOS')],key=lambda e:e.get('t',0))
@@ -1881,7 +1889,8 @@ def _kairos_direction_after_first_capture(candles, capture, swing_size=5):
         return None
 
     internal_events=sorted([e for e in compute_lux_internal_structure(candles,swing_size=swing_size)
-                            if e.get('tipo') in ('CHoCH','BOS') and e.get('t',0)>capture_ts],
+                            if e.get('tipo') in ('CHoCH','BOS') and e.get('t',0)>capture_ts
+                            and (reaction_open is None or e.get('t',0)>=reaction_open)],
                            key=lambda e:e.get('t',0))
 
     for internal in internal_events:
@@ -2835,7 +2844,9 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
         _int=None
         if _active_major and _active_major.get('direcao')==_expected:
             for _e in _ints:
-                if _e.get('t',0)<=_capture_ts or _e.get('direcao')!=_expected or _e.get('tipo') not in ('CHoCH','BOS'):
+                if (_e.get('t',0)<=_capture_ts or
+                    (sweep.get('confirm_ts') is not None and _e.get('t',0)<sweep['confirm_ts']) or
+                    _e.get('direcao')!=_expected or _e.get('tipo') not in ('CHoCH','BOS')):
                     continue
                 _latest_major=next((m for m in reversed(_maj_all) if m.get('t',0)<=_e.get('t',0)),None)
                 if _latest_major and _latest_major.get('direcao')==_expected:
@@ -3359,6 +3370,8 @@ def _kairos_capture_radar_events(result, tf_map, now_ts):
     events = []
     for confirmed, capture, reaction in known:
         key = repr((capture.get('liquidity_tf'), capture.get('liquidity_type'), capture.get('liquidity_origin_ts'), capture.get('nivel'), capture.get('first_capture_ts'), reaction))
+        if capture.get('reaction_confirm_ts') is not None:
+            key += ':REACTION:'+str(capture['reaction_confirm_ts'])
         intervals = {'MN':'M','W1':'W','D1':'D','H4':'240','H1':'60'}
         events.append({
             'key': key, 'timestamp': confirmed, 'capture_confirm_ts': capture.get('capture_confirm_ts') or capture['first_capture_ts'] + 900000,

@@ -3605,6 +3605,13 @@ def _kairos_scan_latest_closed(pair, observed_ts, phase_state):
     except Exception as daily_exc:
         print(f'[KAIROS_DAILY_BRIEF] report error pair={pair}: {type(daily_exc).__name__}', flush=True)
 
+    # Independent per-capture observation/outbox, opt-in; never feeds r or phases.
+    try:
+        from kairos_capture_chains import scan as scan_capture_chains
+        scan_capture_chains(pair, tf_map, cutoff, r, sys.modules[__name__])
+    except Exception as chain_exc:
+        print(f'[KAIROS_CAPTURE_CHAIN] scan error pair={pair}: {type(chain_exc).__name__}', flush=True)
+
     return {'pair':pair,'scan_mode':'LATEST_CLOSED_SNAPSHOT','evaluations':1,
             'daily_brief':daily_brief,
             'cutoff_ts':cutoff,'validacao_dados':validation,

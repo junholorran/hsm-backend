@@ -3577,7 +3577,14 @@ def _kairos_scan_latest_closed(pair, observed_ts, phase_state):
     if r.get('entry_observation_confirmed') and rec:
         rec['signal_snapshot']=dict(r)
     signals=[value['signal_snapshot'] for value in phase_state.values() if value.get('signal_snapshot')]
+    daily_brief = None
+    try:
+        from kairos_daily_delivery import scan_report
+        daily_brief = scan_report(pair, tf_map, cutoff, sys.modules[__name__], r)
+    except Exception as daily_exc:
+        print(f'[KAIROS_DAILY_BRIEF] report error pair={pair}: {type(daily_exc).__name__}', flush=True)
     return {'pair':pair,'scan_mode':'LATEST_CLOSED_SNAPSHOT','evaluations':1,
+            'daily_brief':daily_brief,
             'cutoff_ts':cutoff,'validacao_dados':validation,
             'sinais_unicos_completos':signals,
             'radar_captures':_kairos_capture_radar_events(r,tf_map,cutoff),

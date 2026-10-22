@@ -2087,6 +2087,12 @@ def _kairos_live_scanner_loop():
                             if cached.get('retest_confirm_close_ts',cycle_started_ms+1)<=cycle_started_ms:
                                 pending_state.pop('signal_snapshot',None)
                     print(f"[KAIROS_LIVE] scan done pair={pair} signals={len(sinais)} new={len(novos)} watermark={_KAIROS_LIVE_LAST_TS[pair]}", flush=True)
+                    try:
+                        from kairos_daily_delivery import submit as submit_daily_brief
+                        submit_daily_brief(r.get('daily_brief'),send_telegram,'/data/kairos_daily_brief.db')
+                    except Exception as daily_exc:
+                        print(f'[KAIROS_DAILY_BRIEF] submit error pair={pair}: {type(daily_exc).__name__}',flush=True)
+
                 except Exception as e:
                     print(f"[KAIROS_LIVE] scan error pair={pair}: {e}", flush=True)
         time.sleep(max(0.1,_KAIROS_LIVE_INTERVAL_SECONDS-(time.time()-cycle_started_ms/1000)))

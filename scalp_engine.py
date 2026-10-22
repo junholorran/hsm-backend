@@ -2754,6 +2754,14 @@ def avaliar_vortex_decision_layer_v2(m15_ate_agora, m5_ate_agora, d1_ate_agora=N
 
     now_ts = int(cutoff_ts) if cutoff_ts is not None else max((cs[-1]['t'] for cs in candles_por_tf.values() if cs),default=resultado['timestamp'] or 0)
     mapa=_kairos_build_mtf_map(candles_por_tf)
+    # Optional presentation export: reuse the map already calculated above.
+    # No detector, authorization or price is changed by this snapshot.
+    import os as _context_os
+    if _context_os.environ.get('KAIROS_DAILY_BRIEF_ENABLED','false').strip().lower()=='true':
+        resultado['context_map_source']={'asof_ts':now_ts,'zones':{
+            tf:list((mapa.get(tf) or {}).get('zones') or [])+
+               list((mapa.get(tf) or {}).get('order_blocks') or [])
+            for tf in ('H4','H1')}}
     contexto=_kairos_context_bias(candles_por_tf)
     resultado['context_bias']=contexto; resultado['bias']=contexto.get('final')
     resultado['dealing_ranges']={}
@@ -3590,7 +3598,15 @@ def _kairos_scan_latest_closed(pair, observed_ts, phase_state):
     if r.get('entry_observation_confirmed') and rec:
         rec['signal_snapshot']=dict(r)
     signals=[value['signal_snapshot'] for value in phase_state.values() if value.get('signal_snapshot')]
+    daily_brief = None
+    try:
+        from kairos_daily_delivery import scan_report
+        daily_brief = scan_report(pair, tf_map, cutoff, sys.modules[__name__], r)
+    except Exception as daily_exc:
+        print(f'[KAIROS_DAILY_BRIEF] report error pair={pair}: {type(daily_exc).__name__}', flush=True)
+
     return {'pair':pair,'scan_mode':'LATEST_CLOSED_SNAPSHOT','evaluations':1,
+            'daily_brief':daily_brief,
             'cutoff_ts':cutoff,'validacao_dados':validation,
             'sinais_unicos_completos':signals,
             'radar_captures':_kairos_capture_radar_events(r,tf_map,cutoff),

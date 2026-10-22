@@ -1,9 +1,12 @@
 # Daily bias and liquidity briefing — inactive candidate
 
-This proposal is isolated in `kairos_daily_report.py`. No existing application,
-scanner, Telegram sender, FVG/OB detector, period levels, entry authorization or
-production database is changed. There is no scheduled callback and nothing is
-sent. Native candles and registry snapshots must be supplied by a future caller.
+This proposal is implemented in `kairos_daily_report.py` and
+`kairos_daily_delivery.py`, with two guarded hooks in the existing scanner and
+app delivery loop. It uses the SAME `send_telegram` callback, token and chat for
+BTCUSD, ETHUSD, SOLUSD and BNBUSD. The hooks are inactive by default:
+`KAIROS_DAILY_BRIEF_ENABLED` must explicitly be `true`. No live environment
+variables have been changed. FVG/OB detectors, period levels, entry decisions,
+existing alert messages and existing signal delivery watermarks are unchanged.
 
 ## Explicit daily rule
 
@@ -40,18 +43,29 @@ historical liquidity or exchange orders. Counts and missing period types are
 shown. Nearest available levels above/below the last D1 close are descriptive;
 they are not live-price references, targets or a predicted destination.
 
-## Delivery preparation
+## Delivery through the existing bot
 
 The pure formatter returns plain-text pages no longer than 3500 characters and
-does not silently truncate levels. `prepare_notification` only stores candidate
-payloads once per pair/UTC-day/rule-version in an explicitly supplied SQLite
-connection. It never reads environment secrets, opens the production database,
-contacts Telegram or marks delivery successful. A preparation record is not a
-delivery receipt. The caller owns transactions.
+does not silently truncate levels. `prepare_notification` remains an isolated
+preparation helper; it does not send. The integration's `scan_report` reads the
+existing native candles, computes the existing registry once per successful
+pair/day snapshot and keeps the structure context separate from daily bias.
+It performs no additional market API calls. A mid-day startup reports the
+current native day only, showing the actual map-observation timestamp; it does
+not pretend that intraday captures were known at midnight.
+
+`submit` uses a bounded background queue so daily briefing sends do not block
+legacy signal delivery. `deliver` uses the EXISTING bot callback and records
+each positively acknowledged page in `/data/kairos_daily_brief.db`, separate
+from `alerts.db`. The same pair/day/rule payload is frozen durably for retries.
+Failed pages retry on a later successful scan; acknowledged pages survive
+restarts. As with the Telegram API generally, a crash after remote acceptance
+but before local commit can duplicate one page (no remote idempotency key).
+Storage failure prevents sending; report/send failures do not alter legacy
+signal watermarks. No external message was sent during validation.
 
 Before activation: validate the heuristic in replay and forward DEMO; finalize
-price invalidation; review scheduling and gap/catch-up policy; add reliable
-multipart Telegram delivery/retry receipts; use a separate database namespace;
-check all four pairs; rotate the Telegram token following the Railway notice;
-deploy only the approved integration. No extra market API traffic is required
-by this candidate. Current live configuration remains untouched.
+price invalidation; check all four pairs with native data; rotate the Telegram
+token following the Railway notice; deploy and explicitly enable only the
+approved informational integration. No forecast-performance claim follows
+from unit tests passing. Current live configuration remains untouched.

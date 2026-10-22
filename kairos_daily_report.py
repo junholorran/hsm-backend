@@ -130,6 +130,10 @@ def notification_parts(report, max_chars=3500):
              'Observar reação no POI; confirmação M15 e refinamento M5.',
              f"Níveis H4/H1: {report['coverage_counts']}. Períodos ausentes: {', '.join(report['missing_period_types']) or 'nenhum'}.",
              'MAPA EXISTENTE H4/H1 + PERÍODOS | cobertura limitada ao histórico disponível:']
+    context = report.get('structure_context') or {}
+    if context:
+        lines.insert(1, 'Estrutura (separada do viés): ' + ' | '.join(f'{tf} {context.get(tf, "neutro")}' for tf in ('D1','H4','H1')))
+    lines.insert(1, 'Mapa observado em ' + datetime.fromtimestamp(report['asof_ts']/1000, timezone.utc).isoformat())
     lines += [f"{r['tf']} {r['type']} @ {r['level']} | " + ('disponível' if r['state']=='ACTIVE' else 'capturada') for r in report['levels']]
     pages = []; page = header
     for line in lines:

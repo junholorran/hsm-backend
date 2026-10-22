@@ -2092,6 +2092,11 @@ def _kairos_live_scanner_loop():
                         submit_daily_brief(r.get('daily_brief'),send_telegram,'/data/kairos_daily_brief.db')
                     except Exception as daily_exc:
                         print(f'[KAIROS_DAILY_BRIEF] submit error pair={pair}: {type(daily_exc).__name__}',flush=True)
+                    try:
+                        from kairos_capture_chains import submit as submit_capture_chains
+                        submit_capture_chains(pair,send_telegram)
+                    except Exception as chain_exc:
+                        print(f'[KAIROS_CAPTURE_CHAIN] submit error pair={pair}: {type(chain_exc).__name__}',flush=True)
 
                 except Exception as e:
                     print(f"[KAIROS_LIVE] scan error pair={pair}: {e}", flush=True)

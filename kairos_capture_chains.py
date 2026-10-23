@@ -1,7 +1,7 @@
-"""Independent, opt-in observational chains. Never feeds the entry engine.
+"""Durable Ludo observations qualified by closed reaction episodes.
 
 Ludo supplies structure; existing engine functions supply causal FVG/OBs.
-SQLite state/outbox is separate from all legacy setup/delivery watermarks.
+State/outbox is separate from legacy setup watermarks. Never submits orders.
 """
 import copy
 import hashlib
@@ -17,9 +17,11 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from kairos_ludo_structure import structure_snapshot
+from kairos_reaction_episode import reaction_timeline, evidence_at, touch_episode
 
 M5 = 300000
 M15 = 900000
+CAUSAL_POLICY_VERSION = 2
 PAIRS = ('BTCUSD', 'ETHUSD', 'SOLUSD', 'BNBUSD')
 DEFAULT_PATH = '/data/kairos_capture_chains.db'
 _LOCK = threading.RLock()
@@ -144,7 +146,8 @@ def advance(state, pair, captures, tf_map, cutoff, engine, observed_ts=None):
     """
     original = copy.deepcopy(state)
     observed_ts = max(cutoff, observed_ts or cutoff)
-    if state and cutoff <= state['asof_ts']:
+    if state and (cutoff < state['asof_ts'] or (cutoff == state['asof_ts']
+            and state.get('causal_policy_version') == CAUSAL_POLICY_VERSION)):
         return original, []
     m15 = _closed(tf_map.get('M15', []), M15, cutoff)
     m5 = _closed(tf_map.get('M5', []), M5, cutoff)
@@ -154,15 +157,26 @@ def advance(state, pair, captures, tf_map, cutoff, engine, observed_ts=None):
                  for tf, cs, d in (('M15', m15, M15), ('M5', m5, M5))}
     if any(s['status'] != 'OK' for s in snapshots.values()):
         return original, []
+    if state and state.get('causal_policy_version') != CAUSAL_POLICY_VERSION:
+        # Existing plans were not reaction-qualified. Rebase only on validated
+        # closed data; never adopt their old plans or historical retests.
+        return dict(start_ts=cutoff, asof_ts=cutoff, captures={},
+                    causal_policy_version=CAUSAL_POLICY_VERSION,
+                    migrated_from_unqualified_state=True,
+                    ludo_only_since=cutoff), []
     if not state:
-        return dict(start_ts=cutoff, asof_ts=cutoff, captures={}), []
+        return dict(start_ts=cutoff, asof_ts=cutoff, captures={},
+                    causal_policy_version=CAUSAL_POLICY_VERSION), []
     state = original
     previous = state['asof_ts']
     alerts = []
 
     def emit(cid, rec, stage, **facts):
         event = dict(pair=pair, capture_id=cid, stage=stage, observed_ts=observed_ts,
+                     causal_policy_version=CAUSAL_POLICY_VERSION,
                      capture=copy.deepcopy(rec['capture']), fill_assumed=False,
+                     reaction=copy.deepcopy(rec.get('reaction')),
+                     episode_key=(rec.get('episode') or {}).get('key'),
                      entry_authorized=False, **facts)
         event['key'] = hashlib.sha256(json.dumps(
             [cid, stage, facts.get('break_ts'), facts.get('candle_ts'), cutoff],
@@ -194,13 +208,17 @@ def advance(state, pair, captures, tf_map, cutoff, engine, observed_ts=None):
             tf = capture['htf_location']['tf']
             duration = {'H1': 3600000, 'H4': 14400000, 'D1': 86400000, 'W1': 604800000}[tf]
             origin_removed = _removed_at(origin_zone, tf_map.get(tf) or [], duration, engine)
-        if m15[0]['t'] > min(previous, capture['native_capture_confirm_ts']):
+        required_start = (capture['native_capture_confirm_ts'] if capture.get('origin_kind') == 'HTF_FVG_TOUCH'
+                          else capture['first_capture_ts'])
+        if m15[0]['t'] > min(previous, required_start):
             rec['history_lost'] = True
             emit(cid, rec, 'HISTORICO_INSUFICIENTE')
             continue
         fresh = [e for e in m15events if previous < e['close_ts'] <= cutoff
                  and e['open_ts'] >= capture['native_capture_confirm_ts']
                  and e['level_known_ts'] <= e['open_ts']]
+        timeline = reaction_timeline(m15, capture)
+        origin_reaction = touch_episode(capture) if capture.get('origin_kind') == 'HTF_FVG_TOUCH' else None
         removals = {}
         # Time-ordered closes: old-plan M5 observation, then native M15 break.
         # Plans discovered late are checked through the remaining closed bars
@@ -209,6 +227,22 @@ def advance(state, pair, captures, tf_map, cutoff, engine, observed_ts=None):
             if c['t'] < previous:
                 continue
             closed = c['t']+M5
+            reaction = (origin_reaction if origin_reaction and origin_reaction['confirmed_ts'] <= closed
+                        else evidence_at(timeline, closed))
+            if reaction and reaction['key'] != (rec.get('episode') or {}).get('key'):
+                old_plan = rec.get('plan')
+                if old_plan and not old_plan.get('invalidated'):
+                    old_plan['invalidated'] = True
+                    zone = old_plan.get('m5_zone')
+                    ambiguous = bool(zone and not old_plan.get('touched') and c['t'] >= old_plan['armed_ts']
+                                     and c['h'] >= zone['bottom'] and c['l'] <= zone['top'])
+                    emit(cid, rec, 'TOQUE_E_INVALIDACAO' if ambiguous else 'PLANO_INVALIDADO',
+                         break_ts=old_plan['break']['close_ts'], candle_ts=c['t'],
+                         direction='LONG' if old_plan['break']['side'] == 'UP' else 'SHORT',
+                         reason='CONFIRMED_REACTION_CHANGED')
+                rec['reaction'] = copy.deepcopy(reaction)
+                rec['episode'] = dict(key=reaction['key'], consumed=False)
+                rec['plan'] = None
             plan = rec.get('plan')
             if plan and not plan.get('invalidated'):
                 zone = plan.get('m5_zone')
@@ -239,16 +273,26 @@ def advance(state, pair, captures, tf_map, cutoff, engine, observed_ts=None):
                 if origin_removed is not None and origin_removed <= closed:
                     continue
                 direction = 'LONG' if event['side'] == 'UP' else 'SHORT'
-                plan = rec.get('plan')
-                zone = (plan.get('parent_zone') if plan and not plan.get('invalidated')
-                        and plan.get('m5_zone') else _parent_zone(engine, m15, capture, event))
+                episode = rec.get('episode')
+                reaction = rec.get('reaction')
+                if not episode or episode.get('consumed') or not reaction:
+                    continue
+                if reaction['confirmed_ts'] > closed or reaction['direction'] != direction:
+                    continue
+                candle = next(row for row in m15 if row['t'] == event['open_ts'])
+                if capture.get('origin_kind') != 'HTF_FVG_TOUCH':
+                    if not (candle['c'] > capture['nivel'] if direction == 'LONG' else candle['c'] < capture['nivel']):
+                        continue
+                causal_capture = {**capture, 'first_capture_ts':reaction['leg_start_ts'],
+                                  'sweep_ts':reaction['leg_start_ts']}
+                zone = _parent_zone(engine, m15, causal_capture, event)
+                episode.update(consumed=True, break_ts=event['close_ts'])
                 emit(cid, rec, 'M15_QUEBRA', break_ts=event['close_ts'], direction=direction,
                      kind=event['kind'], level=event['level'],
                      parent_zone=zone if _zone_ok(zone) else None)
-                if plan and not plan.get('invalidated') and plan.get('m5_zone'):
-                    continue
                 plan = dict(break_ts=event['close_ts'], observed_ts=observed_ts, invalidated=False,
                             invalidation=event['opposite_level'],
+                            episode_key=episode['key'], causal_start_ts=reaction['leg_start_ts'],
                             parent_zone=zone if _zone_ok(zone) else None)
                 plan['break'] = copy.deepcopy(event)
                 rec['plan'] = plan
@@ -270,7 +314,9 @@ def advance(state, pair, captures, tf_map, cutoff, engine, observed_ts=None):
             emit(cid, rec, 'PLANO_INVALIDADO', break_ts=plan['break']['close_ts'],
                  direction='LONG' if plan['break']['side'] == 'UP' else 'SHORT')
             continue
-        zone, ready = _refinement(engine, m5, capture, plan['break'], parent, m5events)
+        causal_capture = {**capture, 'first_capture_ts':plan['causal_start_ts'],
+                          'sweep_ts':plan['causal_start_ts']}
+        zone, ready = _refinement(engine, m5, causal_capture, plan['break'], parent, m5events)
         if _zone_ok(zone):
             up = plan['break']['side'] == 'UP'
             plan.update(m5_zone=copy.deepcopy(zone), armed_ts=observed_ts, zone_known_ts=ready)
@@ -315,6 +361,9 @@ def scan(pair, tf_map, cutoff, decision, engine, path=DEFAULT_PATH):
         if updated and (not state or events):
             print(f'[KAIROS_CAPTURE_CHAIN] {"baseline" if not state else "advanced"} '
                   f'pair={pair} cutoff={cutoff} captures={len(updated["captures"])} events={len(events)}', flush=True)
+        if state and state.get('causal_policy_version') != CAUSAL_POLICY_VERSION:
+            print(f'[KAIROS_CAUSAL_POLICY] rebase pair={pair} version={CAUSAL_POLICY_VERSION} '
+                  f'cutoff={cutoff} previous_unqualified_plans_not_adopted=true', flush=True)
         if not updated or updated.get('asof_ts') != cutoff:
             return None
         return dict(pair=pair, events=len(events), asof_ts=updated['asof_ts'], view=state_view(updated))
@@ -324,18 +373,30 @@ def state_view(state):
     """Current Ludo provider stage for presentation; never claims an exchange fill."""
     base = dict(model='LUDO', code='AGUARDANDO_ZONA_OU_CAPTURA', direction=None,
                 entry_authorized=False, setup=None, capture=None, break_=None)
+    if state and state.get('causal_policy_version') != CAUSAL_POLICY_VERSION:
+        base['code'] = 'AGUARDANDO_REINICIALIZACAO_CAUSAL'
+        return base
     records = [(cid, rec) for cid, rec in (state.get('captures') or {}).items()
                if not rec.get('history_lost')]
     if not records:
         return base
-    cid, rec = max(records, key=lambda x: x[1]['capture']['native_capture_confirm_ts'])
+    def relevance(item):
+        rec = item[1]
+        plan = rec.get('plan') or {}
+        active = not (rec.get('origin_invalidated') or plan.get('invalidated'))
+        rank = (4 if active and plan.get('m5_zone') and not plan.get('touched') else
+                3 if active and plan and not plan.get('touched') else
+                2 if active and plan else 1 if active else 0)
+        return rank, plan.get('break_ts', 0), rec['capture']['native_capture_confirm_ts']
+    cid, rec = max(records, key=relevance)
     base['capture'] = copy.deepcopy(rec['capture'])
     if rec.get('origin_invalidated'):
         base['code'] = 'SETUP_ANTERIOR_INVALIDADO'
         return base
     plan = rec.get('plan')
     if not plan:
-        base['code'] = 'AGUARDANDO_CONFIRMACAO_M15'
+        base['code'] = ('AGUARDANDO_CONFIRMACAO_M15' if rec.get('reaction')
+                        else 'AGUARDANDO_REACAO_CONFIRMADA')
         return base
     base['m15_break'] = copy.deepcopy(plan['break'])
     if plan.get('invalidated'):
@@ -380,6 +441,15 @@ def message(event):
         lines.append('Entrega atrasada: evento histórico; confirme o estado atual antes de agir.')
     if event.get('direction'):
         lines.append(f'Sentido observado: {event["direction"]}')
+    origin_known = c.get('native_capture_confirm_ts')
+    if origin_known is not None:
+        when = datetime.fromtimestamp(origin_known/1000, ZoneInfo('Europe/Lisbon')).strftime('%d/%m %H:%M')
+        label = 'Toque HTF confirmado' if c.get('origin_kind') == 'HTF_FVG_TOUCH' else 'Captura confirmada'
+        lines.append(f'{label}: {when} Portugal.')
+    reaction = event.get('reaction')
+    if reaction and reaction['state'] != 'HTF_FVG_TOUCH':
+        when = datetime.fromtimestamp(reaction['confirmed_ts']/1000, ZoneInfo('Europe/Lisbon')).strftime('%d/%m %H:%M')
+        lines.append(f'Reação confirmada: {reaction["state"]} | {when} Portugal | hipótese {reaction["direction"]}.')
     if event['stage'] in ('RETESTE_OBSERVADO', 'TOQUE_E_INVALIDACAO'):
         closed = event['candle_ts']+M5
         when = datetime.fromtimestamp(closed/1000, ZoneInfo('Europe/Lisbon')).strftime('%d/%m %H:%M')
@@ -387,7 +457,7 @@ def message(event):
         if event['observed_ts']-closed >= M5:
             lines.append('Observação recuperada do histórico; sem nova entrada presumida agora.')
     if event['stage'] == 'CAPTURA':
-        lines.append('Aguardar quebra M15 confirmada; captura não confirma reversão.')
+        lines.append('Aguardar reação confirmada e quebra M15 Ludo alinhada; captura não confirma reversão.')
     if event['stage'] == 'POI_HTF_TOCADO':
         lines.append('Toque em POI, sem captura de liquidez presumida. Aguardar quebra M15 Ludo.')
     if event['stage'] == 'M15_QUEBRA':
@@ -416,7 +486,13 @@ def deliver(pair, sender, path=DEFAULT_PATH):
     # One delivery worker owns acknowledgements; scanner uses short separate transactions.
     with closing(_db(path)) as db:
         for seq, payload in db.execute('SELECT seq,payload FROM chain_outbox WHERE pair=? AND ack=0 ORDER BY seq', (pair,)).fetchall():
-            if sender(message(json.loads(payload))) is not True:
+            event = json.loads(payload)
+            if event.get('causal_policy_version') != CAUSAL_POLICY_VERSION:
+                db.execute('UPDATE chain_outbox SET ack=2 WHERE seq=?', (seq,))
+                db.commit()
+                print(f'[KAIROS_CAPTURE_CHAIN] suppressed_unqualified pair={pair} seq={seq}', flush=True)
+                continue
+            if sender(message(event)) is not True:
                 return False
             db.execute('UPDATE chain_outbox SET ack=1 WHERE seq=?', (seq,))
             db.commit()

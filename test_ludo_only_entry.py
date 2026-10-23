@@ -36,7 +36,7 @@ def test_provider_failure_cannot_fall_back_to_lux(monkeypatch):
 def test_fvg_touch_origin_is_distinct_from_liquidity_capture():
     origin = dict(origin_kind='HTF_FVG_TOUCH', origin_key='H4|mother',
                   liquidity_tf=None, liquidity_type=None, liquidity_side=None,
-                  htf_location=dict(tf='H4', zone_id='mother', bottom=103, top=109),
+                  htf_location=dict(tf='H4', zone_id='mother', tipo='FVG_bearish', bottom=103, top=109),
                   first_capture_ts=M15, native_capture_confirm_ts=2*M15)
     state, _ = advance({}, [], M15)
     state, alerts = advance(state, [origin], 2*M15)
@@ -94,7 +94,7 @@ def test_daily_failure_does_not_block_durable_ludo_delivery(monkeypatch):
 
 def test_dead_htf_origin_is_retired_before_any_entry_plan():
     origin = dict(origin_kind='HTF_FVG_TOUCH', origin_key='H1|mother',
-        htf_location=dict(tf='H1', zone_id='mother', bottom=103, top=109),
+        htf_location=dict(tf='H1', zone_id='mother', tipo='FVG_bearish', bottom=103, top=109),
         origin_zone=dict(id='mother', tipo='FVG_bearish', direcao='baixa', bottom=103,top=109),
         first_capture_ts=4*M15, sweep_ts=4*M15, native_capture_confirm_ts=5*M15)
     state, _ = advance({}, [], 3*M15)
@@ -147,7 +147,7 @@ def test_new_fvg_touch_in_first_interval_after_activation_survives_restart(tmp_p
     monkeypatch.setenv('KAIROS_ENTRY_STRUCTURE', 'LUDO')
     path = str(tmp_path/'state.db')
     origin = dict(origin_kind='HTF_FVG_TOUCH', origin_key='H1|mother',
-        htf_location=dict(tf='H1', zone_id='mother', bottom=103, top=109),
+        htf_location=dict(tf='H1', zone_id='mother', tipo='FVG_bearish', bottom=103, top=109),
         first_capture_ts=M15, native_capture_confirm_ts=2*M15)
     chains.scan('SOLUSD', {'M15':bars(M15,M15),'M5':bars(M15,M5)}, M15, {}, Engine, path)
     decision = dict(htf_entry_origins=[origin])

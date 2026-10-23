@@ -81,6 +81,15 @@ def enrich_report(report, tf_map, decision):
     # A detector observation is not mislabeled as motor authorization.
     out['stage']={'code':stage,'engine_reason':reason,'direction':decision.get('direction') if setup_known and not invalidated and not historical_retest else None,
                   'setup':copy.deepcopy(setup) if setup_known and not invalidated and not historical_retest else None,'entry_authorized':False}
+    ludo_stage = decision.get('ludo_entry_stage')
+    if ludo_stage is not None and decision.get('entry_structure_model') == 'LUDO':
+        stage = ludo_stage['code']
+        out['stage'] = copy.deepcopy(ludo_stage)
+        out['stage']['engine_reason'] = stage
+        out['stage']['entry_authorized'] = False
+        setup = ludo_stage.get('setup') or {}
+        setup_known = bool(setup)
+        out['entry_structure_model'] = 'LUDO'
     out['m15_observation']=None
     rows=tf_map.get('M15') or []
     if rows:
@@ -98,7 +107,7 @@ def enrich_report(report, tf_map, decision):
     # One full combined map per actual stage/capture/review transition, never
     # a new message merely because a market price or snapshot time changes.
     cap_key=({k:capture.get(k) for k in ('liquidity_tf','liquidity_type','nivel','first_capture_ts','post_capture_state','reaction_confirm_ts')} if capture else None)
-    key=[daily.get('available_ts'),stage,setup.get('key') if setup_known else None,cap_key,bool(review),out['m15_observation']]
+    key=[daily.get('available_ts'),stage,setup.get('key') if setup_known else None,cap_key,bool(review),out['m15_observation'],out.get('entry_structure_model')]
     out['delivery_key']=hashlib.sha256(json.dumps(key,sort_keys=True).encode()).hexdigest()[:20]
     out['entry_authorized']=False
     return out

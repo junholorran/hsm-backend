@@ -55,6 +55,8 @@ def _context_line(event):
 
 
 def format_capture_message(pair, event):
+    from kairos_ludo_entry import enabled as ludo_only
+    uses_ludo = event.get('entry_structure_model') == 'LUDO' or ludo_only()
     tf = event.get('liquidity_tf') or 'HTF'
     typ = event.get('liquidity_type') or 'LIQUIDEZ'
     level = _price(event.get('level'))
@@ -88,7 +90,12 @@ def format_capture_message(pair, event):
     waiting = ('aguardando reação / confirmação M15'
                if reaction == 'UNRESOLVED_REACTION' else
                'aguardando confirmação M15 / construção M5')
-    confirmed = _utc_time(event.get('timestamp'))
+    if uses_ludo:
+        next_step = ('Aguardar quebra M15 por fechamento, pela estrutura Ludo; '
+                     'depois POI causal, refinamento M5 e reteste.')
+        waiting = 'aguardando confirmação M15 Ludo'
+    confirmed = (_local_time(event.get('timestamp')) if uses_ludo
+                 else _utc_time(event.get('timestamp')))
     confirmed_line = f'\n🕐 <b>Confirmação: {confirmed}</b>' if confirmed else ''
 
     return (

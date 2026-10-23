@@ -136,6 +136,8 @@ def notification_parts(report, max_chars=3500):
     if context:
         lines.insert(1, 'Contexto estrutural D1/H4/H1: ' + ' | '.join(f'{tf} {context.get(tf, "neutro")}' for tf in ('D1','H4','H1')))
     lines.insert(1, 'Mapa observado em ' + datetime.fromtimestamp(report['asof_ts']/1000, ZoneInfo('Europe/Lisbon')).isoformat()+' (Portugal)')
+    if report.get('entry_structure_model') == 'LUDO':
+        lines.insert(1, 'Estrutura ativa de entrada: SMC Ludo M15 → POI causal → refinamento M5 → reteste.')
     if report.get('current_price'):
         px=report['current_price']
         stage_labels={'SETUP_ANTERIOR_INVALIDADO':'setup anterior invalidado; aguardar uma nova cadeia','RETESTE_HISTORICO_SEM_NOVA_ENTRADA':'reteste histórico identificado; sem nova entrada autorizada','AGUARDANDO_ZONA_OU_CAPTURA':'aguardando zona relevante ou captura de liquidez','AGUARDANDO_CONFIRMACAO_M15':'aguardando confirmação M15 exigida pelo motor','AGUARDANDO_POI_CAUSAL_OU_REFINAMENTO_M5':'M15 confirmado; aguardando zona causal ou refinamento M5','AGUARDANDO_RETESTE_M5':'aguardando reteste da zona M5','RETESTE_M5_OBSERVADO':'reteste M5 observado pelo motor, DEMO/manual'}

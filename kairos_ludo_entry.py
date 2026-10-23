@@ -74,6 +74,7 @@ def snapshot(pair, tf_map, cutoff, engine):
     _, audit = engine._kairos_select_structural_first_capture_sweep(tf_map, cutoff)
     decision = dict(valid=False, signal=False, entry_audit_only=True,
                     entry_structure_model='LUDO', structural_sweep_audit=audit,
+                    causal_policy_version=chains.CAUSAL_POLICY_VERSION,
                     context_bias=context, bias=context.get('final'),
                     failure_reason='SEM_INTENCAO_M15_APOS_CAPTURA_ESTRUTURAL',
                     context_map_source=dict(asof_ts=cutoff, zones={tf:
@@ -113,9 +114,11 @@ def snapshot(pair, tf_map, cutoff, engine):
     for radar in radars:
         radar['entry_structure_model'] = 'LUDO'
     print(f'[KAIROS_ENTRY_MODEL] pair={pair} model=LUDO legacy_authorization=false '
+          f'causal_policy_version={chains.CAUSAL_POLICY_VERSION} '
           f'cutoff={cutoff} stage={saved["view"]["code"]}', flush=True)
     return dict(pair=pair, scan_mode='LATEST_CLOSED_SNAPSHOT', evaluations=1,
         entry_structure_model='LUDO', daily_brief=daily, cutoff_ts=cutoff,
+        causal_policy_version=chains.CAUSAL_POLICY_VERSION,
         sinais_unicos_completos=[], entry_phase_events=[], entry_setup_states={},
         pending_setup_keys=[], radar_captures=radars,
         ludo_entry_stage=saved['view'],

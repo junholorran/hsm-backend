@@ -84,8 +84,9 @@ def test_m15_before_m5_both_directions_and_same_cutoff_deduplication():
     same, alerts = advance(state, [capture()], 3*M15, [event()])
     assert same == frozen and alerts == []
     state, alerts = advance(state, [capture()], 4*M15, [event(), event(3*M15, 'UP')])
-    assert [a['stage'] for a in alerts][-3:] == ['PLANO_INVALIDADO', 'M15_QUEBRA', 'M5_ARMADO']
-    assert alerts[-1]['direction'] == 'LONG'
+    assert [a['stage'] for a in alerts] == ['PLANO_INVALIDADO']
+    # Opposite structure alone cannot recycle a consumed, unchanged reaction.
+    assert not any(a['stage'] == 'M5_ARMADO' for a in alerts)
 
 
 def test_retest_is_prospective_and_never_assumes_fill():

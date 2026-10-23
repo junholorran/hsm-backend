@@ -42,3 +42,5 @@ identity/lifecycle, restart baseline, historical stages and optional-export
 failure isolation. A native SOL provider smoke at 21 October 19:15 UTC reaches
 SHORT/awaiting M5 retest with legacy entry authorization functions set to fail if
 called. Offline legacy-reference tests remain unchanged and green.
+
+Production-environment check: the offline-reference suite is isolated from the inherited live entry policy by a pytest-only fixture. Individual Ludo tests explicitly opt in. The fixture never runs in the application process. The full suite also passes with all three production feature flags enabled (266 tests, 53 subtests).

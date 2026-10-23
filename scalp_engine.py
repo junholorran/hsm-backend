@@ -1773,52 +1773,9 @@ def _kairos_fvg_touch_intent(mapa, m15_candles, m5_candles, now_ts, candles_por_
     Only observed outside->inside M5 transitions after the HTF formation close
     can start a thesis. No implicit historical touch at the data-window edge.
     """
+    from kairos_ludo_entry import htf_touch_locations
     m15=[c for c in m15_candles if c['t']+900000 <= now_ts]
-    m5=[c for c in m5_candles if c['t']+300000 <= now_ts]
-    durations={'W1':604800000,'D1':86400000,'H4':14400000,'H1':3600000}
-    locations=[]
-    for tf,duration in durations.items():
-        for z in (mapa.get(tf) or {}).get('zones',[]):
-            if (z.get('tipo') not in ('FVG_bullish','FVG_bearish') or
-                    z.get('state') not in ('ATIVA','TOCADA','PARCIAL') or
-                    z.get('lux_fvg') is not True):
-                continue
-            born=z.get('created_ts'); top=z.get('top'); bottom=z.get('bottom')
-            if born is None or top is None or bottom is None or top < bottom:
-                continue
-            sources=[z.get('source_a'),z.get('source_mid'),z.get('source_c')]
-            if (not all(isinstance(c,dict) and c.get('t') is not None for c in sources) or
-                    [c['t'] for c in sources] != [born-2*duration,born-duration,born]):
-                continue
-            ready=born+duration
-            if ready > now_ts:
-                continue
-            if candles_por_tf is not None:
-                native=[c for c in candles_por_tf.get(tf,[]) if born <= c['t'] and c['t']+duration <= now_ts]
-                offset=345600000 if tf=='W1' else 0
-                latest_open=((now_ts-offset)//duration)*duration+offset-duration
-                if (not native or native[0]['t'] != born or native[-1]['t'] != latest_open or
-                        any(b['t']-a['t'] != duration for a,b in zip(native,native[1:]))):
-                    continue
-            entries=[]
-            for prev,c in zip(m5,m5[1:]):
-                if c['t'] < ready:
-                    continue
-                inside=c['h'] >= bottom and c['l'] <= top
-                prev_inside=prev['h'] >= bottom and prev['l'] <= top
-                if inside and not prev_inside and c['t']-prev['t']==300000:
-                    entries.append(c)
-            zone_id=z.get('id') or f"{z['tipo']}:{born}:{bottom}:{top}"
-            for entry in entries:
-                # A later interaction cannot erase a previously authorized touch.
-                covered=[c for c in m5 if c['t'] >= entry['t']]
-                if any(b['t']-a['t'] != 300000 for a,b in zip(covered,covered[1:])):
-                    continue
-                locations.append({'tf':tf,'tipo':z['tipo'],'zone_id':zone_id,
-                                  'top':top,'bottom':bottom,'origin_ts':born,
-                                  'formation_close_ts':ready,'touch_ts':entry['t'],
-                                  'touch_confirm_close_ts':entry['t']+300000,
-                                  'touch_price':entry['c'],'source':'HTF_FVG_TOUCH'})
+    locations=htf_touch_locations(mapa, m15_candles, m5_candles, now_ts, candles_por_tf)
     audit={'origin_kind':'HTF_FVG_TOUCH','touch_candidates':len(locations),
            'verdict':'NO_CONFIRMED_FVG_INTERACTION'}
     if not locations:
@@ -3567,6 +3524,20 @@ def _kairos_scan_latest_closed(pair, observed_ts, phase_state):
             'failure_reason_by_tf': failure_by_tf,
             'candles_deficit_by_tf': {},
         }
+    # Ludo is the sole active live entry path when selected. Never evaluate,
+    # resume or fall back to the offline Lux Major/Internal entry phases.
+    from kairos_ludo_entry import enabled as ludo_only, snapshot as ludo_snapshot
+    if ludo_only():
+        import sys
+        try:
+            result=ludo_snapshot(pair,tf_map,cutoff,sys.modules[__name__])
+            result.update(base_audit)
+            return result
+        except Exception as ludo_exc:
+            print(f'[KAIROS_ENTRY_MODEL] provider error pair={pair}: {type(ludo_exc).__name__}',flush=True)
+            return {**base_audit,'pair':pair,'entry_structure_model':'LUDO',
+                    'erro':'LUDO_ENTRY_PROVIDER_UNAVAILABLE','sinais_unicos_completos':[],
+                    'entry_phase_events':[],'pending_setup_keys':[]}
     r=avaliar_vortex_decision_layer_v2(
         tf_map['M15'],tf_map['M5'],tf_map['D1'],candles_por_tf=tf_map,
         audit_pair=pair,experimental_poi_policy='A_CURRENT',experimental_poi_state={},cutoff_ts=cutoff,

@@ -123,7 +123,7 @@ def format_pair_update(pair,groups,context,now_ts=None):
                 plain=html.unescape(page.replace('<b>','').replace('</b>',''))
                 lines += [line for line in plain.splitlines() if line!='DEMO / MANUAL · execução não comprovada.']
     if not operational:
-        lines+=['','AGORA: verificar reação e confirmação M15 Ludo da respetiva sequência; depois POI causal, refinamento M5 e reteste.',
+        lines+=['','AGORA: verificar reação e primeira quebra M5 válida; a confirmação M15 e o plano causal continuam a ser acompanhados separadamente.',
                 'SEM TRADE por captura ou toque isolado.']
     if context.get('asof_ts') is not None:
         lines.append(f"Contexto guardado até {stamp(context['asof_ts'])} Portugal; cada referência conserva a sua hora.")

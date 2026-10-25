@@ -82,6 +82,7 @@ def _reason_lines(e):
                   'PARENT_POI_INVALIDATED':'POI causal M15 invalidado pelo detector',
                   'M5_POI_INVALIDATED':'POI M5 invalidado pelo detector',
                   'HTF_ORIGIN_INVALIDATED':'FVG HTF de origem invalidado',
+                  'OPPOSITE_M5_BREAK':'Quebra contrária M5 confirmada por fechamento',
                   'HISTORY_LOST':'Histórico insuficiente para continuar a sequência'}.get(code,
                   'Motivo específico não disponível no evento original')
         if r.get('confirmed_ts') is not None:text+=f" | {stamp(r['confirmed_ts'])} Portugal"
@@ -112,6 +113,8 @@ def format_chain_events(events,now_ts=None):
     e=next((x for x in events if x['stage']=='M5_ARMADO'),events[-1])
     stage=e['stage'];side=e.get('direction');trade='COMPRA' if side=='LONG' else 'VENDA' if side=='SHORT' else 'PLANO'
     titles={'CAPTURA':'💧 LIQUIDEZ CAPTURADA','POI_HTF_TOCADO':'📦 TOQUE EM POI HTF',
+        'M5_ANTECIPADO':f'🔔 {trade} | QUEBRA M5 ANTECIPADA',
+        'M5_ANTECIPADO_INVALIDADO':'🚫 HIPÓTESE M5 ANTECIPADA ENCERRADA',
         'M15_QUEBRA':f'🔎 {trade} | M15 CONFIRMADO','M5_ARMADO':f'🟡 PLANO DE {trade}',
         'RETESTE_OBSERVADO':f'👀 {trade} | RETESTE OBSERVADO',
         'PLANO_INVALIDADO':f'🚫 PLANO DE {trade} INVALIDADO',
@@ -154,7 +157,8 @@ def format_chain_events(events,now_ts=None):
     level=e.get('level',br.get('level',original.get('level')))
     if kind:
         heading='CONFIRMAÇÃO ORIGINAL DO PLANO' if stage in ('PLANO_INVALIDADO','TOQUE_E_INVALIDACAO') else 'CONFIRMAÇÃO ESTRUTURAL'
-        lines+=['',heading,f"{kind} M15 por fechamento além de {price(level)}.",
+        confirmation_tf='M5' if stage in ('M5_ANTECIPADO','M5_ANTECIPADO_INVALIDADO') else 'M15'
+        lines+=['',heading,f"{kind} {confirmation_tf} por fechamento além de {price(level)}.",
                 f"Confirmado em {stamp(e.get('break_ts',br.get('close_ts')))} Portugal | estrutura Ludo."]
     if parent or zone:
         lines+=['','ZONAS DO PLANO']
@@ -171,8 +175,15 @@ def format_chain_events(events,now_ts=None):
         lines += [f'{label}: {price(extreme)}.','Referência estrutural para proteção. Stop exato não calculado; margem não definida.']
     lines+=['','ESTADO / PRÓXIMO PASSO']
     if stage=='M5_ARMADO':lines.append('AGUARDAR RETESTE M5 · entrada ainda não confirmada.')
+    elif stage=='M5_ANTECIPADO':
+        lines.append('M15 por confirmar · POI causal e reteste ainda por verificar. SEM TRADE AUTORIZADO POR ESTE AVISO.')
+        if e['observed_ts']-e['break_ts']>=M5:
+            lines.append('Quebra M5 histórica / aviso atrasado; não constitui uma nova entrada agora.')
+    elif stage=='M5_ANTECIPADO_INVALIDADO':
+        lines+=_reason_lines(e)
+        lines.append('Hipótese antecipada M5 encerrada; não cancela automaticamente um plano M15 independente nem ordens na exchange.')
     elif stage=='M15_QUEBRA':lines.append('AGUARDAR POI CAUSAL / REFINAMENTO M5 · ainda sem entrada confirmada.')
-    elif stage in ('CAPTURA','POI_HTF_TOCADO'):lines.append('AGUARDAR REAÇÃO / CONFIRMAÇÃO M15 Ludo → POI causal → refinamento M5 → reteste. SEM TRADE. Captura ou toque isolado não autoriza entrada.')
+    elif stage in ('CAPTURA','POI_HTF_TOCADO'):lines.append('AGUARDAR REAÇÃO / QUEBRA M5 ANTECIPADA; confirmação M15 Ludo → POI causal → refinamento M5 → reteste. SEM TRADE. Captura ou toque isolado não autoriza entrada.')
     elif stage=='RETESTE_OBSERVADO':
         lines.append(f"Candle M5 confirmado: {stamp(e.get('candle_ts',0)+M5)} Portugal.")
         lines.append('Reteste observado; execução não comprovada. Confirme o estado atual antes de decidir.')

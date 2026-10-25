@@ -388,6 +388,10 @@ def scan(pair, tf_map, cutoff, decision, engine, path=DEFAULT_PATH):
         observed_now=int(time.time()*1000)
         updated, events = advance(state, pair, captures, tf_map, cutoff, engine,
                                   observed_ts=observed_now)
+        if updated and updated.get('asof_ts')==cutoff:
+            from kairos_early_m5 import observe
+            updated,early_events=observe(updated,pair,tf_map,cutoff,observed_now)
+            events.extend(early_events)
         if updated and os.environ.get('KAIROS_ENTRY_STRUCTURE', '').strip().upper() == 'LUDO':
             updated.setdefault('ludo_only_since', cutoff)
             # Detector rollout is prospective. Persist independently of the

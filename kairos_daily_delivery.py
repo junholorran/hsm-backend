@@ -68,6 +68,9 @@ def deliver(report, sender, db_path):
             db.execute('CREATE TABLE IF NOT EXISTS context_current '
                        '(pair TEXT,day INTEGER,version TEXT,state_key TEXT,delivery_version TEXT,last_asof INTEGER,'
                        'PRIMARY KEY(pair,day,version))')
+            db.execute('CREATE TABLE IF NOT EXISTS daily_delivery_evidence '
+                       '(pair TEXT,day INTEGER,version TEXT,payload TEXT,'
+                       'PRIMARY KEY(pair,day,version))')
             db.execute('BEGIN IMMEDIATE')
             if report.get('delivery_key'):
                 current=db.execute('SELECT state_key,delivery_version,last_asof FROM context_current '
@@ -80,6 +83,13 @@ def deliver(report, sender, db_path):
                     version=VERSION+':'+report['delivery_key']+':'+str(report['asof_ts'])
                 db.execute('INSERT OR REPLACE INTO context_current VALUES (?,?,?,?,?,?)',
                            (pair,day,VERSION,report['delivery_key'],version,report['asof_ts']))
+            # Archive the complete immutable map in the same transaction as
+            # its compact pages. Existing frozen pages keep their own evidence.
+            existing=db.execute('SELECT 1 FROM daily_delivery WHERE pair=? AND day=? AND version=?',
+                                (pair,day,version)).fetchone()
+            if not existing:
+                db.execute('INSERT INTO daily_delivery_evidence VALUES (?,?,?,?)',
+                           (pair,day,version,json.dumps(report,ensure_ascii=False)))
             db.execute('INSERT OR IGNORE INTO daily_delivery VALUES (?,?,?,?,0)', 
                        (pair, day, version, json.dumps(parts, ensure_ascii=False)))
             db.commit()

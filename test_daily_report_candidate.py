@@ -86,7 +86,7 @@ class ReportTests(unittest.TestCase):
 
     def test_pages_include_all_supplied_levels_without_truncation(self):
         r=self.report([level(value=120+i/100) for i in range(200)])
-        parts=notification_parts(r,max_chars=1000)
+        parts=notification_parts(r,max_chars=1000,detailed=True)
         self.assertGreater(len(parts),1)
         self.assertTrue(all(len(p)<=1000 for p in parts))
         self.assertEqual(sum(p.count('H1 SWING_HIGH @') for p in parts),200)

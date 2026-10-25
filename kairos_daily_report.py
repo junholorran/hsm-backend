@@ -115,8 +115,70 @@ REASONS = {
 }
 
 
-def notification_parts(report, max_chars=3500):
-    """Plain-text Telegram-ready pages, including every supplied map level."""
+def notification_parts(report, max_chars=3500, *, detailed=False):
+    """Compact daily context by default; full map remains an explicit audit view.
+
+    Formatting only: retain report evidence, delivery identity and trading gates.
+    """
+    if not 1000 <= max_chars <= 3500:
+        raise ValueError('max_chars must be between 1000 and 3500')
+    if report['status'] != 'READY_CANDIDATE':
+        return []
+    if detailed:
+        return _detailed_parts(report, max_chars)
+    from kairos_alert_presentation import price
+    d=report['daily']; context=report.get('structure_context') or {}
+    stamp=datetime.fromtimestamp(report['asof_ts']/1000,ZoneInfo('Europe/Lisbon')).strftime('%d/%m/%Y · %H:%M')
+    bias={'BULLISH':'ALTA','BEARISH':'BAIXA','NEUTRO':'NEUTRO'}[d['bias']]
+    arrows={'alta':'↑','baixa':'↓','neutro':'↔'}
+    lines=['🧭 KAIROS | VIÉS DIÁRIO',f"{report['pair']} | {stamp} Portugal",'',
+           f"Hipótese diária: {bias}"+(' · EM REAVALIAÇÃO' if report.get('daily_review_required') else ''),
+           REASONS[d['reason']],
+           'Estrutura: '+' | '.join(f'{tf} {arrows.get(context.get(tf), "?")}' for tf in ('D1','H4','H1'))]
+    px=report.get('current_price')
+    if px:
+        px_stamp=datetime.fromtimestamp(px['close_ts']/1000,ZoneInfo('Europe/Lisbon')).strftime('%H:%M')
+        lines.append(f"Último M5 fechado: {price(px['value'])} · {px_stamp} Portugal")
+    if report.get('daily_review_required'):
+        review={'CLOSE_ABOVE_PREVIOUS_HIGH':('≤','máxima anterior','h'),
+                'CLOSE_BELOW_PREVIOUS_LOW':('≥','mínima anterior','l'),
+                'HIGH_CAPTURE_AND_CLOSE_INSIDE':('≥','máxima anterior','h'),
+                'LOW_CAPTURE_AND_CLOSE_INSIDE':('≤','mínima anterior','l')}.get(d['reason'])
+        if review:
+            op,label,key=review
+            lines.append(f"Reavaliar: M5 fechou {op} {label} ({price(d['previous_day'][key])}).")
+        else:
+            lines.append('Reavaliar hipótese diária; condição detalhada indisponível.')
+    lines+=['','LIQUIDEZ PRÓXIMA · referência, sem alvo presumido']
+    for side,label in (('above','Acima'),('below','Abaixo')):
+        lev=(report.get('nearest_available') or {}).get(side)
+        lines.append(f"{label}: "+(f"{lev['tf']} {lev['type']} · {price(lev['level'])}" if lev else 'não identificada no mapa disponível'))
+    # At most one nearest valid POI per TF, kept distinct from liquidity.
+    if px:
+        for tf in ('H1','H4'):
+            zones=[z for z in report.get('zones',[]) if z['tf']==tf]
+            zone=min(zones,key=lambda z:(max(z['bottom']-px['value'],px['value']-z['top'],0),z['bottom'],z['top'],str(z['type'])),default=None)
+            if zone:
+                lines.append(f"POI próximo {tf}: {zone['type']} · {price(zone['bottom'])}–{price(zone['top'])}")
+    stages={'SETUP_ANTERIOR_INVALIDADO':'plano anterior invalidado; aguardar nova cadeia',
+            'AGUARDANDO_REACAO_CONFIRMADA':'aguardando reação confirmada após captura',
+            'AGUARDANDO_REINICIALIZACAO_CAUSAL':'aguardando reinicialização causal',
+            'RETESTE_HISTORICO_SEM_NOVA_ENTRADA':'reteste histórico; sem nova entrada',
+            'AGUARDANDO_ZONA_OU_CAPTURA':'aguardando zona relevante ou captura',
+            'AGUARDANDO_CONFIRMACAO_M15':'aguardando confirmação M15 Ludo',
+            'AGUARDANDO_POI_CAUSAL_OU_REFINAMENTO_M5':'M15 confirmado; aguardar POI causal / refinamento M5',
+            'AGUARDANDO_RETESTE_M5':'aguardando reteste M5',
+            'RETESTE_M5_OBSERVADO':'reteste M5 observado; execução manual não presumida'}
+    stage=stages.get((report.get('stage') or {}).get('code'),'estado operacional indisponível')
+    lines+=['',f'AGORA: {stage}.','CONTEXTO · SEM TRADE AUTORIZADO POR ESTE RESUMO · DEMO/MANUAL']
+    text='\n'.join(lines)
+    if len(text.encode('utf-16-le'))//2 > max_chars:
+        raise ValueError('Compact daily summary exceeds page budget')
+    return [text]
+
+
+def _detailed_parts(report, max_chars=3500):
+    """Plain-text audit pages, including every supplied map level."""
     from kairos_alert_presentation import price
     if report['status'] != 'READY_CANDIDATE':
         return []

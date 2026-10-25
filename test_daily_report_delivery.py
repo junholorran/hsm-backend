@@ -48,7 +48,8 @@ class DailyIntegrationTests(unittest.TestCase):
         api=self.api();r=self.report();sent=[]
         def first(message):
             sent.append(message);return len(sent)==1
-        with tempfile.TemporaryDirectory() as path, patch.dict(os.environ,{'KAIROS_DAILY_BRIEF_ENABLED':'true'}):
+        from kairos_daily_report import notification_parts
+        with tempfile.TemporaryDirectory() as path, patch.dict(os.environ,{'KAIROS_DAILY_BRIEF_ENABLED':'true'}), patch.object(api,'notification_parts',lambda report:notification_parts(report,detailed=True)):
             db=path+'/daily.db'
             self.assertFalse(api.deliver(r,first,db))
             self.assertEqual(len(sent),2)

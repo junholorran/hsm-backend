@@ -186,7 +186,15 @@ def advance(state, pair, captures, tf_map, cutoff, engine, observed_ts=None):
     for capture in captures:
         known = capture.get('native_capture_confirm_ts')
         poi_origin = capture.get('origin_kind') == 'HTF_FVG_TOUCH'
+        ludo_origin = (capture.get('origin_kind') == 'LUDO_SWING_CAPTURE'
+                       and capture.get('structural_source') == 'LUDO'
+                       and capture.get('liquidity_tf') in ('H4','H1','M15')
+                       and capture.get('liquidity_type') in ('LUDO_SWING_HIGH','LUDO_SWING_LOW')
+                       and capture.get('liquidity_confirm_ts') is not None
+                       and capture['liquidity_confirm_ts'] <= capture.get('first_capture_ts',-1)
+                       and capture.get('liquidity_side') in ('HIGH','LOW'))
         valid_origin = (bool(capture.get('origin_key') and capture.get('htf_location')) if poi_origin
+                        else ludo_origin if capture.get('origin_kind') == 'LUDO_SWING_CAPTURE'
                         else capture.get('liquidity_tf') in ('W1', 'D1', 'H4', 'H1')
                         and capture.get('liquidity_side') in ('HIGH', 'LOW'))
         if not valid_origin or known is None or not state['start_ts'] < known <= cutoff:
@@ -343,16 +351,22 @@ def scan(pair, tf_map, cutoff, decision, engine, path=DEFAULT_PATH):
         row = db.execute('SELECT payload FROM chain_state WHERE pair=?', (pair,)).fetchone()
         state = json.loads(row[0]) if row else {}
         captures = list((decision.get('structural_sweep_audit') or {}).get('candidates') or [])
+        recent_since = state.get('ludo_liquidity_since',cutoff)
         if os.environ.get('KAIROS_ENTRY_STRUCTURE', '').strip().upper() == 'LUDO':
             if state and 'ludo_only_since' not in state:
                 state['ludo_only_since'] = cutoff
             baseline = state.get('ludo_only_since', cutoff)
             captures.extend(c for c in decision.get('htf_entry_origins', [])
                             if c['native_capture_confirm_ts'] > baseline)
+            captures.extend(c for c in decision.get('ludo_liquidity_origins', [])
+                            if c['native_capture_confirm_ts'] > recent_since)
         updated, events = advance(state, pair, captures, tf_map, cutoff, engine,
                                   observed_ts=int(time.time()*1000))
         if updated and os.environ.get('KAIROS_ENTRY_STRUCTURE', '').strip().upper() == 'LUDO':
             updated.setdefault('ludo_only_since', cutoff)
+            # Detector rollout is prospective. Persist independently of the
+            # older chain baseline; restarts must not resurrect old captures.
+            updated.setdefault('ludo_liquidity_since', recent_since)
         if updated:
             db.execute('INSERT OR REPLACE INTO chain_state VALUES (?,?)', (pair, json.dumps(updated)))
         for event in events:

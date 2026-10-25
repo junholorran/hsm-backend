@@ -7,6 +7,7 @@ import copy
 import os
 
 import kairos_capture_chains as chains
+from kairos_ludo_liquidity import captures as recent_ludo_captures
 
 
 def enabled():
@@ -94,6 +95,7 @@ def snapshot(pair, tf_map, cutoff, engine):
             first_capture_ts=location['touch_ts'], sweep_ts=location['touch_ts'],
             native_capture_confirm_ts=location['touch_confirm_close_ts']))
     decision['htf_entry_origins'] = origins
+    decision['ludo_liquidity_origins'] = recent_ludo_captures(tf_map,cutoff)
     saved = chains.scan(pair, tf_map, cutoff, decision, engine)
     if not saved or saved.get('asof_ts') != cutoff:
         raise RuntimeError('Ludo durable provider did not confirm this cutoff')

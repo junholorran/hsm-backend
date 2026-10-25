@@ -14,7 +14,7 @@ DURATIONS={'M5':300000,'M15':900000,'M30':1800000,'H1':3600000,
            'H4':14400000,'D1':86400000,'W1':604800000}
 
 
-def structure_snapshot(candles, duration, cutoff):
+def structure_snapshot(candles, duration, cutoff, include_levels=False):
     """Run the supplied body-break structure on closed, contiguous native bars."""
     cs=[c for c in candles if c['t']+duration<=cutoff]
     if not cs:
@@ -23,6 +23,7 @@ def structure_snapshot(candles, duration, cutoff):
         return {'status':'DATA_GAP','state':None,'events':[]}
     high=cs[0]['h']; low=cs[0]['l']; high_start=low_start=direction=0
     high_idx=low_idx=0; events=[]; low_known=high_known=cs[0]['t']+duration
+    level_history=[]; active_levels={}
     for n,c in enumerate(cs):
         # ta.highestbars/lowestbars: most recent occurrence wins equal extrema.
         length=10 if n>10 else n+1
@@ -62,12 +63,24 @@ def structure_snapshot(candles, duration, cutoff):
             elif c['l']<low and direction in (0,1):
                 if not all(n-j>low_start for j in (1,2,3)):
                     low=c['l']; low_start=n; low_known=closed
-    return {'status':'OK','state':{'high':high,'low':low,
+        if include_levels:
+            for side, value, origin, known in (('HIGH',high,high_start,high_known),
+                                                ('LOW',low,low_start,low_known)):
+                old=active_levels.get(side)
+                identity=(cs[origin]['t'],value)
+                if old is None or (old['origin_ts'],old['level']) != identity:
+                    if old is not None:old['active_until_ts']=closed
+                    record=dict(side=side,level=value,origin_ts=cs[origin]['t'],
+                                known_ts=known,active_until_ts=None)
+                    level_history.append(record);active_levels[side]=record
+    result = {'status':'OK','state':{'high':high,'low':low,
         'high_origin_ts':cs[high_start]['t'],'low_origin_ts':cs[low_start]['t'],
         'high_known_ts':high_known,'low_known_ts':low_known,
         'direction':{0:'UNSET',1:'DOWN',2:'UP'}[direction],
         'last_closed_ts':cs[-1]['t']+duration,'history_start_ts':cs[0]['t'],
         'history_count':len(cs)},'events':events}
+    if include_levels:result['levels']=level_history
+    return result
 
 
 def observe(tf_map, cutoff, decision):

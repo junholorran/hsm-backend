@@ -44,17 +44,5 @@ def build_touch_events(maps, m5_candle, touch_close_ts):
 
 
 def format_fvg_touch_message(pair, event):
-    tf = event.get('tf') or 'HTF'
-    typ = str(event.get('tipo') or 'FVG')
-    side = 'BULLISH' if typ.endswith('bullish') else 'BEARISH' if typ.endswith('bearish') else typ.upper()
-    return (
-        f'📦 <b>KAIROS | FVG {tf}</b>\n'
-        f'<b>{pair} | {side}</b>\n\n'
-        f'📍 <b>Zona: {_price(event.get("bottom"))}–{_price(event.get("top"))}</b>\n'
-        f'⚡ <b>Preço tocou / entrou no FVG {tf}</b>\n\n'
-        '🧠 <b>LEITURA</b>\n'
-        'FVG HTF relevante em contacto com o preço. Isto é contexto/atenção; não define direção sozinho.\n\n'
-        '👀 <b>AGORA</b>\n'
-        'M15 precisa confirmar a intenção estrutural. M5 apenas refina/executa depois da autorização.\n\n'
-        '<b>⚠️ ATENÇÃO — SEM TRADE · DEMO / MANUAL</b>'
-    )
+    from kairos_alert_presentation import format_htf_touch
+    return format_htf_touch(pair,event)

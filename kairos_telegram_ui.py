@@ -57,6 +57,9 @@ def _context_line(event):
 def format_capture_message(pair, event):
     from kairos_ludo_entry import enabled as ludo_only
     uses_ludo = event.get('entry_structure_model') == 'LUDO' or ludo_only()
+    if uses_ludo:
+        from kairos_alert_presentation import format_radar_capture
+        return format_radar_capture(pair,event)
     tf = event.get('liquidity_tf') or 'HTF'
     typ = event.get('liquidity_type') or 'LIQUIDEZ'
     level = _price(event.get('level'))

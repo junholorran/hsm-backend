@@ -25,7 +25,7 @@ def test_message_is_context_only_not_trade_signal():
         'bottom':84521.1,'top':85395.8,'touch_close_ts':2300,
     })
     assert 'FVG H4' in msg
-    assert '84521.1' in msg
+    assert '84521,10' in msg
     assert 'SEM TRADE' in msg
     assert 'M15' in msg
     assert 'M5' in msg

@@ -115,7 +115,7 @@ REASONS = {
 }
 
 
-def notification_parts(report, max_chars=3500):
+def _detail_parts(report, max_chars=3500):
     """Plain-text Telegram-ready pages, including every supplied map level."""
     if report['status'] != 'READY_CANDIDATE':
         return []
@@ -124,7 +124,7 @@ def notification_parts(report, max_chars=3500):
     d = report['daily']
     date = datetime.fromtimestamp(d['available_ts']/1000, timezone.utc).date().isoformat()
     bias_text={'BULLISH':'ALTA','BEARISH':'BAIXA','NEUTRO':'NEUTRO'}[d['bias']]
-    header = f"KAIROS | MAPA DO DIA\n{report['pair']} | {date} | Hipótese diária: {bias_text}\n"
+    header = f"📋 KAIROS | DETALHES DO MAPA\n{report['pair']} | {date} | Hipótese diária: {bias_text}\n"
     lines = [REASONS[d['reason']],
              f"Dia fechado: H {d['closed_day']['h']} | L {d['closed_day']['l']} | C {d['closed_day']['c']}",
              f"Dia anterior: H {d['previous_day']['h']} | L {d['previous_day']['l']}",
@@ -141,8 +141,9 @@ def notification_parts(report, max_chars=3500):
     if report.get('current_price'):
         px=report['current_price']
         stage_labels={'SETUP_ANTERIOR_INVALIDADO':'setup anterior invalidado; aguardar uma nova cadeia','RETESTE_HISTORICO_SEM_NOVA_ENTRADA':'reteste histórico identificado; sem nova entrada autorizada','AGUARDANDO_ZONA_OU_CAPTURA':'aguardando zona relevante ou captura de liquidez','AGUARDANDO_CONFIRMACAO_M15':'aguardando confirmação M15 exigida pelo motor','AGUARDANDO_POI_CAUSAL_OU_REFINAMENTO_M5':'M15 confirmado; aguardando zona causal ou refinamento M5','AGUARDANDO_RETESTE_M5':'aguardando reteste da zona M5','RETESTE_M5_OBSERVADO':'reteste M5 observado pelo motor, DEMO/manual'}
+        stage_labels['AGUARDANDO_REACAO_CONFIRMADA'] = 'aguardando reação confirmada'
         details=[f"Referência: último M5 fechado @ {px['value']} (não é cotação ao vivo).",
-                 f"AGORA: {stage_labels[report['stage']['code']]}"]
+                 f"AGORA: {stage_labels.get(report['stage']['code'], 'Estado não reconhecido; conferir sequência')}"]
         if report.get('daily_review_required'):
             details.append('REAVALIAR hipótese diária: preço recuperou/perdeu a referência anterior; não é inversão automática.')
         for side,title in (('above','acima'),('below','abaixo')):
@@ -170,6 +171,122 @@ def notification_parts(report, max_chars=3500):
         page += line + '\n'
     pages.append(page.rstrip())
     return pages
+
+
+def _number(value):
+    """Retain the supplied price precision; strip only an integer's .0 suffix."""
+    return str(value).removesuffix('.0')
+
+
+def notification_parts(report, max_chars=3500):
+    """Concise reading first, followed by the unabridged existing inventory.
+
+    Formatting only: no detectors, causal associations or delivery-key changes.
+    A standalone M15 detector observation is kept in details, never promoted to
+    confirmation of the capture/plan selected by the durable chain.
+    """
+    details = _detail_parts(report, max_chars)
+    if not details:
+        return []
+    d = report['daily']; current = d['closed_day']; previous = d['previous_day']
+    bias = {'BULLISH': 'ALTA', 'BEARISH': 'BAIXA', 'NEUTRO': 'NEUTRO'}[d['bias']]
+    icon = {'BULLISH': '🔺', 'BEARISH': '🔻', 'NEUTRO': '◼️'}[d['bias']]
+    stamp = datetime.fromtimestamp(report['asof_ts']/1000, ZoneInfo('Europe/Lisbon')).strftime('%d/%m/%Y · %H:%M')
+    header = f"🗺 KAIROS | MAPA DO DIA\n{report['pair']} · {stamp} Portugal\n"
+    reason = d['reason']
+    if reason == 'CLOSE_ABOVE_PREVIOUS_HIGH':
+        reading = f"Fechamento {_number(current['c'])} > máxima anterior {_number(previous['h'])}. Hipótese de continuação de alta."
+    elif reason == 'CLOSE_BELOW_PREVIOUS_LOW':
+        reading = f"Fechamento {_number(current['c'])} < mínima anterior {_number(previous['l'])}. Hipótese de continuação de baixa."
+    elif reason in ('HIGH_CAPTURE_AND_CLOSE_INSIDE', 'LOW_CAPTURE_AND_CLOSE_INSIDE'):
+        which = 'máxima' if reason == 'HIGH_CAPTURE_AND_CLOSE_INSIDE' else 'mínima'
+        boundary = previous['h'] if which == 'máxima' else previous['l']
+        reading = (f"Capturou a {which} anterior {_number(boundary)}; fechou em {_number(current['c'])} dentro do intervalo. "
+                   'Hipótese de reversão, ainda sem confirmação estrutural.')
+    else:
+        reading = REASONS[reason] + ' Sem direção diária confirmada.'
+    lines = ['', f'{icon} VIÉS DIÁRIO: {bias}', reading]
+    if report.get('daily_review_required'):
+        lines += ['⚠️ REAVALIAR: preço voltou além da referência diária; não é inversão automática.']
+    context = report.get('structure_context') or {}
+    if context:
+        arrows = {'alta': '↑', 'baixa': '↓', 'neutro': '↔'}
+        lines += ['', '🧭 ESTRUTURA', ' | '.join(f'{tf} {arrows.get(context.get(tf), "?")}' for tf in ('D1','H4','H1'))]
+    stage = report.get('stage') or {}
+    capture = stage.get('capture')
+    # The latest map capture can belong to a different episode; label it so.
+    cap = capture or report.get('latest_capture')
+    if cap and cap.get('origin_kind') != 'HTF_FVG_TOUCH':
+        reactions = {'REJECTION_RECLAIM': 'rejeição / recuperação',
+                     'ACCEPTANCE_CONTINUATION': 'aceitação / continuação',
+                     'UNRESOLVED_REACTION': 'reação por resolver'}
+        title = '💧 CAPTURA DA SEQUÊNCIA' if capture else '💧 ÚLTIMA CAPTURA NO MAPA · vínculo ao plano não confirmado'
+        lines += ['', title, f"{cap['liquidity_tf']} {cap['liquidity_type']}: {_number(cap['nivel'])}"]
+        if not capture:
+            reaction = cap.get('post_capture_state')
+            lines += ['Classificação no mapa: ' + reactions.get(reaction, 'reação não informada')]
+    event = stage.get('m15_break')
+    if event:
+        when = datetime.fromtimestamp(event['close_ts']/1000, ZoneInfo('Europe/Lisbon')).strftime('%d/%m %H:%M')
+        arrow, relation = ('↑', 'acima de') if event['side'] == 'UP' else ('↓', 'abaixo de')
+        lines += ['', f"📉 {event['kind']} M15 {arrow} {relation} {_number(event['level'])} · {when} Portugal"]
+    px = (report.get('current_price') or {}).get('value', current['c'])
+    wanted = {'BULLISH': 'alta', 'BEARISH': 'baixa'}.get(d['bias'])
+    zones = report.get('zones') or []
+    nearby = []
+    for tf in ('H4', 'H1'):
+        candidates = [z for z in zones if z['tf'] == tf and
+                      (not wanted or z.get('role') == 'ZONA_PARA_OBSERVAR_RECUO')]
+        groups = [candidates] if wanted else [
+            [z for z in candidates if z['bottom'] <= px <= z['top']],
+            [z for z in candidates if z['bottom'] > px],
+            [z for z in candidates if z['top'] < px]]
+        for group in groups:
+            nearest = min(group, key=lambda z: max(z['bottom']-px, px-z['top'], 0), default=None)
+            if nearest:
+                nearby.append(nearest)
+    lines += ['', '📍 ZONAS PRÓXIMAS PARA OBSERVAR']
+    for z in nearby:
+        typ = z['type'].split('_')[0]
+        direction = {'alta': 'compra', 'baixa': 'venda'}.get(z.get('direction'), 'contexto')
+        lines += [f"{z['tf']} {typ} {direction}: {_number(z['bottom'])}–{_number(z['top'])}"]
+    if not nearby:
+        lines += ['Nenhuma zona alinhada identificada no mapa.']
+    lines += ['Zonas de contexto; não são ordens de entrada.', '', '💧 LIQUIDEZ DISPONÍVEL MAIS PRÓXIMA']
+    for side, label in [('above', 'Acima'), ('below', 'Abaixo')]:
+        row = report['nearest_available'].get(side)
+        lines += [f"{label}: " + (f"{row['tf']} {row['type']} · {_number(row['level'])}" if row else 'não identificada')]
+    labels = {
+        'AGUARDANDO_ZONA_OU_CAPTURA': 'aguardando zona relevante ou captura de liquidez',
+        'AGUARDANDO_REACAO_CONFIRMADA': 'aguardando reação confirmada',
+        'AGUARDANDO_CONFIRMACAO_M15': 'aguardando confirmação M15 · CHoCH/BOS por fechamento alinhado',
+        'AGUARDANDO_POI_CAUSAL_OU_REFINAMENTO_M5': 'M15 confirmado; aguardando POI causal ou refinamento M5',
+        'AGUARDANDO_RETESTE_M5': 'aguardando reteste da zona M5',
+        'RETESTE_M5_OBSERVADO': 'reteste M5 observado; execução não confirmada',
+        'RETESTE_HISTORICO_SEM_NOVA_ENTRADA': 'reteste histórico; não é nova entrada',
+        'SETUP_ANTERIOR_INVALIDADO': 'plano anterior invalidado; aguardar nova sequência',
+    }
+    code = stage.get('code')
+    lines += ['', '⏳ AGORA: ' + labels.get(code, 'Estado não reconhecido; conferir sequência')]
+    if code in ('AGUARDANDO_RETESTE_M5', 'RETESTE_M5_OBSERVADO'):
+        setup = stage.get('setup') or {}
+        if _finite(setup.get('bottom')) and _finite(setup.get('top')):
+            typ = setup.get('zone_type', 'POI').split('_')[0]
+            lines += [f"🎯 {typ} M5: {_number(setup['bottom'])}–{_number(setup['top'])}"]
+        else:
+            lines += ['Zona M5: não informada; conferir alerta da sequência.']
+    lines += ['', f'Preço de referência: {_number(px)} · ' + ('último M5 fechado' if report.get('current_price') else 'fechamento D1') + '; não é cotação ao vivo.',
+              'DEMO / MANUAL · Sem ordem ou execução confirmada.']
+    # Preserve caller page limits even for deliberately small test/export pages.
+    pages = []; page = header
+    for line in lines:
+        if len(page) + len(line) + 1 > max_chars:
+            pages.append(page.rstrip()); page = header
+        if len(page) + len(line) + 1 > max_chars:
+            raise ValueError('A summary row is too long')
+        page += line + '\n'
+    pages.append(page.rstrip())
+    return pages + details
 
 
 def prepare_notification(connection, report):

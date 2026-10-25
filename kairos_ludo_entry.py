@@ -96,6 +96,12 @@ def snapshot(pair, tf_map, cutoff, engine):
             native_capture_confirm_ts=location['touch_confirm_close_ts']))
     decision['htf_entry_origins'] = origins
     decision['ludo_liquidity_origins'] = recent_ludo_captures(tf_map,cutoff)
+    try:
+        radars = engine._kairos_capture_radar_events(decision, tf_map, cutoff)
+    except Exception as exc:
+        radars = []
+        print(f'[KAIROS_CAPTURE_RADAR] Ludo presentation error pair={pair}: {type(exc).__name__}', flush=True)
+    decision['radar_context'] = radars
     saved = chains.scan(pair, tf_map, cutoff, decision, engine)
     if not saved or saved.get('asof_ts') != cutoff:
         raise RuntimeError('Ludo durable provider did not confirm this cutoff')
@@ -108,11 +114,6 @@ def snapshot(pair, tf_map, cutoff, engine):
         daily = scan_report(pair, tf_map, cutoff, engine, decision)
     except Exception as exc:
         print(f'[KAIROS_DAILY_BRIEF] Ludo presentation error pair={pair}: {type(exc).__name__}', flush=True)
-    try:
-        radars = engine._kairos_capture_radar_events(decision, tf_map, cutoff)
-    except Exception as exc:
-        radars = []
-        print(f'[KAIROS_CAPTURE_RADAR] Ludo presentation error pair={pair}: {type(exc).__name__}', flush=True)
     for radar in radars:
         radar['entry_structure_model'] = 'LUDO'
     print(f'[KAIROS_ENTRY_MODEL] pair={pair} model=LUDO legacy_authorization=false '
@@ -122,6 +123,6 @@ def snapshot(pair, tf_map, cutoff, engine):
         entry_structure_model='LUDO', daily_brief=daily, cutoff_ts=cutoff,
         causal_policy_version=chains.CAUSAL_POLICY_VERSION,
         sinais_unicos_completos=[], entry_phase_events=[], entry_setup_states={},
-        pending_setup_keys=[], radar_captures=radars,
+        pending_setup_keys=[], radar_captures=[], radar_context_events=radars,
         ludo_entry_stage=saved['view'],
         distribuicao_motivos_todos_ciclos={saved['view']['code']: 1})

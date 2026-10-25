@@ -364,6 +364,7 @@ def _db(path):
     db.execute('CREATE TABLE IF NOT EXISTS chain_state (pair TEXT PRIMARY KEY, payload TEXT)')
     db.execute('CREATE TABLE IF NOT EXISTS chain_outbox '
                '(seq INTEGER PRIMARY KEY, key TEXT UNIQUE, pair TEXT, payload TEXT, ack INTEGER DEFAULT 0)')
+    db.execute('CREATE TABLE IF NOT EXISTS chain_notice_context (pair TEXT PRIMARY KEY,payload TEXT)')
     return db
 
 
@@ -384,8 +385,9 @@ def scan(pair, tf_map, cutoff, decision, engine, path=DEFAULT_PATH):
                             if c['native_capture_confirm_ts'] > baseline)
             captures.extend(c for c in decision.get('ludo_liquidity_origins', [])
                             if c['native_capture_confirm_ts'] > recent_since)
+        observed_now=int(time.time()*1000)
         updated, events = advance(state, pair, captures, tf_map, cutoff, engine,
-                                  observed_ts=int(time.time()*1000))
+                                  observed_ts=observed_now)
         if updated and os.environ.get('KAIROS_ENTRY_STRUCTURE', '').strip().upper() == 'LUDO':
             updated.setdefault('ludo_only_since', cutoff)
             # Detector rollout is prospective. Persist independently of the
@@ -393,6 +395,21 @@ def scan(pair, tf_map, cutoff, decision, engine, path=DEFAULT_PATH):
             updated.setdefault('ludo_liquidity_since', recent_since)
         if updated:
             db.execute('INSERT OR REPLACE INTO chain_state VALUES (?,?)', (pair, json.dumps(updated)))
+        if updated and updated.get('asof_ts')==cutoff:
+            from kairos_notice_context import context_snapshot,radar_notice,_valid_radar
+            prior=db.execute('SELECT payload FROM chain_notice_context WHERE pair=?',(pair,)).fetchone()
+            previous_context=json.loads(prior[0]) if prior else {}
+            notice_since=previous_context.get('notice_since',cutoff)
+            radars=decision.get('radar_context') or []
+            context=context_snapshot(previous_context,updated,radars,cutoff)
+            context.setdefault('notice_since',notice_since)
+            db.execute('INSERT OR REPLACE INTO chain_notice_context VALUES(?,?)',(pair,json.dumps(context)))
+            if os.environ.get('KAIROS_ENTRY_STRUCTURE','').strip().upper()=='LUDO':
+                for r in radars:
+                    if not (_valid_radar(r,cutoff) and r.get('key') and r['timestamp']>notice_since):continue
+                    notice=radar_notice(pair,r,observed_now,CAUSAL_POLICY_VERSION)
+                    if db.execute('SELECT 1 FROM chain_outbox WHERE key=?',(notice['key'],)).fetchone() is None:
+                        events.append(notice)
         for event in events:
             db.execute('INSERT OR IGNORE INTO chain_outbox (key,pair,payload) VALUES (?,?,?)',
                        (event['key'], pair, json.dumps(event)))
@@ -466,7 +483,8 @@ def message(event):
 def deliver(pair, sender, path=DEFAULT_PATH):
     if not enabled() or pair not in PAIRS:
         return False
-    from kairos_alert_presentation import bundle_events,format_chain_events
+    from kairos_alert_presentation import bundle_events
+    from kairos_notice_context import update_groups,format_pair_update
     # Freeze pages before sending. Original events remain the audit record.
     # Receipts are per page; source events are acknowledged only at completion.
     with closing(_db(path)) as db:
@@ -483,11 +501,13 @@ def deliver(pair, sender, path=DEFAULT_PATH):
                 print(f'[KAIROS_CAPTURE_CHAIN] suppressed_unqualified pair={pair} seq={seq}',flush=True)
             elif seq not in assigned:
                 pending.append((seq,event))
-        for group in bundle_events(pending):
+        context_row=db.execute('SELECT payload FROM chain_notice_context WHERE pair=?',(pair,)).fetchone()
+        context=json.loads(context_row[0]) if context_row else {}
+        for group in update_groups(bundle_events(pending)):
             key=hashlib.sha256(json.dumps([pair,group['seqs']],separators=(',',':')).encode()).hexdigest()
             db.execute('INSERT OR IGNORE INTO chain_delivery_batches(key,pair,pages,seqs,observed_ts,policy_version) VALUES(?,?,?,?,?,?)',
-                       (key,pair,json.dumps(format_chain_events(group['events']),ensure_ascii=False),
-                        json.dumps(group['seqs']),max(e['observed_ts'] for e in group['events']),CAUSAL_POLICY_VERSION))
+                       (key,pair,json.dumps(format_pair_update(pair,group['groups'],context),ensure_ascii=False),
+                        json.dumps(group['seqs']),max(e['observed_ts'] for g in group['groups'] for e in g['events']),CAUSAL_POLICY_VERSION))
         db.commit()
         batches=db.execute('SELECT key,pages,seqs,acknowledged,observed_ts,policy_version FROM chain_delivery_batches WHERE pair=? AND complete=0 ORDER BY rowid',(pair,)).fetchall()
         for key,payload,source,acknowledged,observed,policy in batches:

@@ -21,7 +21,8 @@ class UnifiedContextMapTests(unittest.TestCase):
         self.assertEqual(out['nearest_available']['reference'],'LAST_CLOSED_M5_CLOSE')
         self.assertEqual(len(out['zones']),1)
         self.assertFalse(out['entry_authorized'])
-        self.assertIn('FVG_bullish', '\n'.join(notification_parts(out)))
+        self.assertNotIn('FVG_bullish', '\n'.join(notification_parts(out)))
+        self.assertIn('FVG_bullish', '\n'.join(notification_parts(out,detailed=True)))
         self.assertIn('aguardando confirmação M15', '\n'.join(notification_parts(out)))
 
     def test_invalid_future_zone_and_invalidated_zone_cannot_be_presented_as_available(self):

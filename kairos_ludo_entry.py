@@ -122,10 +122,21 @@ def snapshot(pair, tf_map, cutoff, engine):
     print(f'[KAIROS_ENTRY_MODEL] pair={pair} model=LUDO legacy_authorization=false '
           f'causal_policy_version={chains.CAUSAL_POLICY_VERSION} '
           f'cutoff={cutoff} stage={saved["view"]["code"]}', flush=True)
-    return dict(pair=pair, scan_mode='LATEST_CLOSED_SNAPSHOT', evaluations=1,
+    report = dict(pair=pair, scan_mode='LATEST_CLOSED_SNAPSHOT', evaluations=1,
         entry_structure_model='LUDO', daily_brief=daily, cutoff_ts=cutoff,
         causal_policy_version=chains.CAUSAL_POLICY_VERSION,
         sinais_unicos_completos=[], entry_phase_events=[], entry_setup_states={},
         pending_setup_keys=[], radar_captures=[], radar_context_events=radars,
         ludo_entry_stage=saved['view'],
         distribuicao_motivos_todos_ciclos={saved['view']['code']: 1})
+
+    if os.environ.get('KAIROS_FVG_FORCE_SHADOW', '').strip().lower() == 'true':
+        try:
+            from kairos_fvg_force_shadow import observe_view
+            report['fvg_force_shadow'] = observe_view(tf_map, saved['view'], cutoff)
+        except Exception as exc:
+            # Research output must never block the established entry provider.
+            report['fvg_force_shadow'] = dict(mode='OBSERVATION_ONLY',
+                status='OBSERVER_ERROR', error_type=type(exc).__name__,
+                changes_entry_decision=False)
+    return report

@@ -28,3 +28,13 @@ This structural comparison uses the entire available archived prefix rather than
 ## Activation
 
 Optional provider diagnostic: KAIROS_FVG_FORCE_SHADOW=true. Default off. Adds only fvg_force_shadow to the returned report; no outbox, decision or saved-plan writes. Diagnostic exceptions are isolated as OBSERVER_ERROR. Not deployed/activated by this task. Replay CLI: tools/replay_fvg_force_shadow.py SOURCE OUTPUT --start EPOCH_MS --end EPOCH_MS.
+
+## ATR V2 extension — 27 October 2026
+
+Prior-only Wilder ATR14 now recorded, not used as a filter. SOL M15 breaking body0.06 / priorATR0.457181 =0.1312ATR. Selected earlier SOL M5 FVG B body0.35 / priorATR0.289897 =1.2073ATR; gap0.30 =1.0348ATR. BNB M30 breaking B body2.80 / priorATR2.166374 =1.2925ATR; gap1.41 =0.6509ATR. Compare within timeframe/context; an M30 vs M15 distinction is not proof of comparative trading edge.
+
+For margin rather than an all-or-nothing body requirement, V2 reports both experimental strict (all3 existing body/tail/median checks) and balanced (at least2of3, plus directional body). Same direct-break FVG associations: SOL11/11 strict,11/11 balanced; BNB24/27 strict,27/27 balanced. These are not liquidity-qualified entry counts and do not establish that balanced is better. All native FVG candidates remain intact; no quality label enables or disables a signal.
+
+Tests:15 targeted tests including prior-only ATR, scale invariance, missing history/gaps; full built suite394 passed +53 subtests. Production unchanged.
+
+Independent ATR V2 review: no blockers; requested additional two-of-three/opposite-direction coverage added. Final source suite395 passed +53 subtests. Built suite394 +53 before that test-only addition.

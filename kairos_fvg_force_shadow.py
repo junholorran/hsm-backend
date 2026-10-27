@@ -6,7 +6,7 @@ Native Ludo, liquidity, FVG lifecycle, plan state and delivery are untouched.
 import math
 from statistics import median
 
-VERSION = 'FVG_FORCE_SHADOW_V1'
+VERSION = 'FVG_FORCE_SHADOW_V2'
 THRESHOLDS = dict(body_fraction_min=0.60, closing_tail_max=0.25,
                   body_median_multiple_min=1.50, baseline_bars=20)
 
@@ -15,6 +15,28 @@ def _valid(c):
     return (all(isinstance(c.get(k), (int, float)) and not isinstance(c[k],bool)
                 and math.isfinite(c[k]) for k in ('t','o','h','l','c'))
             and c['l'] <= min(c['o'],c['c']) <= max(c['o'],c['c']) <= c['h'])
+
+
+def _atr_before(rows, index, duration, period=14):
+    """Wilder RMA of TR, using only bars strictly before measured candle.
+
+    Seed with first period TRs in contiguous segment; first TR is high-low.
+    Missing history produces unknown, never an artificially small ATR.
+    """
+    segment=[]
+    for row in rows[:index]:
+        if segment and row['t']-segment[-1]['t']!=duration:
+            segment=[]
+        segment.append(row)
+    if not segment or rows[index]['t']-segment[-1]['t']!=duration or len(segment)<period:
+        return None
+    tr=[]
+    for i,row in enumerate(segment):
+        prior_close=segment[i-1]['c'] if i else row['c']
+        tr.append(max(row['h']-row['l'],abs(row['h']-prior_close),abs(row['l']-prior_close)))
+    atr=sum(tr[:period])/period
+    for value in tr[period:]:atr=(atr*(period-1)+value)/period
+    return atr if atr>0 else None
 
 
 def _metrics(rows, index, side, duration):
@@ -32,10 +54,20 @@ def _metrics(rows, index, side, duration):
             and tail<=THRESHOLDS['closing_tail_max']
             and expansion>=THRESHOLDS['body_median_multiple_min']) if all(
                 x is not None for x in (fraction,tail,expansion)) else None
+    atr=_atr_before(rows,index,duration)
+    checks=dict(body_fraction=(fraction>=THRESHOLDS['body_fraction_min']) if fraction is not None else None,
+                closing_tail=(tail<=THRESHOLDS['closing_tail_max']) if tail is not None else None,
+                body_expansion=(expansion>=THRESHOLDS['body_median_multiple_min']) if expansion is not None else None)
+    passed=sum(v is True for v in checks.values())
+    known=all(v is not None for v in checks.values())
     return dict(open_ts=c['t'],close_ts=c['t']+duration,body=body,
                 body_fraction=fraction,closing_tail_fraction=tail,
                 prior_body_median=baseline,body_median_multiple=expansion,
-                baseline_complete=covered,experimental_strong=strong)
+                baseline_complete=covered,experimental_strong=strong,
+                prior_atr14=atr,body_atr14=body/atr if atr else None,
+                range_atr14=span/atr if atr else None,research_checks=checks,
+                research_checks_passed=passed if known else None,
+                experimental_balanced=(directional and passed>=2) if known else None)
 
 
 def assess_fvg(candles, zone, event, duration, cutoff):
@@ -96,6 +128,7 @@ def assess_fvg(candles, zone, event, duration, cutoff):
                 sources=[dict(s) for s in sources],direct_break=direct,
                 inside_causal_leg=leg,break_close_ts=event['close_ts'],
                 close_beyond_level=beyond,middle=mid,break_candle=break_metrics,
+                gap_atr14=(top-bottom)/mid['prior_atr14'] if mid['prior_atr14'] else None,
                 experimental_candidate=candidate,reasons=reasons)
 
 
@@ -121,9 +154,10 @@ def _measure_selected(rows, zone, side, duration, cutoff):
     geometry=geometry and zone.get('tipo')==expected and all(
         isinstance(zone.get(k),(int,float)) and math.isclose(zone[k],v,abs_tol=1e-9)
         for k,v in (('bottom',bottom),('top',top)))
+    mid=_metrics(rows,positions[b['t']],side,duration)
     return dict(status='MEASURED',sources=[dict(r) for r in sources],
                 geometry_valid=geometry,bottom=bottom,top=top,
-                middle=_metrics(rows,positions[b['t']],side,duration))
+                middle=mid,gap_atr14=(top-bottom)/mid['prior_atr14'] if mid['prior_atr14'] else None)
 
 
 def observe_view(tf_map, view, cutoff):

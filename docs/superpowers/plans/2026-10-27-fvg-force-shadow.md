@@ -20,3 +20,9 @@ No lookahead, cross-timeframe association, changed Telegram/state, invented ICT 
 11 shadow tests, full built application suite391 passed +53 subtests. Build patches passed; generated app.py/scalp_engine.py restored. Independent reviewer identified missing separate M15-break metrics; two reproducing tests failed, implementation corrected, full suite green. Review minor about archive history addressed explicitly in results; complete A/B/C geometry added. No deferred findings.
 
 Ruling: strict direct-B hypothesis stays observation only; earlier leg FVGs remain measured and are not removed from live selection. Multi-candle strength interpretation remains research, not an enabled filter. Cost if strict hypothesis were activated prematurely: valid multi-candle setups could be excluded.
+
+## V2 follow-up
+
+User asked for flexible, volatility-normalized observation rather than copying BNB. ATR14 prior-only ratios and alternative2of3 diagnostic implemented with three new failing-first tests, then14 targeted green and full built suite394 +53 subtests. No new ATR gate, no live activation, no multi-candle aggregate strength claim. Same research-only deployment boundary remains.
+
+V2 review: no blockers; minor two-of-three and opposite-direction test coverage added. Final15 shadow tests and full source suite395 +53 passed.

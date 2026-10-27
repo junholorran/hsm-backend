@@ -116,3 +116,45 @@ def test_selected_incomplete_third_cannot_be_measured_as_valid():
     bars,z,e=case()
     r=observe_view({'M5':bars},{'m15_break':e,'setup':{'poi':z}},23*D-1)
     assert r['selected_fvg']['status']=='NOT_YET_CLOSED'
+
+def test_atr_excludes_middle_and_third_and_scales_across_assets():
+    bars,z,e=case()
+    r=assess_fvg(bars,z,e,D,23*D)
+    assert r['middle']['prior_atr14']==pytest.approx(.3)
+    assert r['middle']['body_atr14']==pytest.approx(1/.3)
+    assert r['gap_atr14']==pytest.approx(.6/.3)
+    scaled=[dict(c,**{k:c[k]*10 for k in ('o','h','l','c')}) for c in bars]
+    zz=dict(z,bottom=z['bottom']*10,top=z['top']*10,
+        source_a=scaled[-3],source_mid=scaled[-2],source_c=scaled[-1])
+    ee=dict(e,level=e['level']*10)
+    rr=assess_fvg(scaled,zz,ee,D,23*D)
+    assert rr['middle']['body_atr14']==pytest.approx(r['middle']['body_atr14'])
+    assert rr['gap_atr14']==pytest.approx(r['gap_atr14'])
+    changed=copy.deepcopy(bars);changed[-1]['h']=150
+    z2=dict(z,source_c=changed[-1])
+    assert assess_fvg(changed,z2,e,D,23*D)['middle']['prior_atr14']==r['middle']['prior_atr14']
+
+def test_atr_missing_history_and_recent_gap_stay_unknown():
+    bars,z,e=case()
+    assert assess_fvg(bars[-3:],z,e,D,23*D)['middle']['prior_atr14'] is None
+    bars.pop(10)
+    assert assess_fvg(bars,z,e,D,23*D)['middle']['prior_atr14'] is None
+
+
+def test_balanced_profile_explains_borderline_without_new_entry_gate():
+    bars,z,e=case();bars[-2].update(h=102)
+    r=assess_fvg(bars,z,e,D,23*D)
+    assert r['middle']['experimental_strong'] is False
+    assert r['middle']['research_checks_passed']==1
+    assert r['changes_entry_decision'] is False
+
+def test_two_of_three_profile_allows_margin_but_not_opposite_body():
+    bars,z,e=case();bars[-2]['h']=101.6
+    r=assess_fvg(bars,z,e,D,23*D)
+    assert r['middle']['research_checks_passed']==2
+    assert r['middle']['experimental_balanced'] is True
+    assert r['middle']['experimental_strong'] is False
+    bars[-2].update(o=101.1,c=100.1)
+    r=assess_fvg(bars,z,e,D,23*D)
+    assert r['middle']['experimental_balanced'] is False
+    assert r['changes_entry_decision'] is False

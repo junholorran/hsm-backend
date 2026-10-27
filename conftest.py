@@ -10,3 +10,5 @@ import pytest
 @pytest.fixture(autouse=True)
 def reference_entry_policy(monkeypatch):
     monkeypatch.delenv('KAIROS_ENTRY_STRUCTURE', raising=False)
+    monkeypatch.delenv('KAIROS_M15_PRIMARY_FVG', raising=False)
+    monkeypatch.delenv('KAIROS_FVG_FORCE_SHADOW', raising=False)

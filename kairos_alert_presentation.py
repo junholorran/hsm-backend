@@ -84,6 +84,7 @@ def _reason_lines(e):
                   'ENTRY_POLICY_CHANGED':'Modelo corrigido: plano fora da regra de sweep HTF relevante e FVG causal',
                   'HTF_ORIGIN_INVALIDATED':'FVG HTF de origem invalidado',
                   'OPPOSITE_M5_BREAK':'Quebra contrária M5 confirmada por fechamento',
+                  'NO_DIRECT_M15_FVG':'A terceira vela não confirmou um FVG M15 válido ligado à quebra',
                   'HISTORY_LOST':'Histórico insuficiente para continuar a sequência'}.get(code,
                   'Motivo específico não disponível no evento original')
         if r.get('confirmed_ts') is not None:text+=f" | {stamp(r['confirmed_ts'])} Portugal"
@@ -116,6 +117,7 @@ def format_chain_events(events,now_ts=None):
     titles={'CAPTURA':'💧 LIQUIDEZ CAPTURADA','POI_HTF_TOCADO':'📦 TOQUE EM POI HTF',
         'M5_ANTECIPADO':f'🔔 {trade} | QUEBRA M5 ANTECIPADA',
         'M5_ANTECIPADO_INVALIDADO':'🚫 HIPÓTESE M5 ANTECIPADA ENCERRADA',
+        'M15_ARMADO':f'🟡 PLANO M15 DE {trade}',
         'M15_QUEBRA':f'🔎 {trade} | M15 CONFIRMADO','M5_ARMADO':f'🟡 PLANO DE {trade}',
         'RETESTE_OBSERVADO':f'👀 {trade} | RETESTE OBSERVADO',
         'PLANO_INVALIDADO':f'🚫 PLANO DE {trade} INVALIDADO',
@@ -168,14 +170,20 @@ def format_chain_events(events,now_ts=None):
                'OB_bullish':'OB comprador','OB_bearish':'OB vendedor'}
         if parent:lines.append(f"M15 {names.get(parent.get('tipo'),'POI')}: {price(parent['bottom'])}–{price(parent['top'])}")
         if zone:
-            lines.append(f"M5 {names.get(zone.get('tipo'),'POI')}: {price(zone['bottom'])}–{price(zone['top'])}")
+            zone_tf=e.get('zone_tf','M5')
+            if zone_tf!='M15' or not parent:
+                lines.append(f"{zone_tf} {names.get(zone.get('tipo'),'POI')}: {price(zone['bottom'])}–{price(zone['top'])}")
             proximal=zone['top'] if side=='LONG' else zone['bottom'] if side=='SHORT' else None
             if proximal is not None:lines.append(f'Proximal planeada: {price(proximal)}; não confirma execução.')
     if extreme is not None:
         label='Fundo estrutural abaixo da entrada' if side=='LONG' else 'Topo estrutural acima da entrada' if side=='SHORT' else 'Extremo estrutural'
         lines += [f'{label}: {price(extreme)}.','Referência estrutural para proteção. Stop exato não calculado; margem não definida.']
     lines+=['','ESTADO / PRÓXIMO PASSO']
-    if stage=='M5_ARMADO':lines.append('AGUARDAR RETESTE M5 · entrada ainda não confirmada.')
+    if stage=='M15_ARMADO':
+        lines.append('PLANO M15 PRONTO · aguardar retorno ao FVG M15. M5 opcional para refinamento; não exige nova quebra.')
+        lines.append('Quebra com força pelo critério experimental flexível; ordem limite e stop são decisões manuais.')
+    elif stage=='M5_ARMADO':
+        lines.append('REFINAMENTO M5 OPCIONAL · plano principal M15 independente.' if e.get('primary_policy') else 'AGUARDAR RETESTE M5 · entrada ainda não confirmada.')
     elif stage=='M5_ANTECIPADO':
         lines.append('M15 por confirmar · POI causal e reteste ainda por verificar. SEM TRADE AUTORIZADO POR ESTE AVISO.')
         if e['observed_ts']-e['break_ts']>=M5:
@@ -183,10 +191,13 @@ def format_chain_events(events,now_ts=None):
     elif stage=='M5_ANTECIPADO_INVALIDADO':
         lines+=_reason_lines(e)
         lines.append('Hipótese antecipada M5 encerrada; não cancela automaticamente um plano M15 independente nem ordens na exchange.')
-    elif stage=='M15_QUEBRA':lines.append('AGUARDAR POI CAUSAL / REFINAMENTO M5 · ainda sem entrada confirmada.')
-    elif stage in ('CAPTURA','POI_HTF_TOCADO'):lines.append('AGUARDAR REAÇÃO / QUEBRA M5 ANTECIPADA; confirmação M15 Ludo → POI causal → refinamento M5 → reteste. SEM TRADE. Captura ou toque isolado não autoriza entrada.')
+    elif stage=='M15_QUEBRA':lines.append('QUEBRA M15 COM FORÇA · aguardar fechamento da terceira vela e confirmação do FVG M15; ainda sem plano pronto.' if e.get('primary_policy') else 'AGUARDAR POI CAUSAL / REFINAMENTO M5 · ainda sem entrada confirmada.')
+    elif stage in ('CAPTURA','POI_HTF_TOCADO'):
+        from kairos_m15_primary import enabled as m15_primary_enabled
+        lines.append('AGUARDAR REAÇÃO / M5 ANTECIPADO; plano principal: quebra forte M15 → FVG M15 confirmado → aguardar retorno. M5 opcional. SEM TRADE por captura isolada.' if m15_primary_enabled() else 'AGUARDAR REAÇÃO / QUEBRA M5 ANTECIPADA; confirmação M15 Ludo → POI causal → refinamento M5 → reteste. SEM TRADE. Captura ou toque isolado não autoriza entrada.')
     elif stage=='RETESTE_OBSERVADO':
         lines.append(f"Candle M5 confirmado: {stamp(e.get('candle_ts',0)+M5)} Portugal.")
+        if e.get('zone_tf')=='M15':lines.append('Retorno ao FVG M15 observado em candle M5 fechado.')
         lines.append('Reteste observado; execução não comprovada. Confirme o estado atual antes de decidir.')
         if e['observed_ts']-e.get('candle_ts',0)-M5>=M5:lines.append('Reteste histórico; nenhuma nova entrada presumida agora.')
     elif stage in ('PLANO_INVALIDADO','TOQUE_E_INVALIDACAO'):

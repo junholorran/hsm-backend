@@ -17,6 +17,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from kairos_ludo_structure import structure_snapshot
+import kairos_m15_primary as primary
 from kairos_reaction_episode import reaction_timeline, evidence_at, touch_episode, entry_direction_allowed, entry_reaction_allowed, entry_origin_allowed
 
 M5 = 300000
@@ -179,8 +180,10 @@ def advance(state, pair, captures, tf_map, cutoff, engine, observed_ts=None):
                     ludo_only_since=cutoff), []
     if not state:
         return dict(start_ts=cutoff, asof_ts=cutoff, captures={},
-                    causal_policy_version=CAUSAL_POLICY_VERSION), []
+                    causal_policy_version=CAUSAL_POLICY_VERSION,
+                    **({'m15_primary_since':cutoff} if primary.enabled() else {})), []
     state = original
+    if primary.enabled():state.setdefault('m15_primary_since',cutoff)
     previous = state['asof_ts']
     alerts = []
 
@@ -196,6 +199,7 @@ def advance(state, pair, captures, tf_map, cutoff, engine, observed_ts=None):
         if plan and (stage!='M15_QUEBRA' or facts.get('break_ts')==plan['break']['close_ts']):
             def zone_view(z):
                 return {k:z.get(k) for k in ('id','tipo','bottom','top','created_ts','flip_ts','t','break_ts')} if z else None
+            if plan.get('primary_policy'):event['primary_policy']=plan['primary_policy']
             event['plan_details']=dict(m15_break=copy.deepcopy(plan['break']),
                 parent_zone=zone_view(plan.get('parent_zone')),m5_zone=zone_view(plan.get('m5_zone')),
                 invalidation=plan.get('invalidation'),had_retest=bool(plan.get('touched')))
@@ -230,9 +234,14 @@ def advance(state, pair, captures, tf_map, cutoff, engine, observed_ts=None):
     for cid, rec in state['captures'].items():
         capture = rec['capture']
         old_plan = rec.get('plan')
+        if old_plan and not old_plan.get('invalidated') and bool(old_plan.get('primary_policy')) != primary.enabled():
+            old_plan['invalidated'] = True
+            emit(cid,rec,'PLANO_INVALIDADO',break_ts=old_plan['break']['close_ts'],
+                 direction='LONG' if old_plan['break']['side']=='UP' else 'SHORT',
+                 reason='ENTRY_POLICY_CHANGED',invalidation_reasons=[dict(code='ENTRY_POLICY_CHANGED',confirmed_ts=cutoff)])
         if old_plan and not old_plan.get('invalidated'):
             old_direction = 'LONG' if old_plan['break']['side'] == 'UP' else 'SHORT'
-            if not entry_direction_allowed(capture, old_direction) or (old_plan.get('m5_zone') and not _entry_fvg(old_plan['m5_zone'])):
+            if not entry_direction_allowed(capture, old_direction) or (not old_plan.get('primary_policy') and old_plan.get('m5_zone') and not _entry_fvg(old_plan['m5_zone'])):
                 old_plan['invalidated'] = True
                 emit(cid, rec, 'PLANO_INVALIDADO', break_ts=old_plan['break']['close_ts'],
                      candle_ts=cutoff-M5, direction=old_direction, reason='ENTRY_POLICY_CHANGED',
@@ -270,7 +279,7 @@ def advance(state, pair, captures, tf_map, cutoff, engine, observed_ts=None):
                 old_plan = rec.get('plan')
                 if old_plan and not old_plan.get('invalidated'):
                     old_plan['invalidated'] = True
-                    zone = old_plan.get('m5_zone')
+                    zone = old_plan.get('m15_zone') or old_plan.get('m5_zone')
                     ambiguous = bool(zone and not old_plan.get('touched') and c['t'] >= old_plan['armed_ts']
                                      and c['h'] >= zone['bottom'] and c['l'] <= zone['top'])
                     emit(cid, rec, 'TOQUE_E_INVALIDACAO' if ambiguous else 'PLANO_INVALIDADO',
@@ -284,7 +293,7 @@ def advance(state, pair, captures, tf_map, cutoff, engine, observed_ts=None):
                 rec['plan'] = None
             plan = rec.get('plan')
             if plan and not plan.get('invalidated'):
-                zone = plan.get('m5_zone')
+                zone = plan.get('m15_zone') or plan.get('m5_zone')
                 up = plan['break']['side'] == 'UP'
                 touch = bool(zone and c['t'] >= plan['armed_ts']
                              and c['h'] >= zone['bottom'] and c['l'] <= zone['top'])
@@ -293,6 +302,7 @@ def advance(state, pair, captures, tf_map, cutoff, engine, observed_ts=None):
                 if invalid:reasons.append(dict(code='STRUCTURAL_EXTREME_BREACHED',
                     level=plan['invalidation'],confirmed_ts=closed))
                 for name, rows, duration in (('parent_zone', m15, M15), ('m5_zone', m5, M5)):
+                    if plan.get('primary_policy') and name=='m5_zone':continue
                     key = (plan['break']['close_ts'], name)
                     if key not in removals:
                         removals[key] = _removed_at(plan.get(name), rows, duration, engine)
@@ -319,7 +329,8 @@ def advance(state, pair, captures, tf_map, cutoff, engine, observed_ts=None):
                     plan['touched'] = True
                     plan['retest'] = dict(c)
                     emit(cid, rec, 'RETESTE_OBSERVADO', break_ts=plan['break']['close_ts'],
-                         candle_ts=c['t'], zone=zone, direction='LONG' if up else 'SHORT')
+                         candle_ts=c['t'], zone=zone, zone_tf='M15' if plan.get('primary_policy') else 'M5',
+                         direction='LONG' if up else 'SHORT')
             for event in (e for e in fresh if e['close_ts'] == closed):
                 if origin_removed is not None and origin_removed <= closed:
                     continue
@@ -336,15 +347,19 @@ def advance(state, pair, captures, tf_map, cutoff, engine, observed_ts=None):
                         continue
                 causal_capture = {**capture, 'first_capture_ts':reaction['leg_start_ts'],
                                   'sweep_ts':reaction['leg_start_ts']}
-                zone = _parent_zone(engine, m15, causal_capture, event)
+                if primary.enabled() and (event['open_ts']<state['m15_primary_since'] or not primary.strong_break(m15,event)):
+                    continue
+                zone = None if primary.enabled() else _parent_zone(engine, m15, causal_capture, event)
                 episode.update(consumed=True, break_ts=event['close_ts'])
                 emit(cid, rec, 'M15_QUEBRA', break_ts=event['close_ts'], direction=direction,
                      kind=event['kind'], level=event['level'],
+                     primary_policy=primary.POLICY if primary.enabled() else None,
                      parent_zone=zone if _zone_ok(zone) else None,invalidation=event['opposite_level'])
                 plan = dict(break_ts=event['close_ts'], observed_ts=observed_ts, invalidated=False,
                             invalidation=event['opposite_level'],
                             episode_key=episode['key'], causal_start_ts=reaction['leg_start_ts'],
                             parent_zone=zone if _zone_ok(zone) else None)
+                if primary.enabled():plan['primary_policy']=primary.POLICY
                 plan['break'] = copy.deepcopy(event)
                 rec['plan'] = plan
         if origin_removed is not None and origin_removed <= cutoff:
@@ -357,6 +372,21 @@ def advance(state, pair, captures, tf_map, cutoff, engine, observed_ts=None):
             continue
         if not plan or plan.get('invalidated') or plan.get('m5_zone'):
             continue
+        if plan.get('primary_policy') and not plan.get('m15_zone'):
+            zone=primary.direct_zone(m15,plan['break'],cutoff,engine)
+            if zone and _removed_at(zone,m15,M15,engine) is None:
+                plan.update(parent_zone=copy.deepcopy(zone),m15_zone=copy.deepcopy(zone),
+                            m15_armed_ts=observed_ts,armed_ts=observed_ts)
+                emit(cid,rec,'M15_ARMADO',break_ts=plan['break']['close_ts'],
+                     direction='LONG' if plan['break']['side']=='UP' else 'SHORT',
+                     zone=zone,zone_tf='M15',parent_zone=zone,invalidation=plan['invalidation'])
+            elif cutoff>=plan['break']['close_ts']+M15:
+                plan['invalidated']=True
+                if rec.get('episode'):rec['episode']['consumed']=False
+                emit(cid,rec,'PLANO_INVALIDADO',break_ts=plan['break']['close_ts'],
+                     direction='LONG' if plan['break']['side']=='UP' else 'SHORT',
+                     reason='NO_DIRECT_M15_FVG',invalidation_reasons=[dict(code='NO_DIRECT_M15_FVG',confirmed_ts=cutoff)])
+            if not plan.get('m15_zone'):continue
         parent = plan.get('parent_zone')
         if not parent:
             continue
@@ -369,10 +399,16 @@ def advance(state, pair, captures, tf_map, cutoff, engine, observed_ts=None):
             continue
         causal_capture = {**capture, 'first_capture_ts':plan['causal_start_ts'],
                           'sweep_ts':plan['causal_start_ts']}
-        zone, ready = _refinement(engine, m5, causal_capture, plan['break'], parent, m5events)
+        try:
+            zone, ready = _refinement(engine, m5, causal_capture, plan['break'], parent, m5events)
+        except Exception as exc:
+            if not plan.get('primary_policy'):raise
+            print(f'[KAIROS_M15_PRIMARY] optional_m5_error pair={pair} type={type(exc).__name__}',flush=True)
+            zone, ready = None, None
         if _zone_ok(zone):
             up = plan['break']['side'] == 'UP'
-            plan.update(m5_zone=copy.deepcopy(zone), armed_ts=observed_ts, zone_known_ts=ready)
+            plan.update(m5_zone=copy.deepcopy(zone), zone_known_ts=ready)
+            if not plan.get('primary_policy'):plan['armed_ts']=observed_ts
             emit(cid, rec, 'M5_ARMADO', break_ts=plan['break']['close_ts'],
                  direction='LONG' if up else 'SHORT', zone=zone,
                  parent_zone=parent, invalidation=plan['invalidation'])
@@ -468,9 +504,9 @@ def state_view(state):
         rec = item[1]
         plan = rec.get('plan') or {}
         active = not (rec.get('origin_invalidated') or plan.get('invalidated'))
-        if plan and (not entry_direction_allowed(rec['capture'], 'LONG' if plan['break']['side']=='UP' else 'SHORT') or (plan.get('m5_zone') and not _entry_fvg(plan['m5_zone']))):
+        if plan and (not entry_direction_allowed(rec['capture'], 'LONG' if plan['break']['side']=='UP' else 'SHORT') or (not plan.get('primary_policy') and plan.get('m5_zone') and not _entry_fvg(plan['m5_zone']))):
             active = False
-        rank = (4 if active and plan.get('m5_zone') and not plan.get('touched') else
+        rank = (4 if active and (plan.get('m15_zone') or plan.get('m5_zone')) and not plan.get('touched') else
                 3 if active and plan and not plan.get('touched') else
                 2 if active and plan else 1 if active else 0)
         return rank, plan.get('break_ts', 0), rec['capture']['native_capture_confirm_ts']
@@ -485,21 +521,21 @@ def state_view(state):
                         else 'AGUARDANDO_REACAO_CONFIRMADA')
         return base
     base['m15_break'] = copy.deepcopy(plan['break'])
-    if plan.get('invalidated') or not entry_direction_allowed(rec['capture'], 'LONG' if plan['break']['side']=='UP' else 'SHORT') or (plan.get('m5_zone') and not _entry_fvg(plan['m5_zone'])):
+    if plan.get('invalidated') or not entry_direction_allowed(rec['capture'], 'LONG' if plan['break']['side']=='UP' else 'SHORT') or (not plan.get('primary_policy') and plan.get('m5_zone') and not _entry_fvg(plan['m5_zone'])):
         base['code'] = 'SETUP_ANTERIOR_INVALIDADO'
         return base
     base['direction'] = 'LONG' if plan['break']['side'] == 'UP' else 'SHORT'
-    zone = plan.get('m5_zone')
+    zone = plan.get('m15_zone') or plan.get('m5_zone')
     if not zone:
-        base['code'] = 'AGUARDANDO_POI_CAUSAL_OU_REFINAMENTO_M5'
+        base['code'] = 'AGUARDANDO_FVG_M15_CONFIRMADO' if plan.get('primary_policy') else 'AGUARDANDO_POI_CAUSAL_OU_REFINAMENTO_M5'
         return base
-    base['code'] = 'RETESTE_M5_OBSERVADO' if plan.get('touched') else 'AGUARDANDO_RETESTE_M5'
+    base['code'] = ('RETESTE_M15_OBSERVADO' if plan.get('touched') else 'AGUARDANDO_RETESTE_M15') if plan.get('primary_policy') else ('RETESTE_M5_OBSERVADO' if plan.get('touched') else 'AGUARDANDO_RETESTE_M5')
     if plan.get('touched') and (not plan.get('retest')
             or plan['retest']['t']+M5 < state['asof_ts']):
         base.update(code='RETESTE_HISTORICO_SEM_NOVA_ENTRADA', direction=None)
         return base
     base['setup'] = dict(key=f'LUDO:{cid}:{plan["break"]["close_ts"]}',
-        tf='M5', direction=base['direction'], ready_ts=plan['armed_ts'],
+        tf='M15' if plan.get('primary_policy') else 'M5', direction=base['direction'], ready_ts=plan['armed_ts'],
         bottom=zone['bottom'], top=zone['top'], zone_type=zone['tipo'],
         level=zone['top'] if base['direction'] == 'LONG' else zone['bottom'],
         poi=copy.deepcopy(zone), retest=copy.deepcopy(plan.get('retest')))
@@ -512,11 +548,13 @@ def message(event):
 
 
 def _entry_notice_allowed(event):
-    if event.get('stage') not in ('M15_QUEBRA', 'M5_ARMADO', 'RETESTE_OBSERVADO', 'M5_ANTECIPADO'):
+    if event.get('stage') not in ('M15_QUEBRA', 'M15_ARMADO', 'M5_ARMADO', 'RETESTE_OBSERVADO', 'M5_ANTECIPADO'):
         return True
+    if event.get('stage')!='M5_ANTECIPADO' and bool(event.get('primary_policy'))!=primary.enabled():
+        return False
     if not entry_direction_allowed(event.get('capture') or {}, event.get('direction')):
         return False
-    return event.get('stage') not in ('M5_ARMADO','RETESTE_OBSERVADO') or _entry_fvg(event.get('zone'))
+    return event.get('stage') not in ('M15_ARMADO','M5_ARMADO','RETESTE_OBSERVADO') or _entry_fvg(event.get('zone'))
 
 
 def deliver(pair, sender, path=DEFAULT_PATH):

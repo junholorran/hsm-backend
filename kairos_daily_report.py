@@ -167,6 +167,7 @@ def notification_parts(report, max_chars=3500, *, detailed=False):
             'AGUARDANDO_ZONA_OU_CAPTURA':'aguardando zona relevante ou captura',
             'AGUARDANDO_CONFIRMACAO_M15':'aguardando confirmação M15 Ludo',
             'AGUARDANDO_POI_CAUSAL_OU_REFINAMENTO_M5':'M15 confirmado; aguardar POI causal / refinamento M5',
+            'AGUARDANDO_FVG_M15_CONFIRMADO':'quebra forte M15; aguardando confirmação do FVG M15','AGUARDANDO_RETESTE_M15':'plano M15 pronto; aguardar retorno ao FVG; M5 opcional','RETESTE_M15_OBSERVADO':'retorno ao FVG M15 observado em candle M5 fechado',
             'AGUARDANDO_RETESTE_M5':'aguardando reteste M5',
             'RETESTE_M5_OBSERVADO':'reteste M5 observado; execução manual não presumida'}
     stage=stages.get((report.get('stage') or {}).get('code'),'estado operacional indisponível')
@@ -180,6 +181,7 @@ def notification_parts(report, max_chars=3500, *, detailed=False):
 def _detailed_parts(report, max_chars=3500):
     """Plain-text audit pages, including every supplied map level."""
     from kairos_alert_presentation import price
+    from kairos_m15_primary import enabled as primary_enabled
     if report['status'] != 'READY_CANDIDATE':
         return []
     if max_chars < 1000 or max_chars > 3500:
@@ -192,7 +194,7 @@ def _detailed_parts(report, max_chars=3500):
              f"Dia fechado: H {price(d['closed_day']['h'])} | L {price(d['closed_day']['l'])} | C {price(d['closed_day']['c'])}",
              f"Dia anterior: H {price(d['previous_day']['h'])} | L {price(d['previous_day']['l'])}",
              'Leitura diária experimental; contexto, sem entrada autorizada.',
-             'Observar reação no POI; confirmação M15 e refinamento M5.',
+             ('Observar captura/reação; quebra forte e FVG M15; refinamento M5 opcional.' if primary_enabled() else 'Observar reação no POI; confirmação M15 e refinamento M5.'),
              f"Níveis H4/H1: {report['coverage_counts']}. Períodos ausentes: {', '.join(report['missing_period_types']) or 'nenhum'}.",
              'LIQUIDEZ MAPEADA H4/H1 + PERÍODOS | cobertura limitada ao histórico disponível:']
     context = report.get('structure_context') or {}
@@ -200,10 +202,11 @@ def _detailed_parts(report, max_chars=3500):
         lines.insert(1, 'Contexto estrutural D1/H4/H1: ' + ' | '.join(f'{tf} {context.get(tf, "neutro")}' for tf in ('D1','H4','H1')))
     lines.insert(1, 'Mapa observado em ' + datetime.fromtimestamp(report['asof_ts']/1000, ZoneInfo('Europe/Lisbon')).isoformat()+' (Portugal)')
     if report.get('entry_structure_model') == 'LUDO':
-        lines.insert(1, 'Estrutura ativa de entrada: SMC Ludo M15 → POI causal → refinamento M5 → reteste.')
+        lines.insert(1, 'Estrutura ativa de entrada: captura relevante → quebra forte Ludo M15 → FVG M15 → retorno; M5 opcional.' if primary_enabled() else 'Estrutura ativa de entrada: SMC Ludo M15 → POI causal → refinamento M5 → reteste.')
     if report.get('current_price'):
         px=report['current_price']
-        stage_labels={'SETUP_ANTERIOR_INVALIDADO':'setup anterior invalidado; aguardar uma nova cadeia','RETESTE_HISTORICO_SEM_NOVA_ENTRADA':'reteste histórico identificado; sem nova entrada autorizada','AGUARDANDO_ZONA_OU_CAPTURA':'aguardando zona relevante ou captura de liquidez','AGUARDANDO_CONFIRMACAO_M15':'aguardando confirmação M15 exigida pelo motor','AGUARDANDO_POI_CAUSAL_OU_REFINAMENTO_M5':'M15 confirmado; aguardando zona causal ou refinamento M5','AGUARDANDO_RETESTE_M5':'aguardando reteste da zona M5','RETESTE_M5_OBSERVADO':'reteste M5 observado pelo motor, DEMO/manual'}
+        stage_labels={'SETUP_ANTERIOR_INVALIDADO':'setup anterior invalidado; aguardar uma nova cadeia','RETESTE_HISTORICO_SEM_NOVA_ENTRADA':'reteste histórico identificado; sem nova entrada autorizada','AGUARDANDO_ZONA_OU_CAPTURA':'aguardando zona relevante ou captura de liquidez','AGUARDANDO_CONFIRMACAO_M15':'aguardando confirmação M15 exigida pelo motor','AGUARDANDO_POI_CAUSAL_OU_REFINAMENTO_M5':'M15 confirmado; aguardando zona causal ou refinamento M5','AGUARDANDO_FVG_M15_CONFIRMADO':'quebra forte M15; aguardando confirmação do FVG M15','AGUARDANDO_RETESTE_M15':'plano M15 pronto; aguardar retorno ao FVG; M5 opcional','RETESTE_M15_OBSERVADO':'retorno ao FVG M15 observado em candle M5 fechado',
+            'AGUARDANDO_RETESTE_M5':'aguardando reteste da zona M5','RETESTE_M5_OBSERVADO':'reteste M5 observado pelo motor, DEMO/manual'}
         details=[f"Referência: último M5 fechado @ {price(px['value'])} (não é cotação ao vivo).",
                  f"AGORA: {stage_labels[report['stage']['code']]}"]
         if report.get('daily_review_required'):

@@ -23,10 +23,11 @@ def context_snapshot(previous,state,radars,cutoff):
     result=copy.deepcopy(previous or {})
     result['asof_ts']=cutoff
     liquidity=result.setdefault('liquidity',{})
+    for tf in ('M15','M5'):liquidity.pop(tf,None)
     candidates=[copy.deepcopy(r) for r in radars if _valid_radar(r,cutoff)]
     for rec in state.get('captures',{}).values():
         c=rec['capture'];rx=rec.get('reaction') or {}
-        if c.get('origin_kind')=='HTF_FVG_TOUCH' or rec.get('history_lost'):continue
+        if c.get('origin_kind')=='HTF_FVG_TOUCH' or c.get('liquidity_tf') in ('M15','M5') or rec.get('history_lost'):continue
         candidates.append(dict(timestamp=rx.get('confirmed_ts') or c.get('native_capture_confirm_ts'),
             capture_confirm_ts=c.get('native_capture_confirm_ts'),liquidity_tf=c.get('liquidity_tf'),
             liquidity_type=c.get('liquidity_type'),level=c.get('nivel'),

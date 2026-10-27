@@ -88,10 +88,9 @@ def test_native_sol_1245_acceptance_retest_is_blocked():
         state,events=chains.advance(state,'SOLUSD',[f['capture']],tf,cutoff,engine,observed_ts=cutoff+16000)
         notices.extend(events)
     assert not any(e.get('direction')=='LONG' and e['stage'] in ('M15_QUEBRA','M5_ARMADO','RETESTE_OBSERVADO') for e in notices)
-    rec=state['captures'][chains.capture_id('SOLUSD',f['capture'])]
-    assert rec['reaction']['state']=='REJECTION_RECLAIM'
-    assert rec['reaction']['direction']=='SHORT'
-    assert any(e['stage']=='M15_QUEBRA' and e['direction']=='SHORT' for e in notices)
+    assert f['capture']['liquidity_tf']=='M15'
+    assert chains.capture_id('SOLUSD',f['capture']) not in state['captures']
+    assert not notices  # This local origin is excluded in both directions.
 
 
 def test_acceptance_cannot_rearm_but_later_rejection_can():

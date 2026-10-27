@@ -34,7 +34,7 @@ class Engine:
 
     @staticmethod
     def _kairos_m5_refine_zone(*args, **kwargs):
-        return dict(id='child', tipo='FVG_bearish', direcao=args[4], top=105, bottom=104,
+        return dict(id='child', tipo='FVG_bearish', lux_fvg=True, direcao=args[4], top=105, bottom=104,
                     source_a={'t': M15}, source_mid={'t': M15+M5}, source_c={'t': M15+2*M5})
 
     @staticmethod
@@ -188,7 +188,7 @@ def test_removed_initial_zone_falls_back_to_later_m5_zone_at_its_own_birth():
     class Zones(Engine):
         @staticmethod
         def _kairos_m5_refine_zone(*args, **kw):
-            return dict(id='old', tipo='FVG_bearish', top=106, bottom=104,
+            return dict(id='old', tipo='FVG_bearish', lux_fvg=True, top=106, bottom=104,
                         direcao='baixa', created_ts=2*M15,
                         source_a={'t': M15}, source_mid={'t': M15+M5}, source_c={'t': M15+2*M5})
         @staticmethod
@@ -197,7 +197,7 @@ def test_removed_initial_zone_falls_back_to_later_m5_zone_at_its_own_birth():
                     dict(id='new', state='ATIVA')]
         @staticmethod
         def _kairos_select_entry_zone(*args):
-            return dict(id='new', tipo='FVG_bearish', top=106, bottom=104,
+            return dict(id='new', tipo='FVG_bearish', lux_fvg=True, top=106, bottom=104,
                         direcao='baixa', created_ts=4*M15,
                         source_a={'t': 4*M15-2*M5}, source_mid={'t': 4*M15-M5}, source_c={'t': 4*M15})
     m5event = event(4*M15)

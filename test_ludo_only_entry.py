@@ -40,9 +40,9 @@ def test_fvg_touch_origin_is_distinct_from_liquidity_capture():
                   first_capture_ts=M15, native_capture_confirm_ts=2*M15)
     state, _ = advance({}, [], M15)
     state, alerts = advance(state, [origin], 2*M15)
-    assert [a['stage'] for a in alerts] == ['POI_HTF_TOCADO']
+    assert alerts == []  # A POI touch is map context, not a liquidity origin.
     state, alerts = advance(state, [origin], 3*M15, [event()])
-    assert 'M5_ARMADO' in [a['stage'] for a in alerts]
+    assert not any(a['stage']=='M5_ARMADO' for a in alerts)
     assert all(a['capture'].get('liquidity_type') is None for a in alerts)
 
 
@@ -102,7 +102,7 @@ def test_dead_htf_origin_is_retired_before_any_entry_plan():
         state, _ = advance(state, [origin], 5*M15)
         state, alerts = advance(state, [origin], 9*M15, [event(8*M15)])
     assert not any(a['stage'] == 'M5_ARMADO' for a in alerts)
-    assert chains.state_view(state)['code'] == 'SETUP_ANTERIOR_INVALIDADO'
+    assert chains.state_view(state)['code'] == 'AGUARDANDO_ZONA_OU_CAPTURA'
 
 
 def test_old_retest_is_not_advertised_as_current_entry_stage():
@@ -153,11 +153,11 @@ def test_new_fvg_touch_in_first_interval_after_activation_survives_restart(tmp_p
     decision = dict(htf_entry_origins=[origin])
     with patch.object(chains,'structure_snapshot',return_value=dict(status='OK',events=[])):
         saved = chains.scan('SOLUSD', {'M15':bars(2*M15,M15),'M5':bars(2*M15,M5)},2*M15,decision,Engine,path)
-    assert saved['view']['code'] == 'AGUARDANDO_CONFIRMACAO_M15'
+    assert saved['view']['code'] == 'AGUARDANDO_ZONA_OU_CAPTURA'
     with patch.object(chains,'structure_snapshot',return_value=dict(status='OK',events=[event()])):
         saved = chains.scan('SOLUSD', {'M15':bars(3*M15,M15),'M5':bars(3*M15,M5)},3*M15,decision,Engine,path)
-    assert saved['view']['code'] == 'AGUARDANDO_RETESTE_M5'
-    assert saved['view']['capture']['origin_kind'] == 'HTF_FVG_TOUCH'
+    assert saved['view']['code'] == 'AGUARDANDO_ZONA_OU_CAPTURA'
+    assert saved['view']['setup'] is None
 
 
 def test_invalid_live_structure_configuration_fails_closed(monkeypatch):

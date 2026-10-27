@@ -47,12 +47,9 @@ def test_native_bnb_first_recent_capture_can_authorize_first_short_choch():
     assert cap['native_capture_confirm_ts']==1792901700000
     events=[a for a in alerts if a['capture_id']==chains.capture_id('BNBUSD',cap)]
     breaks=[a for a in events if a['stage']=='M15_QUEBRA']
-    assert [(a['break_ts'],a['level'],a['direction']) for a in breaks]==[(BREAK,743.63,'SHORT')]
-    armed=next(a for a in events if a['stage']=='M5_ARMADO')
-    assert (armed['parent_zone']['bottom'],armed['parent_zone']['top'])==(747.38,748.63)
-    assert (armed['zone']['bottom'],armed['zone']['top'])==(747.47,748.63)
-    assert armed['observed_ts']==BREAK and armed['fill_assumed'] is False
-    assert not any(a['stage']=='RETESTE_OBSERVADO' for a in events)
+    assert cap['liquidity_tf']=='M15'
+    assert breaks==[]  # Local M15 liquidity no longer originates a trade.
+    assert not any(a['stage']=='M5_ARMADO' for a in events)
 
 
 def test_level_is_known_before_first_cross_and_is_not_recaptured():
@@ -124,9 +121,8 @@ def test_live_scan_admits_fresh_ludo_capture_and_preserves_activation_on_restart
     decision=dict(ludo_liquidity_origins=find(prefix(BREAK),BREAK))
     chains.scan('BNBUSD',prefix(BREAK),BREAK,decision,engine,path)
     state=read_state(path);cap=target(decision['ludo_liquidity_origins'])
-    rec=state['captures'][chains.capture_id('BNBUSD',cap)]
-    assert rec['plan']['break']['close_ts']==BREAK
-    assert rec['plan']['m5_zone']['bottom']==747.47
+    assert cap['liquidity_tf']=='M15'
+    assert chains.capture_id('BNBUSD',cap) not in state['captures']
     assert state['ludo_liquidity_since']==START
     assert state['causal_policy_version']==2
     with sqlite3.connect(path) as db:

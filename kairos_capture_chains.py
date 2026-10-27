@@ -17,12 +17,12 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from kairos_ludo_structure import structure_snapshot
-from kairos_reaction_episode import reaction_timeline, evidence_at, touch_episode, entry_direction_allowed, entry_reaction_allowed
+from kairos_reaction_episode import reaction_timeline, evidence_at, touch_episode, entry_direction_allowed, entry_reaction_allowed, entry_origin_allowed
 
 M5 = 300000
 M15 = 900000
 CAUSAL_POLICY_VERSION = 2
-LIQUIDITY_ENTRY_POLICY = 'RECLAIM_ONLY_V1'
+LIQUIDITY_ENTRY_POLICY = 'RELEVANT_HTF_SWEEP_FVG_V1'
 PAIRS = ('BTCUSD', 'ETHUSD', 'SOLUSD', 'BNBUSD')
 DEFAULT_PATH = '/data/kairos_capture_chains.db'
 _LOCK = threading.RLock()
@@ -56,6 +56,10 @@ def _closed(rows, duration, cutoff):
                    for k in ('t', 'o', 'h', 'l', 'c')) for c in cs):
         return None
     return cs
+
+
+def _entry_fvg(zone):
+    return bool(zone and zone.get('tipo') in ('FVG_bullish','FVG_bearish') and zone.get('lux_fvg') is True)
 
 
 def _zone_ok(zone):
@@ -115,10 +119,16 @@ def _refinement(engine, m5, capture, event, parent, snapshots):
     zone = engine._kairos_m5_refine_zone(
         prefix, parent, capture['first_capture_ts'], event['close_ts'], direction,
         structure_level=event['level'], structure_origin_ts=event['origin_ts'])
-    if (_zone_ok(zone) and zone.get('direcao') == direction
-            and zone['top'] >= parent['bottom'] and zone['bottom'] <= parent['top']
-            and _causal_m5(zone, capture['first_capture_ts'], event['close_ts'])
-            and _removed_at(zone, m5, M5, engine) is None):
+    causal_start=max(capture['first_capture_ts'],event['opposite_origin_ts'])
+    def eligible(z,start=causal_start,ready=event['close_ts']):
+        return (_entry_fvg(z) and _zone_ok(z) and z.get('direcao')==direction
+                and z['top']>=parent['bottom'] and z['bottom']<=parent['top']
+                and _causal_m5(z,start,ready)
+                and _removed_at(z,m5,M5,engine) is None)
+    if not eligible(zone):
+        candidates=[z for z in engine._kairos_fvg_states(prefix) if eligible(z)]
+        zone=max(candidates,key=lambda z:z.get('created_ts') or 0) if candidates else None
+    if eligible(zone):
         return zone, event['close_ts']
     # Later M5 structure may produce a new causal refinement, never an old POI.
     for e in reversed(snapshots):
@@ -130,10 +140,12 @@ def _refinement(engine, m5, capture, event, parent, snapshots):
         z = engine._kairos_select_entry_zone(
             prefix, {**capture, 'sweep_ts': event['close_ts'], 'direcao': direction},
             _structure(e, prefix), {})
-        if (_zone_ok(z) and z.get('direcao') == direction
-                and z['top'] >= parent['bottom'] and z['bottom'] <= parent['top']
-                and _causal_m5(z, event['close_ts'], e['close_ts'])
-                and _removed_at(z, m5, M5, engine) is None):
+        start=max(event['close_ts'],e['opposite_origin_ts'])
+        if not eligible(z,start,e['close_ts']):
+            candidates=[candidate for candidate in engine._kairos_fvg_states(prefix)
+                        if eligible(candidate,start,e['close_ts'])]
+            z=max(candidates,key=lambda candidate:candidate.get('created_ts') or 0) if candidates else None
+        if eligible(z,start,e['close_ts']):
             return z, e['close_ts']
     return None, None
 
@@ -204,9 +216,9 @@ def advance(state, pair, captures, tf_map, cutoff, engine, observed_ts=None):
                        and capture.get('liquidity_side') in ('HIGH','LOW'))
         valid_origin = (bool(capture.get('origin_key') and capture.get('htf_location')) if poi_origin
                         else ludo_origin if capture.get('origin_kind') == 'LUDO_SWING_CAPTURE'
-                        else capture.get('liquidity_tf') in ('W1', 'D1', 'H4', 'H1')
+                        else capture.get('liquidity_tf') in ('MN', 'W1', 'D1', 'H4', 'H1')
                         and capture.get('liquidity_side') in ('HIGH', 'LOW'))
-        if not valid_origin or known is None or not state['start_ts'] < known <= cutoff:
+        if not valid_origin or not entry_origin_allowed(capture) or known is None or not state['start_ts'] < known <= cutoff:
             continue
         cid = capture_id(pair, capture)
         if cid not in state['captures']:
@@ -220,7 +232,7 @@ def advance(state, pair, captures, tf_map, cutoff, engine, observed_ts=None):
         old_plan = rec.get('plan')
         if old_plan and not old_plan.get('invalidated'):
             old_direction = 'LONG' if old_plan['break']['side'] == 'UP' else 'SHORT'
-            if not entry_direction_allowed(capture, old_direction):
+            if not entry_direction_allowed(capture, old_direction) or (old_plan.get('m5_zone') and not _entry_fvg(old_plan['m5_zone'])):
                 old_plan['invalidated'] = True
                 emit(cid, rec, 'PLANO_INVALIDADO', break_ts=old_plan['break']['close_ts'],
                      candle_ts=cutoff-M5, direction=old_direction, reason='ENTRY_POLICY_CHANGED',
@@ -385,6 +397,7 @@ def scan(pair, tf_map, cutoff, decision, engine, path=DEFAULT_PATH):
         row = db.execute('SELECT payload FROM chain_state WHERE pair=?', (pair,)).fetchone()
         state = json.loads(row[0]) if row else {}
         captures = list((decision.get('structural_sweep_audit') or {}).get('candidates') or [])
+        captures.extend(decision.get('period_entry_origins') or [])
         recent_since = state.get('ludo_liquidity_since',cutoff)
         if os.environ.get('KAIROS_ENTRY_STRUCTURE', '').strip().upper() == 'LUDO':
             if state and 'ludo_only_since' not in state:
@@ -455,7 +468,7 @@ def state_view(state):
         rec = item[1]
         plan = rec.get('plan') or {}
         active = not (rec.get('origin_invalidated') or plan.get('invalidated'))
-        if plan and not entry_direction_allowed(rec['capture'], 'LONG' if plan['break']['side']=='UP' else 'SHORT'):
+        if plan and (not entry_direction_allowed(rec['capture'], 'LONG' if plan['break']['side']=='UP' else 'SHORT') or (plan.get('m5_zone') and not _entry_fvg(plan['m5_zone']))):
             active = False
         rank = (4 if active and plan.get('m5_zone') and not plan.get('touched') else
                 3 if active and plan and not plan.get('touched') else
@@ -472,7 +485,7 @@ def state_view(state):
                         else 'AGUARDANDO_REACAO_CONFIRMADA')
         return base
     base['m15_break'] = copy.deepcopy(plan['break'])
-    if plan.get('invalidated') or not entry_direction_allowed(rec['capture'], 'LONG' if plan['break']['side']=='UP' else 'SHORT'):
+    if plan.get('invalidated') or not entry_direction_allowed(rec['capture'], 'LONG' if plan['break']['side']=='UP' else 'SHORT') or (plan.get('m5_zone') and not _entry_fvg(plan['m5_zone'])):
         base['code'] = 'SETUP_ANTERIOR_INVALIDADO'
         return base
     base['direction'] = 'LONG' if plan['break']['side'] == 'UP' else 'SHORT'
@@ -501,7 +514,9 @@ def message(event):
 def _entry_notice_allowed(event):
     if event.get('stage') not in ('M15_QUEBRA', 'M5_ARMADO', 'RETESTE_OBSERVADO', 'M5_ANTECIPADO'):
         return True
-    return entry_direction_allowed(event.get('capture') or {}, event.get('direction'))
+    if not entry_direction_allowed(event.get('capture') or {}, event.get('direction')):
+        return False
+    return event.get('stage') not in ('M5_ARMADO','RETESTE_OBSERVADO') or _entry_fvg(event.get('zone'))
 
 
 def deliver(pair, sender, path=DEFAULT_PATH):

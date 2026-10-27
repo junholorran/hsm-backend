@@ -94,7 +94,10 @@ def snapshot(pair, tf_map, cutoff, engine):
             htf_location=location, origin_zone=copy.deepcopy(zone),
             first_capture_ts=location['touch_ts'], sweep_ts=location['touch_ts'],
             native_capture_confirm_ts=location['touch_confirm_close_ts']))
-    decision['htf_entry_origins'] = origins
+    # Standalone touches remain map context; they cannot originate an entry.
+    decision['htf_entry_origins'] = []
+    from kairos_reaction_episode import period_capture_origins
+    decision['period_entry_origins'] = period_capture_origins(engine,tf_map,cutoff) if hasattr(engine,'_kairos_previous_period_liquidity') else []
     decision['ludo_liquidity_origins'] = recent_ludo_captures(tf_map,cutoff)
     try:
         radars = engine._kairos_capture_radar_events(decision, tf_map, cutoff)

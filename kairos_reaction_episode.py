@@ -60,21 +60,65 @@ def touch_episode(capture):
                 key=f'TOUCH:{capture["native_capture_confirm_ts"]}', evidence_tf='M5')
 
 
-def entry_direction_allowed(capture, direction):
-    """Liquidity entries reverse a captured side; acceptance is context only.
-
-    HTF FVG touch is an independently authorized origin, not a liquidity raid.
-    Its native direction and structural checks remain with its own caller.
-    """
+def entry_origin_allowed(capture):
+    """Only the relevant higher-timeframe liquidity requested by the user."""
     if capture.get('origin_kind') == 'HTF_FVG_TOUCH':
-        return direction in ('LONG', 'SHORT')
+        return False
+    tf=capture.get('liquidity_tf');kind=capture.get('liquidity_type')
+    if tf in ('H4','H1'):
+        return kind in ('SWING_HIGH','SWING_LOW','EQH','EQL','LUDO_SWING_HIGH','LUDO_SWING_LOW')
+    return kind in {'D1':('PDH','PDL'),'W1':('PWH','PWL'),'MN':('PMH','PML')}.get(tf,())
+
+
+def entry_direction_allowed(capture, direction):
+    if not entry_origin_allowed(capture):
+        return False
     expected = {'HIGH': 'SHORT', 'LOW': 'LONG'}.get(capture.get('liquidity_side'))
     return expected is not None and direction == expected
 
 
 def entry_reaction_allowed(capture, reaction, direction):
-    if not reaction or not entry_direction_allowed(capture, direction):
-        return False
-    if capture.get('origin_kind') == 'HTF_FVG_TOUCH':
-        return reaction.get('state') == 'HTF_FVG_TOUCH' and reaction.get('direction') == direction
-    return reaction.get('state') == 'REJECTION_RECLAIM' and reaction.get('direction') == direction
+    return bool(reaction and entry_direction_allowed(capture, direction)
+                and reaction.get('state') == 'REJECTION_RECLAIM'
+                and reaction.get('direction') == direction)
+
+
+def period_capture_origins(engine, tf_map, cutoff):
+    """Reuse native calendar first capture; daily-only consumption stays context.
+
+    No inferred intraday clock or fresh raid for an already consumed month.
+    """
+    result=[]
+    for level in engine._kairos_previous_period_liquidity(tf_map,cutoff):
+        opened=level.get('captured_ts');known=level.get('capture_confirm_ts')
+        if (level.get('captured_tf')!='M15' or opened is None or known is None
+                or known>cutoff or level.get('confirmed_ts',cutoff+1)>opened):
+            continue
+        bar=next((c for c in tf_map.get('M15',[]) if c['t']==opened and c['t']+M15<=cutoff),None)
+        if bar is None:continue
+        high=level['type'] in ('PDH','PWH','PMH')
+        crossed=lambda c:c['h']>level['level'] if high else c['l']<level['level']
+        if not crossed(bar) or known!=opened+M15:continue
+        # Prove that the missing older part of an intraday tail was untouched.
+        # Closed D1 candles may prove absence of a raid, never its intraday time.
+        intervals=[]; prior_cross=False
+        for tf,duration in (('M15',M15),('D1',86400000)):
+            for c in tf_map.get(tf,[]):
+                end=c['t']+duration
+                if c['t']<level['confirmed_ts'] or end>opened:continue
+                if crossed(c):
+                    prior_cross=True
+                else:intervals.append((c['t'],end))
+        if prior_cross:continue
+        covered=level['confirmed_ts']
+        for left,right in sorted(intervals):
+            if left>covered:break
+            covered=max(covered,right)
+        if covered<opened:continue
+        result.append(dict(liquidity_tf=level['tf'],liquidity_type=level['type'],
+            nivel=level['level'],liquidity_side='HIGH' if high else 'LOW',
+            liquidity_origin_ts=level['origin_ts'],liquidity_confirm_ts=level['confirmed_ts'],
+            first_capture_ts=opened,sweep_ts=opened,native_capture_confirm_ts=known,
+            capture_confirm_ts=known,capture_evidence_tf='M15',
+            extremo=bar['h'] if high else bar['l']))
+    return result

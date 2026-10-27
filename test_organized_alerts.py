@@ -25,11 +25,11 @@ def proof(cid='liquidity',stage='M5_ARMADO',direction='LONG'):
         observed_ts=1792875631115,causal_policy_version=2,direction=direction,
         break_ts=1792875600000,kind='CHoCH',level=732.3,invalidation=717.23,
         parent_zone=dict(tipo='FVG_bullish',bottom=721.5,top=723.04),
-        zone=dict(tipo='FVG_bullish',bottom=721.5,top=722.92),
+        zone=dict(tipo='FVG_bullish',lux_fvg=True,bottom=721.5,top=722.92),
         reaction=dict(state='REJECTION_RECLAIM',direction='LONG',confirmed_ts=1792865700000),
         plan_details=dict(m15_break=dict(kind='CHoCH',level=732.3,close_ts=1792875600000),
           parent_zone=dict(tipo='FVG_bullish',bottom=721.5,top=723.04),
-          m5_zone=dict(tipo='FVG_bullish',bottom=721.5,top=722.92),
+          m5_zone=dict(tipo='FVG_bullish',lux_fvg=True,bottom=721.5,top=722.92),
           invalidation=717.23,had_retest=False))
 
 
@@ -147,8 +147,14 @@ def test_existing_invalidation_emits_exact_facts_without_changing_transition():
 
 def put(path,rows):
     with chains._db(path) as db:
-        for e in rows:db.execute('INSERT INTO chain_outbox(key,pair,payload) VALUES(?,?,?)',
-                                (e['key'],'BNBUSD',json.dumps(e)))
+        for e in copy.deepcopy(rows):
+            # Delivery fixtures use eligible HTF liquidity, while formatter-only
+            # tests above still exercise standalone POI context presentation.
+            if e.get('stage') in ('M15_QUEBRA','M5_ARMADO','RETESTE_OBSERVADO') and e['capture'].get('origin_kind')=='HTF_FVG_TOUCH':
+                e['capture'].pop('origin_kind')
+                e['capture'].update(liquidity_tf='H1',liquidity_type='EQL',liquidity_side='LOW',nivel=724.32)
+            db.execute('INSERT INTO chain_outbox(key,pair,payload) VALUES(?,?,?)',
+                       (e['key'],'BNBUSD',json.dumps(e)))
 
 
 def test_bundle_delivery_retries_pages_without_consuming_events_early(tmp_path,monkeypatch):

@@ -177,3 +177,14 @@ def test_optional_refinement_error_cannot_block_primary_arm(monkeypatch):
         state,events=run_native(state,23*M15)
     assert any(e['stage']=='M15_ARMADO' for e in events)
     assert chains.state_view(state)['setup']['tf']=='M15'
+
+def test_same_cutoff_legacy_view_cannot_advertise_old_actionable_plan(monkeypatch):
+    monkeypatch.setenv('KAIROS_M15_PRIMARY_FVG','true')
+    rows,c,e,z=inputs()
+    plan={'break':e,'break_ts':e['close_ts'],'parent_zone':z,'m5_zone':z,
+          'armed_ts':23*M15,'invalidation':99.4,'invalidated':False}
+    state=dict(causal_policy_version=chains.CAUSAL_POLICY_VERSION,asof_ts=23*M15,
+               captures={'old':dict(capture=c,plan=plan)})
+    view=chains.state_view(state)
+    assert view['setup'] is None
+    assert view['code']=='SETUP_ANTERIOR_INVALIDADO'

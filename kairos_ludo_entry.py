@@ -121,6 +121,7 @@ def snapshot(pair, tf_map, cutoff, engine):
         radar['entry_structure_model'] = 'LUDO'
     print(f'[KAIROS_ENTRY_MODEL] pair={pair} model=LUDO legacy_authorization=false '
           f'causal_policy_version={chains.CAUSAL_POLICY_VERSION} '
+          f'm15_primary={str(chains.primary.enabled()).lower()} '
           f'cutoff={cutoff} stage={saved["view"]["code"]}', flush=True)
     report = dict(pair=pair, scan_mode='LATEST_CLOSED_SNAPSHOT', evaluations=1,
         entry_structure_model='LUDO', daily_brief=daily, cutoff_ts=cutoff,

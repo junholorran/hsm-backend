@@ -504,6 +504,7 @@ def state_view(state):
         rec = item[1]
         plan = rec.get('plan') or {}
         active = not (rec.get('origin_invalidated') or plan.get('invalidated'))
+        if plan and bool(plan.get('primary_policy')) != primary.enabled():active=False
         if plan and (not entry_direction_allowed(rec['capture'], 'LONG' if plan['break']['side']=='UP' else 'SHORT') or (not plan.get('primary_policy') and plan.get('m5_zone') and not _entry_fvg(plan['m5_zone']))):
             active = False
         rank = (4 if active and (plan.get('m15_zone') or plan.get('m5_zone')) and not plan.get('touched') else
@@ -519,6 +520,9 @@ def state_view(state):
     if not plan:
         base['code'] = ('AGUARDANDO_CONFIRMACAO_M15' if rec.get('reaction')
                         else 'AGUARDANDO_REACAO_CONFIRMADA')
+        return base
+    if bool(plan.get('primary_policy')) != primary.enabled():
+        base['code']='SETUP_ANTERIOR_INVALIDADO'
         return base
     base['m15_break'] = copy.deepcopy(plan['break'])
     if plan.get('invalidated') or not entry_direction_allowed(rec['capture'], 'LONG' if plan['break']['side']=='UP' else 'SHORT') or (not plan.get('primary_policy') and plan.get('m5_zone') and not _entry_fvg(plan['m5_zone'])):

@@ -19,3 +19,5 @@ BNB24Oct00:00–25Oct01:00 Portugal:302 cycles (25h archive window).5 captures,4
 ## Rollout and rollback
 
 Production code rollback target:e9de3df3723b101c2509e917e4fc0833a6cd9e16 / Railway7d8e2781-97f0-4c8a-80ee-edcc8d647a37. Set KAIROS_M15_PRIMARY_FVG=false for reversible legacy behavior; incompatible tracked primary plans are retired once. Set true activates a prospective baseline, retires old legacy plans with manual cancellation notice, suppresses queued old actionable notices and leaves audit/acknowledgements intact. No exchange order is cancelled automatically.
+
+Rollout verification: initial deployment312ae96d-7182-45e2-ad25-718eff5a1c77 SUCCESS, healthcheck passed, all4scanner pairs active. Found and fixed stale same-cutoff legacy summary before its next state transition: view now suppresses policy-mismatched plans immediately; existing delivery suppression already prevented stale actionable messages. Added runtime m15_primary telemetry. Regression failed first; final built suite408 +53,13 primary tests.

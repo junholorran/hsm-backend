@@ -461,7 +461,7 @@ def state_view(state):
         base['code'] = 'AGUARDANDO_REINICIALIZACAO_CAUSAL'
         return base
     records = [(cid, rec) for cid, rec in (state.get('captures') or {}).items()
-               if not rec.get('history_lost')]
+               if not rec.get('history_lost') and entry_origin_allowed(rec['capture'])]
     if not records:
         return base
     def relevance(item):

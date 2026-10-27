@@ -137,3 +137,10 @@ def test_later_refinement_looks_past_invalid_latest_fvg():
     later=event(4*M15);later['close_ts']=4*M15+M5
     z,ready=chains._refinement(Later,bars(5*M15,M5),capture(),event(),dict(top=108,bottom=103),[later])
     assert z and z['id']=='valid' and ready==4*M15+M5
+
+
+def test_old_local_context_cannot_hide_waiting_relevant_origin():
+    state=initial()
+    local={**capture(),'liquidity_tf':'M15','liquidity_type':'LUDO_SWING_HIGH','native_capture_confirm_ts':3*M15}
+    state['captures']['old-local']=dict(capture=local,plan=None)
+    assert chains.state_view(state)['capture']['liquidity_tf']=='H4'

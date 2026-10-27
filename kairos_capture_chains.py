@@ -17,11 +17,12 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from kairos_ludo_structure import structure_snapshot
-from kairos_reaction_episode import reaction_timeline, evidence_at, touch_episode
+from kairos_reaction_episode import reaction_timeline, evidence_at, touch_episode, entry_direction_allowed, entry_reaction_allowed
 
 M5 = 300000
 M15 = 900000
 CAUSAL_POLICY_VERSION = 2
+LIQUIDITY_ENTRY_POLICY = 'RECLAIM_ONLY_V1'
 PAIRS = ('BTCUSD', 'ETHUSD', 'SOLUSD', 'BNBUSD')
 DEFAULT_PATH = '/data/kairos_capture_chains.db'
 _LOCK = threading.RLock()
@@ -216,6 +217,14 @@ def advance(state, pair, captures, tf_map, cutoff, engine, observed_ts=None):
     m5events = snapshots['M5']['events']
     for cid, rec in state['captures'].items():
         capture = rec['capture']
+        old_plan = rec.get('plan')
+        if old_plan and not old_plan.get('invalidated'):
+            old_direction = 'LONG' if old_plan['break']['side'] == 'UP' else 'SHORT'
+            if not entry_direction_allowed(capture, old_direction):
+                old_plan['invalidated'] = True
+                emit(cid, rec, 'PLANO_INVALIDADO', break_ts=old_plan['break']['close_ts'],
+                     candle_ts=cutoff-M5, direction=old_direction, reason='ENTRY_POLICY_CHANGED',
+                     invalidation_reasons=[dict(code='ENTRY_POLICY_CHANGED', confirmed_ts=cutoff)])
         if rec.get('history_lost') or rec.get('origin_invalidated'):
             continue
         origin_zone = capture.get('origin_zone')
@@ -307,7 +316,7 @@ def advance(state, pair, captures, tf_map, cutoff, engine, observed_ts=None):
                 reaction = rec.get('reaction')
                 if not episode or episode.get('consumed') or not reaction:
                     continue
-                if reaction['confirmed_ts'] > closed or reaction['direction'] != direction:
+                if reaction['confirmed_ts'] > closed or not entry_reaction_allowed(capture, reaction, direction):
                     continue
                 candle = next(row for row in m15 if row['t'] == event['open_ts'])
                 if capture.get('origin_kind') != 'HTF_FVG_TOUCH':
@@ -398,6 +407,9 @@ def scan(pair, tf_map, cutoff, decision, engine, path=DEFAULT_PATH):
             # older chain baseline; restarts must not resurrect old captures.
             updated.setdefault('ludo_liquidity_since', recent_since)
         if updated:
+            if state.get('liquidity_entry_policy') != LIQUIDITY_ENTRY_POLICY:
+                print(f'[KAIROS_CAPTURE_CHAIN] entry_policy pair={pair} policy={LIQUIDITY_ENTRY_POLICY} acceptance_context_only=true',flush=True)
+            updated['liquidity_entry_policy'] = LIQUIDITY_ENTRY_POLICY
             db.execute('INSERT OR REPLACE INTO chain_state VALUES (?,?)', (pair, json.dumps(updated)))
         if updated and updated.get('asof_ts')==cutoff:
             from kairos_notice_context import context_snapshot,radar_notice,_valid_radar
@@ -443,6 +455,8 @@ def state_view(state):
         rec = item[1]
         plan = rec.get('plan') or {}
         active = not (rec.get('origin_invalidated') or plan.get('invalidated'))
+        if plan and not entry_direction_allowed(rec['capture'], 'LONG' if plan['break']['side']=='UP' else 'SHORT'):
+            active = False
         rank = (4 if active and plan.get('m5_zone') and not plan.get('touched') else
                 3 if active and plan and not plan.get('touched') else
                 2 if active and plan else 1 if active else 0)
@@ -458,7 +472,7 @@ def state_view(state):
                         else 'AGUARDANDO_REACAO_CONFIRMADA')
         return base
     base['m15_break'] = copy.deepcopy(plan['break'])
-    if plan.get('invalidated'):
+    if plan.get('invalidated') or not entry_direction_allowed(rec['capture'], 'LONG' if plan['break']['side']=='UP' else 'SHORT'):
         base['code'] = 'SETUP_ANTERIOR_INVALIDADO'
         return base
     base['direction'] = 'LONG' if plan['break']['side'] == 'UP' else 'SHORT'
@@ -484,6 +498,12 @@ def message(event):
     return '\n\n'.join(format_chain_events([event]))
 
 
+def _entry_notice_allowed(event):
+    if event.get('stage') not in ('M15_QUEBRA', 'M5_ARMADO', 'RETESTE_OBSERVADO', 'M5_ANTECIPADO'):
+        return True
+    return entry_direction_allowed(event.get('capture') or {}, event.get('direction'))
+
+
 def deliver(pair, sender, path=DEFAULT_PATH):
     if not enabled() or pair not in PAIRS:
         return False
@@ -495,12 +515,21 @@ def deliver(pair, sender, path=DEFAULT_PATH):
         db.execute('CREATE TABLE IF NOT EXISTS chain_delivery_batches '
                    '(key TEXT PRIMARY KEY,pair TEXT,pages TEXT,seqs TEXT,acknowledged INTEGER DEFAULT 0,complete INTEGER DEFAULT 0,observed_ts INTEGER,policy_version INTEGER)')
         db.execute('BEGIN IMMEDIATE')
+        # A frozen page can mix origins. Stop its remaining pages if any source
+        # is forbidden; keep receipts and audit, never replay delivered pages.
+        for key, source in db.execute('SELECT key,seqs FROM chain_delivery_batches WHERE pair=? AND complete=0', (pair,)).fetchall():
+            seqs=json.loads(source)
+            sources=[db.execute('SELECT payload FROM chain_outbox WHERE seq=?',(seq,)).fetchone() for seq in seqs]
+            if any(row and not _entry_notice_allowed(json.loads(row[0])) for row in sources):
+                db.executemany('UPDATE chain_outbox SET ack=2 WHERE seq=? AND ack=0',[(seq,) for seq in seqs])
+                db.execute('UPDATE chain_delivery_batches SET complete=1 WHERE key=?',(key,))
+                print(f'[KAIROS_CAPTURE_CHAIN] suppressed_entry_policy pair={pair} batch={key[:8]}',flush=True)
         existing=db.execute('SELECT seqs FROM chain_delivery_batches WHERE pair=? AND complete=0',(pair,)).fetchall()
         assigned={seq for row in existing for seq in json.loads(row[0])}
         pending=[]
         for seq,payload in db.execute('SELECT seq,payload FROM chain_outbox WHERE pair=? AND ack=0 ORDER BY seq',(pair,)).fetchall():
             event=json.loads(payload)
-            if event.get('causal_policy_version') != CAUSAL_POLICY_VERSION:
+            if event.get('causal_policy_version') != CAUSAL_POLICY_VERSION or not _entry_notice_allowed(event):
                 db.execute('UPDATE chain_outbox SET ack=2 WHERE seq=?',(seq,))
                 print(f'[KAIROS_CAPTURE_CHAIN] suppressed_unqualified pair={pair} seq={seq}',flush=True)
             elif seq not in assigned:

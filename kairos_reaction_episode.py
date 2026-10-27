@@ -58,3 +58,23 @@ def touch_episode(capture):
                 confirmed_ts=capture['native_capture_confirm_ts'],
                 leg_start_ts=capture['first_capture_ts'],
                 key=f'TOUCH:{capture["native_capture_confirm_ts"]}', evidence_tf='M5')
+
+
+def entry_direction_allowed(capture, direction):
+    """Liquidity entries reverse a captured side; acceptance is context only.
+
+    HTF FVG touch is an independently authorized origin, not a liquidity raid.
+    Its native direction and structural checks remain with its own caller.
+    """
+    if capture.get('origin_kind') == 'HTF_FVG_TOUCH':
+        return direction in ('LONG', 'SHORT')
+    expected = {'HIGH': 'SHORT', 'LOW': 'LONG'}.get(capture.get('liquidity_side'))
+    return expected is not None and direction == expected
+
+
+def entry_reaction_allowed(capture, reaction, direction):
+    if not reaction or not entry_direction_allowed(capture, direction):
+        return False
+    if capture.get('origin_kind') == 'HTF_FVG_TOUCH':
+        return reaction.get('state') == 'HTF_FVG_TOUCH' and reaction.get('direction') == direction
+    return reaction.get('state') == 'REJECTION_RECLAIM' and reaction.get('direction') == direction

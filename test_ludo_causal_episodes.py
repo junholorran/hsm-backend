@@ -65,10 +65,11 @@ def test_new_confirmed_reaction_is_a_new_episode_not_a_new_capture():
     for c in rows[3:]:c.update(o=109,h=111,l=108,c=110)
     up=event(4*M15,'UP');up['opposite_level']=90
     state,alerts=run(state,5*M15,m15=rows,events=[event(),up])
-    proof=next(e for e in alerts if e['stage']=='M15_QUEBRA')
-    assert proof['direction']=='LONG'
-    assert proof['reaction']['confirmed_ts']==5*M15
-    assert proof['capture']['native_capture_confirm_ts']==2*M15
+    assert not any(e['stage']=='M15_QUEBRA' for e in alerts)
+    rec=next(iter(state['captures'].values()))
+    assert rec['reaction']['state']=='ACCEPTANCE_CONTINUATION'
+    assert rec['reaction']['confirmed_ts']==5*M15
+    assert rec['capture']['native_capture_confirm_ts']==2*M15
     assert not any(e['stage']=='CAPTURA' for e in alerts)
 
 
@@ -198,8 +199,7 @@ def test_native_btc_consumed_acceptance_cannot_rearm_18h_or_flip_long_at_04h():
         state,new=chains.advance(state,'BTCUSD',[f['capture']],tf,cutoff,engine,observed_ts=cutoff+1)
         alerts.extend(new)
     breaks=[a for a in alerts if a['stage']=='M15_QUEBRA']
-    assert [(a['break_ts'],a['direction'],a['level']) for a in breaks]==[(f['cutoffs'][1],'SHORT',81605.1)]
-    assert breaks[0]['reaction']['state']=='ACCEPTANCE_CONTINUATION'
+    assert breaks==[]  # LOW acceptance is context, never a SHORT entry.
     assert not any(a['stage']=='M5_ARMADO' and a['break_ts'] in f['cutoffs'][2:] for a in alerts)
 
 

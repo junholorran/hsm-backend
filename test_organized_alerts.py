@@ -15,7 +15,7 @@ def ui():
 
 
 def proof(cid='liquidity',stage='M5_ARMADO',direction='LONG'):
-    cap=dict(liquidity_tf='H4',liquidity_type='EQL',nivel=724.32,
+    cap=dict(liquidity_tf='H4',liquidity_type='EQL',liquidity_side='LOW',nivel=724.32,
              native_capture_confirm_ts=1792854900000)
     if cid!='liquidity':
         tf='H1' if cid=='h1' else 'H4'

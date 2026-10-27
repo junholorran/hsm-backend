@@ -4,7 +4,7 @@ import hashlib
 import json
 
 from kairos_ludo_structure import structure_snapshot
-from kairos_reaction_episode import reaction_timeline, evidence_at, touch_episode
+from kairos_reaction_episode import reaction_timeline, evidence_at, touch_episode, entry_direction_allowed, entry_reaction_allowed
 
 M5=300000
 M15=900000
@@ -44,6 +44,11 @@ def observe(state,pair,tf_map,cutoff,observed_ts):
 
     for cid,rec in original.get('captures',{}).items():
         capture=rec['capture']; record=tracking['records'].get(cid)
+        if record and not record.get('ended'):
+            direction='LONG' if record['break']['side']=='UP' else 'SHORT'
+            if not entry_direction_allowed(capture,direction):
+                record['ended']='ENTRY_POLICY_CHANGED'
+                emit(cid,rec,record,'M5_ANTECIPADO_INVALIDADO',cutoff,'ENTRY_POLICY_CHANGED')
         if rec.get('history_lost') or rec.get('origin_invalidated') or m5[0]['t']>min(previous,capture['first_capture_ts']):
             if record and not record.get('ended'):
                 reason='HTF_ORIGIN_INVALIDATED' if rec.get('origin_invalidated') else 'HISTORY_LOST'
@@ -79,7 +84,7 @@ def observe(state,pair,tf_map,cutoff,observed_ts):
             if (closed<=tracking['since'] or event['open_ts']<capture['native_capture_confirm_ts']
                     or reaction['confirmed_ts']>closed):continue
             direction='LONG' if event['side']=='UP' else 'SHORT'
-            if reaction['direction']!=direction:continue
+            if not entry_reaction_allowed(capture,reaction,direction):continue
             # Outside bars can break both structural sides. Without intrabar
             # ordering, do not announce a fresh valid early hypothesis.
             if (candle['l']<event['opposite_level'] if direction=='LONG'

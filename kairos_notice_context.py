@@ -81,7 +81,10 @@ def _liquidity_lines(r):
     low='LOW' in typ or typ in ('PDL','PWL','PML','EQL')
     if (high or low) and r.get('reaction') in ('REJECTION_RECLAIM','ACCEPTANCE_CONTINUATION'):
         up=low if r['reaction']=='REJECTION_RECLAIM' else high
-        lines.append('Hipótese da reação: '+('LONG' if up else 'SHORT')+'; aguardar autorização estrutural.')
+        if r['reaction']=='ACCEPTANCE_CONTINUATION':
+            lines.append('Contexto de continuação: '+('LONG' if up else 'SHORT')+'; não autoriza plano de entrada por esta captura.')
+        else:
+            lines.append('Hipótese da reação: '+('LONG' if up else 'SHORT')+'; aguardar autorização estrutural.')
     context=r.get('context') or {};arrow={'alta':'↑','baixa':'↓','neutro':'→'}
     if context:lines.append('Contexto na confirmação: '+' | '.join(f"{tf} {arrow.get(context[tf],'→')}" for tf in ('MN','W1','D1','H4','H1') if tf in context))
     if r.get('capture_evidence_tf')=='D1':lines.append('Evidência diária; instante intradiário da captura não determinado.')

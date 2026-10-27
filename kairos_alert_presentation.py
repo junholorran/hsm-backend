@@ -81,6 +81,7 @@ def _reason_lines(e):
                   'STRUCTURAL_EXTREME_BREACHED':f"Extremo estrutural ultrapassado: {price(r.get('level'))}",
                   'PARENT_POI_INVALIDATED':'POI causal M15 invalidado pelo detector',
                   'M5_POI_INVALIDATED':'POI M5 invalidado pelo detector',
+                  'ENTRY_POLICY_CHANGED':'Modelo corrigido: aceitação/continuação não autoriza este plano de entrada',
                   'HTF_ORIGIN_INVALIDATED':'FVG HTF de origem invalidado',
                   'OPPOSITE_M5_BREAK':'Quebra contrária M5 confirmada por fechamento',
                   'HISTORY_LOST':'Histórico insuficiente para continuar a sequência'}.get(code,

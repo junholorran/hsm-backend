@@ -47,25 +47,26 @@ def build_structure_watch_events(maps,m15_candles,m5_candles,cutoff):
                      and inside(c) and (prev["t"]<ready or not inside(prev))]
             if not touches:
                 continue
-            touch=touches[-1]
-            confirm=touch["t"]+M5
-            event=next((e for e in events if e["side"]==("UP" if bull else "DOWN")
-                        and e["close_ts"]>confirm),None)
-            if event is None:
-                continue
-            key=(event["close_ts"],event["side"])
-            origin=dict(tf=tf,zone_id=z["id"],tipo=z["tipo"],bottom=bottom,top=top,
-                        touch_open_ts=touch["t"],touch_close_ts=confirm)
-            if key not in groups:
-                groups[key]=dict(notice_kind="HTF_FVG_M15_STRUCTURE",direction="LONG" if bull else "SHORT",
-                    confirmation_close_ts=event["close_ts"],m15_break=dict(event),
-                    entry_authorized=False,fill_assumed=False,origins=[])
-            groups[key]["origins"].append(origin)
+            for index,touch in enumerate(touches):
+                confirm=touch["t"]+M5
+                next_open=touches[index+1]["t"] if index+1<len(touches) else cutoff+1
+                event=next((e for e in events if e["side"]==("UP" if bull else "DOWN")
+                            and confirm<=e["close_ts"]<=next_open),None)
+                if event is None:
+                    continue
+                key=(event["close_ts"],event["side"])
+                origin=dict(tf=tf,zone_id=z["id"],tipo=z["tipo"],bottom=bottom,top=top,
+                            touch_open_ts=touch["t"],touch_close_ts=confirm)
+                if key not in groups:
+                    groups[key]=dict(notice_kind="HTF_FVG_M15_STRUCTURE",direction="LONG" if bull else "SHORT",
+                        confirmation_close_ts=event["close_ts"],m15_break=dict(event),
+                        entry_authorized=False,fill_assumed=False,origins=[])
+                groups[key]["origins"].append(origin)
     out=[]
     for key,notice in sorted(groups.items()):
         origins=sorted(notice["origins"],key=lambda z:(0 if z["tf"]=="H4" else 1,z["zone_id"]))
         notice["origins"]=origins
-        identity=[key,[(z["tf"],z["zone_id"],z["touch_close_ts"]) for z in origins]]
+        identity=key  # Pair is scoped by the persistent delivery table; origins can change.
         notice["key"]="M15_FVG_WATCH|"+hashlib.sha256(json.dumps(identity,separators=(",",":")).encode()).hexdigest()[:24]
         notice["touch_close_ts"]=min(z["touch_close_ts"] for z in origins)
         notice["tf"]="/".join(dict.fromkeys(z["tf"] for z in origins))

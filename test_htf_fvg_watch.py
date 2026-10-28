@@ -106,3 +106,29 @@ def test_touch_and_strong_break_can_be_confirmed_at_same_close():
     out=watch.build_structure_watch_events(maps,rows,m5,cut+11*M15)
     assert len(out)==1
     assert out[0]["touch_close_ts"]==out[0]["confirmation_close_ts"]==33*M15
+
+
+def test_persistent_delivery_uses_confirmation_time_and_deduplicates_changed_origins(tmp_path):
+    import ast
+    import inspect
+    import sqlite3
+    import patch_kairos_htf_fvg_alerts as patcher
+    tree=ast.parse(inspect.getsource(patcher.patch_app_source))
+    block=next(node.value.value for node in ast.walk(tree) if isinstance(node,ast.Assign)
+               and isinstance(node.value,ast.Constant) and isinstance(node.value.value,str)
+               and "def _kairos_deliver_fvg_once" in node.value.value)
+    sent=[]
+    ns=dict(sqlite3=sqlite3,DB_FILE=str(tmp_path/"watch.db"),
+            _KAIROS_LIVE_STARTED_TS=21*M15,send_telegram=lambda msg:sent.append(msg) or True)
+    exec(block,ns)
+    maps,rows,m5,cut=fixture()
+    maps["H1"]={"zones":[dict(maps["H4"]["zones"][0],id="h1",created_ts=-3600000)]}
+    first=watch.build_structure_watch_events(maps,rows,m5,cut)[0]
+    assert first["touch_close_ts"]<ns["_KAIROS_LIVE_STARTED_TS"]<first["confirmation_close_ts"]
+    assert ns["_kairos_deliver_fvg_once"]("BTCUSD",first,"first")
+    maps["H1"]["zones"][0]["state"]="INVALIDADA"
+    second=watch.build_structure_watch_events(maps,rows,m5,cut)[0]
+    assert ns["_kairos_deliver_fvg_once"]("BTCUSD",second,"second")
+    assert sent==["first"]
+    with sqlite3.connect(ns["DB_FILE"]) as db:
+        assert db.execute("SELECT COUNT(*) FROM kairos_fvg_delivery WHERE status='DELIVERED'").fetchone()[0]==1

@@ -1,12 +1,66 @@
-HTF_FVG_TFS = ('W1', 'D1', 'H4', 'H1')
+from datetime import datetime,timezone
+import html
+import math
+
+HTF_FVG_TFS = ('MN', 'W1', 'D1', 'H4', 'H1')
 ACTIVE_FVG_STATES = {'ATIVA', 'TOCADA', 'PARCIAL'}
 
+def formation_close(zone,tf):
+    born=zone.get("created_ts")
+    if not isinstance(born,(int,float)) or not math.isfinite(born):
+        return None
+    if tf=="MN":
+        current=datetime.fromtimestamp(born/1000,timezone.utc)
+        if current.day!=1 or any((current.hour,current.minute,current.second,current.microsecond)):
+            return None
+        year=current.year+(current.month==12)
+        month=1 if current.month==12 else current.month+1
+        return int(datetime(year,month,1,tzinfo=timezone.utc).timestamp()*1000)
+    duration={"W1":604800000,"D1":86400000,"H4":14400000,"H1":3600000}.get(tf)
+    return born+duration if duration is not None else None
+
+def liquidity_inside_zone(zone,levels,known_before,m15_candles=None,asof=None):
+    result=[];seen=set()
+    allowed={"EQH","EQL","SWING_HIGH","SWING_LOW","LUDO_SWING_HIGH","LUDO_SWING_LOW",
+             "PDH","PDL","PWH","PWL","PMH","PML"}
+    for ref in levels or []:
+        value=ref.get("level");confirmed=ref.get("confirmed_ts")
+        if (ref.get("tf") not in HTF_FVG_TFS or ref.get("type") not in allowed
+                or ref.get("state")!="ACTIVE" or ref.get("captured_ts") is not None
+                or not isinstance(value,(int,float)) or not math.isfinite(value)
+                or not isinstance(confirmed,(int,float)) or not math.isfinite(confirmed)
+                or confirmed>known_before or not zone["bottom"]<=value<=zone["top"]):
+            continue
+        high=ref["type"] in {"EQH","SWING_HIGH","LUDO_SWING_HIGH","PDH","PWH","PMH"}
+        horizon=known_before if asof is None else asof
+        consumed=any(c["t"]>=confirmed and c["t"]+900000<=horizon
+                     and (c["h"]>value if high else c["l"]<value)
+                     for c in m15_candles or [])
+        if consumed:
+            continue
+        key=(ref["tf"],ref["type"],value,ref.get("origin_ts"))
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append({k:ref.get(k) for k in ("tf","type","level","origin_ts","confirmed_ts","state")})
+    return sorted(result,key=lambda ref:(HTF_FVG_TFS.index(ref["tf"]),ref["type"],ref["level"]))
+
+def confluence_line(levels):
+    if not levels:
+        return None
+    from kairos_alert_presentation import price
+    visible=levels[:3]
+    text="💧 Liquidez disponível no mapa: "+" | ".join(
+        ref["tf"]+" "+ref["type"]+" @ "+price(ref["level"]) for ref in visible)
+    if len(levels)>3:
+        text+=" | +"+str(len(levels)-3)+" referências"
+    return text
 
 def _price(value):
     return f"{float(value):.8f}".rstrip('0').rstrip('.')
 
 
-def build_touch_events(maps, m5_candle, touch_close_ts):
+def build_touch_events(maps, m5_candle, touch_close_ts, liquidity_levels=None, m15_candles=None):
     if not m5_candle:
         return []
     low = float(m5_candle['l'])
@@ -20,9 +74,8 @@ def build_touch_events(maps, m5_candle, touch_close_ts):
                 continue
             if zone.get('state') not in ACTIVE_FVG_STATES:
                 continue
-            duration={'W1':604800000,'D1':86400000,'H4':14400000,'H1':3600000}[tf]
-            born=zone.get('created_ts')
-            if born is not None and m5_candle['t'] < born+duration:
+            ready=formation_close(zone,tf)
+            if ready is None or m5_candle['t'] < ready:
                 continue
             bottom = zone.get('bottom')
             top = zone.get('top')
@@ -43,14 +96,15 @@ def build_touch_events(maps, m5_candle, touch_close_ts):
                 'origin_ts': zone.get('origin_ts'),
                 'created_ts': zone.get('created_ts'),
                 'touch_close_ts': int(touch_close_ts),
+                'liquidity_inside': liquidity_inside_zone(zone,liquidity_levels,m5_candle['t'],m15_candles=m15_candles,asof=touch_close_ts),
                 'observed_low': low,
                 'observed_high': high,
             })
     return out
 
 
-def format_fvg_touch_message(pair, event):
-    if event.get('notice_kind')=='HTF_FVG_M15_STRUCTURE':
+def format_fvg_touch_message(pair,event):
+    if event.get("notice_kind")=="HTF_FVG_M15_STRUCTURE":
         from kairos_htf_fvg_watch import format_structure_watch
         return format_structure_watch(pair,event)
     from kairos_alert_presentation import format_htf_touch

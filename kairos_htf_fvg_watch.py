@@ -9,12 +9,13 @@ from zoneinfo import ZoneInfo
 
 from kairos_ludo_structure import structure_snapshot
 from kairos_m15_primary import strong_break
+from kairos_htf_fvg_alerts import HTF_FVG_TFS,formation_close,liquidity_inside_zone,confluence_line
 
 M5=300000
 M15=900000
 ACTIVE={"ATIVA","TOCADA","PARCIAL"}
 
-def build_structure_watch_events(maps,m15_candles,m5_candles,cutoff):
+def build_structure_watch_events(maps,m15_candles,m5_candles,cutoff,liquidity_levels=None):
     m15=[c for c in m15_candles if c["t"]+M15<=cutoff]
     m5=[c for c in m5_candles if c["t"]+M5<=cutoff]
     if not m15 or len(m5)<2:
@@ -26,7 +27,7 @@ def build_structure_watch_events(maps,m15_candles,m5_candles,cutoff):
         return []
     events=sorted((e for e in snapshot["events"] if strong_break(m15,e)),key=lambda e:e["close_ts"])
     groups={}
-    for tf,duration in (("H4",14400000),("H1",3600000)):
+    for tf in HTF_FVG_TFS:
         for z in ((maps or {}).get(tf) or {}).get("zones",[]):
             if z.get("ludo_fvg") is not True or z.get("state") not in ACTIVE:
                 continue
@@ -36,7 +37,9 @@ def build_structure_watch_events(maps,m15_candles,m5_candles,cutoff):
             if bottom is None or top is None or bottom>=top:
                 continue
             bull=z["tipo"]=="FVG_bullish"
-            ready=z["created_ts"]+duration
+            ready=formation_close(z,tf)
+            if ready is None:
+                continue
             observed=[c for c in m5 if c["t"]>=ready]
             # A confirmed lower-timeframe breach already disproves continued
             # zone validity, even while its H4/H1 candle remains in progress.
@@ -56,7 +59,8 @@ def build_structure_watch_events(maps,m15_candles,m5_candles,cutoff):
                     continue
                 key=(event["close_ts"],event["side"])
                 origin=dict(tf=tf,zone_id=z["id"],tipo=z["tipo"],bottom=bottom,top=top,
-                            touch_open_ts=touch["t"],touch_close_ts=confirm)
+                            touch_open_ts=touch["t"],touch_close_ts=confirm,
+                            liquidity_inside=liquidity_inside_zone(z,liquidity_levels,touch["t"],m15_candles=m15,asof=cutoff))
                 if key not in groups:
                     groups[key]=dict(notice_kind="HTF_FVG_M15_STRUCTURE",direction="LONG" if bull else "SHORT",
                         confirmation_close_ts=event["close_ts"],m15_break=dict(event),
@@ -64,7 +68,7 @@ def build_structure_watch_events(maps,m15_candles,m5_candles,cutoff):
                 groups[key]["origins"].append(origin)
     out=[]
     for key,notice in sorted(groups.items()):
-        origins=sorted(notice["origins"],key=lambda z:(0 if z["tf"]=="H4" else 1,z["zone_id"]))
+        origins=sorted(notice["origins"],key=lambda z:(HTF_FVG_TFS.index(z["tf"]),z["zone_id"]))
         notice["origins"]=origins
         identity=key  # Pair is scoped by the persistent delivery table; origins can change.
         notice["key"]="M15_FVG_WATCH|"+hashlib.sha256(json.dumps(identity,separators=(",",":")).encode()).hexdigest()[:24]
@@ -81,6 +85,9 @@ def format_structure_watch(pair,event):
     for z in event["origins"]:
         lines.append("📦 "+z["tf"]+" FVG: "+price(z["bottom"])+"–"+price(z["top"]))
         lines.append("🕐 Toque confirmado: "+clock(z["touch_close_ts"])+" Portugal")
+        confluence=confluence_line(z.get("liquidity_inside"))
+        if confluence:
+            lines.append(confluence)
     e=event["m15_break"]
     lines+=["✅ "+e["kind"]+" M15 por fechamento além de "+price(e["level"])+" · força confirmada",
             "🕐 Confirmação: "+clock(event["confirmation_close_ts"])+" Portugal",

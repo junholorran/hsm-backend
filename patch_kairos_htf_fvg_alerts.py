@@ -37,7 +37,7 @@ def _kairos_deliver_fvg_once(pair, event, message):
             row=conn.execute('SELECT status FROM kairos_fvg_delivery WHERE pair=? AND event_key=?', (pair,event['key'])).fetchone()
             if row and row[0] in ('DELIVERED','PRE_BOOT_BASELINE'):
                 return True
-            touch_ts=int(event['touch_close_ts'])
+            touch_ts=int(event.get('confirmation_close_ts') or event['touch_close_ts'])
             if not row and touch_ts < _KAIROS_LIVE_STARTED_TS:
                 conn.execute('INSERT INTO kairos_fvg_delivery VALUES (?,?,?,?)', (pair,event['key'],touch_ts,'PRE_BOOT_BASELINE'))
                 status='PRE_BOOT_BASELINE'
@@ -59,8 +59,8 @@ def _kairos_send_fvg_events(pair, result, cutoff):
     """Separate FVG context stream. FVG is never treated as liquidity or entry."""
     from kairos_htf_fvg_alerts import format_fvg_touch_message
     delivered=True
-    for event in result.get('htf_fvg_touch_events') or []:
-        ts=event.get('touch_close_ts')
+    for event in list(result.get('htf_fvg_touch_events') or [])+list(result.get('htf_fvg_structure_events') or []):
+        ts=event.get('confirmation_close_ts') or event.get('touch_close_ts')
         if ts is None or ts > cutoff:
             continue
         msg=format_fvg_touch_message(pair,event)

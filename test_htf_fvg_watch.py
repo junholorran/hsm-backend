@@ -79,3 +79,30 @@ def test_confirmation_message_names_origin_break_and_context_only():
     msg=watch.format_structure_watch("BTCUSD",event)
     assert "H4" in msg and "M15" in msg and "BTCUSD" in msg
     assert "SEM TRADE" in msg and "COMPRA" in msg
+
+
+def test_same_confirmation_keeps_delivery_key_if_one_origin_disappears():
+    maps,rows,m5,cut=fixture()
+    maps["H1"]={"zones":[dict(maps["H4"]["zones"][0],id="h1",created_ts=-3600000)]}
+    first=watch.build_structure_watch_events(maps,rows,m5,cut)[0]
+    maps["H1"]["zones"][0]["state"]="INVALIDADA"
+    later=watch.build_structure_watch_events(maps,rows,m5,cut)[0]
+    assert first["key"]==later["key"]
+
+def test_later_retouch_does_not_erase_prior_valid_confirmation():
+    maps,rows,m5,cut=fixture()
+    m5[-3].update(l=99.5)
+    rows[-1].update(l=99.5)
+    out=watch.build_structure_watch_events(maps,rows,m5,cut)
+    assert any(e["confirmation_close_ts"]==22*M15 for e in out)
+
+def test_touch_and_strong_break_can_be_confirmed_at_same_close():
+    maps,rows,m5,cut=fixture()
+    for c in rows:c["t"]+=11*M15
+    for c in m5:c["t"]+=11*M15
+    maps["H4"]["zones"][0].update(created_ts=16*M15,bottom=99.5,top=100.05)
+    for c in m5:
+        if 32*M15<=c["t"]<32*M15+2*M5:c.update(l=100.1)
+    out=watch.build_structure_watch_events(maps,rows,m5,cut+11*M15)
+    assert len(out)==1
+    assert out[0]["touch_close_ts"]==out[0]["confirmation_close_ts"]==33*M15

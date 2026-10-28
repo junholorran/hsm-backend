@@ -23,7 +23,7 @@ def direct_zone(candles,event,cutoff,engine):
     from kairos_fvg_force_shadow import assess_fvg
     rows=[c for c in candles if c['t']+900000<=cutoff]
     for z in engine._kairos_fvg_states(rows,lookback=len(rows)):
-        if (z.get('lux_fvg') is not True or z.get('tipo') not in ('FVG_bullish','FVG_bearish')
+        if (not (z.get('ludo_fvg') is True or z.get('lux_fvg') is True) or z.get('tipo') not in ('FVG_bullish','FVG_bearish')
             or (z.get('source_mid') or {}).get('t')!=event['open_ts']):continue
         sources=[z.get(k) or {} for k in ('source_a','source_mid','source_c')]
         if any((c.get('l',float('-inf'))<event['opposite_level'] if event['side']=='UP'

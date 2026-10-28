@@ -673,12 +673,12 @@ def _kairos_confirmed_pivots(candles, left=KAIROS_SWEEP_LEFT, right=KAIROS_SWEEP
 
 
 def _kairos_fvg_states(candles, lookback=250):
-    """Lux SMC FVG removal plus separately sourced Lux Inversion FVG states.
+    """User-supplied Ludo FVG plus separately identified Lux IFVG extension.
 
     All inputs are native candles supplied by the existing closed-bar pipeline.
     Removed mothers remain audit records, not active POIs or HTF alerts.
     """
-    from kairos_lux_fvg import combined_fvg_states
+    from kairos_ludo_fvg import combined_fvg_states
     return combined_fvg_states(candles, lookback)
 
 
@@ -1763,7 +1763,7 @@ def _kairos_select_htf_poi_location(mapa, m15_candles, now_ts):
         return None
     return max(candidates,key=lambda x:(x['touch_ts'],KAIROS_TF_PESO.get(x['tf'],1)))
 
-print('[KAIROS_FVG_ENTRY] installed=true origin=HTF_FVG_TOUCH structure_sizes=50/5 fvg_reference=LUX_SMC_IFVG', flush=True)
+print('[KAIROS_FVG_ENTRY] installed=true origin=HTF_FVG_TOUCH structure_sizes=50/5 fvg_reference=LUDO_FVG_LUX_IFVG_EXTENSION', flush=True)
 
 
 def _kairos_fvg_touch_intent(mapa, m15_candles, m5_candles, now_ts, candles_por_tf=None):
@@ -2338,7 +2338,7 @@ def _kairos_select_entry_zone(exec_candles, sweep, structure, mapa):
     # no BOS/CHoCH. Entre FVGs válidos da mesma perna, o mais próximo temporalmente
     # do break tem prioridade. Liquidez dentro da zona desempata, mas não transforma
     # IFVG/OB em prioridade acima do FVG causal da quebra.
-    fvg=[z for z in zones if z['tipo'].startswith('FVG_') and z.get('lux_fvg') is True]
+    fvg=[z for z in zones if z['tipo'].startswith('FVG_') and (z.get('ludo_fvg') is True or z.get('lux_fvg') is True)]
     if fvg:
         return max(fvg,key=lambda z:(1 if z.get('liquidity_inside') else 0,z.get('created_ts') or 0))
     # IFVG continua elegível somente quando nasceu de FVG-mãe Lux da mesma perna.
@@ -2422,7 +2422,7 @@ def _kairos_shadow_validate_poi(zone, candles, sweep=None, structure=None, tf='M
             out['pass']=bool(ok); out['reason']='OK' if ok else 'IFVG_SEM_CADEIA_MAE_FLIP_CAUSAL_VALIDA'
             return out
         expected='FVG_bullish' if mother=='FVG_bullish' else ('FVG_bearish' if mother=='FVG_bearish' else None)
-        ok=ordered and bool(mother) and typ==expected and bounds_ok and created_ok and causal_ok and zone.get('lux_fvg') is True and lux_close_ok and lux_threshold_ok
+        ok=ordered and bool(mother) and typ==expected and bounds_ok and created_ok and causal_ok and (zone.get('ludo_fvg') is True or (zone.get('lux_fvg') is True and lux_close_ok and lux_threshold_ok))
         out['pass']=bool(ok); out['reason']='OK' if ok else 'FVG_GEOMETRIA_OU_CAUSALIDADE_INVALIDA'
         return out
     if typ.startswith('OB_'):

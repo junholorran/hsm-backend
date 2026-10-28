@@ -178,7 +178,7 @@ def test_native_fvg_wick_removal_is_not_replaced_with_close_rule():
     cs = [dict(t=i*M5, o=100, h=101, l=99, c=100) for i in range(8)]
     cs[-2] = dict(t=6*M5, o=100, h=111, l=100, c=110)
     cs[-1] = dict(t=7*M5, o=110, h=112, l=109, c=111)
-    zone = next(z for z in engine._kairos_fvg_states(cs) if z.get('lux_fvg'))
+    zone = next(z for z in engine._kairos_fvg_states(cs) if z.get('ludo_fvg'))
     removal = dict(t=8*M5, o=110, h=111, l=100, c=110)
     assert removal['c'] > zone['bottom'] and removal['l'] < zone['bottom']
     assert chains._removed_at(zone, cs+[removal], M5, engine) == 9*M5

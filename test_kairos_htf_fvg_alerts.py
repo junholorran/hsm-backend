@@ -4,7 +4,7 @@ from kairos_htf_fvg_alerts import build_touch_events, format_fvg_touch_message
 def test_only_relevant_htf_fvg_and_actual_m5_touch_are_alerted():
     maps = {
         'H4': {'zones': [
-            {'id':'H4_B','tipo':'FVG_bearish','state':'ATIVA','bottom':84521.1,'top':85395.8,'created_ts':1000},
+            {'id':'H4_B','tipo':'FVG_bearish','state':'ATIVA','bottom':84521.1,'top':85395.8,'created_ts':-14400000},
             {'id':'H4_OLD','tipo':'FVG_bullish','state':'INVALIDADA','bottom':81000,'top':82000,'created_ts':900},
         ]},
         'M15': {'zones': [

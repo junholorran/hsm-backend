@@ -107,7 +107,7 @@ def test_unsafe_persisted_state_is_rebased_without_rearming_old_capture():
     assert updated['start_ts']==4*M15
     assert updated['captures']=={}
     assert not any(e['stage']=='M5_ARMADO' for e in alerts)
-    assert updated['causal_policy_version']==2
+    assert updated['causal_policy_version']==chains.CAUSAL_POLICY_VERSION
 
 
 def test_pending_unsafe_alert_is_suppressed_without_deleting_audit(tmp_path,monkeypatch):
@@ -214,4 +214,4 @@ def test_live_provider_identifies_the_verified_causal_policy(monkeypatch):
     with patch.object(chains,'scan',return_value=dict(asof_ts=M15,view=chains.state_view({}))), \
          patch.object(daily,'scan_report',return_value=None):
         result=provider.snapshot('SOLUSD',dict(M15=bars(M15,M15),M5=bars(M15,M5)),M15,MapEngine)
-    assert result['causal_policy_version']==2
+    assert result['causal_policy_version']==chains.CAUSAL_POLICY_VERSION

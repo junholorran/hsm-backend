@@ -22,7 +22,7 @@ from kairos_reaction_episode import reaction_timeline, evidence_at, touch_episod
 
 M5 = 300000
 M15 = 900000
-CAUSAL_POLICY_VERSION = 2
+CAUSAL_POLICY_VERSION = 3
 LIQUIDITY_ENTRY_POLICY = 'RELEVANT_HTF_SWEEP_FVG_V1'
 PAIRS = ('BTCUSD', 'ETHUSD', 'SOLUSD', 'BNBUSD')
 DEFAULT_PATH = '/data/kairos_capture_chains.db'
@@ -60,7 +60,7 @@ def _closed(rows, duration, cutoff):
 
 
 def _entry_fvg(zone):
-    return bool(zone and zone.get('tipo') in ('FVG_bullish','FVG_bearish') and zone.get('lux_fvg') is True)
+    return bool(zone and zone.get('tipo') in ('FVG_bullish','FVG_bearish') and (zone.get('ludo_fvg') is True or zone.get('lux_fvg') is True))
 
 
 def _zone_ok(zone):

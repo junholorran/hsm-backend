@@ -27,7 +27,7 @@ def htf_touch_locations(mapa, m15_candles, m5_candles, now_ts, candles_por_tf=No
         for z in (mapa.get(tf) or {}).get('zones',[]):
             if (z.get('tipo') not in ('FVG_bullish','FVG_bearish') or
                     z.get('state') not in ('ATIVA','TOCADA','PARCIAL') or
-                    z.get('lux_fvg') is not True):
+                    not (z.get('ludo_fvg') is True or z.get('lux_fvg') is True)):
                 continue
             born=z.get('created_ts'); top=z.get('top'); bottom=z.get('bottom')
             if born is None or top is None or bottom is None or top < bottom:
@@ -123,7 +123,11 @@ def snapshot(pair, tf_map, cutoff, engine):
           f'causal_policy_version={chains.CAUSAL_POLICY_VERSION} '
           f'm15_primary={str(chains.primary.enabled()).lower()} '
           f'cutoff={cutoff} stage={saved["view"]["code"]}', flush=True)
+    from kairos_htf_fvg_alerts import build_touch_events
+    last_m5=next((c for c in reversed(tf_map.get('M5',[])) if c['t']+300000<=cutoff),None)
+    touch_events=build_touch_events(mapa,last_m5,last_m5['t']+300000) if last_m5 else []
     report = dict(pair=pair, scan_mode='LATEST_CLOSED_SNAPSHOT', evaluations=1,
+        htf_fvg_touch_events=touch_events,
         entry_structure_model='LUDO', daily_brief=daily, cutoff_ts=cutoff,
         causal_policy_version=chains.CAUSAL_POLICY_VERSION,
         sinais_unicos_completos=[], entry_phase_events=[], entry_setup_states={},

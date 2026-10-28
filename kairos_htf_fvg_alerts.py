@@ -20,6 +20,10 @@ def build_touch_events(maps, m5_candle, touch_close_ts):
                 continue
             if zone.get('state') not in ACTIVE_FVG_STATES:
                 continue
+            duration={'W1':604800000,'D1':86400000,'H4':14400000,'H1':3600000}[tf]
+            born=zone.get('created_ts')
+            if born is not None and m5_candle['t'] < born+duration:
+                continue
             bottom = zone.get('bottom')
             top = zone.get('top')
             if bottom is None or top is None:

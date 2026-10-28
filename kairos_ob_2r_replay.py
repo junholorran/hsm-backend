@@ -249,7 +249,7 @@ def native_export(engine, pair, end, include_fvg=False):
                         'atr_period':200,'partial_year_used':False},
             'note':'Only contiguous complete 12-month years. No new signal authorization.'}
         result['fvg_math_performed']=True
-        result['fvg_reference']='LUX_SMC_V6_AND_LUX_IFVG_V6'
+        result['fvg_reference']='LUDO_GH68_USER_PINE_V5_AND_LUX_IFVG_V6'
     return result
 
 

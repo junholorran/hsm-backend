@@ -22,7 +22,7 @@ def proof(cid='liquidity',stage='M5_ARMADO',direction='LONG'):
         cap=dict(origin_kind='HTF_FVG_TOUCH',htf_location=dict(tf=tf,bottom=713.01,top=718.73),
                  native_capture_confirm_ts=1792855200000)
     return dict(key=cid+stage,pair='BNBUSD',capture_id=cid,capture=cap,stage=stage,
-        observed_ts=1792875631115,causal_policy_version=2,direction=direction,
+        observed_ts=1792875631115,causal_policy_version=chains.CAUSAL_POLICY_VERSION,direction=direction,
         break_ts=1792875600000,kind='CHoCH',level=732.3,invalidation=717.23,
         parent_zone=dict(tipo='FVG_bullish',bottom=721.5,top=723.04),
         zone=dict(tipo='FVG_bullish',lux_fvg=True,bottom=721.5,top=722.92),
@@ -238,7 +238,7 @@ def test_frozen_batch_from_an_old_policy_is_suppressed_after_migration(tmp_path,
     monkeypatch.setenv('KAIROS_ENTRY_STRUCTURE','LUDO');path=str(tmp_path/'out.db')
     put(path,[proof()])
     assert not chains.deliver('BNBUSD',lambda s:False,path)
-    monkeypatch.setattr(chains,'CAUSAL_POLICY_VERSION',3)
+    monkeypatch.setattr(chains,'CAUSAL_POLICY_VERSION',chains.CAUSAL_POLICY_VERSION+1)
     sent=[]
     assert chains.deliver('BNBUSD',lambda s:sent.append(s) or True,path)
     assert sent==[]

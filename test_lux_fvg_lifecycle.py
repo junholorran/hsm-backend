@@ -1,5 +1,6 @@
 import unittest
 import scalp_engine as e
+from kairos_lux_fvg import combined_fvg_states as lux_states
 
 class LuxLifecycleTests(unittest.TestCase):
     def candles(self):
@@ -9,7 +10,7 @@ class LuxLifecycleTests(unittest.TestCase):
                    dict(t=222*3600000,o=105.,h=107.,l=104.,c=106.)])
         return cs
     def mother(self,cs):
-        return next(z for z in e._kairos_fvg_states(cs) if z['id']=='FVG_795600000_B')
+        return next(z for z in lux_states(cs) if z['id']=='FVG_795600000_B')
     def test_bull_smc_wick_removes_without_close_invalidation(self):
         cs=self.candles();cs.append(dict(t=223*3600000,o=103.,h=104.,l=100.,c=102.))
         z=self.mother(cs)
@@ -22,19 +23,19 @@ class LuxLifecycleTests(unittest.TestCase):
     def test_bear_smc_uses_literal_raw_pine_top_not_normalized_upper(self):
         cs=[{**c,'o':200-c['o'],'c':200-c['c'],'h':200-c['l'],'l':200-c['h']} for c in self.candles()]
         cs.append(dict(t=223*3600000,o=95.,h=97.,l=94.,c=95.))
-        z=next(z for z in e._kairos_fvg_states(cs) if z['id']=='FVG_795600000_S')
+        z=next(z for z in lux_states(cs) if z['id']=='FVG_795600000_S')
         self.assertEqual(z['state'],'INVALIDADA')
     def test_ifvg_reference_has_distinct_atr_filtered_mother(self):
         cs=self.candles();cs.append(dict(t=223*3600000,o=103.,h=104.,l=100.,c=102.))
         cs.append(dict(t=224*3600000,o=102.,h=103.,l=100.,c=100.5))
-        zs=e._kairos_fvg_states(cs)
+        zs=lux_states(cs)
         inv=next(z for z in zs if z.get('lux_ifvg') and z['source_mid']['t']==221*3600000)
         self.assertEqual((inv['tipo'],inv['state'],inv['flip_ts']),('IFVG_bearish','IFVG',224*3600000))
         self.assertTrue(inv['mother_fvg_id']);self.assertGreater(inv['top']-inv['bottom'],inv['lux_ifvg_width_threshold'])
     def test_ifvg_open_body_can_invalidate_even_close_inside(self):
         cs=self.candles();cs.extend([dict(t=223*3600000,o=102.,h=103.,l=100.,c=100.5),
                                     dict(t=224*3600000,o=104.1,h=104.2,l=102.,c=103.)])
-        inv=next(z for z in e._kairos_fvg_states(cs) if z.get('lux_ifvg') and z['source_mid']['t']==221*3600000)
+        inv=next(z for z in lux_states(cs) if z.get('lux_ifvg') and z['source_mid']['t']==221*3600000)
         self.assertEqual(inv['state'],'INVALIDADA')
     def test_ifvg_width_threshold_is_strict(self):
         from kairos_lux_fvg import inversion_fvg_states
@@ -62,15 +63,16 @@ class LuxLifecycleTests(unittest.TestCase):
         end=224*3600000
         with patch.object(api,'fetch_inputs',return_value=({'H1':cs},{'H1':[]})):
             out=api.native_export(e,'BTCUSD',end,include_fvg=True)
-        z=next(z for z in out['fvg_states']['H1'] if z['id']=='FVG_795600000_B')
+        z=next(z for z in out['fvg_states']['H1'] if z['id']=='LUDO_FVG_795600000_B')
         self.assertEqual(z['state'],'INVALIDADA')
+        self.assertTrue(z['ludo_fvg'])
         self.assertFalse(out['evaluation_performed'])
 
     def test_btc_h4_real_wick_regression(self):
         import json
         from pathlib import Path
         cs=json.loads(Path('btc_h4_fvg_wick_fixture.json').read_text())
-        zs=e._kairos_fvg_states(cs)
+        zs=lux_states(cs)
         z=next(z for z in zs if z['bottom']==83118.2 and z['top']==83217.7 and z['tipo']=='FVG_bullish')
         self.assertEqual(z['state'],'INVALIDADA')
         self.assertEqual(z['invalidated_ts'],1791878400000)

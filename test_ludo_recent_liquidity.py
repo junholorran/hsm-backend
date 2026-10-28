@@ -124,7 +124,7 @@ def test_live_scan_admits_fresh_ludo_capture_and_preserves_activation_on_restart
     assert cap['liquidity_tf']=='M15'
     assert chains.capture_id('BNBUSD',cap) not in state['captures']
     assert state['ludo_liquidity_since']==START
-    assert state['causal_policy_version']==2
+    assert state['causal_policy_version']==chains.CAUSAL_POLICY_VERSION
     with sqlite3.connect(path) as db:
         before=db.execute('SELECT COUNT(*) FROM chain_outbox').fetchone()[0]
     chains.scan('BNBUSD',prefix(BREAK),BREAK,decision,engine,path)
@@ -137,7 +137,7 @@ def test_rollout_never_adopts_pre_activation_recent_captures(tmp_path,monkeypatc
     monkeypatch.setenv('KAIROS_ENTRY_STRUCTURE','LUDO')
     path=str(tmp_path/'chain.db');find=detector()
     # Existing v2 state from before this detector was installed.
-    state=dict(start_ts=START,asof_ts=BREAK-300000,captures={},causal_policy_version=2,
+    state=dict(start_ts=START,asof_ts=BREAK-300000,captures={},causal_policy_version=chains.CAUSAL_POLICY_VERSION,
                ludo_only_since=START)
     with chains._db(path) as db:
         db.execute('INSERT INTO chain_state VALUES (?,?)',('BNBUSD',json.dumps(state)))

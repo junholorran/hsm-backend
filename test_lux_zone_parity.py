@@ -1,5 +1,6 @@
 import unittest
 import scalp_engine as engine
+from kairos_lux_fvg import combined_fvg_states as lux_states
 
 
 class LuxZoneParityTests(unittest.TestCase):
@@ -25,8 +26,8 @@ class LuxZoneParityTests(unittest.TestCase):
         cs[297].update(o=100, c=100.1, h=100.2, l=99.9)
         cs[298].update(o=100, c=102, h=102.1, l=99.9)
         cs[299].update(o=103, c=103, h=104, l=102.5)
-        full = engine._kairos_fvg_states(cs, lookback=300)
-        tail = engine._kairos_fvg_states(cs, lookback=3)
+        full = lux_states(cs, lookback=300)
+        tail = lux_states(cs, lookback=3)
         self.assertEqual([z for z in full if z['created_ts'] >= 297], tail)
         zone = next(z for z in tail if z['created_ts'] == 299)
         self.assertAlmostEqual(zone['lux_threshold'], (0.001 + 0.00001 + 0.0002) / 299 * 2)

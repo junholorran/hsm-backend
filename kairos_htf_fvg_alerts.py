@@ -28,6 +28,8 @@ def build_touch_events(maps, m5_candle, touch_close_ts):
             top = zone.get('top')
             if bottom is None or top is None:
                 continue
+            if (low <= float(bottom) if typ=='FVG_bullish' else high >= float(top)):
+                continue
             if high < float(bottom) or low > float(top):
                 continue
             zone_id = zone.get('id') or f"{typ}:{zone.get('origin_ts')}:{bottom}:{top}"
@@ -48,5 +50,8 @@ def build_touch_events(maps, m5_candle, touch_close_ts):
 
 
 def format_fvg_touch_message(pair, event):
+    if event.get('notice_kind')=='HTF_FVG_M15_STRUCTURE':
+        from kairos_htf_fvg_watch import format_structure_watch
+        return format_structure_watch(pair,event)
     from kairos_alert_presentation import format_htf_touch
     return format_htf_touch(pair,event)

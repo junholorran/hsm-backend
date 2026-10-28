@@ -126,7 +126,12 @@ def snapshot(pair, tf_map, cutoff, engine):
     from kairos_htf_fvg_alerts import build_touch_events
     last_m5=next((c for c in reversed(tf_map.get('M5',[])) if c['t']+300000<=cutoff),None)
     touch_events=build_touch_events(mapa,last_m5,last_m5['t']+300000) if last_m5 else []
+    from kairos_htf_fvg_watch import build_structure_watch_events
+    watch_events=build_structure_watch_events(mapa,tf_map.get('M15',[]),tf_map.get('M5',[]),cutoff)
+    confirmed=(saved['view'].get('m15_break') or {}).get('close_ts')
+    watch_events=[e for e in watch_events if e['confirmation_close_ts']!=confirmed]
     report = dict(pair=pair, scan_mode='LATEST_CLOSED_SNAPSHOT', evaluations=1,
+        htf_fvg_structure_events=watch_events,
         htf_fvg_touch_events=touch_events,
         entry_structure_model='LUDO', daily_brief=daily, cutoff_ts=cutoff,
         causal_policy_version=chains.CAUSAL_POLICY_VERSION,

@@ -130,6 +130,7 @@ def format_chain_events(events,now_ts=None):
     header=f"KAIROS | {e['pair']} | {titles.get(stage,stage)}"
     if stage=='POI_HTF_TOCADO' and e.get('htf_tf'):
         header=f"KAIROS | {e['pair']} | 📦 TOQUE EM FVG {e['htf_tf']}"
+        if side in ("LONG","SHORT"):header+=" | "+("COMPRADOR" if side=="LONG" else "VENDEDOR")
     lines=[f"Sequência {ident} · atualização {stamp(e['observed_ts'])} Portugal"]
     now_ts=int(time.time()*1000) if now_ts is None else now_ts
     if now_ts-e['observed_ts']>M15:lines.append('⚠️ Aviso histórico / entrega atrasada: confirme o estado atual antes de agir.')
@@ -145,6 +146,9 @@ def format_chain_events(events,now_ts=None):
         if c.get('origin_kind')=='HTF_FVG_TOUCH':
             lines.append(f"📦 POI {loc.get('tf')} FVG: {price(loc.get('bottom'))}–{price(loc.get('top'))} | origem {cid[:8]}")
             lines.append(f"Toque HTF confirmado: {stamp(c.get('native_capture_confirm_ts'))} Portugal; sem captura de liquidez presumida.")
+            from kairos_htf_fvg_alerts import confluence_line
+            extra=confluence_line(source.get("liquidity_inside"))
+            if extra:lines.append(extra)
         else:
             typ=str(c.get('liquidity_type','LIQUIDEZ')).replace('LUDO_SWING_HIGH','topo Ludo').replace('LUDO_SWING_LOW','fundo Ludo')
             lines.append(f"💧 Liquidez {c.get('liquidity_tf')} {typ}: {price(c.get('nivel'))} | origem {cid[:8]}")
@@ -192,7 +196,10 @@ def format_chain_events(events,now_ts=None):
         lines+=_reason_lines(e)
         lines.append('Hipótese antecipada M5 encerrada; não cancela automaticamente um plano M15 independente nem ordens na exchange.')
     elif stage=='M15_QUEBRA':lines.append('QUEBRA M15 COM FORÇA · aguardar fechamento da terceira vela e confirmação do FVG M15; ainda sem plano pronto.' if e.get('primary_policy') else 'AGUARDAR POI CAUSAL / REFINAMENTO M5 · ainda sem entrada confirmada.')
-    elif stage in ('CAPTURA','POI_HTF_TOCADO'):
+    elif stage=='POI_HTF_TOCADO':
+        expected='ALTA' if side=='LONG' else 'BAIXA' if side=='SHORT' else 'direção a confirmar'
+        lines.append('Observar quebra M15 Ludo de '+expected+' com força; M5 serve para aviso antecipado / refinamento. Aguardar plano causal. SEM TRADE por toque isolado.')
+    elif stage=='CAPTURA':
         from kairos_m15_primary import enabled as m15_primary_enabled
         lines.append('AGUARDAR REAÇÃO / M5 ANTECIPADO; plano principal: quebra forte M15 → FVG M15 confirmado → aguardar retorno. M5 opcional. SEM TRADE por captura isolada.' if m15_primary_enabled() else 'AGUARDAR REAÇÃO / QUEBRA M5 ANTECIPADA; confirmação M15 Ludo → POI causal → refinamento M5 → reteste. SEM TRADE. Captura ou toque isolado não autoriza entrada.')
     elif stage=='RETESTE_OBSERVADO':
@@ -239,6 +246,8 @@ def format_htf_touch(pair,event):
     if observed is None:observed=int(time.time()*1000)
     proof=dict(pair=pair,capture_id=hashlib.sha256(str(event.get('key') or event).encode()).hexdigest()[:20],
         observed_ts=observed,stage='POI_HTF_TOCADO',htf_tf=event.get('tf'),
+        direction='LONG' if event.get('tipo')=='FVG_bullish' else 'SHORT' if event.get('tipo')=='FVG_bearish' else None,
+        liquidity_inside=event.get('liquidity_inside') or [],
         capture=dict(origin_kind='HTF_FVG_TOUCH',native_capture_confirm_ts=observed,
             htf_location=dict(tf=event.get('tf'),bottom=event.get('bottom'),top=event.get('top'))))
     return '\n\n'.join(format_chain_events([proof]))

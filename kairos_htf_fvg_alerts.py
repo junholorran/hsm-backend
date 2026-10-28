@@ -100,16 +100,5 @@ def format_fvg_touch_message(pair,event):
     if event.get("notice_kind")=="HTF_FVG_M15_STRUCTURE":
         from kairos_htf_fvg_watch import format_structure_watch
         return format_structure_watch(pair,event)
-    from kairos_alert_presentation import price,stamp
-    bull=event.get("tipo")=="FVG_bullish"
-    lines=["📦 KAIROS | FVG "+str(event.get("tf"))+" TOCADO",
-           html.escape(pair)+" · "+("COMPRADOR" if bull else "VENDEDOR"),
-           "📍 Zona: "+price(event.get("bottom"))+"–"+price(event.get("top")),
-           "🕐 "+stamp(event.get("touch_close_ts"))+" Portugal"]
-    confluence=confluence_line(event.get("liquidity_inside"))
-    if confluence:
-        lines.append(confluence)
-    lines+=["👀 Observar quebra M15 de "+("ALTA" if bull else "BAIXA")+" com força.",
-            "M5: aviso antecipado / refinamento; aguardar plano causal.",
-            "CONTEXTO · SEM TRADE · DEMO / MANUAL"]
-    return "\n".join(lines)
+    from kairos_alert_presentation import format_htf_touch
+    return format_htf_touch(pair,event)

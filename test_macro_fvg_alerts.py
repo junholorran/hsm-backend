@@ -66,3 +66,15 @@ def test_macro_structure_notice_keeps_liquidity_context_without_entry_permission
     out=build_structure_watch_events(maps,rows,m5,cut,liquidity_levels=[level])
     assert out[0]["entry_authorized"] is False
     assert out[0]["origins"][0]["liquidity_inside"][0]["type"]=="EQL"
+
+
+def test_closed_m15_capture_excludes_stale_native_active_h4_confluence():
+    now=ts(2026,3,1,11)
+    maps={"H4":{"zones":[zone(ts(2026,3,1))]}}
+    level=dict(tf="H4",type="EQL",level=99.8,confirmed_ts=ts(2026,3,1,8),
+               origin_ts=ts(2026,2,28,20),state="ACTIVE",captured_ts=None)
+    raid=dict(t=now-900000,o=100,h=100.5,l=99.7,c=100.2)
+    event=build_touch_events(maps,bar(now),now+300000,
+                             liquidity_levels=[level],m15_candles=[raid])[0]
+    assert event["liquidity_inside"]==[]
+    assert level["state"]=="ACTIVE" and level["captured_ts"] is None

@@ -62,7 +62,7 @@ def test_first_strong_m15_watch_also_accepts_month_week_and_day(tf):
 
 def test_macro_structure_notice_keeps_liquidity_context_without_entry_permission():
     maps,rows,m5,cut=fixture()
-    level=dict(tf="H1",type="EQL",level=99.5,confirmed_ts=0,origin_ts=-3600000,state="ACTIVE")
+    level=dict(tf="H1",type="EQL",level=99.2,confirmed_ts=0,origin_ts=-3600000,state="ACTIVE")
     out=build_structure_watch_events(maps,rows,m5,cut,liquidity_levels=[level])
     assert out[0]["entry_authorized"] is False
     assert out[0]["origins"][0]["liquidity_inside"][0]["type"]=="EQL"

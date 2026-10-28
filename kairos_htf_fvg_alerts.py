@@ -19,7 +19,7 @@ def formation_close(zone,tf):
     duration={"W1":604800000,"D1":86400000,"H4":14400000,"H1":3600000}.get(tf)
     return born+duration if duration is not None else None
 
-def liquidity_inside_zone(zone,levels,known_before):
+def liquidity_inside_zone(zone,levels,known_before,m15_candles=None,asof=None):
     result=[];seen=set()
     allowed={"EQH","EQL","SWING_HIGH","SWING_LOW","LUDO_SWING_HIGH","LUDO_SWING_LOW",
              "PDH","PDL","PWH","PWL","PMH","PML"}
@@ -30,6 +30,13 @@ def liquidity_inside_zone(zone,levels,known_before):
                 or not isinstance(value,(int,float)) or not math.isfinite(value)
                 or not isinstance(confirmed,(int,float)) or not math.isfinite(confirmed)
                 or confirmed>known_before or not zone["bottom"]<=value<=zone["top"]):
+            continue
+        high=ref["type"] in {"EQH","SWING_HIGH","LUDO_SWING_HIGH","PDH","PWH","PMH"}
+        horizon=known_before if asof is None else asof
+        consumed=any(c["t"]>=confirmed and c["t"]+900000<=horizon
+                     and (c["h"]>value if high else c["l"]<value)
+                     for c in m15_candles or [])
+        if consumed:
             continue
         key=(ref["tf"],ref["type"],value,ref.get("origin_ts"))
         if key in seen:
@@ -53,7 +60,7 @@ def _price(value):
     return f"{float(value):.8f}".rstrip('0').rstrip('.')
 
 
-def build_touch_events(maps, m5_candle, touch_close_ts, liquidity_levels=None):
+def build_touch_events(maps, m5_candle, touch_close_ts, liquidity_levels=None, m15_candles=None):
     if not m5_candle:
         return []
     low = float(m5_candle['l'])
@@ -89,7 +96,7 @@ def build_touch_events(maps, m5_candle, touch_close_ts, liquidity_levels=None):
                 'origin_ts': zone.get('origin_ts'),
                 'created_ts': zone.get('created_ts'),
                 'touch_close_ts': int(touch_close_ts),
-                'liquidity_inside': liquidity_inside_zone(zone,liquidity_levels,m5_candle['t']),
+                'liquidity_inside': liquidity_inside_zone(zone,liquidity_levels,m5_candle['t'],m15_candles=m15_candles,asof=touch_close_ts),
                 'observed_low': low,
                 'observed_high': high,
             })

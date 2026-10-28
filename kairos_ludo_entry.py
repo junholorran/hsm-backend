@@ -126,7 +126,7 @@ def snapshot(pair, tf_map, cutoff, engine):
     from kairos_htf_fvg_alerts import build_touch_events
     last_m5=next((c for c in reversed(tf_map.get('M5',[])) if c['t']+300000<=cutoff),None)
     liquidity_levels=audit.get('levels') or []
-    touch_events=build_touch_events(mapa,last_m5,last_m5['t']+300000,liquidity_levels=liquidity_levels) if last_m5 else []
+    touch_events=build_touch_events(mapa,last_m5,last_m5['t']+300000,liquidity_levels=liquidity_levels,m15_candles=tf_map.get('M15',[])) if last_m5 else []
     from kairos_htf_fvg_watch import build_structure_watch_events
     watch_events=build_structure_watch_events(mapa,tf_map.get('M15',[]),tf_map.get('M5',[]),cutoff,liquidity_levels=liquidity_levels)
     confirmed=(saved['view'].get('m15_break') or {}).get('close_ts')

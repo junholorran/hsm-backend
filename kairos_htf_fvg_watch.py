@@ -60,7 +60,7 @@ def build_structure_watch_events(maps,m15_candles,m5_candles,cutoff,liquidity_le
                 key=(event["close_ts"],event["side"])
                 origin=dict(tf=tf,zone_id=z["id"],tipo=z["tipo"],bottom=bottom,top=top,
                             touch_open_ts=touch["t"],touch_close_ts=confirm,
-                            liquidity_inside=liquidity_inside_zone(z,liquidity_levels,touch["t"]))
+                            liquidity_inside=liquidity_inside_zone(z,liquidity_levels,touch["t"],m15_candles=m15,asof=cutoff))
                 if key not in groups:
                     groups[key]=dict(notice_kind="HTF_FVG_M15_STRUCTURE",direction="LONG" if bull else "SHORT",
                         confirmation_close_ts=event["close_ts"],m15_break=dict(event),

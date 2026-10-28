@@ -12,7 +12,7 @@ jobs:
       - uses: actions/checkout@v4
       - run: python3 -m pip install --break-system-packages pytest pytest-subtests requests flask
       - name: Focused touch to M15 tests
-        run: python3 -m pytest -q test_htf_fvg_watch.py
+        run: python3 -m pytest -q test_htf_fvg_watch.py test_macro_fvg_alerts.py
       - name: Production build patches and full suite
         run: |
           python3 patch_htf_structure_radar_v4.py

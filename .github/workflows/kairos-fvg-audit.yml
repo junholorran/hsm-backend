@@ -1,14 +1,22 @@
-name: Kairos read-only FVG audit
+name: Kairos FVG watch validation
 on:
   push:
     branches: [audit/ludo-fvg-20261028]
 permissions:
   contents: read
 jobs:
-  audit:
+  test:
     runs-on: ubuntu-latest
     timeout-minutes: 8
     steps:
       - uses: actions/checkout@v4
-      - name: Export native candles and audit published Ludo FVG
-        run: python3 tools/audit_live_ludo_fvg.py
+      - run: python3 -m pip install --break-system-packages pytest pytest-subtests requests flask
+      - name: Focused touch to M15 tests
+        run: python3 -m pytest -q test_htf_fvg_watch.py
+      - name: Production build patches and full suite
+        run: |
+          python3 patch_htf_structure_radar_v4.py
+          python3 patch_kairos_telegram_ui.py
+          python3 patch_kairos_htf_fvg_alerts.py
+          python3 patch_telegram_delivery_diag.py
+          python3 -m pytest -q --ignore=legacy-mute

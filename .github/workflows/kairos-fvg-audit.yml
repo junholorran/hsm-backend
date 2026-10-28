@@ -1,0 +1,14 @@
+name: Kairos read-only FVG audit
+on:
+  push:
+    branches: [audit/ludo-fvg-20261028]
+permissions:
+  contents: read
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - name: Export native candles and audit published Ludo FVG
+        run: python3 tools/audit_live_ludo_fvg.py

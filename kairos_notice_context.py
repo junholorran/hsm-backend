@@ -4,6 +4,7 @@ import hashlib
 import html
 import json
 import math
+import time
 
 from kairos_alert_presentation import price,stamp,_pages,format_chain_events
 
@@ -93,7 +94,7 @@ def _liquidity_lines(r):
     return lines
 
 
-def format_pair_update(pair,groups,context,now_ts=None):
+def _format_context_update(pair,groups,context,now_ts=None):
     events=[e for g in groups for e in g['events']]
     observed=max(e['observed_ts'] for e in events)
     lines=[f"Atualização registada: {stamp(observed)} Portugal.",
@@ -132,3 +133,87 @@ def format_pair_update(pair,groups,context,now_ts=None):
     if context.get('asof_ts') is not None:
         lines.append(f"Contexto guardado até {stamp(context['asof_ts'])} Portugal; cada referência conserva a sua hora.")
     return _pages(lines,f'KAIROS | {pair} | ATUALIZAÇÃO')
+
+
+_READY_STAGES = {'M15_ARMADO', 'M5_ARMADO'}
+
+
+def _entry_key(e):
+    p=e.get('plan_details') or {}
+    parent=e.get('parent_zone') or p.get('parent_zone') or {}
+    # Presentation grouping only: never join different structural plans.
+    return json.dumps([e.get('pair'),e.get('direction'),e.get('break_ts'),e.get('observed_ts'),
+        parent, e.get('invalidation',p.get('invalidation'))],sort_keys=True)
+
+
+
+def format_entry_notice(events,now_ts=None):
+    """Render existing ready events; never authorize or execute an order."""
+    e=next((x for x in events if x['stage']=='M15_ARMADO'),events[-1])
+    now_ts=int(time.time()*1000) if now_ts is None else now_ts
+    side=e.get('direction')
+    if side not in ('LONG','SHORT'):
+        return format_chain_events(events,now_ts=now_ts)
+    p=e.get('plan_details') or {};br=p.get('m15_break') or {}
+    parent=e.get('parent_zone') or p.get('parent_zone')
+    zone=parent or e.get('zone') or p.get('m5_zone')
+    if not zone or zone.get('bottom') is None or zone.get('top') is None:
+        return format_chain_events(events,now_ts=now_ts)
+    trade='🟢 COMPRA' if side=='LONG' else '🔴 VENDA'
+    # Only the existing strict primary policy proves the force badge.
+    fire=' 🔥' if e.get('primary_policy') else ''
+    kind=br.get('kind') or e.get('kind') or 'Quebra'
+    lines=[f"{trade} · {e['pair']} · M15",f"{kind} LUDO{fire} · confirmado por fechamento",
+           f"🕐 Quebra: {stamp(e.get('break_ts') or br.get('close_ts'))} Portugal"]
+    origins=set()
+    for source in events:
+        c=source.get('capture') or {};loc=c.get('htf_location') or {}
+        if c.get('origin_kind')=='HTF_FVG_TOUCH':
+            text=f"📦 Origem: toque FVG {loc.get('tf')} {price(loc.get('bottom'))}–{price(loc.get('top'))}"
+        else:
+            typ=str(c.get('liquidity_type') or 'liquidez').replace('LUDO_SWING_LOW','fundo Ludo').replace('LUDO_SWING_HIGH','topo Ludo')
+            text=f"💧 Captura: {c.get('liquidity_tf')} {typ} @ {price(c.get('nivel'))}"
+        text+=f" · {stamp(c.get('native_capture_confirm_ts'))}"
+        if text not in origins:lines.append(text);origins.add(text)
+    tf='M15' if parent else e.get('zone_tf','M5')
+    lines.append(f"📍 Zona de entrada {tf}: {price(zone['bottom'])}–{price(zone['top'])}")
+    refinements=set()
+    for source in events:
+        z=source.get('zone')
+        if source['stage']=='M5_ARMADO' and source.get('zone_tf','M5')=='M5' and z:
+            refinements.add(f"🔍 M5 opcional: {price(z['bottom'])}–{price(z['top'])}")
+    lines.extend(sorted(refinements))
+    extreme=e.get('invalidation',p.get('invalidation'))
+    if extreme is not None:
+        label='fundo' if side=='LONG' else 'topo'
+        lines.append(f"🛑 Referência de proteção ({label}): {price(extreme)} · stop exato não calculado")
+    else:lines.append('🛑 Proteção: não informada · stop não calculado')
+    lines += [f"🕐 Plano disponível: {stamp(max(x['observed_ts'] for x in events))} Portugal",
+              '⏳ Aguardar retorno à zona para a ordem limite manual.',
+              'O Kairos não coloca ordens nem confirma execução na Bybit.']
+    if now_ts is not None and now_ts-max(x['observed_ts'] for x in events)>900000:
+        lines.append('⚠️ Aviso atrasado: confirmar validade atual antes de agir.')
+    return _pages(lines,'🎯 KAIROS | PREPARAR ORDEM LIMITE')
+
+
+def format_pair_update(pair,groups,context,now_ts=None):
+    # Ready plans get their own short message, outside the context envelope.
+    entries={};others=[]
+    terminal={_entry_key(e)
+              for g in groups for e in g['events']
+              if e['stage'] in ('PLANO_INVALIDADO','TOQUE_E_INVALIDACAO','RETESTE_OBSERVADO')}
+    for group in groups:
+        ready=[e for e in group['events'] if e['stage'] in _READY_STAGES and e.get('primary_policy')]
+        rest=[e for e in group['events'] if e not in ready
+              and not (e['stage']=='M15_QUEBRA' and any(
+                  e.get('break_ts')==r.get('break_ts') and e.get('direction')==r.get('direction')
+                  for r in ready))]
+        for e in ready:
+            if _entry_key(e) not in terminal:
+                entries.setdefault(_entry_key(e),[]).append(e)
+        if rest:others.append(dict(group,events=rest))
+    if not entries:return _format_context_update(pair,others or groups,context,now_ts)
+    pages=[]
+    for events in entries.values():pages.extend(format_entry_notice(events,now_ts))
+    if others:pages.extend(_format_context_update(pair,others,context,now_ts))
+    return pages

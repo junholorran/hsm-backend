@@ -486,7 +486,17 @@ def scan(pair, tf_map, cutoff, decision, engine, path=DEFAULT_PATH):
                   f'cutoff={cutoff} previous_unqualified_plans_not_adopted=true', flush=True)
         if not updated or updated.get('asof_ts') != cutoff:
             return None
-        return dict(pair=pair, events=len(events), asof_ts=updated['asof_ts'], view=state_view(updated))
+        summary={}
+        try:
+            from kairos_notice_brief import state_summary
+            recent=[]
+            for row in db.execute('SELECT payload FROM chain_outbox WHERE pair=? ORDER BY seq',(pair,)):
+                notice=json.loads(row[0])
+                if cutoff-14400000 < notice.get('observed_ts',0) <= observed_now:recent.append(notice)
+            summary=state_summary(dict(updated,pair=pair),recent,cutoff)
+        except Exception as exc:
+            print(f'[KAIROS_NOTICE_SUMMARY] unavailable pair={pair} type={type(exc).__name__}',flush=True)
+        return dict(pair=pair, events=len(events), asof_ts=updated['asof_ts'], view=state_view(updated),notice_summary=summary)
 
 
 def state_view(state):

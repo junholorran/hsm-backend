@@ -69,6 +69,8 @@ class DailyIntegrationTests(unittest.TestCase):
             report['asof_ts']+=300000;report['delivery_key']='B'
             self.assertTrue(api.deliver(report,sender,db));count=len(sent)
             report['asof_ts']+=300000;report['delivery_key']='A'
+            self.assertTrue(api.deliver(report,sender,db));self.assertEqual(len(sent),count)
+            report['asof_ts']+=14400000
             self.assertTrue(api.deliver(report,sender,db));self.assertGreater(len(sent),count)
             count=len(sent)
             self.assertTrue(api.deliver(copy.deepcopy(report),sender,db));self.assertEqual(len(sent),count)

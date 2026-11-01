@@ -250,4 +250,5 @@ def format_htf_touch(pair,event):
         liquidity_inside=event.get('liquidity_inside') or [],
         capture=dict(origin_kind='HTF_FVG_TOUCH',native_capture_confirm_ts=observed,
             htf_location=dict(tf=event.get('tf'),bottom=event.get('bottom'),top=event.get('top'))))
-    return '\n\n'.join(format_chain_events([proof]))
+    from kairos_notice_brief import format_event_group
+    return '\n\n'.join(format_event_group([proof]))

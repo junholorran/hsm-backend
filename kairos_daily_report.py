@@ -126,50 +126,8 @@ def notification_parts(report, max_chars=3500, *, detailed=False):
         return []
     if detailed:
         return _detailed_parts(report, max_chars)
-    from kairos_alert_presentation import price
-    d=report['daily']; context=report.get('structure_context') or {}
-    stamp=datetime.fromtimestamp(report['asof_ts']/1000,ZoneInfo('Europe/Lisbon')).strftime('%d/%m/%Y · %H:%M')
-    bias={'BULLISH':'ALTA','BEARISH':'BAIXA','NEUTRO':'NEUTRO'}[d['bias']]
-    arrows={'alta':'↑','baixa':'↓','neutro':'↔'}
-    lines=['🧭 KAIROS | VIÉS DIÁRIO',f"{report['pair']} · {stamp} Portugal",
-           f"Viés: {bias}"+(' · EM REAVALIAÇÃO' if report.get('daily_review_required') else ''),
-           REASONS[d['reason']],
-           'Contexto: '+' | '.join(f'{tf} {arrows.get(context.get(tf), "?")}'
-                                 for tf in ('MN','W1','D1','H4','H1') if tf in context) if context else 'Contexto: indisponível']
-    if report.get('daily_review_required'):
-        review={'CLOSE_ABOVE_PREVIOUS_HIGH':('≤','máxima anterior','h'),
-                'CLOSE_BELOW_PREVIOUS_LOW':('≥','mínima anterior','l'),
-                'HIGH_CAPTURE_AND_CLOSE_INSIDE':('≥','máxima anterior','h'),
-                'LOW_CAPTURE_AND_CLOSE_INSIDE':('≤','mínima anterior','l')}.get(d['reason'])
-        if review:
-            op,label,key=review
-            lines.append(f"Reavaliar: M5 fechou {op} {label} ({price(d['previous_day'][key])}).")
-        else:
-            lines.append('Reavaliar hipótese diária; condição detalhada indisponível.')
-    names={'PDH':'máxima do dia anterior','PDL':'mínima do dia anterior',
-           'PWH':'máxima da semana anterior','PWL':'mínima da semana anterior',
-           'PMH':'máxima do mês anterior','PML':'mínima do mês anterior',
-           'SWING_HIGH':'topo','SWING_LOW':'fundo','EQH':'topos iguais','EQL':'fundos iguais'}
-    for side,label in (('above','Acima'),('below','Abaixo')):
-        lev=(report.get('nearest_available') or {}).get(side)
-        lines.append(f"{label}: "+(f"{price(lev['level'])} · {lev['tf']} {names.get(lev['type'],'nível')}"
-                                  if lev else 'liquidez não identificada'))
-    stages={'SETUP_ANTERIOR_INVALIDADO':'plano anterior invalidado; aguardar nova cadeia',
-            'AGUARDANDO_REACAO_CONFIRMADA':'aguardando reação confirmada após captura',
-            'AGUARDANDO_REINICIALIZACAO_CAUSAL':'aguardando reinicialização causal',
-            'RETESTE_HISTORICO_SEM_NOVA_ENTRADA':'reteste histórico; sem nova entrada',
-            'AGUARDANDO_ZONA_OU_CAPTURA':'aguardando zona relevante ou captura',
-            'AGUARDANDO_CONFIRMACAO_M15':'aguardando confirmação M15 Ludo',
-            'AGUARDANDO_POI_CAUSAL_OU_REFINAMENTO_M5':'M15 confirmado; aguardar POI causal / refinamento M5',
-            'AGUARDANDO_FVG_M15_CONFIRMADO':'quebra forte M15; aguardando confirmação do FVG M15','AGUARDANDO_RETESTE_M15':'plano M15 pronto; aguardar retorno ao FVG; M5 opcional','RETESTE_M15_OBSERVADO':'retorno ao FVG M15 observado em candle M5 fechado',
-            'AGUARDANDO_RETESTE_M5':'aguardando reteste M5',
-            'RETESTE_M5_OBSERVADO':'reteste M5 observado; execução manual não presumida'}
-    stage=stages.get((report.get('stage') or {}).get('code'),'estado operacional indisponível')
-    lines += [f'AGORA: {stage}.','CONTEXTO · SEM TRADE · DEMO/MANUAL']
-    text='\n'.join(lines)
-    if len(text.encode('utf-16-le'))//2 > max_chars:
-        raise ValueError('Compact daily summary exceeds page budget')
-    return [text]
+    from kairos_notice_brief import scheduled_parts
+    return scheduled_parts(report,max_chars)
 
 
 def _detailed_parts(report, max_chars=3500):

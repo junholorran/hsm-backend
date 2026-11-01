@@ -109,8 +109,15 @@ def snapshot(pair, tf_map, cutoff, engine):
     if not saved or saved.get('asof_ts') != cutoff:
         raise RuntimeError('Ludo durable provider did not confirm this cutoff')
     decision['ludo_entry_stage'] = saved['view']
+    decision['notice_summary'] = saved.get('notice_summary') or {}
     decision['direction'] = saved['view'].get('direction')
     decision['intent_m15_found'] = bool(saved['view'].get('m15_break'))
+    decision['notification_fvg_inventory']=[]
+    try:
+        from kairos_notice_brief import fvg_inventory
+        decision['notification_fvg_inventory']=fvg_inventory(mapa,audit.get('levels') or [],tf_map.get('M15',[]),tf_map.get('M5',[]),cutoff)
+    except Exception as exc:
+        print(f'[KAIROS_NOTICE_FVG_MAP] unavailable pair={pair} type={type(exc).__name__}',flush=True)
     daily = None
     from kairos_daily_delivery import scan_report
     try:

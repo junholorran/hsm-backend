@@ -19,8 +19,8 @@ def test_default_is_one_short_summary_without_inventory_or_old_bos():
     r=sample(); before=copy.deepcopy(r)
     pages=notification_parts(r)
     assert len(pages)==1
-    assert len(pages[0].splitlines())<=20
-    assert 'VIÉS DIÁRIO' in pages[0]
+    assert len(pages[0].splitlines())<=35
+    assert 'MAPA DO DIA' in pages[0]
     assert 'D1 ↑ | H4 ↓ | H1 ↓' in pages[0]
     assert 'aguardando confirmação M15' in pages[0]
     assert 'H1 SWING_HIGH @ 319' not in pages[0]

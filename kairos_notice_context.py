@@ -163,7 +163,8 @@ def format_entry_notice(events,now_ts=None):
     # Only the existing strict primary policy proves the force badge.
     fire=' 🔥' if e.get('primary_policy') else ''
     kind=br.get('kind') or e.get('kind') or 'Quebra'
-    lines=[f"{trade} · {e['pair']} · M15",f"{kind} LUDO{fire} · confirmado por fechamento",
+    from kairos_notice_brief import plan_ref
+    lines=[f"{trade} · {e['pair']} · M15",'🔖 Plano: '+plan_ref(e),f"{kind} LUDO{fire} · confirmado por fechamento",
            f"🕐 Quebra: {stamp(e.get('break_ts') or br.get('close_ts'))} Portugal"]
     origins=set()
     for source in events:
@@ -212,8 +213,11 @@ def format_pair_update(pair,groups,context,now_ts=None):
             if _entry_key(e) not in terminal:
                 entries.setdefault(_entry_key(e),[]).append(e)
         if rest:others.append(dict(group,events=rest))
-    if not entries:return _format_context_update(pair,others or groups,context,now_ts)
+    from kairos_notice_brief import format_event_group,brief_groups
+    if not entries:
+        return [page for events in brief_groups(others or groups) for page in format_event_group(events,now_ts)]
     pages=[]
     for events in entries.values():pages.extend(format_entry_notice(events,now_ts))
-    if others:pages.extend(_format_context_update(pair,others,context,now_ts))
+    if others:
+        pages.extend(page for events in brief_groups(others) for page in format_event_group(events,now_ts))
     return pages

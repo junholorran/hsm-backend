@@ -39,10 +39,10 @@ def test_new_fvg_update_includes_previous_liquidity_with_own_confirmation_time()
     groups=bundle_events([(1,poi(3*M15))])
     pages=notice.format_pair_update('BTCUSD',groups,context,now_ts=3*M15)
     text=html.unescape('\n'.join(pages))
-    assert '80611,70' in text and '78470,00–80535,00' in text
-    assert 'CONTEXTO DE LIQUIDEZ' in text and 'POIs HTF' in text
-    assert 'aceitação / continuação' in text and 'sem captura de liquidez presumida' in text
-    assert 'uma única cadeia' in text
+    assert '80611,70' not in text and '78470,00–80535,00' in text
+    assert 'CONTEXTO DE LIQUIDEZ' not in text and 'FVG TOCADO' in text
+    assert 'sem captura de liquidez presumida' in text
+    assert 'uma única cadeia' not in text
 
 
 def test_live_radar_goes_to_durable_outbox_not_parallel_sender(tmp_path,monkeypatch):
@@ -80,8 +80,8 @@ def test_same_cycle_context_and_plan_send_one_update_but_keep_separate_sections(
     plan=proof();plan['observed_ts']=1792875600200
     put(path,[capture,plan]);sent=[]
     assert chains.deliver('BNBUSD',lambda s:sent.append(s) or True,path)
-    assert len(sent)==1
-    text=html.unescape(sent[0]);assert 'ATUALIZAÇÃO' in text and 'AGUARDAR RETESTE M5' in text
+    assert len(sent)==2
+    text=html.unescape('\n'.join(sent));assert 'LIQUIDEZ CAPTURADA' in text and 'AGUARDAR RETESTE M5' in text
     with sqlite3.connect(path) as db:
         assert db.execute('SELECT SUM(ack) FROM chain_outbox').fetchone()[0]==2
 
@@ -103,7 +103,7 @@ def test_unified_pages_preserve_opposite_plan_sections_without_claiming_one_trad
     groups=bundle_events([(1,a),(2,b)])
     text=html.unescape('\n'.join(notice.format_pair_update('BNBUSD',groups,{},now_ts=a['observed_ts'])))
     assert 'PLANO DE COMPRA' in text and 'PLANO DE VENDA' in text
-    assert 'uma única cadeia' in text
+    assert 'uma única cadeia' not in text
 
 
 def test_provider_disables_only_parallel_sender_and_keeps_radar_audit(monkeypatch):

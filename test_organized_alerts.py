@@ -209,7 +209,7 @@ def test_live_capture_and_htf_touch_share_layout_without_mixing_origins(monkeypa
     assert '746,50' in capture_msg and 'M15' in capture_msg and 'Ludo' in capture_msg
     poi_msg=html.unescape(format_fvg_touch_message('BNBUSD',dict(tf='H1',tipo='FVG_bullish',
         bottom=713.01,top=718.73,touch_close_ts=1792855200000)))
-    assert 'ORIGENS IDENTIFICADAS' in poi_msg and 'sem captura de liquidez presumida' in poi_msg
+    assert 'FVG TOCADO' in poi_msg and 'sem captura de liquidez presumida' in poi_msg
     assert '713,01–718,73' in poi_msg and 'SEM TRADE' in poi_msg
 
 

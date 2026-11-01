@@ -38,6 +38,8 @@ def scan_report(pair, tf_map, cutoff, engine, decision):
             registry = engine._kairos_structural_registry(tf_map, cutoff)
         report = build_report(pair, tf_map['D1'], registry, cutoff, cutoff)
         report['structure_context'] = copy.deepcopy(decision.get('context_bias') or {})
+        report['notice_summary'] = copy.deepcopy(decision.get('notice_summary') or {})
+        report['notification_fvg_inventory'] = copy.deepcopy(decision.get('notification_fvg_inventory') or [])
         from kairos_context_map import enrich_report
         report = enrich_report(report, tf_map, decision)
         if report['status'] == 'READY_CANDIDATE':
@@ -57,9 +59,12 @@ def deliver(report, sender, db_path):
             or report.get('status') != 'READY_CANDIDATE'):
         return False
     try:
+        # Native UTC H4 boundaries; first fresh scan can catch up this bucket only.
+        bucket=report['asof_ts']//14400000*14400000
+        schedule_key='SCHEDULED_H4_V1:'+str(bucket)
         parts = notification_parts(report)
         pair = report['pair']; day = report['daily']['available_ts']
-        version = VERSION + (':'+report['delivery_key'] if report.get('delivery_key') else '')
+        version = VERSION + ':'+schedule_key
         # Local worker serialization; SQLite also serializes multiple processes.
         with _DELIVERY_LOCK, sqlite3.connect(db_path, timeout=2) as db:
             db.execute('CREATE TABLE IF NOT EXISTS daily_delivery '
@@ -72,17 +77,17 @@ def deliver(report, sender, db_path):
                        '(pair TEXT,day INTEGER,version TEXT,payload TEXT,'
                        'PRIMARY KEY(pair,day,version))')
             db.execute('BEGIN IMMEDIATE')
-            if report.get('delivery_key'):
+            if schedule_key:
                 current=db.execute('SELECT state_key,delivery_version,last_asof FROM context_current '
                                    'WHERE pair=? AND day=? AND version=?',(pair,day,VERSION)).fetchone()
                 if current and current[2]>report['asof_ts']:
                     db.commit();return True  # Ignore an obsolete queued snapshot.
-                if current and current[0]==report['delivery_key']:
+                if current and current[0]==schedule_key:
                     version=current[1]  # Resume the exact partially acknowledged occurrence.
                 else:
-                    version=VERSION+':'+report['delivery_key']+':'+str(report['asof_ts'])
+                    version=VERSION+':'+schedule_key+':'+str(report['asof_ts'])
                 db.execute('INSERT OR REPLACE INTO context_current VALUES (?,?,?,?,?,?)',
-                           (pair,day,VERSION,report['delivery_key'],version,report['asof_ts']))
+                           (pair,day,VERSION,schedule_key,version,report['asof_ts']))
             # Archive the complete immutable map in the same transaction as
             # its compact pages. Existing frozen pages keep their own evidence.
             existing=db.execute('SELECT 1 FROM daily_delivery WHERE pair=? AND day=? AND version=?',
@@ -93,23 +98,32 @@ def deliver(report, sender, db_path):
             db.execute('INSERT OR IGNORE INTO daily_delivery VALUES (?,?,?,?,0)', 
                        (pair, day, version, json.dumps(parts, ensure_ascii=False)))
             db.commit()
-            while True:
-                db.execute('BEGIN IMMEDIATE')
-                payload, acknowledged = db.execute(
-                    'SELECT parts,acknowledged FROM daily_delivery WHERE pair=? AND day=? AND version=?',
-                    (pair,day,version)).fetchone()
-                frozen = json.loads(payload)
-                if acknowledged >= len(frozen):
-                    db.commit(); return True
-                # Existing sender uses HTML parse mode; escape plain-text payloads.
-                message = html.escape(frozen[acknowledged])
-                if sender(message) is not True:
-                    db.rollback(); return False
-                db.execute('UPDATE daily_delivery SET acknowledged=? WHERE pair=? AND day=? AND version=?',
-                           (acknowledged+1,pair,day,version))
-                db.commit()
-                if acknowledged+1==len(frozen):
-                    print(f'[KAIROS_CONTEXT_MAP] delivered pair={pair} day={day} key={version} pages={len(frozen)} asof={report["asof_ts"]}',flush=True)
+            # Finish already-started frozen summaries before the current one.
+            # Never replay acknowledged pages or backfill wholly unsent old maps.
+            prior=db.execute('SELECT day,version,parts,acknowledged FROM daily_delivery '
+                             'WHERE pair=? AND acknowledged>0 ORDER BY day,rowid',(pair,)).fetchall()
+            queue=[(old_day,old_version) for old_day,old_version,payload,ack in prior
+                   if old_version!=version and ':SCHEDULED_H4_V1:' in old_version
+                   and ack<len(json.loads(payload))]
+            queue.append((day,version))
+            for queued_day,queued_version in queue:
+                while True:
+                    db.execute('BEGIN IMMEDIATE')
+                    payload,acknowledged=db.execute(
+                        'SELECT parts,acknowledged FROM daily_delivery WHERE pair=? AND day=? AND version=?',
+                        (pair,queued_day,queued_version)).fetchone()
+                    frozen=json.loads(payload)
+                    if acknowledged>=len(frozen):db.commit();break
+                    message=html.escape(frozen[acknowledged])
+                    if queued_version!=version:
+                        message='⚠️ Continuação de resumo anterior; não é uma leitura atual.\n'+message
+                    if sender(message) is not True:db.rollback();return False
+                    db.execute('UPDATE daily_delivery SET acknowledged=? WHERE pair=? AND day=? AND version=?',
+                               (acknowledged+1,pair,queued_day,queued_version))
+                    db.commit()
+                    if acknowledged+1==len(frozen):
+                        print(f'[KAIROS_CONTEXT_MAP] delivered pair={pair} day={queued_day} key={queued_version} pages={len(frozen)} asof={report["asof_ts"]}',flush=True)
+            return True
     except Exception as exc:
         print(f'[KAIROS_DAILY_BRIEF] delivery/storage error: {type(exc).__name__}', flush=True)
         return False

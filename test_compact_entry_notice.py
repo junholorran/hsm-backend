@@ -3,7 +3,7 @@ from kairos_notice_context import format_pair_update
 from test_organized_alerts import proof as base_proof
 
 def proof(*a,**kw):
-    e=base_proof(*a,**kw);e["primary_policy"]="existing";return e
+    e=base_proof(*a,**kw);e["primary_policy"]="existing";e["break_strong"]=True;return e
 
 
 def render(events,context=None):
@@ -40,7 +40,7 @@ def test_different_directions_or_parent_zones_remain_separate():
 def test_no_ready_event_keeps_old_notice_and_does_not_invent_force():
     e=proof(stage='M15_QUEBRA')
     assert 'PREPARAR ORDEM LIMITE' not in '\n'.join(render([e]))
-    e=proof(stage='M15_ARMADO');e.pop('primary_policy')
+    e=proof(stage='M15_ARMADO');e.pop('primary_policy');e.pop('break_strong')
     assert '🔥' not in '\n'.join(render([e]))
 
 

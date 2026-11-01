@@ -199,7 +199,9 @@ def advance(state, pair, captures, tf_map, cutoff, engine, observed_ts=None):
         if plan and (stage!='M15_QUEBRA' or facts.get('break_ts')==plan['break']['close_ts']):
             def zone_view(z):
                 return {k:z.get(k) for k in ('id','tipo','bottom','top','created_ts','flip_ts','t','break_ts')} if z else None
-            if plan.get('primary_policy'):event['primary_policy']=plan['primary_policy']
+            if plan.get('primary_policy'):
+                event['primary_policy']=plan['primary_policy']
+                event['break_strong']=primary.notice_is_strong(plan)
             event['plan_details']=dict(m15_break=copy.deepcopy(plan['break']),
                 parent_zone=zone_view(plan.get('parent_zone')),m5_zone=zone_view(plan.get('m5_zone')),
                 invalidation=plan.get('invalidation'),had_retest=bool(plan.get('touched')))
@@ -347,19 +349,22 @@ def advance(state, pair, captures, tf_map, cutoff, engine, observed_ts=None):
                         continue
                 causal_capture = {**capture, 'first_capture_ts':reaction['leg_start_ts'],
                                   'sweep_ts':reaction['leg_start_ts']}
-                if primary.enabled() and (event['open_ts']<state['m15_primary_since'] or not primary.strong_break(m15,event)):
+                if primary.enabled() and (event['open_ts']<state['m15_primary_since'] or not primary.valid_break(m15,event)):
                     continue
                 zone = None if primary.enabled() else _parent_zone(engine, m15, causal_capture, event)
                 episode.update(consumed=True, break_ts=event['close_ts'])
                 emit(cid, rec, 'M15_QUEBRA', break_ts=event['close_ts'], direction=direction,
                      kind=event['kind'], level=event['level'],
                      primary_policy=primary.POLICY if primary.enabled() else None,
+                     break_strong=primary.strong_break(m15,event) if primary.enabled() else False,
                      parent_zone=zone if _zone_ok(zone) else None,invalidation=event['opposite_level'])
                 plan = dict(break_ts=event['close_ts'], observed_ts=observed_ts, invalidated=False,
                             invalidation=event['opposite_level'],
                             episode_key=episode['key'], causal_start_ts=reaction['leg_start_ts'],
                             parent_zone=zone if _zone_ok(zone) else None)
-                if primary.enabled():plan['primary_policy']=primary.POLICY
+                if primary.enabled():
+                    plan['primary_policy']=primary.POLICY
+                    plan['break_strong']=primary.strong_break(m15,event)
                 plan['break'] = copy.deepcopy(event)
                 rec['plan'] = plan
         if origin_removed is not None and origin_removed <= cutoff:

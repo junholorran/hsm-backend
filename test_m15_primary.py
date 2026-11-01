@@ -91,9 +91,9 @@ def test_full_transition_arms_before_retest_without_refinement_and_deduplicates(
     assert events[0]['zone_tf']=='M15' and events[0]['fill_assumed'] is False
 
 
-def test_full_transition_weak_break_or_absent_gap_does_not_arm(monkeypatch):
+def test_full_transition_absent_gap_does_not_arm(monkeypatch):
     monkeypatch.setenv('KAIROS_M15_PRIMARY_FVG','true')
-    for weak,gap in [(True,True),(False,False)]:
+    for weak,gap in [(True,False),(False,False)]:
         state,_=run_native({},20*M15,weak,gap)
         events=[]
         for cut in (21*M15,22*M15,23*M15):

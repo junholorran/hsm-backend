@@ -160,8 +160,9 @@ def format_entry_notice(events,now_ts=None):
     if not zone or zone.get('bottom') is None or zone.get('top') is None:
         return format_chain_events(events,now_ts=now_ts)
     trade='🟢 COMPRA' if side=='LONG' else '🔴 VENDA'
-    # Only the existing strict primary policy proves the force badge.
-    fire=' 🔥' if e.get('primary_policy') else ''
+    # Strength is classification metadata, independent of plan authorization.
+    from kairos_m15_primary import notice_is_strong
+    fire=' 🔥' if notice_is_strong(e) else ''
     kind=br.get('kind') or e.get('kind') or 'Quebra'
     from kairos_notice_brief import plan_ref
     lines=[f"{trade} · {e['pair']} · M15",'🔖 Plano: '+plan_ref(e),f"{kind} LUDO{fire} · confirmado por fechamento",

@@ -71,7 +71,8 @@ def format_event_group(events,now_ts=None):
     elif stage in ('M15_QUEBRA','M5_ANTECIPADO'):
         lines+=_origins(events)
         tf='M15' if stage=='M15_QUEBRA' else 'M5'
-        fire=' 🔥' if e.get('primary_policy') and stage=='M15_QUEBRA' else ''
+        from kairos_m15_primary import notice_is_strong
+        fire=' 🔥' if notice_is_strong(e) and stage=='M15_QUEBRA' else ''
         lines.append(f"✅ {e.get('kind','Quebra')} {tf} · LUDO{fire} além de {price(e.get('level'))}")
         lines.append(f"Fechamento: {stamp(e.get('break_ts'))} Portugal")
         lines.append('⏳ Aguardar terceira vela e FVG confirmado; ordem ainda não preparada.' if tf=='M15' else '⏳ Antecipação M5; M15 e plano ainda por confirmar.')

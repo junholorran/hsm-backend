@@ -185,7 +185,8 @@ def format_chain_events(events,now_ts=None):
     lines+=['','ESTADO / PRÓXIMO PASSO']
     if stage=='M15_ARMADO':
         lines.append('PLANO M15 PRONTO · aguardar retorno ao FVG M15. M5 opcional para refinamento; não exige nova quebra.')
-        lines.append('Quebra com força pelo critério experimental flexível; ordem limite e stop são decisões manuais.')
+        from kairos_m15_primary import notice_is_strong
+        lines.append(('Quebra Ludo forte 🔥' if notice_is_strong(e) else 'Quebra Ludo normal')+'; ordem limite e stop são decisões manuais.')
     elif stage=='M5_ARMADO':
         lines.append('REFINAMENTO M5 OPCIONAL · plano principal M15 independente.' if e.get('primary_policy') else 'AGUARDAR RETESTE M5 · entrada ainda não confirmada.')
     elif stage=='M5_ANTECIPADO':
@@ -195,13 +196,13 @@ def format_chain_events(events,now_ts=None):
     elif stage=='M5_ANTECIPADO_INVALIDADO':
         lines+=_reason_lines(e)
         lines.append('Hipótese antecipada M5 encerrada; não cancela automaticamente um plano M15 independente nem ordens na exchange.')
-    elif stage=='M15_QUEBRA':lines.append('QUEBRA M15 COM FORÇA · aguardar fechamento da terceira vela e confirmação do FVG M15; ainda sem plano pronto.' if e.get('primary_policy') else 'AGUARDAR POI CAUSAL / REFINAMENTO M5 · ainda sem entrada confirmada.')
+    elif stage=='M15_QUEBRA':lines.append('QUEBRA M15 LUDO · aguardar fechamento da terceira vela e confirmação do FVG M15; ainda sem plano pronto.' if e.get('primary_policy') else 'AGUARDAR POI CAUSAL / REFINAMENTO M5 · ainda sem entrada confirmada.')
     elif stage=='POI_HTF_TOCADO':
         expected='ALTA' if side=='LONG' else 'BAIXA' if side=='SHORT' else 'direção a confirmar'
-        lines.append('Observar quebra M15 Ludo de '+expected+' com força; M5 serve para aviso antecipado / refinamento. Aguardar plano causal. SEM TRADE por toque isolado.')
+        lines.append('Observar quebra M15 Ludo de '+expected+'; M5 serve para aviso antecipado / refinamento. Aguardar plano causal. SEM TRADE por toque isolado.')
     elif stage=='CAPTURA':
         from kairos_m15_primary import enabled as m15_primary_enabled
-        lines.append('AGUARDAR REAÇÃO / M5 ANTECIPADO; plano principal: quebra forte M15 → FVG M15 confirmado → aguardar retorno. M5 opcional. SEM TRADE por captura isolada.' if m15_primary_enabled() else 'AGUARDAR REAÇÃO / QUEBRA M5 ANTECIPADA; confirmação M15 Ludo → POI causal → refinamento M5 → reteste. SEM TRADE. Captura ou toque isolado não autoriza entrada.')
+        lines.append('AGUARDAR REAÇÃO / M5 ANTECIPADO; plano principal: quebra Ludo M15 → FVG M15 confirmado → aguardar retorno. M5 opcional. SEM TRADE por captura isolada.' if m15_primary_enabled() else 'AGUARDAR REAÇÃO / QUEBRA M5 ANTECIPADA; confirmação M15 Ludo → POI causal → refinamento M5 → reteste. SEM TRADE. Captura ou toque isolado não autoriza entrada.')
     elif stage=='RETESTE_OBSERVADO':
         lines.append(f"Candle M5 confirmado: {stamp(e.get('candle_ts',0)+M5)} Portugal.")
         if e.get('zone_tf')=='M15':lines.append('Retorno ao FVG M15 observado em candle M5 fechado.')

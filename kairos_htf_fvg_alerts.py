@@ -60,7 +60,7 @@ def _price(value):
     return f"{float(value):.8f}".rstrip('0').rstrip('.')
 
 
-def build_touch_events(maps, m5_candle, touch_close_ts, liquidity_levels=None, m15_candles=None):
+def build_touch_events(maps, m5_candle, touch_close_ts, liquidity_levels=None, m15_candles=None, m5_candles=None):
     if not m5_candle:
         return []
     low = float(m5_candle['l'])
@@ -80,6 +80,13 @@ def build_touch_events(maps, m5_candle, touch_close_ts, liquidity_levels=None, m
             bottom = zone.get('bottom')
             top = zone.get('top')
             if bottom is None or top is None:
+                continue
+            # Native HTF state excludes its open candle. A closed M5 full
+            # fill already deletes the Ludo zone; later returns cannot revive it.
+            observed = [c for c in (m5_candles or [])
+                        if ready <= c['t'] and c['t']+300000 <= touch_close_ts]
+            if any(c['l'] <= float(bottom) if typ=='FVG_bullish'
+                   else c['h'] >= float(top) for c in observed):
                 continue
             if (low <= float(bottom) if typ=='FVG_bullish' else high >= float(top)):
                 continue

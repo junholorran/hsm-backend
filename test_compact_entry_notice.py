@@ -70,3 +70,31 @@ def test_default_clock_keeps_stale_warning(monkeypatch):
     e=proof(stage='M15_ARMADO')
     monkeypatch.setattr(n.time,'time',lambda:(e['observed_ts']+1800000)/1000)
     assert 'Aviso atrasado' in '\n'.join(n.format_entry_notice([e]))
+
+
+def test_ready_retest_and_cancel_keep_same_identity_and_clear_roles():
+    from kairos_notice_brief import plan_ref,stamp
+    for side in ('LONG','SHORT'):
+        ready=proof(stage='M15_ARMADO',direction=side)
+        before=copy.deepcopy(ready)
+        reference=plan_ref(ready)
+        text='\n'.join(render([ready]))
+        assert '🆕 NOVO PLANO' in text and reference in text
+        retest=copy.deepcopy(ready);retest.update(stage='RETESTE_OBSERVADO',observed_ts=ready['observed_ts']+300000,candle_ts=ready['observed_ts'])
+        text='\n'.join(render([retest]))
+        assert 'RETESTE DO MESMO PLANO' in text and reference in text
+        assert 'Quebra original: '+stamp(ready['break_ts']) in text
+        assert '721,50–723,04' in text and 'não é um novo sinal' in text
+        assert 'PREPARAR ORDEM LIMITE' not in text
+        cancelled=copy.deepcopy(retest);cancelled.update(stage='PLANO_INVALIDADO',reason='PARENT_POI_INVALIDATED')
+        assert reference in '\n'.join(render([cancelled]))
+        assert ready==before
+
+
+def test_optional_m5_update_is_refinement_of_existing_plan_not_new_plan():
+    from kairos_notice_brief import plan_ref
+    ready=proof(stage='M15_ARMADO');refined=copy.deepcopy(ready);refined['stage']='M5_ARMADO';refined['zone_tf']='M5'
+    text='\n'.join(render([refined]))
+    assert 'REFINAMENTO DO MESMO PLANO' in text
+    assert plan_ref(ready) in text
+    assert 'NOVO PLANO' not in text and 'PREPARAR ORDEM LIMITE' not in text

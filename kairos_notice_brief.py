@@ -39,7 +39,7 @@ def format_event_group(events,now_ts=None):
             'POI_HTF_TOCADO':'📦 KAIROS | FVG TOCADO','M15_QUEBRA':'👀 KAIROS | QUEBRA M15 CONFIRMADA',
             'M5_ANTECIPADO':'👀 KAIROS | QUEBRA M5 ANTECIPADA',
             'M5_ANTECIPADO_INVALIDADO':'❌ KAIROS | HIPÓTESE M5 ENCERRADA',
-            'RETESTE_OBSERVADO':'👀 KAIROS | RETESTE OBSERVADO',
+            'RETESTE_OBSERVADO':'👀 KAIROS | RETESTE DO MESMO PLANO',
             'PLANO_INVALIDADO':'❌ KAIROS | PLANO INVALIDADO',
             'TOQUE_E_INVALIDACAO':'❌ KAIROS | TOQUE E INVALIDAÇÃO',
             'ORIGEM_INVALIDADA':'❌ KAIROS | ORIGEM INVALIDADA',
@@ -77,10 +77,12 @@ def format_event_group(events,now_ts=None):
         lines.append(f"Fechamento: {stamp(e.get('break_ts'))} Portugal")
         lines.append('⏳ Aguardar terceira vela e FVG confirmado; ordem ainda não preparada.' if tf=='M15' else '⏳ Antecipação M5; M15 e plano ainda por confirmar.')
     elif stage=='RETESTE_OBSERVADO':
+        if e.get('break_ts') is not None:lines.append('🕐 Quebra original: '+stamp(e['break_ts'])+' Portugal')
         parent,zone,_=_facts(e);z=parent or zone
         if z:lines.append(f"📦 Zona M15: {price(z.get('bottom'))}–{price(z.get('top'))}" if parent else f"📦 Zona M5: {price(z.get('bottom'))}–{price(z.get('top'))}")
         if e.get('candle_ts') is not None:lines.append('Retorno confirmado: '+stamp(e['candle_ts']+300000)+' Portugal')
-        lines.append('✅ Preço regressou à zona do plano.')
+        lines.append('✅ Preço regressou à zona da entrada original.')
+        lines.append('Acompanhamento do mesmo plano; não é um novo sinal.')
         lines.append('Execução na Bybit não confirmada; não é uma nova entrada.')
     else:
         parent,zone,_=_facts(e);z=parent or zone

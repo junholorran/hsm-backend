@@ -165,7 +165,9 @@ def format_entry_notice(events,now_ts=None):
     fire=' 🔥' if notice_is_strong(e) else ''
     kind=br.get('kind') or e.get('kind') or 'Quebra'
     from kairos_notice_brief import plan_ref
-    lines=[f"{trade} · {e['pair']} · M15",'🔖 Plano: '+plan_ref(e),f"{kind} LUDO{fire} · confirmado por fechamento",
+    new_plan=any(x['stage']=='M15_ARMADO' for x in events)
+    role='🆕 NOVO PLANO' if new_plan else '🔍 REFINAMENTO DO MESMO PLANO'
+    lines=[f"{trade} · {e['pair']} · M15",'🔖 Plano: '+plan_ref(e),role,f"{kind} LUDO{fire} · confirmado por fechamento",
            f"🕐 Quebra: {stamp(e.get('break_ts') or br.get('close_ts'))} Portugal"]
     origins=set()
     for source in events:
@@ -191,11 +193,12 @@ def format_entry_notice(events,now_ts=None):
         lines.append(f"🛑 Referência de proteção ({label}): {price(extreme)} · stop exato não calculado")
     else:lines.append('🛑 Proteção: não informada · stop não calculado')
     lines += [f"🕐 Plano disponível: {stamp(max(x['observed_ts'] for x in events))} Portugal",
-              '⏳ Aguardar retorno à zona para a ordem limite manual.',
+              ('⏳ Aguardar retorno à zona para a ordem limite manual.' if new_plan else
+               'Refinamento opcional do plano original; não é um novo sinal.'),
               'O Kairos não coloca ordens nem confirma execução na Bybit.']
     if now_ts is not None and now_ts-max(x['observed_ts'] for x in events)>900000:
         lines.append('⚠️ Aviso atrasado: confirmar validade atual antes de agir.')
-    return _pages(lines,'🎯 KAIROS | PREPARAR ORDEM LIMITE')
+    return _pages(lines,'🎯 KAIROS | PREPARAR ORDEM LIMITE' if new_plan else '🔍 KAIROS | REFINAMENTO DO MESMO PLANO')
 
 
 def format_pair_update(pair,groups,context,now_ts=None):

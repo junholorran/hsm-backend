@@ -153,6 +153,20 @@ def _plan_removal(zone, candles, duration, engine, *, armed=True):
     return None
 
 
+
+def _mode2_armed(plan):
+    """Only armed primary native Ludo FVG plans use contextual warnings.
+
+    Waiting/legacy plans keep the existing lifecycle. This changes no zone,
+    capture qualification, protected price, or actual exchange position.
+    """
+    if not plan or plan.get('invalidated') or not plan.get('primary_policy') or plan.get('armed_ts') is None:
+        return False
+    return all(isinstance(plan.get(k),dict) and plan[k].get('ludo_fvg') is True
+               and plan[k].get('tipo') in ('FVG_bullish','FVG_bearish')
+               for k in ('parent_zone','m15_zone'))
+
+
 def _causal_m5(zone, start, ready):
     if zone.get('tipo', '').startswith(('FVG_', 'IFVG_')):
         sources = [zone.get(k) or {} for k in ('source_a', 'source_mid', 'source_c')]
@@ -326,22 +340,33 @@ def advance(state, pair, captures, tf_map, cutoff, engine, observed_ts=None):
             closed = c['t']+M5
             reaction = (origin_reaction if origin_reaction and origin_reaction['confirmed_ts'] <= closed
                         else evidence_at(timeline, closed))
+            context_reasons=[]
+            warning_keys={}
             if reaction and reaction['key'] != (rec.get('episode') or {}).get('key'):
                 old_plan = rec.get('plan')
-                if old_plan and not old_plan.get('invalidated'):
-                    old_plan['invalidated'] = True
-                    zone = old_plan.get('m15_zone') or old_plan.get('m5_zone')
-                    ambiguous = bool(_zone_ok(zone) and not old_plan.get('touched') and c['t'] >= old_plan['armed_ts']
-                                     and c['h'] >= zone['bottom'] and c['l'] <= zone['top'])
-                    emit(cid, rec, 'TOQUE_E_INVALIDACAO' if ambiguous else 'PLANO_INVALIDADO',
-                         break_ts=old_plan['break']['close_ts'], candle_ts=c['t'],
-                         direction='LONG' if old_plan['break']['side'] == 'UP' else 'SHORT',
-                         reason='CONFIRMED_REACTION_CHANGED',new_reaction=copy.deepcopy(reaction),
-                         invalidation_reasons=[dict(code='CONFIRMED_REACTION_CHANGED',
-                             level=capture.get('nivel'),confirmed_ts=reaction['confirmed_ts'])])
-                rec['reaction'] = copy.deepcopy(reaction)
-                rec['episode'] = dict(key=reaction['key'], consumed=False)
-                rec['plan'] = None
+                if _mode2_armed(old_plan):
+                    # Preserve the original causal episode and identity. A new
+                    # reaction is context, not a replacement of this armed plan.
+                    if old_plan.get('last_context_reaction_key') != reaction['key']:
+                        context_reasons.append(dict(code='CONFIRMED_REACTION_CHANGED',
+                            level=capture.get('nivel'),confirmed_ts=reaction['confirmed_ts'],
+                            reaction_state=reaction['state'],reaction_direction=reaction.get('direction')))
+                        warning_keys['last_context_reaction_key']=reaction['key']
+                else:
+                    if old_plan and not old_plan.get('invalidated'):
+                        old_plan['invalidated'] = True
+                        zone = old_plan.get('m15_zone') or old_plan.get('m5_zone')
+                        ambiguous = bool(_zone_ok(zone) and not old_plan.get('touched') and c['t'] >= old_plan['armed_ts']
+                                         and c['h'] >= zone['bottom'] and c['l'] <= zone['top'])
+                        emit(cid, rec, 'TOQUE_E_INVALIDACAO' if ambiguous else 'PLANO_INVALIDADO',
+                             break_ts=old_plan['break']['close_ts'], candle_ts=c['t'],
+                             direction='LONG' if old_plan['break']['side'] == 'UP' else 'SHORT',
+                             reason='CONFIRMED_REACTION_CHANGED',new_reaction=copy.deepcopy(reaction),
+                             invalidation_reasons=[dict(code='CONFIRMED_REACTION_CHANGED',
+                                 level=capture.get('nivel'),confirmed_ts=reaction['confirmed_ts'])])
+                    rec['reaction'] = copy.deepcopy(reaction)
+                    rec['episode'] = dict(key=reaction['key'], consumed=False)
+                    rec['plan'] = None
             plan = rec.get('plan')
             if plan and not plan.get('invalidated'):
                 zone = plan.get('m15_zone') or plan.get('m5_zone')
@@ -372,6 +397,12 @@ def advance(state, pair, captures, tf_map, cutoff, engine, observed_ts=None):
                                             zone_tf='M15' if name=='parent_zone' else 'M5', **removal))
                 contrary = next((e for e in fresh if e['close_ts'] == closed
                                  and e['side'] != plan['break']['side']), None)
+                if contrary is not None and _mode2_armed(plan):
+                    if plan.get('last_context_opposite_ts') != contrary['close_ts']:
+                        context_reasons.append(dict(code='OPPOSITE_M15_BREAK',kind=contrary['kind'],
+                            level=contrary['level'],close=contrary.get('close'),confirmed_ts=contrary['close_ts']))
+                        warning_keys['last_context_opposite_ts']=contrary['close_ts']
+                    contrary=None
                 invalid |= contrary is not None
                 invalid |= origin_removed is not None and origin_removed <= closed
                 if contrary is not None:reasons.insert(0,dict(code='OPPOSITE_M15_BREAK',
@@ -385,12 +416,19 @@ def advance(state, pair, captures, tf_map, cutoff, engine, observed_ts=None):
                          else 'PLANO_INVALIDADO', break_ts=plan['break']['close_ts'],
                          candle_ts=c['t'], direction='LONG' if up else 'SHORT',
                          reason=reasons[0]['code'],invalidation_reasons=reasons)
-                elif touch and not plan.get('touched'):
-                    plan['touched'] = True
-                    plan['retest'] = dict(c)
-                    emit(cid, rec, 'RETESTE_OBSERVADO', break_ts=plan['break']['close_ts'],
-                         candle_ts=c['t'], zone=zone, zone_tf='M15' if plan.get('primary_policy') else 'M5',
-                         direction='LONG' if up else 'SHORT')
+                else:
+                    if context_reasons:
+                        plan.update(warning_keys)
+                        emit(cid,rec,'PLANO_EM_ATENCAO',break_ts=plan['break']['close_ts'],
+                             candle_ts=c['t'],direction='LONG' if up else 'SHORT',
+                             context_reasons=context_reasons,plan_maintained=True,
+                             plan_invalidation_policy='MODE2_LUDO_FVG_EXTREME')
+                    if touch and not plan.get('touched'):
+                        plan['touched'] = True
+                        plan['retest'] = dict(c)
+                        emit(cid, rec, 'RETESTE_OBSERVADO', break_ts=plan['break']['close_ts'],
+                             candle_ts=c['t'], zone=zone, zone_tf='M15' if plan.get('primary_policy') else 'M5',
+                             direction='LONG' if up else 'SHORT')
             for event in (e for e in fresh if e['close_ts'] == closed):
                 if origin_removed is not None and origin_removed <= closed:
                     continue
@@ -722,3 +760,5 @@ def submit(pair, sender, path=DEFAULT_PATH):
         if _WORKER is None:
             _WORKER = threading.Thread(target=_drain, args=(sender, path), daemon=True)
             _WORKER.start()
+
+print('[KAIROS_PLAN_LIFECYCLE] mode=2 scope=ARMED_PRIMARY_LUDO_FVG context_changes=WARN price_and_data_safeguards=UNCHANGED',flush=True)

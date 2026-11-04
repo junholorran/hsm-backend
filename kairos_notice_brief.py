@@ -41,6 +41,7 @@ def format_event_group(events,now_ts=None):
             'M5_ANTECIPADO_INVALIDADO':'❌ KAIROS | HIPÓTESE M5 ENCERRADA',
             'RETESTE_OBSERVADO':'👀 KAIROS | RETESTE DO MESMO PLANO',
             'PLANO_INVALIDADO':'❌ KAIROS | PLANO INVALIDADO',
+            'PLANO_EM_ATENCAO':'⚠️ KAIROS | PLANO EM ATENÇÃO',
             'TOQUE_E_INVALIDACAO':'❌ KAIROS | TOQUE E INVALIDAÇÃO',
             'ORIGEM_INVALIDADA':'❌ KAIROS | ORIGEM INVALIDADA',
             'HISTORICO_INSUFICIENTE':'⚠️ KAIROS | HISTÓRICO INSUFICIENTE'}
@@ -76,6 +77,18 @@ def format_event_group(events,now_ts=None):
         lines.append(f"✅ {e.get('kind','Quebra')} {tf} · LUDO{fire} além de {price(e.get('level'))}")
         lines.append(f"Fechamento: {stamp(e.get('break_ts'))} Portugal")
         lines.append('⏳ Aguardar terceira vela e FVG confirmado; ordem ainda não preparada.' if tf=='M15' else '⏳ Antecipação M5; M15 e plano ainda por confirmar.')
+    elif stage=='PLANO_EM_ATENCAO':
+        parent,zone,_=_facts(e);z=parent or zone
+        if z:lines.append(f"📦 Zona M15: {price(z.get('bottom'))}–{price(z.get('top'))}")
+        if e.get('break_ts') is not None:lines.append('🕐 Quebra original: '+stamp(e['break_ts'])+' Portugal')
+        reasons=[]
+        for source in events:
+            for reason in source.get('context_reasons') or []:
+                if reason not in reasons:reasons.append(reason)
+        lines+=_reason_lines(dict(e,invalidation_reasons=reasons))
+        lines.append('✅ Plano mantido: FVG e proteção estrutural sem falha confirmada.')
+        lines.append('Aviso de contexto; não é cancelamento nem uma nova entrada.')
+        lines.append('Ordens e posições na Bybit continuam sob gestão manual.')
     elif stage=='RETESTE_OBSERVADO':
         if e.get('break_ts') is not None:lines.append('🕐 Quebra original: '+stamp(e['break_ts'])+' Portugal')
         parent,zone,_=_facts(e);z=parent or zone
@@ -148,7 +161,7 @@ def scheduled_parts(report,max_chars=3500):
         touched=z.get('last_touch_close_ts')
         if touched is not None and cut-H4<touched<=cut:
             lines.append(f"• {stamp(touched)}: toque observado FVG {z['tf']} {price(z.get('bottom'))}–{price(z.get('top'))}")
-    labels={'CAPTURA':'captura','RADAR_CONTEXT':'reação atualizada','M15_QUEBRA':'quebra M15','M15_ARMADO':'plano M15 pronto','M5_ARMADO':'refinamento M5','RETESTE_OBSERVADO':'reteste observado','PLANO_INVALIDADO':'plano invalidado','TOQUE_E_INVALIDACAO':'toque e invalidação','M5_ANTECIPADO':'antecipação M5'}
+    labels={'PLANO_EM_ATENCAO':'plano mantido em atenção','CAPTURA':'captura','RADAR_CONTEXT':'reação atualizada','M15_QUEBRA':'quebra M15','M15_ARMADO':'plano M15 pronto','M5_ARMADO':'refinamento M5','RETESTE_OBSERVADO':'reteste observado','PLANO_INVALIDADO':'plano invalidado','TOQUE_E_INVALIDACAO':'toque e invalidação','M5_ANTECIPADO':'antecipação M5'}
     selected=sorted(recent.values(),key=lambda e:e.get('observed_ts',0),reverse=True)
     for e in selected[:5]:
         c=e.get('capture') or {};r=e.get('radar_event') or {}

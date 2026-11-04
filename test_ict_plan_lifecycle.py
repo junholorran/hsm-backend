@@ -66,7 +66,7 @@ def test_unverifiable_saved_ludo_zone_cannot_keep_plan_alive(damage):
     assert chains._plan_removal(z,rows,D,EN)['basis']=='FVG_EVIDENCE_MISSING'
 
 
-def run_plan(state,cutoff,side='LONG',close_failure=False,protection_failure=False):
+def run_plan(state,cutoff,side='LONG',close_failure=False,protection_failure=False,extra_events=(),reaction_override=None):
     from unittest.mock import patch
     from test_m15_primary import inputs
     import kairos_m15_primary as primary
@@ -85,10 +85,10 @@ def run_plan(state,cutoff,side='LONG',close_failure=False,protection_failure=Fal
     rx=dict(key='rx',state='REJECTION_RECLAIM',direction=side,confirmed_ts=21*D,leg_start_ts=20*D)
     engine=SimpleNamespace(_kairos_fvg_states=fvg_states,_kairos_m5_refine_zone=lambda *a,**k:None,
                            _kairos_select_entry_zone=lambda *a,**k:None)
-    def snapshot(cs,d,cut):return dict(status='OK',events=[e] if d==D and cut>=e['close_ts'] else [])
+    def snapshot(cs,d,cut):return dict(status='OK',events=[x for x in [e]+list(extra_events) if x['close_ts']<=cut] if d==D else [])
     with patch.object(chains,'structure_snapshot',side_effect=snapshot), \
          patch.object(chains,'reaction_timeline',return_value=[]), \
-         patch.object(chains,'evidence_at',side_effect=lambda tl,ts:rx if ts>=21*D else None):
+         patch.object(chains,'evidence_at',side_effect=lambda tl,ts:(reaction_override if reaction_override and ts>=reaction_override['confirmed_ts'] else rx) if ts>=21*D else None):
         return chains.advance(state,'SOLUSD',[c],dict(M15=m15,M5=m5),cutoff,engine,observed_ts=cutoff)
 
 @pytest.mark.parametrize('side',['LONG','SHORT'])

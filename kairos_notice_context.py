@@ -204,12 +204,19 @@ def format_entry_notice(events,now_ts=None):
 def format_pair_update(pair,groups,context,now_ts=None):
     # Ready plans get their own short message, outside the context envelope.
     entries={};others=[]
+    from kairos_notice_brief import plan_ref
+    # A catch-up scan can contain an earlier context warning and a later
+    # confirmed terminal for the same frozen plan. Keep both audit receipts,
+    # but never present the already-closed plan as currently maintained.
+    closed_refs={plan_ref(e) for g in groups for e in g['events']
+                 if e['stage'] in ('PLANO_INVALIDADO','TOQUE_E_INVALIDACAO')}
     terminal={_entry_key(e)
               for g in groups for e in g['events']
               if e['stage'] in ('PLANO_INVALIDADO','TOQUE_E_INVALIDACAO','RETESTE_OBSERVADO')}
     for group in groups:
         ready=[e for e in group['events'] if e['stage'] in _READY_STAGES and e.get('primary_policy')]
         rest=[e for e in group['events'] if e not in ready
+              and not (e['stage']=='PLANO_EM_ATENCAO' and plan_ref(e) in closed_refs)
               and not (e['stage']=='M15_QUEBRA' and any(
                   e.get('break_ts')==r.get('break_ts') and e.get('direction')==r.get('direction')
                   for r in ready))]

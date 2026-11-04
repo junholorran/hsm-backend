@@ -56,10 +56,11 @@ def bundle_events(rows):
         parent,zone,extreme=_facts(chosen)
         # Without a structural confirmation, independent origins stay separate.
         origin=None if chosen.get('break_ts') else chosen['capture_id']
+        context_warning=chosen['stage']=='PLANO_EM_ATENCAO'
         signature=[chosen['pair'],chosen['observed_ts'],chosen['stage'],chosen.get('direction'),
-                   chosen.get('break_ts'),chosen.get('candle_ts'),origin,_zone(parent),_zone(zone),extreme,
-                   chosen.get('reason'),chosen.get('invalidation_reasons'),
-                   (chosen.get('plan_details') or {}).get('had_retest')]
+                   chosen.get('break_ts'),chosen.get('candle_ts'),origin,_zone(parent),None if context_warning and parent else _zone(zone),extreme,
+                   chosen.get('reason'),chosen.get('invalidation_reasons'),None if context_warning else chosen.get('context_reasons'),
+                   None if context_warning else (chosen.get('plan_details') or {}).get('had_retest')]
         key=json.dumps(signature,sort_keys=True,separators=(',',':'))
         if key not in index:
             index[key]=dict(seqs=[],events=[]);groups.append(index[key])
@@ -92,6 +93,10 @@ def _reason_lines(e):
                   'NO_DIRECT_M15_FVG':'A terceira vela não confirmou um FVG M15 válido ligado à quebra',
                   'HISTORY_LOST':'Histórico insuficiente para continuar a sequência'}.get(code,
                   'Motivo específico não disponível no evento original')
+        if code=='CONFIRMED_REACTION_CHANGED' and r.get('reaction_state'):
+            label={'REJECTION_RECLAIM':'rejeição / recuperação','ACCEPTANCE_CONTINUATION':'aceitação / continuação'}.get(r['reaction_state'],'indefinida')
+            side={'LONG':'COMPRA','SHORT':'VENDA'}.get(r.get('reaction_direction'),'direção a confirmar')
+            text+=f"; reação atual: {label} · {side} (contexto)"
         if r.get('confirmed_ts') is not None:text+=f" | {stamp(r['confirmed_ts'])} Portugal"
         lines.append('• '+text)
     return lines
@@ -126,6 +131,7 @@ def format_chain_events(events,now_ts=None):
         'M15_QUEBRA':f'🔎 {trade} | M15 CONFIRMADO','M5_ARMADO':f'🟡 PLANO DE {trade}',
         'RETESTE_OBSERVADO':f'👀 {trade} | RETESTE OBSERVADO',
         'PLANO_INVALIDADO':f'🚫 PLANO DE {trade} INVALIDADO',
+        'PLANO_EM_ATENCAO':f'⚠️ PLANO DE {trade} EM ATENÇÃO',
         'TOQUE_E_INVALIDACAO':'⚠️ TOQUE E INVALIDAÇÃO NO MESMO CANDLE',
         'ORIGEM_INVALIDADA':'🚫 SEQUÊNCIA DESTA ORIGEM ENCERRADA',
         'HISTORICO_INSUFICIENTE':'⚠️ HISTÓRICO INSUFICIENTE'}
@@ -213,6 +219,9 @@ def format_chain_events(events,now_ts=None):
         if e.get('zone_tf')=='M15':lines.append('Retorno ao FVG M15 observado em candle M5 fechado.')
         lines.append('Reteste observado; execução não comprovada. Confirme o estado atual antes de decidir.')
         if e['observed_ts']-e.get('candle_ts',0)-M5>=M5:lines.append('Reteste histórico; nenhuma nova entrada presumida agora.')
+    elif stage=='PLANO_EM_ATENCAO':
+        lines+=_reason_lines(dict(e,invalidation_reasons=e.get('context_reasons') or []))
+        lines.append('Plano mantido: FVG e proteção estrutural sem falha confirmada. Aviso de contexto; não é cancelamento nem nova entrada.')
     elif stage in ('PLANO_INVALIDADO','TOQUE_E_INVALIDACAO'):
         lines+=_reason_lines(e)
         new=e.get('new_reaction')

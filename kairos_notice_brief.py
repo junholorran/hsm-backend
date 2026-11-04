@@ -78,11 +78,16 @@ def format_event_group(events,now_ts=None):
         lines.append('⏳ Aguardar terceira vela e FVG confirmado; ordem ainda não preparada.' if tf=='M15' else '⏳ Antecipação M5; M15 e plano ainda por confirmar.')
     elif stage=='RETESTE_OBSERVADO':
         parent,zone,_=_facts(e);z=parent or zone
-        if z:lines.append(f"📦 Zona M15: {price(z['bottom'])}–{price(z['top'])}" if parent else f"📦 Zona M5: {price(z['bottom'])}–{price(z['top'])}")
+        if z:lines.append(f"📦 Zona M15: {price(z.get('bottom'))}–{price(z.get('top'))}" if parent else f"📦 Zona M5: {price(z.get('bottom'))}–{price(z.get('top'))}")
         if e.get('candle_ts') is not None:lines.append('Retorno confirmado: '+stamp(e['candle_ts']+300000)+' Portugal')
         lines.append('✅ Preço regressou à zona do plano.')
         lines.append('Execução na Bybit não confirmada; não é uma nova entrada.')
     else:
+        parent,zone,_=_facts(e);z=parent or zone
+        if z:lines.append(f"📦 Zona {'M15' if parent else 'M5'}: {price(z.get('bottom'))}–{price(z.get('top'))}")
+        if parent and zone and any(r.get('code')=='M5_POI_INVALIDATED' for r in e.get('invalidation_reasons',[])):
+            lines.append(f"📦 Zona M5: {price(zone.get('bottom'))}–{price(zone.get('top'))}")
+        if e.get('break_ts') is not None:lines.append('🕐 Quebra original: '+stamp(e['break_ts'])+' Portugal')
         lines+=_reason_lines(e)
         lines.append('Este aviso não cancela ordens na Bybit; verificar ordens e posições manualmente.')
         if stage=='TOQUE_E_INVALIDACAO':lines.append('Ordem dos movimentos dentro da vela desconhecida; execução não presumida.')
@@ -140,7 +145,7 @@ def scheduled_parts(report,max_chars=3500):
     for z in report.get('notification_fvg_inventory') or []:
         touched=z.get('last_touch_close_ts')
         if touched is not None and cut-H4<touched<=cut:
-            lines.append(f"• {stamp(touched)}: toque observado FVG {z['tf']} {price(z['bottom'])}–{price(z['top'])}")
+            lines.append(f"• {stamp(touched)}: toque observado FVG {z['tf']} {price(z.get('bottom'))}–{price(z.get('top'))}")
     labels={'CAPTURA':'captura','RADAR_CONTEXT':'reação atualizada','M15_QUEBRA':'quebra M15','M15_ARMADO':'plano M15 pronto','M5_ARMADO':'refinamento M5','RETESTE_OBSERVADO':'reteste observado','PLANO_INVALIDADO':'plano invalidado','TOQUE_E_INVALIDACAO':'toque e invalidação','M5_ANTECIPADO':'antecipação M5'}
     selected=sorted(recent.values(),key=lambda e:e.get('observed_ts',0),reverse=True)
     for e in selected[:5]:
@@ -178,7 +183,7 @@ def scheduled_parts(report,max_chars=3500):
             if not candidates:continue
             z=min(candidates,key=lambda z:min(abs(z['bottom']-(px or z['bottom'])),abs(z['top']-(px or z['top']))))
             chosen.append(z)
-            lines.append(f"• {tf} {'comprador' if direction=='alta' else 'vendedor'} {price(z['bottom'])}–{price(z['top'])}"+(' · preço na zona' if z.get('inside') else ''))
+            lines.append(f"• {tf} {'comprador' if direction=='alta' else 'vendedor'} {price(z.get('bottom'))}–{price(z.get('top'))}"+(' · preço na zona' if z.get('inside') else ''))
             from kairos_htf_fvg_alerts import confluence_line
             confluence=confluence_line(z.get('liquidity_inside'))
             if confluence:lines.append('  '+confluence)

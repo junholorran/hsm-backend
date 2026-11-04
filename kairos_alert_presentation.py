@@ -73,7 +73,12 @@ def _reason_lines(e):
     lines=[]
     for r in reasons:
         code=r.get('code')
-        if code=='OPPOSITE_M15_BREAK':
+        if r.get('basis')=='FVG_CLOSE_THROUGH':
+            tf=r.get('zone_tf') or ('M15' if code=='PARENT_POI_INVALIDATED' else 'M5')
+            text=f"Fechamento {tf} {price(r.get('close'))} além da borda {price(r.get('level'))} do FVG; falha da zona do plano"
+        elif r.get('basis')=='FVG_EVIDENCE_MISSING':
+            text='Evidência das velas do FVG indisponível ou inconsistente; plano encerrado por falta de validação, sem falha de preço comprovada'
+        elif code=='OPPOSITE_M15_BREAK':
             text=f"{r.get('kind') or 'Quebra'} contrário M15 além de {price(r.get('level'))}; fechamento {price(r.get('close'))}"
         else:
             text={'CONFIRMED_REACTION_CHANGED':('A reação confirmada da origem mudou'+

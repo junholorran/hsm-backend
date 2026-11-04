@@ -104,6 +104,55 @@ def _removed_at(zone, candles, duration, engine):
     return min(removals) if removals else None
 
 
+def _plan_removal(zone, candles, duration, engine, *, armed=True):
+    """Plan-only failure evidence; native Ludo drawings keep their wick rules.
+
+    A saved, proven Ludo FVG may remain an armed plan after full wick fill or
+    drawing-history eviction. Its own timeframe must CLOSE beyond the far
+    boundary. Structural protection and contrary breaks remain independent.
+    Missing evidence never authorizes continued monitoring as a valid plan.
+    """
+    if not zone:
+        return None
+    if not armed or zone.get('ludo_fvg') is not True or zone.get('tipo') not in ('FVG_bullish','FVG_bearish'):
+        removed = _removed_at(zone, candles, duration, engine)
+        return dict(confirmed_ts=removed) if removed is not None else None
+    keys = ('t','o','h','l','c')
+    def valid(c):
+        return (isinstance(c,dict) and all(isinstance(c.get(k),(int,float))
+                and not isinstance(c[k],bool) and math.isfinite(c[k]) for k in keys)
+                and c['l'] <= min(c['o'],c['c']) <= max(c['o'],c['c']) <= c['h'])
+    # Unknown saved evidence is unusable at every replayed step. Do not date
+    # its failure at the batch tail and emit positive retests in the meantime.
+    missing = dict(basis='FVG_EVIDENCE_MISSING',confirmed_ts=None)
+    sources = [zone.get(k) for k in ('source_a','source_mid','source_c')]
+    if not _zone_ok(zone) or not all(valid(c) for c in sources):
+        return missing
+    a,b,c = sources
+    if b['t']-a['t'] != duration or c['t']-b['t'] != duration or zone.get('created_ts') != c['t']:
+        return missing
+    bull = zone['tipo']=='FVG_bullish'
+    top,bottom = (c['l'],a['h']) if bull else (a['l'],c['h'])
+    if (top <= bottom or zone['top'] != top or zone['bottom'] != bottom
+            or zone.get('direcao') != ('alta' if bull else 'baixa')):
+        return missing
+    start = next((i for i,r in enumerate(candles) if isinstance(r,dict) and r.get('t')==a['t']),None)
+    rows = candles[start:] if start is not None else []
+    if (len(rows)<3 or not all(valid(r) for r in rows[:3])
+            or any(any(saved[k]!=actual[k] for k in keys) for saved,actual in zip(sources,rows[:3]))):
+        return missing
+    level = bottom if bull else top
+    previous = c['t']
+    for r in rows[3:]:
+        if not valid(r) or r['t']-previous != duration:
+            return missing
+        if (r['c'] < level if bull else r['c'] > level):
+            return dict(basis='FVG_CLOSE_THROUGH',confirmed_ts=r['t']+duration,
+                        candle_ts=r['t'],close=r['c'],level=level,bottom=bottom,top=top)
+        previous = r['t']
+    return None
+
+
 def _causal_m5(zone, start, ready):
     if zone.get('tipo', '').startswith(('FVG_', 'IFVG_')):
         sources = [zone.get(k) or {} for k in ('source_a', 'source_mid', 'source_c')]
@@ -282,7 +331,7 @@ def advance(state, pair, captures, tf_map, cutoff, engine, observed_ts=None):
                 if old_plan and not old_plan.get('invalidated'):
                     old_plan['invalidated'] = True
                     zone = old_plan.get('m15_zone') or old_plan.get('m5_zone')
-                    ambiguous = bool(zone and not old_plan.get('touched') and c['t'] >= old_plan['armed_ts']
+                    ambiguous = bool(_zone_ok(zone) and not old_plan.get('touched') and c['t'] >= old_plan['armed_ts']
                                      and c['h'] >= zone['bottom'] and c['l'] <= zone['top'])
                     emit(cid, rec, 'TOQUE_E_INVALIDACAO' if ambiguous else 'PLANO_INVALIDADO',
                          break_ts=old_plan['break']['close_ts'], candle_ts=c['t'],
@@ -297,21 +346,30 @@ def advance(state, pair, captures, tf_map, cutoff, engine, observed_ts=None):
             if plan and not plan.get('invalidated'):
                 zone = plan.get('m15_zone') or plan.get('m5_zone')
                 up = plan['break']['side'] == 'UP'
-                touch = bool(zone and c['t'] >= plan['armed_ts']
+                touch_zone_valid = _zone_ok(zone)
+                if plan.get('m15_zone'):
+                    parent = plan.get('parent_zone') or {}
+                    touch_zone_valid = touch_zone_valid and all(zone.get(k)==parent.get(k) for k in ('id','tipo','bottom','top','created_ts'))
+                touch = bool(touch_zone_valid and plan.get('armed_ts') is not None and c['t'] >= plan['armed_ts']
                              and c['h'] >= zone['bottom'] and c['l'] <= zone['top'])
                 invalid = c['l'] < plan['invalidation'] if up else c['h'] > plan['invalidation']
                 reasons=[]
-                if invalid:reasons.append(dict(code='STRUCTURAL_EXTREME_BREACHED',
+                if zone and not touch_zone_valid:
+                    invalid = True
+                    reasons.append(dict(code='PARENT_POI_INVALIDATED' if plan.get('m15_zone') else 'M5_POI_INVALIDATED',
+                        basis='FVG_EVIDENCE_MISSING',confirmed_ts=closed))
+                if invalid and (c['l'] < plan['invalidation'] if up else c['h'] > plan['invalidation']):reasons.append(dict(code='STRUCTURAL_EXTREME_BREACHED',
                     level=plan['invalidation'],confirmed_ts=closed))
                 for name, rows, duration in (('parent_zone', m15, M15), ('m5_zone', m5, M5)):
                     if plan.get('primary_policy') and name=='m5_zone':continue
                     key = (plan['break']['close_ts'], name)
                     if key not in removals:
-                        removals[key] = _removed_at(plan.get(name), rows, duration, engine)
-                    invalid |= removals[key] is not None and removals[key] <= closed
-                    if removals[key] is not None and removals[key] <= closed:
+                        removals[key] = _plan_removal(plan.get(name), rows, duration, engine, armed=plan.get('armed_ts') is not None)
+                    removal = removals[key]
+                    invalid |= removal is not None and (removal['confirmed_ts'] is None or removal['confirmed_ts'] <= closed)
+                    if removal is not None and (removal['confirmed_ts'] is None or removal['confirmed_ts'] <= closed):
                         reasons.append(dict(code='PARENT_POI_INVALIDATED' if name=='parent_zone' else 'M5_POI_INVALIDATED',
-                                            confirmed_ts=removals[key]))
+                                            zone_tf='M15' if name=='parent_zone' else 'M5', **removal))
                 contrary = next((e for e in fresh if e['close_ts'] == closed
                                  and e['side'] != plan['break']['side']), None)
                 invalid |= contrary is not None
@@ -395,12 +453,13 @@ def advance(state, pair, captures, tf_map, cutoff, engine, observed_ts=None):
         parent = plan.get('parent_zone')
         if not parent:
             continue
-        if _removed_at(parent, m15, M15, engine) is not None:
+        parent_removal = _plan_removal(parent, m15, M15, engine, armed=plan.get('armed_ts') is not None)
+        if parent_removal is not None:
             plan['invalidated'] = True
             emit(cid, rec, 'PLANO_INVALIDADO', break_ts=plan['break']['close_ts'],
                  direction='LONG' if plan['break']['side'] == 'UP' else 'SHORT',
                  reason='PARENT_POI_INVALIDATED',invalidation_reasons=[dict(code='PARENT_POI_INVALIDATED',
-                     confirmed_ts=_removed_at(parent,m15,M15,engine))])
+                     zone_tf='M15',**parent_removal)])
             continue
         causal_capture = {**capture, 'first_capture_ts':plan['causal_start_ts'],
                           'sweep_ts':plan['causal_start_ts']}

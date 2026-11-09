@@ -16,6 +16,15 @@ def plan_ref(e):
     return str(e.get('pair','')).replace('USD','')+'-'+hashlib.sha256(json.dumps(key).encode()).hexdigest()[:6]
 
 
+def break_reference(event):
+    """Shared display reference for notices tied to the same M15 close."""
+    ts = event.get('break_ts')
+    side = event.get('direction')
+    if ts is None or side not in ('LONG', 'SHORT'):
+        return None
+    return f"{event['pair']} · {side} · {stamp(ts)} Portugal"
+
+
 def _origins(events):
     lines=[]
     for e in events:
@@ -70,13 +79,15 @@ def format_event_group(events,now_ts=None):
             lines.append('M5 apenas refina depois do plano M15.')
         lines.append('⏳ Aguardar reação e quebra M15; ainda sem plano de entrada. SEM TRADE.')
     elif stage in ('M15_QUEBRA','M5_ANTECIPADO'):
-        lines+=_origins(events)
         tf='M15' if stage=='M15_QUEBRA' else 'M5'
         from kairos_m15_primary import notice_is_strong
         fire=' 🔥' if notice_is_strong(e) and stage=='M15_QUEBRA' else ''
         lines.append(f"✅ {e.get('kind','Quebra')} {tf} · LUDO{fire} além de {price(e.get('level'))}")
         lines.append(f"Fechamento: {stamp(e.get('break_ts'))} Portugal")
         lines.append('⏳ Aguardar terceira vela e FVG confirmado; ordem ainda não preparada.' if tf=='M15' else '⏳ Antecipação M5; M15 e plano ainda por confirmar.')
+        if tf == 'M15' and (ref := break_reference(e)):
+            lines.append('🔗 Quebra de referência: '+ref)
+        lines+=_origins(events)
     elif stage=='PLANO_EM_ATENCAO':
         parent,zone,_=_facts(e);z=parent or zone
         if z:lines.append(f"📦 Zona M15: {price(z.get('bottom'))}–{price(z.get('top'))}")
@@ -147,6 +158,7 @@ def scheduled_parts(report,max_chars=3500):
         if rule:
             op,label,key=rule
             lines.append(f"Reavaliar: M5 fechou {op} {label} ({price(d['previous_day'][key])}).")
+    lines.append('Destino de liquidez: por confirmar.')
     px=(report.get('current_price') or {}).get('value')
     if px is not None:lines.append(f'Preço de referência: {price(px)} · último M5 fechado')
     else:lines.append('Preço de referência atual: indisponível neste mapa.')

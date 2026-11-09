@@ -164,11 +164,15 @@ def format_entry_notice(events,now_ts=None):
     from kairos_m15_primary import notice_is_strong
     fire=' 🔥' if notice_is_strong(e) else ''
     kind=br.get('kind') or e.get('kind') or 'Quebra'
-    from kairos_notice_brief import plan_ref
+    from kairos_notice_brief import break_reference, plan_ref
     new_plan=any(x['stage']=='M15_ARMADO' for x in events)
     role='🆕 NOVO PLANO' if new_plan else '🔍 REFINAMENTO DO MESMO PLANO'
     lines=[f"{trade} · {e['pair']} · M15",'🔖 Plano: '+plan_ref(e),role,f"{kind} LUDO{fire} · confirmado por fechamento",
            f"🕐 Quebra: {stamp(e.get('break_ts') or br.get('close_ts'))} Portugal"]
+    if br.get("level") is not None:
+        lines.append(f"Por que gerou? {kind} M15 além de {price(br['level'])}; FVG da quebra confirmado.")
+    if ref := break_reference(e):
+        lines.append("🔗 Quebra de referência: "+ref)
     origins=set()
     for source in events:
         c=source.get('capture') or {};loc=c.get('htf_location') or {}

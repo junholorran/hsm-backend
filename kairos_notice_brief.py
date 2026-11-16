@@ -59,7 +59,19 @@ def format_event_group(events,now_ts=None):
         return format_chain_events(events,now_ts)
     lines=[f'{pair}'+(' · '+trade if trade else ''),f"🕐 {stamp(e['observed_ts'])} Portugal"]
     if e.get('break_ts'):lines.append('🔖 Plano: '+plan_ref(e))
-    if stage=='RADAR_CONTEXT':
+    if stage=='HISTORICO_INSUFICIENTE':
+        for source in events:
+            lines.append('🔖 Captura: '+str(source.get('capture_id') or 'ID indisponível'))
+            lines.extend(_origins([source]))
+            coverage=source.get('history_coverage') or {}
+            required=coverage.get('required_start_ts')
+            available=coverage.get('available_start_ts')
+            lines.append('M15 necessário desde '+stamp(required)+' Portugal' if required is not None
+                         else 'M15 necessário desde hora indisponível no evento.')
+            lines.append('Primeira vela M15 disponível: '+stamp(available)+' Portugal' if available is not None
+                         else 'Primeira vela M15 disponível: hora indisponível no evento.')
+        lines.append('Sequência encerrada por falta de cobertura M15.')
+    elif stage=='RADAR_CONTEXT':
         r=e.get('radar_event') or {}
         lines.append(f"💧 {r.get('liquidity_tf')} {r.get('liquidity_type')} @ {price(r.get('level'))}")
         labels={'REJECTION_RECLAIM':'rejeição / recuperação','ACCEPTANCE_CONTINUATION':'aceitação / continuação','UNRESOLVED_REACTION':'indefinida'}
@@ -83,8 +95,17 @@ def format_event_group(events,now_ts=None):
         from kairos_m15_primary import notice_is_strong
         fire=' 🔥' if notice_is_strong(e) and stage=='M15_QUEBRA' else ''
         lines.append(f"✅ {e.get('kind','Quebra')} {tf} · LUDO{fire} além de {price(e.get('level'))}")
-        lines.append(f"Fechamento: {stamp(e.get('break_ts'))} Portugal")
-        lines.append('⏳ Aguardar terceira vela e FVG confirmado; ordem ainda não preparada.' if tf=='M15' else '⏳ Antecipação M5; M15 e plano ainda por confirmar.')
+        close_price=e.get('break_close')
+        lines.append(f"Fechamento: {stamp(e.get('break_ts'))} Portugal"+
+                     (f" · {price(close_price)}" if close_price is not None else ''))
+        if tf=='M15':
+            break_ts=e.get('break_ts')
+            if e.get('primary_policy') and break_ts is not None:
+                lines.append('⏳ Terceira vela fecha às '+stamp(break_ts+900000)+' Portugal · FVG por confirmar.')
+            else:
+                lines.append('⏳ Aguardar confirmação da zona de entrada.')
+        else:
+            lines.append('⏳ Antecipação M5; M15 e plano ainda por confirmar.')
         if tf == 'M15' and (ref := break_reference(e)):
             lines.append('🔗 Quebra de referência: '+ref)
         lines+=_origins(events)
@@ -257,9 +278,18 @@ def fvg_inventory(maps,levels,m15,m5,cutoff):
 
 def brief_groups(groups):
     """Coalesce capture+reaction of the exact same origin/cycle in presentation."""
-    out=[];slots={}
+    out=[];slots={};history={}
     for group in groups:
-        for e in group['events']:
+        events=group['events']
+        if events and all(e['stage']=='HISTORICO_INSUFICIENTE' for e in events):
+            first=events[0]
+            key=(first['pair'],first['observed_ts']//300000)
+            if key not in history:
+                history[key]=[]
+                out.append(history[key])
+            history[key].extend(events)
+            continue
+        for e in events:
             if e['stage'] not in ('CAPTURA','RADAR_CONTEXT'):
                 # Preserve existing grouping of operational proofs and origins.
                 if group['events'] not in out:out.append(group['events'])

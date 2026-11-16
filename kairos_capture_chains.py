@@ -295,6 +295,7 @@ def advance(state, pair, captures, tf_map, cutoff, engine, observed_ts=None):
             emit(cid, state['captures'][cid], 'POI_HTF_TOCADO' if poi_origin else 'CAPTURA', known_ts=known)
 
     m15events = snapshots['M15']['events']
+    m15_closes = {c['t']: c['c'] for c in m15}
     m5events = snapshots['M5']['events']
     for cid, rec in state['captures'].items():
         capture = rec['capture']
@@ -321,9 +322,11 @@ def advance(state, pair, captures, tf_map, cutoff, engine, observed_ts=None):
             origin_removed = _removed_at(origin_zone, tf_map.get(tf) or [], duration, engine)
         required_start = (capture['native_capture_confirm_ts'] if capture.get('origin_kind') == 'HTF_FVG_TOUCH'
                           else capture['first_capture_ts'])
-        if m15[0]['t'] > min(previous, required_start):
+        required_m15_start = min(previous, required_start)
+        if m15[0]['t'] > required_m15_start:
             rec['history_lost'] = True
-            emit(cid, rec, 'HISTORICO_INSUFICIENTE')
+            emit(cid, rec, 'HISTORICO_INSUFICIENTE', history_coverage=dict(
+                required_start_ts=required_m15_start, available_start_ts=m15[0]['t']))
             continue
         fresh = [e for e in m15events if previous < e['close_ts'] <= cutoff
                  and e['open_ts'] >= capture['native_capture_confirm_ts']
@@ -451,6 +454,7 @@ def advance(state, pair, captures, tf_map, cutoff, engine, observed_ts=None):
                 episode.update(consumed=True, break_ts=event['close_ts'])
                 emit(cid, rec, 'M15_QUEBRA', break_ts=event['close_ts'], direction=direction,
                      kind=event['kind'], level=event['level'],
+                     break_close=m15_closes.get(event['open_ts']),
                      primary_policy=primary.POLICY if primary.enabled() else None,
                      break_strong=primary.strong_break(m15,event) if primary.enabled() else False,
                      parent_zone=zone if _zone_ok(zone) else None,invalidation=event['opposite_level'])

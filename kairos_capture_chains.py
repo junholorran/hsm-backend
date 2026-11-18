@@ -593,12 +593,13 @@ def scan(pair, tf_map, cutoff, decision, engine, path=DEFAULT_PATH):
             updated['liquidity_entry_policy'] = LIQUIDITY_ENTRY_POLICY
             db.execute('INSERT OR REPLACE INTO chain_state VALUES (?,?)', (pair, json.dumps(updated)))
         if updated and updated.get('asof_ts')==cutoff:
-            from kairos_notice_context import context_snapshot,radar_notice,_valid_radar
+            from kairos_notice_context import context_snapshot,daily_bias_context,radar_notice,_valid_radar
             prior=db.execute('SELECT payload FROM chain_notice_context WHERE pair=?',(pair,)).fetchone()
             previous_context=json.loads(prior[0]) if prior else {}
             notice_since=previous_context.get('notice_since',cutoff)
             radars=decision.get('radar_context') or []
             context=context_snapshot(previous_context,updated,radars,cutoff)
+            context['daily_bias'] = daily_bias_context(tf_map.get('D1') or [], cutoff)
             context.setdefault('notice_since',notice_since)
             db.execute('INSERT OR REPLACE INTO chain_notice_context VALUES(?,?)',(pair,json.dumps(context)))
             if os.environ.get('KAIROS_ENTRY_STRUCTURE','').strip().upper()=='LUDO':

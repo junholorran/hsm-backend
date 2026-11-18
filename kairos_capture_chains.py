@@ -600,6 +600,15 @@ def scan(pair, tf_map, cutoff, decision, engine, path=DEFAULT_PATH):
             radars=decision.get('radar_context') or []
             context=context_snapshot(previous_context,updated,radars,cutoff)
             context['daily_bias'] = daily_bias_context(tf_map.get('D1') or [], cutoff)
+            from kairos_range_models import model_events
+            for model in model_events(tf_map, previous_context.get('range_model_asof'), cutoff):
+                key = f"RANGE_MODEL:{pair}:{model['model']}:{model['tf']}:{model['window']}"
+                if db.execute('SELECT 1 FROM chain_outbox WHERE key=?', (key,)).fetchone() is None:
+                    events.append(dict(key=key, capture_id=key, pair=pair, stage='RANGE_MODEL',
+                                       observed_ts=observed_now, direction=model['direction'],
+                                       causal_policy_version=CAUSAL_POLICY_VERSION, model=model,
+                                       entry_authorized=False))
+            context['range_model_asof'] = cutoff
             context.setdefault('notice_since',notice_since)
             db.execute('INSERT OR REPLACE INTO chain_notice_context VALUES(?,?)',(pair,json.dumps(context)))
             if os.environ.get('KAIROS_ENTRY_STRUCTURE','').strip().upper()=='LUDO':

@@ -172,8 +172,25 @@ def scheduled_parts(report,max_chars=3500):
         if rule:
             op,label,key=rule
             lines.append(f"Reavaliar: M5 fechou {op} {label} ({price(d['previous_day'][key])}).")
-    lines.append('Destino de liquidez: por confirmar.')
     px=(report.get('current_price') or {}).get('value')
+    reference = px if px is not None else (d.get('closed_day') or {}).get('c')
+    active = [row for row in report.get('levels', []) if row.get('state') == 'ACTIVE']
+    if reference is not None:
+        sides = {'HIGH': {}, 'LOW': {}}
+        for row in active:
+            level, side = row['level'], row.get('liquidity_side')
+            if (side == 'HIGH' and level > reference) or (side == 'LOW' and level < reference):
+                sides[side].setdefault(level, row)
+        for side, label in (('HIGH', 'Acima'), ('LOW', 'Abaixo')):
+            levels = sorted(sides[side], reverse=side == 'LOW')[:2]
+            if levels:
+                details = ' → '.join(f"{price(level)} ({sides[side][level]['tf']} {sides[side][level]['type']})"
+                                     for level in levels)
+                lines.append(f"Liquidez a vigiar {label.lower()} do preço: {details}")
+        if not any(sides.values()):
+            lines.append('Liquidez a vigiar: sem nível ativo disponível no mapa.')
+    else:
+        lines.append('Liquidez a vigiar: preço de referência indisponível.')
     if px is not None:lines.append(f'Preço de referência: {price(px)} · último M5 fechado')
     else:lines.append('Preço de referência atual: indisponível neste mapa.')
     summary=report.get('notice_summary') or {};changes=summary.get('changes') or []

@@ -84,7 +84,11 @@ def format_event_group(events,now_ts=None):
         fire=' 🔥' if notice_is_strong(e) and stage=='M15_QUEBRA' else ''
         lines.append(f"✅ {e.get('kind','Quebra')} {tf} · LUDO{fire} além de {price(e.get('level'))}")
         lines.append(f"Fechamento: {stamp(e.get('break_ts'))} Portugal")
-        lines.append('⏳ Aguardar terceira vela e FVG confirmado; ordem ainda não preparada.' if tf=='M15' else '⏳ Antecipação M5; M15 e plano ainda por confirmar.')
+        if e.get('continuation_of'):
+            lines.append('Continuação do CHoCH M15 de '+stamp(e['continuation_of'])+' Portugal.')
+            lines.append('Preço de fechamento: '+price(e['close_price']))
+        else:
+            lines.append('⏳ Aguardar terceira vela e FVG confirmado; ordem ainda não preparada.' if tf=='M15' else '⏳ Antecipação M5; M15 e plano ainda por confirmar.')
         if tf == 'M15' and (ref := break_reference(e)):
             lines.append('🔗 Quebra de referência: '+ref)
         lines+=_origins(events)

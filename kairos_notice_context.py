@@ -286,10 +286,15 @@ def format_pair_update(pair,groups,context,now_ts=None):
                 entries.setdefault(_entry_key(e),[]).append(e)
         if rest:others.append(dict(group,events=rest))
     from kairos_notice_brief import format_event_group,brief_groups
+    daily = context.get('daily_bias')
+
+    def brief(events):
+        return format_event_group(events, now_ts, daily=daily)
+
     if not entries:
-        return [page for events in brief_groups(others or groups) for page in format_event_group(events,now_ts)]
+        return [page for events in brief_groups(others or groups) for page in brief(events)]
     pages=[]
     for events in entries.values():pages.extend(format_entry_notice(events,now_ts))
     if others:
-        pages.extend(page for events in brief_groups(others) for page in format_event_group(events,now_ts))
+        pages.extend(page for events in brief_groups(others) for page in brief(events))
     return pages

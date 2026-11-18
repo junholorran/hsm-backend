@@ -13,6 +13,63 @@ REACTIONS={'REJECTION_RECLAIM':'rejeição / recuperação',
            'UNRESOLVED_REACTION':'ainda indefinida'}
 
 
+D1_MS = 86_400_000
+
+
+def daily_bias_context(rows, cutoff):
+    """Read closed daily candles and keep exact feed prices in the audit."""
+    from decimal import Decimal, InvalidOperation
+
+    closed = {r['t']: r for r in rows if r['t'] + D1_MS <= cutoff}
+    times = sorted(closed)
+    if len(times) < 3 or times[-1] + 2 * D1_MS <= cutoff:
+        return None
+    if times[-3:] != [times[-1] - 2 * D1_MS, times[-1] - D1_MS, times[-1]]:
+        return None
+    try:
+        bars = [(t, *(Decimal(str(closed[t][k])) for k in ('o', 'h', 'l', 'c')))
+                for t in times]
+    except (InvalidOperation, KeyError, ValueError):
+        return None
+    if any(not all(p.is_finite() for p in values) for _, *values in bars):
+        return None
+    if any(not (0 < lo <= min(op, close) <= max(op, close) <= hi)
+           for _, op, hi, lo, close in bars):
+        return None
+    older, prior, current = bars[-3:]
+    ts, _, high, low, close = current
+    previous_high, previous_low = prior[2:4]
+
+    def untouched(index, price_index, lower):
+        level = bars[index][price_index]
+        subsequent = bars[index + 1:]
+        return all((row[price_index] >= level if lower else row[price_index] <= level)
+                   for row in subsequent)
+
+    lows = sorted({row[3] for i, row in enumerate(bars)
+                   if row[3] <= close and untouched(i, 3, True)}, reverse=True)
+    highs = sorted({row[2] for i, row in enumerate(bars)
+                    if row[2] >= close and untouched(i, 2, False)})
+    sweep_high, sweep_low = high > previous_high, low < previous_low
+    if close < previous_low:
+        evidence, bias, reference = 'FECHOU ABAIXO DA MÍNIMA ANTERIOR', 'VENDEDOR', previous_low
+    elif close > previous_high:
+        evidence, bias, reference = 'FECHOU ACIMA DA MÁXIMA ANTERIOR', 'COMPRADOR', previous_high
+    elif close in (previous_low, previous_high):
+        evidence, bias, reference = 'FECHOU NO EXTREMO ANTERIOR', 'INDEFINIDO', close
+    elif sweep_high and sweep_low:
+        evidence, bias, reference = 'VARREU OS DOIS EXTREMOS E FECHOU DENTRO', 'INDEFINIDO', None
+    elif sweep_high or sweep_low:
+        evidence, bias, reference = ('VARREU A MÁXIMA' if sweep_high else 'VARREU A MÍNIMA'), 'INDEFINIDO', None
+    else:
+        evidence, bias, reference = 'FECHOU DENTRO DA FAIXA ANTERIOR', 'INDEFINIDO', None
+    return dict(bias=bias, evidence=evidence, close_ts=ts + D1_MS, close=str(close),
+                reference=str(reference) if reference is not None else None,
+                distance=str(abs(close - reference)) if reference is not None else None,
+                bars=[[t, *map(str, values)] for t, *values in (older, prior, current)],
+                lows=list(map(str, lows[:2])), highs=list(map(str, highs[:2])))
+
+
 def _valid_radar(r,cutoff):
     ts=r.get('timestamp')
     return (isinstance(ts,(int,float)) and math.isfinite(ts) and ts<=cutoff

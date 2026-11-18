@@ -41,7 +41,7 @@ def _origins(events):
     return lines
 
 
-def format_event_group(events,now_ts=None):
+def format_event_group(events,now_ts=None, *, daily=None):
     e=next((x for x in events if x['stage']=='CAPTURA'),events[-1]);stage=e['stage'];pair=e['pair'];side=e.get('direction')
     trade={'LONG':'🟢 COMPRA','SHORT':'🔴 VENDA'}.get(side,'')
     titles={'CAPTURA':'💧 KAIROS | LIQUIDEZ CAPTURADA','RADAR_CONTEXT':'👀 KAIROS | REAÇÃO ATUALIZADA',
@@ -59,6 +59,16 @@ def format_event_group(events,now_ts=None):
         return format_chain_events(events,now_ts)
     lines=[f'{pair}'+(' · '+trade if trade else ''),f"🕐 {stamp(e['observed_ts'])} Portugal"]
     if e.get('break_ts'):lines.append('🔖 Plano: '+plan_ref(e))
+    event_ts = e.get('break_ts') or (e.get('capture') or {}).get('native_capture_confirm_ts')
+    if (daily and event_ts is not None and daily['close_ts'] <= event_ts
+            and stage in ('M15_QUEBRA', 'CAPTURA', 'POI_HTF_TOCADO')):
+        levels = {'VENDEDOR': daily['lows'], 'COMPRADOR': daily['highs']}.get(daily['bias'], [])
+        text = f"📊 D1 {daily['bias']} · {daily['evidence'].lower()} · fechamento {daily['close']}"
+        if daily['reference'] is not None:
+            text += f" · nível {daily['reference']}"
+        if levels:
+            text += ' · liquidez a vigiar ' + ' → '.join(levels)
+        lines.append(text)
     if stage=='RADAR_CONTEXT':
         r=e.get('radar_event') or {}
         lines.append(f"💧 {r.get('liquidity_tf')} {r.get('liquidity_type')} @ {price(r.get('level'))}")

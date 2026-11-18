@@ -214,6 +214,14 @@ def _refinement(engine, m5, capture, event, parent, snapshots):
     return None, None
 
 
+def _continuation_break(sequence, event):
+    return (sequence and event['kind'] == 'BOS'
+            and event['side'] == sequence['side']
+            and event['close_ts'] > sequence['close_ts']
+            and (event['level'] < sequence['level'] if event['side'] == 'DOWN'
+                 else event['level'] > sequence['level']))
+
+
 def advance(state, pair, captures, tf_map, cutoff, engine, observed_ts=None):
     """Pure causal transition, returning copied state and immutable alert facts.
 
@@ -259,7 +267,7 @@ def advance(state, pair, captures, tf_map, cutoff, engine, observed_ts=None):
                      entry_authorized=False, **facts)
         # Presentation facts only: record the existing plan before any reset.
         plan=rec.get('plan')
-        if plan and (stage!='M15_QUEBRA' or facts.get('break_ts')==plan['break']['close_ts']):
+        if plan and not facts.get('continuation_of') and (stage!='M15_QUEBRA' or facts.get('break_ts')==plan['break']['close_ts']):
             def zone_view(z):
                 return {k:z.get(k) for k in ('id','tipo','bottom','top','created_ts','flip_ts','t','break_ts')} if z else None
             if plan.get('primary_policy'):
@@ -429,13 +437,21 @@ def advance(state, pair, captures, tf_map, cutoff, engine, observed_ts=None):
                         emit(cid, rec, 'RETESTE_OBSERVADO', break_ts=plan['break']['close_ts'],
                              candle_ts=c['t'], zone=zone, zone_tf='M15' if plan.get('primary_policy') else 'M5',
                              direction='LONG' if up else 'SHORT')
+            sequence = rec.get('m15_sequence')
+            if sequence and (c['h'] > sequence['extreme'] if sequence['side'] == 'DOWN'
+                             else c['l'] < sequence['extreme']):
+                rec.pop('m15_sequence', None)
+                sequence = None
             for event in (e for e in fresh if e['close_ts'] == closed):
+                if sequence and event['side'] != sequence['side']:
+                    rec.pop('m15_sequence', None)
+                    sequence = None
                 if origin_removed is not None and origin_removed <= closed:
                     continue
                 direction = 'LONG' if event['side'] == 'UP' else 'SHORT'
                 episode = rec.get('episode')
                 reaction = rec.get('reaction')
-                if not episode or episode.get('consumed') or not reaction:
+                if not episode or not reaction:
                     continue
                 if reaction['confirmed_ts'] > closed or not entry_reaction_allowed(capture, reaction, direction):
                     continue
@@ -447,6 +463,20 @@ def advance(state, pair, captures, tf_map, cutoff, engine, observed_ts=None):
                                   'sweep_ts':reaction['leg_start_ts']}
                 if primary.enabled() and (event['open_ts']<state['m15_primary_since'] or not primary.valid_break(m15,event)):
                     continue
+                if episode.get('consumed'):
+                    if (primary.enabled() and _continuation_break(sequence, event)
+                            and sequence['episode_key'] == episode['key']):
+                        emit(cid, rec, 'M15_QUEBRA', break_ts=event['close_ts'],
+                             direction=direction, kind='BOS', level=event['level'],
+                             close_price=candle['c'], continuation_of=sequence['choch_ts'],
+                             primary_policy=primary.POLICY)
+                        sequence.update(close_ts=event['close_ts'], level=event['level'])
+                    continue
+                if primary.enabled() and event['kind'] == 'CHoCH':
+                    sequence = dict(side=event['side'], close_ts=event['close_ts'],
+                                    choch_ts=event['close_ts'], level=event['level'],
+                                    extreme=event['opposite_level'], episode_key=episode['key'])
+                    rec['m15_sequence'] = sequence
                 zone = None if primary.enabled() else _parent_zone(engine, m15, causal_capture, event)
                 episode.update(consumed=True, break_ts=event['close_ts'])
                 emit(cid, rec, 'M15_QUEBRA', break_ts=event['close_ts'], direction=direction,

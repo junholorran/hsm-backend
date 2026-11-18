@@ -54,6 +54,17 @@ def format_event_group(events,now_ts=None, *, daily=None):
             'TOQUE_E_INVALIDACAO':'❌ KAIROS | TOQUE E INVALIDAÇÃO',
             'ORIGEM_INVALIDADA':'❌ KAIROS | ORIGEM INVALIDADA',
             'HISTORICO_INSUFICIENTE':'⚠️ KAIROS | HISTÓRICO INSUFICIENTE'}
+    if stage == 'RANGE_MODEL':
+        m = e['model']
+        side = {'SHORT': 'vendedor', 'LONG': 'comprador', None: 'varreu os dois lados'}[m['direction']]
+        info = [f"{pair} · {m['model']} {m['tf']} · {side}",
+                f"Confirmado: {stamp(m['confirmed_ts'])} Portugal · fechamento {price(m['close'])}",
+                f"Faixa de referência: {price(m['low'])}–{price(m['high'])}"]
+        if m['model'] == 'PO3':
+            info.append(f"Abertura {price(m['opening'])} · varredura {stamp(m['sweep_ts'])} Portugal")
+        elif m['target'] is not None:
+            info.append(f"Liquidez a vigiar: {price(m['target'])}")
+        return _pages(info, '👀 KAIROS | CONTEXTO DE FAIXA')
     if stage not in titles:
         from kairos_alert_presentation import format_chain_events
         return format_chain_events(events,now_ts)
